@@ -407,7 +407,12 @@ import TVCore
     @ObservationIgnored private var cloudFetchedAt: Date?
     @ObservationIgnored private var cloudFetch: Task<Void, Never>?
     /// Sections kept out of the tab bar and sidebar until then.
-    var hiddenSections: [AppSection] { extrasUnlocked ? [] : [.music] }
+    /// [mi3s] 二开融合：上游 1.8.11 新增 Manga 分区；无 Venera 漫画源订阅时隐藏。
+    var hiddenSections: [AppSection] {
+        var hidden: [AppSection] = extrasUnlocked ? [] : [.music]
+        if MangaStore.shared.repositories.isEmpty { hidden.append(.manga) }
+        return hidden
+    }
     /// The app's preference store. Internal (not private) so the full-backup extension can snapshot
     /// and restore the whitelisted keys.
     let defaults: UserDefaults
@@ -727,7 +732,9 @@ import TVCore
     }
     /// Adds the typed address, or refreshes it when it is already in the list. A directory (多仓)
     /// adds every subscription it lists, switched off, for the viewer to choose from.
-    func importSubscription(address: String? = nil) async {
+    /// [mi3s] 二开融合：`name` 形参来自上游 1.8.11（`yingxia://import` 链接可带名字）。
+    /// 我方原有 `subscriptionName` 输入框语义不变：`name` 为 nil 时仍读输入框。
+    func importSubscription(address: String? = nil, name: String? = nil) async {
         await beginImport()
         importing = true; importError = nil; notice = nil
         defer { importing = false; endImport() }
@@ -736,11 +743,11 @@ import TVCore
             let url = try WebAddress.resolve(typed)
             switch try await http.subscriptionImport(url) {
             case .subscription(let value):
-                let name = address == nil ? subscriptionName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
-                let entry = stamping(SubscriptionEntry(address: url.absoluteString, name: name))
+                let entryName = name ?? (address == nil ? subscriptionName.trimmingCharacters(in: .whitespacesAndNewlines) : "")
+                let entry = stamping(SubscriptionEntry(address: url.absoluteString, name: entryName))
                 if let index = subscriptions.firstIndex(where: { $0.address == entry.address && environments.shows($0.environmentID) }) {
                     subscriptions[index].enabled = true
-                    if !name.isEmpty { subscriptions[index].name = name }
+                    if !entryName.isEmpty { subscriptions[index].name = entryName }
                 } else { subscriptions.append(entry) }
                 // Added back by hand: forget that it was ever deleted, so launch-time seeding
                 // treats it like any other subscription again.
