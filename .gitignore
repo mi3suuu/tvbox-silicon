@@ -23,3 +23,12 @@ exports/
 .env
 .env.*
 !.env.example
+
+# [mi3s] 二开：E2E 截图产物（每次运行各不相同，不进仓库）
+Scripts/e2e-shots/
+
+# [mi3s] 二开：xcodebuild -derivedDataPath 构建产物（体积大，不进仓库）
+build-out/
+
+# [mi3s] 二开：融合专用构建目录
+build/DD-*/
