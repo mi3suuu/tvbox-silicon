@@ -745,10 +745,18 @@ extension View {
                         .allowsHitTesting(false)
                         .ignoresSafeArea(edges: .bottom)
                 }
+            } else {
+                // compact × compact (the iPhone Duo's folded *outer* display held sideways) is left alone:
+                // the system's narrow bottom capsule is an awkward fit there and the fade reads as a white
+                // smear across a landscape that was never meant to carry a phone's bottom bar.
+                //
+                // [mi3s] 二开：这一支必须有，且必须 `self`。`tabSafeArea` 是 `@ViewBuilder`，先前这里是
+                // 一句注释、没有 else —— compact × compact 下两个分支都不命中，函数返回的是 `EmptyView`，
+                // 而它被 `.tabSafeArea(...)` 挂在每个 tab 页的根上，于是整页（含 Home）被替换成空视图：
+                // 只剩系统侧边标签栏胶囊，内容区一片纯白 `255,255,255`。这不是布局算错，是页面压根没被
+                // 构建。见 Docs/duo/Duo适配报告.md §一。
+                self
             }
-            // compact × compact (the iPhone Duo's folded *outer* display held sideways) is left alone: the
-            // system's narrow bottom capsule is an awkward fit there and the fade reads as a white smear
-            // across a landscape that was never meant to carry a phone's bottom bar.
         } else {
             safeAreaPadding(.bottom)
         }
