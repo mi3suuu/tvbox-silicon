@@ -148,11 +148,7 @@ struct RootView: View {
             #else
             // The system tab bar on every size class: iOS 26 floats it over content and
             // collapses extra sections into More, which a hand-built bar imitated poorly.
-            #if DO_DIAG_BYPASS_TABVIEW
-            content(store.section)
-            #else
             platformTabs
-            #endif
             #if os(iOS)
                 .overlay(alignment: .bottomTrailing) { videoMiniPlayer }
             #endif

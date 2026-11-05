@@ -410,6 +410,11 @@ struct FormSettingsView: View {
                 FormLink(symbol: "arrow.up.arrow.down.square.fill", tint: .teal, title: L10n.text("Resource Order"),
                          value: rankingSummary) { ResourceRankingView() }
                 FormLink(symbol: "forward.end.alt.fill", tint: .cyan, title: L10n.text("Segment Sources")) { SkipSourceSettingsView() }
+                // 上游 1.8.11 的 #547 字幕外观页（`SubtitleStyleView`）在融合后的设置页里没有入口：
+                // 上游把它挂在 `SettingsView.swift`（iPhone/iPad/Mac 三处 + tvOS 一处），而融合版的
+                // `SettingsView.swift` 是我方 164 行的平台分派壳，那四处随上游正文一起没进来。
+                // 结果设置页里调好的字幕外观无从进入，只有 QA 启动参数能到。这里补回它。
+                FormLink(symbol: "captions.bubble.fill", tint: .orange, title: L10n.text("Subtitle Style")) { SubtitleStyleView() }
                 FormLink(symbol: "waveform.badge.plus", tint: .purple, title: L10n.text("Speech Subtitles")) { SpeechSubtitleView() }
                 FormLink(symbol: "character.bubble.fill", tint: .mint, title: L10n.text("AI Translation"),
                          value: store.aiTranslation.isComplete ? L10n.text("On") : nil) { AITranslationView() }

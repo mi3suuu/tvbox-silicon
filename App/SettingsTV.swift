@@ -96,6 +96,10 @@ struct TVSettingsView: View {
                 TVSettingsLink(title: L10n.text("Play a URL")) { TVPlayURLPage() }
             }
             TVSettingsSection(footer: L10n.text("Shows the video's format, resolution, frame rate and bitrate in a corner of the player.")) {
+                // 上游 #547 的字幕外观页在 tvOS 上同样丢了入口（上游 SettingsView.swift:1594 有一行
+                // `TVSettingsLink(title: "Subtitle Style")`）。补在这里，紧挨"Show Video Info"——
+                // 两者都是播放画面上看得见的东西，放在同一节里最顺手。
+                TVSettingsLink(title: L10n.text("Subtitle Style")) { SubtitleStyleView() }
                 TVSettingsToggle(title: L10n.text("Show Video Info"), isOn: $showsPlaybackInfo)
             }
             if VideoEnhancement.canUpscale || VideoEnhancement.canSmooth {

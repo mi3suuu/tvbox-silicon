@@ -149,6 +149,7 @@
 		49FAE12E9DA2ED063E9C4754 /* PlaybackHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 334B106CCFB47B5E27376A16 /* PlaybackHistoryView.swift */; };
 		4BAEDB63C6C2CC6BCD928C0E /* SpeechSubtitleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15B7D1A21A13195E6399AF37 /* SpeechSubtitleView.swift */; };
 		4C65106175D517040E98330B /* Store.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D1010816125FBC3792AF838 /* Store.swift */; };
+		4D6916642C86D353983CE383 /* SubtitleCues+Mi3s.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */; };
 		4ECADC1891F614EB7956BDAE /* Store+SourceAdmin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DA68D231C18E8CD3C69E0E5 /* Store+SourceAdmin.swift */; };
 		4ECE8586E27A017017F26EDC /* DiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 181C983C0018A97F2A086298 /* DiscoveryView.swift */; };
 		4FDAA1091EFC2C8B0EA634C7 /* FavoriteControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BD8F5818C392424F43FF0C9 /* FavoriteControls.swift */; };
@@ -163,6 +164,7 @@
 		545262EEE6798D31D5522FF5 /* MangaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FF91FA9A33437C335253F10 /* MangaView.swift */; };
 		545F29F3323EB776FED1A94E /* MoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31D1816B8ED53D49478FD843 /* MoreView.swift */; };
 		556C5D64B9A97EFB038F0747 /* MusicDownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F678BCB59DDEA3AD1329B11 /* MusicDownloadsView.swift */; };
+		5590D820034C20DFEDD3C80C /* SubtitleCues+Mi3s.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */; };
 		55C41E0E739A11AA44235092 /* MusicTVPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF5733BA144503E76421BCFD /* MusicTVPlayer.swift */; };
 		56A6EE507B32FD9A832FB255 /* MusicNowPlayingScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0131105AAF88C36366936A /* MusicNowPlayingScreen.swift */; };
 		570457A6A95406CBB4D95E15 /* PosterViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7EE4B1705BFB21E2B4FD033 /* PosterViewer.swift */; };
@@ -441,6 +443,7 @@
 		F100BB089B054088B11E1471 /* LoadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A05A443C3852B992FD8FA34A /* LoadState.swift */; };
 		F102B31D816B7785665204E8 /* CustomProxySettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 130820742107F1D9488A4316 /* CustomProxySettings.swift */; };
 		F199C77516C38F5644997AEB /* TVCore in Frameworks */ = {isa = PBXBuildFile; productRef = A72103001ACB22093291D051 /* TVCore */; };
+		F2A514E15838FA86A939F4D4 /* SubtitleCues+Mi3s.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */; };
 		F2B94D8E8A07F399F14CF5EC /* MusicTVScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DF697EACE4307031398E5A /* MusicTVScreen.swift */; };
 		F2F68C26F3FB2279B102CF52 /* BilibiliAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B684AAD2C1CD8AC3699FB446 /* BilibiliAccountView.swift */; };
 		F3B63B43988E72A87677A7AC /* GlassKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739A64FB51780D4314D2DDF8 /* GlassKit.swift */; };
@@ -548,6 +551,7 @@
 		7A5737402EC96F0FBF79243E /* DanmakuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuView.swift; sourceTree = "<group>"; };
 		7DD9CCBC29ECDB9D8B254CBF /* AITranslationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AITranslationView.swift; sourceTree = "<group>"; };
 		7FB6ADF5D41A7842884ED8A4 /* ArtworkLanguageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkLanguageView.swift; sourceTree = "<group>"; };
+		83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SubtitleCues+Mi3s.swift"; sourceTree = "<group>"; };
 		8320284C7FB9590C44BA7102 /* JNA-Apache2.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "JNA-Apache2.txt"; sourceTree = "<group>"; };
 		846F0B59129DEB3329D2C5DD /* DiscoverBrowseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverBrowseView.swift; sourceTree = "<group>"; };
 		8770B6D1D8E71A51323B90B7 /* Store+Subscriptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Store+Subscriptions.swift"; sourceTree = "<group>"; };
@@ -831,6 +835,7 @@
 				8770B6D1D8E71A51323B90B7 /* Store+Subscriptions.swift */,
 				23977013A78EF150F7C12636 /* Store+vault扩展.swift */,
 				33AB1E848AA3F905713200A7 /* Store+WebCast.swift */,
+				83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */,
 				FE1212366D71C455D6EAE5E4 /* SubtitleOverlay.swift */,
 				D091093D028D2FD9AB72B79C /* SubtitleStyleView.swift */,
 				13947E20489465F172C8B5B7 /* SubtitleTranslator.swift */,
@@ -1454,6 +1459,7 @@
 				824FC2FD39D5B86CCD3466CE /* Store+WebCast.swift in Sources */,
 				7240D6278F01BE37DEB73B90 /* Store+vault扩展.swift in Sources */,
 				1FAC6965CB4F8B33135C85C5 /* Store.swift in Sources */,
+				5590D820034C20DFEDD3C80C /* SubtitleCues+Mi3s.swift in Sources */,
 				982EF0148420E135FF05E244 /* SubtitleOverlay.swift in Sources */,
 				6448A88D8C564A2130BC0E1C /* SubtitleStyleView.swift in Sources */,
 				E5D5A7C6283C6370DF14ECC2 /* SubtitleTranslator.swift in Sources */,
@@ -1592,6 +1598,7 @@
 				CF49289C14C83B57840391A0 /* Store+WebCast.swift in Sources */,
 				32BD0377FF971DDBA2963580 /* Store+vault扩展.swift in Sources */,
 				4C65106175D517040E98330B /* Store.swift in Sources */,
+				F2A514E15838FA86A939F4D4 /* SubtitleCues+Mi3s.swift in Sources */,
 				68DA47E6E8C42E446AC17E45 /* SubtitleOverlay.swift in Sources */,
 				9FD7B6E48A98DE1D6DDBC3E3 /* SubtitleStyleView.swift in Sources */,
 				FBD490433241B703DEC0B46B /* SubtitleTranslator.swift in Sources */,
@@ -1732,6 +1739,7 @@
 				081D3FFA4A0024F6BCBCD60F /* Store+WebCast.swift in Sources */,
 				3E3A3BB03792EB9440301E9E /* Store+vault扩展.swift in Sources */,
 				BF897F1F4B399DAA732ED4ED /* Store.swift in Sources */,
+				4D6916642C86D353983CE383 /* SubtitleCues+Mi3s.swift in Sources */,
 				5CB8BD265BA21805A9BF8CD9 /* SubtitleOverlay.swift in Sources */,
 				1DB2172EFCE0D3B8FE7DE93F /* SubtitleStyleView.swift in Sources */,
 				9DFF07E1B415DEBA91C79373 /* SubtitleTranslator.swift in Sources */,

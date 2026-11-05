@@ -16,6 +16,9 @@ import TVCore
     private(set) var restoredPosition: Double?
     private(set) var requestedResumePosition: Double?
     private(set) var skipSettings = EpisodeSkipSettings()
+    /// [mi3s] 二开融合（N-W5-03）：上游 1.8.11 #547 的字幕外观管线。播放器自绘层用 `Mi3sSubtitleOverlay`，
+    /// 这个对象只负责「AVPlayer 自己画的那份」（画中画里尤其），并下发 `textStyleRules`。
+    let subtitles = SubtitleCues()
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
     private var skipScope: String?
@@ -502,7 +505,11 @@ import TVCore
         self.player = player
         enhancer = VideoEnhancer(player: player)
         queueObservation = player.observe(\.currentItem, options: [.new]) { [weak self] _, _ in
-            Task { @MainActor [weak self] in self?.queueMoved() }
+            Task { @MainActor [weak self] in
+                self?.queueMoved()
+                // [mi3s] 二开融合（N-W5-03）：字幕外观跟着当前 item 走。
+                self?.subtitles.follow(self?.player.currentItem)
+            }
         }
     }
     private var observation: NSKeyValueObservation?
@@ -624,6 +631,8 @@ import TVCore
             ?? AVURLAsset(url: assetURL, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
         let item = AVPlayerItem(asset: asset)
         if url.scheme == HongguoStreams.scheme { item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration }
+        // [mi3s] 二开融合（N-W5-03）：给每个可能播放的 item 挂上字幕管线，见 App/SubtitleCues+Mi3s.swift。
+        subtitles.prepare(item)
         return item
     }
 
