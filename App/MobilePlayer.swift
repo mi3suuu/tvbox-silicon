@@ -99,7 +99,7 @@ struct MobilePlayerView: View {
     /// Reads the stored appearance and positions, then loads this channel's subtitle files.
     /// Called from the view's task so a title change reloads rather than reusing the old cues.
     private func loadSubtitles() async {
-        if let style = try? JSONDecoder().decode(SubtitleStyle.self, from: subtitleStyleData) {
+        if let style = try? JSONDecoder().decode(Mi3sSubtitleStyle.self, from: subtitleStyleData) {
             subtitleStyle = style.sanitized
         }
         if let memory = try? JSONDecoder().decode(SubtitlePositionMemory.self, from: subtitlePositionsData) {
@@ -334,7 +334,7 @@ struct MobilePlayerView: View {
     @AppStorage("subtitleStyle") private var subtitleStyleData = Data()
     /// Where the bubble was dragged to, per title.
     @AppStorage("subtitlePositions") private var subtitlePositionsData = Data()
-    @State private var subtitleStyle = SubtitleStyle.standard
+    @State private var subtitleStyle = Mi3sSubtitleStyle.standard
     @State private var subtitlePositions = SubtitlePositionMemory()
     /// Devices with Yingxia open, for the Play On button; and the one the video was sent to.
     @State private var tvBrowser = PlayOnBrowser()
@@ -391,7 +391,7 @@ struct MobilePlayerView: View {
             // Parsed subtitle tracks are drawn here, not by the player, so they can be resized and
             // moved. Empty when the channel offers no subtitle files, so a film without them is
             // untouched.
-            SubtitleOverlay(
+            Mi3sSubtitleOverlay(
                 track: activeSubtitleTrack,
                 position: clock.position,
                 style: $subtitleStyle,
@@ -520,7 +520,7 @@ struct MobilePlayerView: View {
             return new.locked != old.locked ? .impact(weight: .medium) : new.rate != old.rate ? .selection : nil
         }
         .sheet(item: $externalPlayerStream) { handoff in
-            ExternalPlayerMenu(stream: handoff.url, headers: channel.headers)
+            Mi3sExternalPlayerMenu(stream: handoff.url, headers: channel.headers)
         }
         .task(id: clock.item.map(ObjectIdentifier.init)) {
             await tracks.load(clock.item)
