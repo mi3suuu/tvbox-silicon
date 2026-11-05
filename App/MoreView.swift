@@ -179,9 +179,12 @@ struct MoreView: View {
         switch section {
         case .messages: announcements.all.count
         case .sites: store.subscription.map { store.orderedSites($0).count }
-        case .history: store.playbackHistory.entries.count
-        case .favorites: store.favorites.items.count
-        case .downloads: DownloadLibrary.shared.items.count
+        // [mi3s] 二开：角标计数走可见性过滤，与列表本身一致。
+        // 否则有一条被保险库藏起来的历史/收藏/下载时，角标比列表多，等于把「这里还藏着东西」
+        // 直接写在首页上。三个计数在无密码时与原始计数相等，所以未启用保险库的用户看不出差异。
+        case .history: store.visibleHistory.count
+        case .favorites: store.visibleFavorites.count
+        case .downloads: store.vault.visibleDownloads(DownloadLibrary.shared.items).count
         default: nil
         }
     }

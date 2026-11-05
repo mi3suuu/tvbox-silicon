@@ -96,6 +96,7 @@
 		30C8C447D4E2D5195B1B9447 /* Store+SourceAdmin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DA68D231C18E8CD3C69E0E5 /* Store+SourceAdmin.swift */; };
 		31AF2CAA4FAF67BC195EFE18 /* WebCastController.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE38BD161B2EB5B2C7E4EAA /* WebCastController.swift */; };
 		31D893FEF33876FD07BB58BA /* CloudQRLoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E78573DE76BCF27CABBB20F3 /* CloudQRLoginView.swift */; };
+		32BD0377FF971DDBA2963580 /* Store+vault扩展.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23977013A78EF150F7C12636 /* Store+vault扩展.swift */; };
 		32D0C91B899A3F83DC073BE9 /* PrivacyVaultView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE81FFDA9202CC39C185D9C /* PrivacyVaultView.swift */; };
 		3314E75C1FA34066A34A3031 /* EpisodePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9098502DF807ADE4698AA88 /* EpisodePicker.swift */; };
 		338825790412D642115F2BD3 /* GlassKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739A64FB51780D4314D2DDF8 /* GlassKit.swift */; };
@@ -129,6 +130,7 @@
 		3E10E4E62E4E47143AEA71B9 /* WatchNowTV.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB076E674CF0D07EFFAE17DA /* WatchNowTV.swift */; };
 		3E1331847768062D046F1A3D /* SeriesSuggestionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B78DACC0792D757F147226A /* SeriesSuggestionSheet.swift */; };
 		3E39031243C9BC9870C143E4 /* OpenJDK.txt in Resources */ = {isa = PBXBuildFile; fileRef = BD71FD8B3E72803C426D91CC /* OpenJDK.txt */; };
+		3E3A3BB03792EB9440301E9E /* Store+vault扩展.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23977013A78EF150F7C12636 /* Store+vault扩展.swift */; };
 		3E3FA848D0BF2855FEAE2577 /* OpenJDK.txt in Resources */ = {isa = PBXBuildFile; fileRef = BD71FD8B3E72803C426D91CC /* OpenJDK.txt */; };
 		3E782ECA07220E19F2EBDB7C /* ThirdPartyNotices.txt in Resources */ = {isa = PBXBuildFile; fileRef = A3012FC04D8DAD058B1A5168 /* ThirdPartyNotices.txt */; };
 		3EB79F655F119BDD19F30726 /* ColorfulX in Frameworks */ = {isa = PBXBuildFile; productRef = 185E90685A8AF7EB8AD7A768 /* ColorfulX */; };
@@ -221,6 +223,7 @@
 		7142A1BCD94E8F10E0C623B5 /* PlayerEpisodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6411E1972F52DCE8C5E117F7 /* PlayerEpisodes.swift */; };
 		716E0DF70F0EAC9430515A2E /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2C01FE189D8A11AC65FD3 /* Motion.swift */; };
 		722A5C4D2DC5223EB611AC0A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5938F1806109304A4FB816CF /* Sparkle */; };
+		7240D6278F01BE37DEB73B90 /* Store+vault扩展.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23977013A78EF150F7C12636 /* Store+vault扩展.swift */; };
 		72448F6E6FFCC74EE5950C1A /* Keystone-GPL2.txt in Resources */ = {isa = PBXBuildFile; fileRef = 084C8344E2997DB3ED8FE974 /* Keystone-GPL2.txt */; };
 		725FB47655ADE6348B96EE8B /* SiteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7967648C18110481BD255349 /* SiteView.swift */; };
 		727750AD5FDFFD7416BC3059 /* Radius.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F4E35AA6007E277B5B426A /* Radius.swift */; };
@@ -486,6 +489,7 @@
 		226C6E62CA6E50C8609C1EF3 /* PlayOn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayOn.swift; sourceTree = "<group>"; };
 		2278608DE7AE2FEA27EB51C9 /* TVBox-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "TVBox-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		235375CC2420B76124FCEBC2 /* MusicView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicView.swift; sourceTree = "<group>"; };
+		23977013A78EF150F7C12636 /* Store+vault扩展.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Store+vault扩展.swift"; sourceTree = "<group>"; };
 		28110209CF4DBB819A2F3C74 /* DiscoverDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverDetailView.swift; sourceTree = "<group>"; };
 		2ACBC18014BA7190EBA2EDD7 /* MacUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacUpdater.swift; sourceTree = "<group>"; };
 		2B0131105AAF88C36366936A /* MusicNowPlayingScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicNowPlayingScreen.swift; sourceTree = "<group>"; };
@@ -820,6 +824,7 @@
 				EED18D8626AD516C10884111 /* Store+Search.swift */,
 				1DA68D231C18E8CD3C69E0E5 /* Store+SourceAdmin.swift */,
 				8770B6D1D8E71A51323B90B7 /* Store+Subscriptions.swift */,
+				23977013A78EF150F7C12636 /* Store+vault扩展.swift */,
 				33AB1E848AA3F905713200A7 /* Store+WebCast.swift */,
 				FE1212366D71C455D6EAE5E4 /* SubtitleOverlay.swift */,
 				D091093D028D2FD9AB72B79C /* SubtitleStyleView.swift */,
@@ -1441,6 +1446,7 @@
 				B9C1E5DA31DD3CC5FA8EF045 /* Store+SourceAdmin.swift in Sources */,
 				05D960F0C5F96F1C78BBBD77 /* Store+Subscriptions.swift in Sources */,
 				824FC2FD39D5B86CCD3466CE /* Store+WebCast.swift in Sources */,
+				7240D6278F01BE37DEB73B90 /* Store+vault扩展.swift in Sources */,
 				1FAC6965CB4F8B33135C85C5 /* Store.swift in Sources */,
 				982EF0148420E135FF05E244 /* SubtitleOverlay.swift in Sources */,
 				6448A88D8C564A2130BC0E1C /* SubtitleStyleView.swift in Sources */,
@@ -1577,6 +1583,7 @@
 				30C8C447D4E2D5195B1B9447 /* Store+SourceAdmin.swift in Sources */,
 				6D9E8CE3B19A5A92029CA9AE /* Store+Subscriptions.swift in Sources */,
 				CF49289C14C83B57840391A0 /* Store+WebCast.swift in Sources */,
+				32BD0377FF971DDBA2963580 /* Store+vault扩展.swift in Sources */,
 				4C65106175D517040E98330B /* Store.swift in Sources */,
 				68DA47E6E8C42E446AC17E45 /* SubtitleOverlay.swift in Sources */,
 				9FD7B6E48A98DE1D6DDBC3E3 /* SubtitleStyleView.swift in Sources */,
@@ -1715,6 +1722,7 @@
 				4ECADC1891F614EB7956BDAE /* Store+SourceAdmin.swift in Sources */,
 				A022AB71228E8F72AE664ECF /* Store+Subscriptions.swift in Sources */,
 				081D3FFA4A0024F6BCBCD60F /* Store+WebCast.swift in Sources */,
+				3E3A3BB03792EB9440301E9E /* Store+vault扩展.swift in Sources */,
 				BF897F1F4B399DAA732ED4ED /* Store.swift in Sources */,
 				5CB8BD265BA21805A9BF8CD9 /* SubtitleOverlay.swift in Sources */,
 				1DB2172EFCE0D3B8FE7DE93F /* SubtitleStyleView.swift in Sources */,

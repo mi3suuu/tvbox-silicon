@@ -10,6 +10,9 @@ import TVCore
     #endif
     @State private var updates = Updates()
     @State private var announcements = Announcements()
+    // [mi3s] 二开：隐私遮罩开关。SwiftUI 的 ViewModifier 无法承载 App 级存储属性，
+    // 也无法在 extension 里加 stored property，只能落在 App 结构体上。
+    @AppStorage(PrivacyShade.key) private var coversAppSwitcher = true
     #if os(iOS)
     /// An Apple TV's Douyin code, scanned with the Camera.
     @State private var douyinHandoff: DouyinHandoff.Link?
@@ -35,6 +38,9 @@ import TVCore
     var body: some Scene {
         WindowGroup {
             RootView().environment(store).environment(updates).environment(announcements)
+                // [mi3s] 二开：App Switcher 缩略图遮罩。必须挂在根视图上并常驻视图树，
+                // 系统在进入后台的瞬间才截图，晚挂的 view 已经来不及进快照。
+                .privacyShade(enabled: coversAppSwitcher)
                 #if !os(tvOS)
                 // tvOS draws plain buttons and section links in the tint, so it keeps the neutral default.
                 .tint(Brand.accent)
@@ -89,6 +95,9 @@ import TVCore
                     if phase == .background {
                         Task { _ = await Diagnostics.shared.snapshot(); ErrorReports.shared.save() }
                         store.cloudSync?.flushPending()
+                        // [mi3s] 二开：隐私保险库退到后台即重新上锁。一次解锁只对给出它的那一刻有效，
+                        // 把手机递给别人时被隐藏的源/订阅不会被看到。没有密码时 lock() 是空操作。
+                        store.relockVaultOnBackground()
                     }
                     if phase == .active { Task { await ErrorReports.shared.sendIfDue() } }
                     #if os(tvOS) || os(macOS)
