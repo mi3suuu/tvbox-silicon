@@ -112,6 +112,8 @@ struct TVSettingsView: View {
                               footer: L10n.text("Sends errors to the developer a few times a day so they can be fixed: the error text with web addresses cut to the server name, the app and system versions, and a random ID. Never your accounts, passwords or viewing history.")) {
                 TVSettingsLink(title: L10n.text("Local Cache")) { CacheSettingsView() }
                 if store.extrasUnlocked { TVSettingsLink(title: L10n.text("JAR Runtime and Compatibility")) { RuntimeView() } }
+                // [mi3s] 二开：自己的出口代理（HTTP/HTTPS/SOCKS5），与手机/Mac 同一个页面。
+                TVSettingsLink(title: L10n.text("Proxy")) { ProxySettingsView() }
                 TVSettingsLink(title: L10n.text("Diagnostic Logs")) { DiagnosticsView() }
                 // The same page the phone and the Mac reach from Advanced: what is hidden, and the
                 // passcode that guards it. Without a row here the TV could apply a vault it had no

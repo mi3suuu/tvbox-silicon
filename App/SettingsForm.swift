@@ -507,6 +507,11 @@ struct FormSettingsView: View {
                 if store.extrasUnlocked {
                     FormLink(symbol: "cpu.fill", tint: .orange, title: L10n.text("JAR Runtime and Compatibility")) { RuntimeView() }
                 }
+                // [mi3s] 二开：自己的出口代理（HTTP/HTTPS/SOCKS5）。数据层早已在用
+                // （`Store.customProxy` → `EpisodePicker` 选线时读 endpoints），但旧版从没有过编辑入口，
+                // 于是这个页面一直是孤儿。补上这一行，代理能力才真的可用。
+                FormLink(symbol: "network", tint: .indigo, title: L10n.text("Proxy"),
+                         value: store.customProxy.store.endpoints.isEmpty ? nil : String(store.customProxy.store.endpoints.count)) { ProxySettingsView() }
                 FormLink(symbol: "doc.text.magnifyingglass", tint: .gray, title: L10n.text("Diagnostic Logs")) { DiagnosticsView() }
                 // Its own row rather than a corner of another page: this is the only setting here
                 // that hides content instead of changing how content looks, and a person looking
