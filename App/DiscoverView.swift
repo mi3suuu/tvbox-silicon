@@ -98,7 +98,10 @@ struct DiscoverView: View {
                 }
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 30) {
-                        if featured.isEmpty, model.loading {
+                        // No featured titles yet: hold the hero's height with a loader whether we are
+                        // still fetching (loading) or already failed (loaded but empty), so the top
+                        // of the page is never a blank black strip while the shelves below render.
+                        if featured.isEmpty {
                             ProgressView().frame(maxWidth: .infinity).frame(height: heroShown ? min(proxy.size.width * 1.5, 660) : 160)
                         }
                         ForEach(DiscoverSection.allCases.filter(visible)) { section in
@@ -181,7 +184,9 @@ struct DiscoverView: View {
             Button { searchShown = true } label: {
                 Image(systemName: "text.magnifyingglass").font(.system(size: 28))
                     .frame(width: 76, height: 76).glassSurface(.regular, in: Circle())
-            }.tileButton()
+            }
+                .accessibilityLabel(L10n.text("Search Catalog"))
+                .tileButton()
                 .focused($tvFocus, equals: .search)
                 .onMoveCommand { direction in
                     if direction == .down, heroShown, !featured.isEmpty {
@@ -380,13 +385,14 @@ struct DiscoverView: View {
     }
 
     @ViewBuilder private func brands(_ brands: [TMDBCatalog.Brand], title: String, width: CGFloat, studio: Bool = false) -> some View {
-        if !brands.isEmpty {
+        let browseable = brands.compactMap { brand in brand.feed.brandFilter.map { (brand, $0) } }
+        if !browseable.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 sectionHeading(title)
                 #if os(tvOS)
                 DiscoverTVRow {
-                    ForEach(brands) { brand in
-                        RouteLink { DiscoverBrowseView(title: brand.name, filter: brand.feed.brandFilter, logo: brand.logo) } label: {
+                    ForEach(browseable, id: \.0.id) { (brand, filter) in
+                        RouteLink { DiscoverBrowseView(title: brand.name, filter: filter, logo: brand.logo) } label: {
                             if studio {
                                 DiscoverTVStudioCard(brand: brand, backdrop: model.items(brand.feed).lazy.compactMap(\.backdrop).first)
                             } else {
@@ -398,8 +404,8 @@ struct DiscoverView: View {
                 #else
                 DiscoverRail {
                     LazyHStack(spacing: 13) {
-                        ForEach(brands) { brand in
-                            RouteLink { DiscoverBrowseView(title: brand.name, filter: brand.feed.brandFilter, logo: brand.logo) } label: {
+                        ForEach(browseable, id: \.0.id) { (brand, filter) in
+                            RouteLink { DiscoverBrowseView(title: brand.name, filter: filter, logo: brand.logo) } label: {
                                 DiscoverBrandCard(brand: brand, items: Array(model.items(brand.feed).prefix(4)), width: width)
                             }.tmdbCardButton().accessibilityLabel(brand.name)
                         }
@@ -1567,10 +1573,11 @@ extension TMDBMatch.Candidate {
 }
 
 private extension TMDBCatalog.Feed {
-    var brandFilter: TMDBCatalog.Filter {
+    /// The studio/network this brand feed browses to; nil for feeds the Worker doesn't serve in the networks or
+    /// companies collections. Discover skips those rather than force-unwrapping into a crash on the home page.
+    var brandFilter: TMDBCatalog.Filter? {
         let mapping: [Self: (Int, TMDBMatch.MediaType)] = [.netflix: (213, .tv), .disney: (2739, .tv), .appleTV: (2552, .tv), .hbo: (49, .tv), .warner: (174, .movie), .universal: (33, .movie), .paramount: (4, .movie), .sony: (34, .movie)]
-        let value = mapping[self]!
-        return .studio(value.0, type: value.1)
+        return mapping[self].map { .studio($0.0, type: $0.1) }
     }
 }
 

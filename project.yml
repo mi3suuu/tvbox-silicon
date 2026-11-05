@@ -51,6 +51,9 @@ targetTemplates:
         CFBundleLocalizations: [en, zh-Hans, zh-Hant, ja]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # [mi3s] 二开：外置播放器列表（App/ExternalPlayer.swift + Mi3sExternalPlayerMenu）。
+        # iOS 的 canOpenURL 只认这里登记过的 scheme，不登记则整个列表恒为空。
+        LSApplicationQueriesSchemes: [infuse, vlc-x-callback, nplayer-http, senplayer]
         NSLocalNetworkUsageDescription: Connect to the local media and subscription services you configure, and find Mi3s on your other devices.
         # Play On (Sources/TVCore/PlayOn.swift): iOS browses and advertises only the Bonjour types listed here.
         NSBonjourServices: [_yingxia._tcp]

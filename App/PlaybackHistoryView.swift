@@ -10,13 +10,15 @@ struct PlaybackHistoryView: View {
     @State private var confirmsDelete = false
     @State private var deletionIDs = Set<String>()
     private var history: PlaybackHistory { store.playbackHistory }
+    /// The rows this page may show: the active environment's history, with vault-hidden sources gone.
+    private var visible: [PlaybackHistoryEntry] { store.visibleHistory }
     private var entries: [PlaybackHistoryEntry] {
-        history.entries.filter { query.isEmpty || $0.context.videoName.localizedCaseInsensitiveContains(query) || $0.context.sourceName.localizedCaseInsensitiveContains(query) }
+        visible.filter { query.isEmpty || $0.context.videoName.localizedCaseInsensitiveContains(query) || $0.context.sourceName.localizedCaseInsensitiveContains(query) }
     }
 
     var body: some View {
         Group {
-            if history.entries.isEmpty {
+            if visible.isEmpty {
                 EmptyPage(symbol: AppSection.history.icon, title: L10n.text("No Playback History Yet"),
                           message: L10n.text("Videos you watch appear here, ready to pick up where you left off."),
                           action: L10n.text("Browse Sources"), actionSymbol: AppSection.sites.icon, perform: { store.section = .sites })
@@ -27,12 +29,12 @@ struct PlaybackHistoryView: View {
         .screenBackdrop()
         .historyDetailsDestination()
         .tabTitle(L10n.text("Playback History"))
-        .onChange(of: history.entries.isEmpty) { _, empty in if empty { managing = false; selected.removeAll() } }
+        .onChange(of: visible.isEmpty) { _, empty in if empty { managing = false; selected.removeAll() } }
         // Leaving the page gives up a title still being prepared.
         .onDisappear { if store.playing == nil { store.cancelResume() } }
         .confirmationDialog(L10n.text("Remove selected history and its cached content?"), isPresented: $confirmsDelete, titleVisibility: .visible) {
             Button(L10n.text("Remove from history"), role: .destructive) {
-                history.remove(deletionIDs); selected.subtract(deletionIDs); deletionIDs.removeAll()
+                history.remove(deletionIDs, environment: store.activeEnvironmentID); selected.subtract(deletionIDs); deletionIDs.removeAll()
             }
             .accessibilityIdentifier("history.confirmDelete")
         } message: {
@@ -92,7 +94,7 @@ struct PlaybackHistoryView: View {
                     Label(L10n.text("Manage history"), systemImage: "checklist").lineLimit(1).fixedSize()
                 }
                 .controlButton().accessibilityIdentifier("history.manage")
-                Button { deletionIDs = Set(history.entries.map(\.id)); confirmsDelete = true } label: {
+                Button { deletionIDs = Set(visible.map(\.id)); confirmsDelete = true } label: {
                     Label(L10n.text("Clear history"), systemImage: "trash").lineLimit(1).fixedSize()
                 }
                 .controlButton()
@@ -184,7 +186,7 @@ struct HistoryCard: View {
     private var historyRemove: some View {
         ArtworkBadgeButton(symbol: "xmark", label: L10n.text("Remove from history"), destructive: true) {
             guard drag?.active != true else { return }
-            store.playbackHistory.remove(entry.id)
+            store.playbackHistory.remove(entry.id, environment: entry.environment)
         }
         .allowsHitTesting(drag?.active != true)
     }
@@ -281,7 +283,7 @@ struct HistoryCard: View {
             if details {
                 Text("\(episodeLabel) · \(SourceLabel(entry.context.sourceName).text)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).cardCaption()
-                Text(HistoryFormat.status(entry)).font(.caption).monospacedDigit().foregroundStyle(.tertiary).lineLimit(1)
+                Text(HistoryFormat.status(entry)).font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
                     .cardCaption()
             } else {
                 // The bar on the poster already says how far; the line names the episode.
@@ -306,7 +308,7 @@ struct HistoryCard: View {
             Button(L10n.text("Show Details"), systemImage: "info.circle") { openDetails?(details) }
         }
         FavoriteMenuButton(item: entry.favoriteItem(), name: entry.context.videoName)
-        Button(L10n.text("Remove from history"), systemImage: "trash", role: .destructive) { store.playbackHistory.remove(entry.id) }
+        Button(L10n.text("Remove from history"), systemImage: "trash", role: .destructive) { store.playbackHistory.remove(entry.id, environment: entry.environment) }
     }
 }
 

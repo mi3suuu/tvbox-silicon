@@ -434,7 +434,7 @@ struct GlobalSearchView: View {
                     Text(video.remarks).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if !detail.isEmpty {
-                    Text(detail).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 Text(SourceLabel(item.site.name).text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -501,7 +501,9 @@ struct GlobalSearchView: View {
                                 Image(systemName: "arrow.up.left").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
                                     .padding(.trailing, 18).frame(height: 48)
                                     .contentShape(Rectangle())
-                            }.buttonStyle(.plain)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(L10n.text("Use This Search"))
                         }
                         if index < history.count - 1 { Divider().padding(.leading, 56) }
                     }
@@ -591,6 +593,7 @@ struct GlobalSearchView: View {
         let keyword = query ?? model.keyword
         guard !keyword.isEmpty else { return }
         historyData = (try? JSONEncoder().encode(Array(([keyword] + history.filter { $0 != keyword }).prefix(20)))) ?? Data()
+        store.persistKeychainBackup()
     }
 
     #if os(tvOS)
@@ -615,11 +618,15 @@ struct GlobalSearchView: View {
         guard !keyword.isEmpty else { return }
         rememberQuery(keyword)
         inputFocused = false
+        // A fresh search asks every source, so a source the viewer picked last time must not keep
+        // filtering the stream — otherwise results from the other sources arrive but stay hidden
+        // until that one source answers, which reads as "waiting for the whole search".
+        model.select(nil)
         #if os(tvOS)
         entering = false
         #endif
         model.search(keyword, config: config) { [store] site in
-            store.hiddenSources.contains(site, origin: config.origin)
+            store.hiddenSources.contains(site, origin: config.origin) || !store.vault.permits(site: site, fallback: config.origin)
         }
     }
 }
@@ -805,10 +812,13 @@ struct RecommendationsView: View {
     private var sites: [Site] { fixedSite.map { [$0] } ?? store.recommendationSites(config) }
     /// Until the user picks a source, default to the first in strategy order, so opening the app
     /// does not start the JVM when a standard API or script source is available. A source paused for
-    /// failing (`SourceHealth.paused`) is passed over unless it is the viewer's pick.
+    /// failing (`SourceHealth.paused`) is passed over even when it is the viewer's pick: a stale pick
+    /// must not pin the page to a dead source long after another one would have played.
     private var site: Site? {
-        sites.first(where: { $0.key == sourceKey })
-            ?? sites.first(where: { !SourceHealth.shared.paused($0, origin: config.origin) }) ?? sites.first
+        if let picked = sites.first(where: { $0.key == sourceKey }), !SourceHealth.shared.paused(picked, origin: config.origin) {
+            return picked
+        }
+        return sites.first(where: { !SourceHealth.shared.paused($0, origin: config.origin) }) ?? sites.first
     }
     private var requestID: String { "\(config.origin)|\(config.importedAt)|\(site?.key ?? "")|\(revision)" }
 
@@ -1524,7 +1534,7 @@ private struct SourceChip: View {
                 if name == CloudSources.site(where: \.isBilibili)?.name { BilibiliGlyph(size: 15).foregroundStyle(selected ? Brand.onAccent : BilibiliMark.blue) } else if let symbol = label.symbol { Text(symbol) }
                 Text(label.title).lineLimit(1)
                 if let count { Text("\(count)").monospacedDigit().opacity(0.55) }
-                if let dot { Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(dot) }
+                if let dot { Image(systemName: "circle.fill").font(.system(size: 11)).foregroundStyle(dot) }
             }
             .font(.system(size: 13, weight: selected ? .semibold : .medium))
             .foregroundStyle(selected ? Brand.onAccent : Color.primary.opacity(0.82))
