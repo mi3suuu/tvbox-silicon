@@ -26,7 +26,10 @@ private func episode(_ id: String, flag: String, name: String, episodeID: String
     let favorites = Favorites(defaults: defaults)
     #expect(favorites.liveChannels.map(\.name) == ["First", "Second"])
     let document = try JSONDecoder().decode(FavoriteDocument.self, from: try #require(defaults.data(forKey: "favorites")))
-    #expect(document.version == 2)
+    // [mi3s] 二开融合：我方收藏用 version 3 持久化（每条记录内联所属观看环境，见 FavoriteRecord）。
+    // 迁移后写的仍是可读文档，且再读一次必须还原同样的顺序 —— 这才是这条用例真正要守的东西。
+    #expect(document.version >= 2)
+    #expect(document.items.count == 2)
     #expect(Favorites(defaults: defaults).liveChannels.map(\.name) == ["First", "Second"])
 }
 

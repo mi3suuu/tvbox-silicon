@@ -40,7 +40,7 @@ public final class MediaCache: @unchecked Sendable {
            let loaded = try? JSONDecoder().decode([String: Entry].self, from: data) {
             entries = loaded.filter { $0.key.count == 64 && $0.key.allSatisfy { $0.isHexDigit } && $0.value.bytes >= 0 }
         }
-        let evicted = lock.withLock { let e = prune(now: Date()); persist(); return e }
+        let evicted = lock.withLock { let e = prune(now: Date()); persist(force: true); return e }
         deleteBlobs(evicted)
     }
     public func ticket() -> Ticket { lock.withLock { Ticket(generation: generation) } }
@@ -59,7 +59,7 @@ public final class MediaCache: @unchecked Sendable {
             // An expired, missing or truncated blob is forgotten: the dictionary under the lock, the file outside it.
             let removed = lock.withLock {
                 let removed = entries.removeValue(forKey: key) != nil
-                if removed { persist() }
+                if removed { persist(force: true) }
                 return removed
             }
             if removed { try? FileManager.default.removeItem(at: file) }
@@ -87,7 +87,7 @@ public final class MediaCache: @unchecked Sendable {
         let evicted = lock.withLock {
             entries[key] = Entry(kind: kind, scope: scope, bytes: data.count, expires: now.addingTimeInterval(ttl), used: now)
             let evicted = prune(now: now)
-            persist()
+            persist(force: true)
             return evicted
         }
         deleteBlobs(evicted)
@@ -98,7 +98,7 @@ public final class MediaCache: @unchecked Sendable {
             generation &+= 1
             let keys = entries.keys.filter({ entries[$0]?.scope == scope })
             for key in keys { entries[key] = nil }
-            persist()
+            persist(force: true)
             return keys
         }
         deleteBlobs(keys)
@@ -108,7 +108,7 @@ public final class MediaCache: @unchecked Sendable {
             generation &+= 1
             let key = id(key, kind, scope)
             let removed = entries.removeValue(forKey: key) != nil
-            persist()
+            persist(force: true)
             return removed ? [key] : []
         }
         deleteBlobs(keys)
@@ -121,7 +121,7 @@ public final class MediaCache: @unchecked Sendable {
     }
     public func summary(now: Date = Date()) -> Summary {
         let evicted = lock.withLock { () -> [String] in
-            let e = prune(now: now); persist(); return e
+            let e = prune(now: now); persist(force: true); return e
         }
         deleteBlobs(evicted)
         return lock.withLock {
@@ -151,11 +151,17 @@ public final class MediaCache: @unchecked Sendable {
         }
         return removed
     }
-    private func persist() {
-        // Collapse rapid rewrites (a grid fling downloads many posters at once): encoding the whole
-        // index and rewriting the file every time was a synchronous I/O spike on the calling thread.
+    /// Writes the index.
+    ///
+    /// [mi3s] 二开修正：`force` 区分「结构变化」与「使用时间刷新」。
+    /// 原实现无条件节流，导致 `store()` 写好 blob 后 1 秒内不再写索引 —— 同一进程里新实例
+    /// （或崩溃后重启）读到的索引里没有这条记录，缓存明明在盘上却取不到（MediaCacheTests 实证）。
+    /// 现在：新增/删除/初始化/prune 一律 `force: true`；只有 `data(for:)` 里刷新 `used` 才允许节流。
+    private func persist(force: Bool = false) {
+        // Collapse rapid rewrites of the *usage* timestamps (a grid fling reads many posters at once):
+        // encoding the whole index and rewriting the file every time was a synchronous I/O spike.
         let now = Date()
-        guard now.timeIntervalSince(lastPersist) >= 1.0 else { return }
+        guard force || now.timeIntervalSince(lastPersist) >= 1.0 else { return }
         guard let data = try? JSONEncoder().encode(entries) else { return }
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try? data.write(to: root.appending(path: "index.json"), options: .atomic)
