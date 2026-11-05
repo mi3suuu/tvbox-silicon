@@ -12,6 +12,8 @@ public struct SourceGroup: Equatable, Sendable, Identifiable {
         case pinned, builtIn, subscription(String)
         /// The sources the viewer hid, last on the page.
         case hidden
+        // [mi3s] 二开：case other —— 改派来源落不到任何订阅时仍需显示，否则「源存在却看不见」
+        // 会被当成 bug（上游只有 pinned/builtIn/subscription/hidden 四种）
         /// Sources that reached the merged list but belong to no listed subscription: filed onto a
         /// subscription that is now off, or carried by a copy whose address changed. They are listed
         /// rather than dropped, because a source that exists and cannot be seen looks like a bug.

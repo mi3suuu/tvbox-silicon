@@ -40,6 +40,7 @@ import Observation
 
     public init(file: URL?) {
         self.file = file
+        // [mi3s] 二开：cooldown 是本次运行的墙钟期限，跨重启持久化会把已恢复的源长期排除
         if let file, let saved = JSONFileStore<[String: Record]>(file: file).load() {
             // A cooldown is a wall-clock deadline for *this* run: persisting it across a restart left a
             // source silently excluded long after it recovered. Drop the deadline on load, so a restart

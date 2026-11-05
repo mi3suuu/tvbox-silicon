@@ -24,6 +24,15 @@ struct SitesView: View {
     @State private var foldBeforeSearch: Set<String>?
     @State private var arranging = false
     @State private var choosingHidden = false
+    /// Seeds the fold before the first frame, so the page never draws every group open and then
+    /// fold: restoring in `.task` runs after the first render, which reads as the page flickering.
+    /// Picking starts open (see `applyDefaultFold`).
+    init(pick: ((Site) -> Void)? = nil, pickable: [Site] = [], picked: String? = nil) {
+        self.pick = pick
+        self.pickable = pickable
+        self.picked = picked
+        _collapsed = State(initialValue: pick == nil ? (SourceFoldState().collapsed ?? []) : [])
+    }
     var body: some View {
         Group {
             if let config = store.subscription {
@@ -180,7 +189,9 @@ struct SitesView: View {
         let header = Button {
             withAnimation(.snappy(duration: 0.3)) {
                 if open { collapsed.insert(group.id) } else { collapsed.remove(group.id) }
-                foldState.save(collapsed)
+                // A picking visit folds for its own convenience and leaves the Sources page's saved
+                // fold alone: borrowing a page to choose from must not rearrange it.
+                if pick == nil { foldState.save(collapsed) }
             }
         } label: {
             HStack(spacing: 8) {
@@ -243,7 +254,8 @@ struct SitesView: View {
     private func setAllCollapsed(_ all: Bool) {
         let ids = store.sourceGroups(includeHidden: false).map(\.id)
         withAnimation(.snappy(duration: 0.3)) { collapsed = all ? Set(ids) : [] }
-        foldState.save(collapsed)
+        // Same rule as a single header: only the Sources page owns the saved fold.
+        if pick == nil { foldState.save(collapsed) }
     }
 
     /// Entry to the record of moved sources, shown only while a move is in effect.
@@ -258,8 +270,12 @@ struct SitesView: View {
     }
 
     /// The page as the viewer left it: the fold they saved, else every group open.
+    ///
+    /// Only the page's own fold is restored. Picked-for-something-else (Watch Now's recommendations)
+    /// is a different visit with a different job: it must open every group, or a source the viewer
+    /// folded away on the Sources page is absent from the list they were asked to choose from.
     private func applyDefaultFold() {
-        collapsed = foldState.collapsed ?? []
+        collapsed = pick == nil ? (foldState.collapsed ?? []) : []
         foldBeforeSearch = nil
     }
 }
