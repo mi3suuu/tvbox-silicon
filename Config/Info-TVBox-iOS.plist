@@ -11,7 +11,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Yingxia</string>
+	<string>Mi3s</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -56,9 +56,11 @@
 		<string>_yingxia._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect to the local media and subscription services you configure, and find Yingxia on your other devices.</string>
+	<string>Connect to the local media and subscription services you configure, and find Mi3s on your other devices.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Saves a sign-in code to Photos, so the app on this phone can scan it.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Writes subtitles from a video's own sound track, on this device.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -95,5 +97,7 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>WebCastDefaultPort</key>
+	<integer>8090</integer>
 </dict>
 </plist>
