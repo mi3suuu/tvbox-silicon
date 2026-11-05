@@ -15,6 +15,8 @@ struct CloudDriveView: View {
     @State private var error: String?
     @State private var saving = false
     @State private var showsManual = false
+    /// [mi3s] 二开：登出前二次确认。上游 1.8.11 一点即登出，误触会连带清掉插件里保存的登录态且无法撤销。
+    @State private var signingOut: CloudProvider?
     var body: some View {
         SettingsPage(title: L10n.text("Cloud Drive Accounts"), symbol: "externaldrive") {
             SettingsGroup(footer: store.extrasUnlocked ? L10n.text("Sign in to Quark and UC on their official page, and to Baidu and Aliyun by scanning a code with their phone app. Yingxia stores the login on this Mac and supplies it to the plugins you run.")
@@ -24,11 +26,7 @@ struct CloudDriveView: View {
                     SettingsRow(symbol: provider.symbol, tint: provider.tint, title: provider.name,
                                 subtitle: L10n.text(signedIn ? "Signed In" : "Not Signed In")) {
                         if signedIn {
-                            Button(L10n.text("Sign Out")) {
-                                provider.clear(&accounts)
-                                EmbeddedJarHost.forgetPluginSignIns(provider.pluginFiles)
-                                save()
-                            }.settingsButton()
+                            Button(L10n.text("Sign Out")) { signingOut = provider }.settingsButton()
                         } else {
                             Button(L10n.text("Sign In")) {
                                 if provider == .xunlei { texting = true } else if provider.signsInOnWeb { login = provider } else { scan = provider }
@@ -58,6 +56,17 @@ struct CloudDriveView: View {
             if let error { Label(error, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(Brand.rose) }
         }
         .task { do { accounts = try CloudDriveAccounts.load() } catch { self.error = error.localizedDescription } }
+        .confirmationDialog(L10n.text("Sign out of %@?", signingOut?.name ?? ""), isPresented: Binding(get: { signingOut != nil }, set: { if !$0 { signingOut = nil } }), titleVisibility: .visible) {
+            Button(L10n.text("Sign Out"), role: .destructive) {
+                guard let provider = signingOut else { return }
+                provider.clear(&accounts)
+                EmbeddedJarHost.forgetPluginSignIns(provider.pluginFiles)
+                save()
+                signingOut = nil
+            }
+        } message: {
+            Text(L10n.text("You'll need to sign in again, and the plugin's saved sign-in will be removed too."))
+        }
         .sheet(item: $login) { provider in
             CloudLoginView(provider: provider) { cookie, ticket in
                 try await provider.saveLogin(cookie, ticket: ticket)
@@ -338,6 +347,8 @@ struct CloudDriveView: View {
     @State private var accounts = CloudDriveAccounts()
     @State private var login: CloudProvider?
     @State private var error: String?
+    /// [mi3s] 二开：登出前二次确认。上游 1.8.11 一点即登出，误触会连带清掉插件里保存的登录态且无法撤销。
+    @State private var signingOut: CloudProvider?
     var body: some View {
         SettingsPage(title: L10n.text("Cloud Drive Accounts"), symbol: "externaldrive") {
             SettingsGroup(footer: footer) {
@@ -346,7 +357,7 @@ struct CloudDriveView: View {
                     SettingsRow(symbol: provider.symbol, tint: provider.tint, title: provider.name,
                                 subtitle: L10n.text(signedIn ? "Signed In" : "Not Signed In")) {
                         if signedIn {
-                            Button(L10n.text("Sign Out")) { signOut(provider) }.settingsButton()
+                            Button(L10n.text("Sign Out")) { signingOut = provider }.settingsButton()
                         } else {
                             Button(L10n.text("Sign In")) { login = provider }.settingsButton(prominent: true)
                         }
@@ -356,6 +367,11 @@ struct CloudDriveView: View {
             if let error { Label(error, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(Brand.rose) }
         }
         .task { reload() }
+        .confirmationDialog(L10n.text("Sign out of %@?", signingOut?.name ?? ""), isPresented: Binding(get: { signingOut != nil }, set: { if !$0 { signingOut = nil } }), titleVisibility: .visible) {
+            Button(L10n.text("Sign Out"), role: .destructive) { if let p = signingOut { signOut(p) }; signingOut = nil }
+        } message: {
+            Text(L10n.text("You'll need to sign in again, and the plugin's saved sign-in will be removed too."))
+        }
         #if os(iOS)
         .sheet(item: $login) { provider in
             if provider == .xunlei { XunleiSignInView(signedIn: reload) }
