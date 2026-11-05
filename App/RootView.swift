@@ -46,6 +46,11 @@ struct RootView: View {
     // Untyped so it can hold both More-tab sections and Route pages.
     @State private var morePath = NavigationPath()
     @State private var moreSection: AppSection = .settings
+    /// [mi3s] 二开：折展时「因为分区从标签栏掉进 More」而被动跳过去的那一个分区；用户自己点 More
+    /// 进去时保持 nil。折叠把 7 格收成 4 格，Sites / Music / Manga 会掉进 More，`store.section` 被改写
+    /// 成 `.more`；展开时格子回到 7 个，`inMore` 里已经没有它，于是要把它放回去。没有这个标记就没法
+    /// 区分「用户主动停在 More」和「被折展搬过来」，前者不能被拽回去。见 Docs/duo/Duo适配报告.md §二·P2。
+    @State private var movedToMoreBySlotChange: AppSection?
     #if os(iOS)
     @AppStorage(PhoneTabs.storageKey) private var storedTabs = ""
     /// Where the in-app mini player has been dragged, so it can sit anywhere on screen like YouTube's.
@@ -219,17 +224,32 @@ struct RootView: View {
             .sheet(isPresented: Binding(get: { store.music.presentsPlayer }, set: { store.music.presentsPlayer = $0 })) { MusicNowPlayingScreen() }
             .onChange(of: store.section) { _, section in
                 if phoneTabs && inMore.contains(section) {
+                    // [mi3s] 二开：用户（或一次深链）主动选了一个在 More 里的分区 —— 不是折展搬的。
+                    movedToMoreBySlotChange = nil
                     moreSection = section; morePath = NavigationPath([section])
                     store.section = .more
                 }
             }
             // Closing iPhone Duo narrows the side bar back to four: a section that just left it opens inside More.
+            // Opening it again widens the bar back to seven, and the section returns to the bar — so the page the
+            // viewer was on has to come back with it. Without this, closing on Sites and opening again left them
+            // on More: `phoneTabs` never changed (a Duo is a phone folded or flat), so the restore below never ran.
             .onChange(of: barSlots) { _, _ in
                 if phoneTabs && inMore.contains(store.section) {
+                    // Fell out of the bar into More. Remember it was this that moved them, not a tap.
+                    movedToMoreBySlotChange = store.section
                     moreSection = store.section; morePath = NavigationPath([store.section]); store.section = .more
+                } else if store.section == .more, let moved = movedToMoreBySlotChange, !inMore.contains(moved) {
+                    // Back in the bar: put the page back, and leave More as empty as we found it.
+                    moreSection = moved
+                    morePath = NavigationPath()
+                    movedToMoreBySlotChange = nil
+                    store.section = moved
                 }
             }
             .onChange(of: phoneTabs) { _, phone in
+                // [mi3s] 二开：切到/离开手机标签栏都是别的原因，折展搬移的账就此结清。
+                movedToMoreBySlotChange = nil
                 if !phone && store.section == .more { store.section = morePath.isEmpty ? .settings : moreSection }
                 else if phone && inMore.contains(store.section) {
                     moreSection = store.section; morePath = NavigationPath([store.section]); store.section = .more
