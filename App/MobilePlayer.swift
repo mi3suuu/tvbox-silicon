@@ -4,6 +4,57 @@ import AVKit
 import MediaPlayer
 import TVCore
 
+/// How the picture meets the box the page gives it.
+///
+/// Every shape used to force its own answer: held sideways, unfolded, or on the Duo's cover screen the picture
+/// was cropped to fill, because a fitted frame left bands the page could not use. That was a guess about the
+/// stream — a 2.35:1 film on the inner display lost a third of its width, a 4:3 one lost its top and bottom.
+/// The box now follows the stream itself unless the viewer says otherwise, and the choice is one setting shared
+/// by every shape, so a picture the viewer decided on stays that way when the Duo folds or the phone turns.
+enum PictureScaling: String, CaseIterable, Identifiable {
+    /// 适应片源: the box takes the stream's own shape, so the whole picture shows and nothing is cropped.
+    /// Where the layout fixes the box instead (a split column, full screen), the picture fits inside it
+    /// and black bands take the rest — the same result as the "fill with bars" pick this replaced, but
+    /// without asking the viewer to choose between two options that drew the identical picture.
+    case source
+    /// 铺满: the box stays, the picture grows until it covers it, edges cropped.
+    case fill
+    /// 拉伸: the box stays, the picture is stretched onto it, whatever its shape.
+    case stretch
+
+    var id: String { rawValue }
+
+    /// Stored under one key: the pick follows the viewer across titles, shapes and launches.
+    static let key = "pictureScaling"
+
+    /// Only this one changes the box; the rest keep it and change the picture inside it.
+    var followsSource: Bool { self == .source }
+
+    var gravity: AVLayerVideoGravity {
+        switch self {
+        case .source: return .resizeAspect
+        case .fill: return .resizeAspectFill
+        case .stretch: return .resize
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .source: return L10n.text("Fit to Source")
+        case .fill: return L10n.text("Crop to Fill")
+        case .stretch: return L10n.text("Stretch")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .source: return "aspectratio"
+        case .fill: return "rectangle.fill"
+        case .stretch: return "arrow.left.and.right"
+        }
+    }
+}
+
 /// The iPhone and iPad player. The picture plays in a layer of our own and every control is drawn here: AVKit's
 /// controls on iOS keep AirPlay and volume in a row of their own above anything laid over them and take no buttons
 /// of ours, so the title, our buttons, AirPlay and Picture in Picture couldn't share one row. Back and the title sit
@@ -26,21 +77,265 @@ struct MobilePlayerView: View {
     let close: () -> Void
     /// The whole screen, or the top of an iPhone watch page.
     var layout: MobilePlayerLayout = .screen
+    /// The picture on a watch page owns a full-height column (held sideways, unfolded) rather than a
+    /// strip at the top, so its chrome is the roomy kind and keeps clear of the notch and the home
+    /// indicator instead of hugging the box's edges.
+    var immersive: Bool = false
     /// On a watch page: Full Screen, or back to the page.
     var toggleFullScreen: (() -> Void)? = nil
+    /// Open the episode picker from the options menu.
+    var openEpisodes: () -> Void = {}
+    /// Float the video in-app: back to the main interface while it keeps playing in the mini player.
+    var miniplayer: () -> Void = {}
+    /// The picture's width over height, once the stream is known: the page sizes its box from it.
+    var aspect: (CGFloat) -> Void = { _ in }
+
+    /// The subtitle file on screen, or nil when the channel offers none or it has not loaded.
+    private var activeSubtitleTrack: SubtitleTrack? {
+        guard let id = chosenSubtitle else { return subtitleTracks.first }
+        return subtitleTracks.first { $0.id == id }
+    }
+
+    /// Reads the stored appearance and positions, then loads this channel's subtitle files.
+    /// Called from the view's task so a title change reloads rather than reusing the old cues.
+    private func loadSubtitles() async {
+        if let style = try? JSONDecoder().decode(SubtitleStyle.self, from: subtitleStyleData) {
+            subtitleStyle = style.sanitized
+        }
+        if let memory = try? JSONDecoder().decode(SubtitlePositionMemory.self, from: subtitlePositionsData) {
+            subtitlePositions = memory
+        }
+        // Put the bubble back where it was left for this title.
+        let remembered = subtitlePositions.position(for: channel.url.absoluteString)
+        subtitleStyle.centerX = remembered.x
+        subtitleStyle.centerY = remembered.y
+
+        let files = channel.subtitles
+        guard !files.isEmpty else { subtitleTracks = []; return }
+        subtitleTracks = await SubtitleTrack.loadAll(files, headers: channel.headers)
+        // While the overlay is drawing a track, the player must not draw its own, or both appear.
+        // Selecting nothing is how AVPlayer turns a legible track off.
+        if !subtitleTracks.isEmpty, let group = tracks.legible { tracks.select(nil, in: group) }
+    }
+
+    /// The segment the playhead is inside, if any. Credits win at the end of a file, and the intro
+    /// wins anywhere else, so a marker that overlaps another cannot show two buttons.
+    private var currentSkipSegment: SkipSegmentSources.Segment? {
+        let position = clock.position
+        if let credits = skipCredits, position >= credits.start, position < credits.end { return credits }
+        return skipSegment
+    }
+
+    /// Asks each configured source for an intro/credits marker and keeps the first usable one.
+    ///
+    /// Only file-level sources are trusted directly. A title-level database describes a different
+    /// cut, so its segment is accepted only when the timing actually fits this file — the check
+    /// lives in `SkipSegmentSources.choose`, and `skipIsFileLevel` records which kind won so the
+    /// button can behave accordingly.
+    private func loadSkipSegment() async {
+        skipSegment = nil
+        skipCredits = nil
+        skipIsFileLevel = false
+        guard let item = clock.item else { return }
+        let duration = clock.duration > 0 ? clock.duration : 0
+
+        // One dictionary per kind: a dictionary can hold one segment per source, and the viewer's
+        // markers can name both an intro and a credits segment.
+        var intro: [SkipSegmentSources.Source: SkipSegmentSources.Segment] = [:]
+        var credits: [SkipSegmentSources.Source: SkipSegmentSources.Segment] = [:]
+
+        // The viewer's own markers: the intro end and outro length they set on the episode skip
+        // page. Highest authority, and the only source that works offline with no chapters.
+        if store.skipSources.isActive(.manual), let scope = channel.skipScope {
+            let settings = EpisodeSkipSettings.load(scope: scope)
+            if settings.introEnd > 0 {
+                intro[.manual] = SkipSegmentSources.Segment(kind: .intro, start: 0, end: settings.introEnd)
+            }
+            if settings.outroLength > 0, duration > settings.outroLength {
+                credits[.manual] = SkipSegmentSources.Segment(
+                    kind: .credits, start: duration - settings.outroLength, end: duration)
+            }
+        }
+        // Chapters are the other file-level source, available without a network call.
+        if store.skipSources.isActive(.mediaServer),
+           let chapters = chapterSegments(of: item) {
+            intro[.mediaServer] = chapters
+        }
+        guard !intro.isEmpty || !credits.isEmpty else { return }
+
+        if let chosen = store.skipSources.choose(kind: .intro, duration: duration, reported: intro) {
+            skipSegment = chosen.segment
+            skipIsFileLevel = chosen.source.isFileLevel
+        }
+        if let chosen = store.skipSources.choose(kind: .credits, duration: duration, reported: credits) {
+            skipCredits = chosen.segment
+            skipIsFileLevel = skipIsFileLevel || chosen.source.isFileLevel
+        }
+    }
+
+    /// Reads the asset's own chapters as candidate intro/credits segments.
+    ///
+    /// A "chapter" is only useful here when there are at least three of them: with one or two, the
+    /// chapter is the whole file or half of it, and neither is an intro.
+    private func chapterSegments(of item: AVPlayerItem) -> SkipSegmentSources.Segment? {
+        // No async variant of this property exists; it reads from metadata already loaded with the
+        // asset, so calling it on the player's queue is cheap.
+        let groups = item.asset.chapterMetadataGroups(bestMatchingPreferredLanguages: Locale.preferredLanguages)
+        guard groups.count >= 3 else { return nil }
+        let first = groups.first
+        guard let start = first?.timeRange.start.seconds,
+              let length = first?.timeRange.duration.seconds,
+              start.isFinite, length.isFinite, length > 3 else { return nil }
+        return SkipSegmentSources.Segment(kind: .intro, start: start, end: start + length)
+    }
+
+    /// Records what the picture is, and warns only when the answer is "this cannot be shown".
+    ///
+    /// The decision itself lives in `HDRDisplay`; this only reads the track's format description.
+    /// Nothing is tone-mapped by hand — when the display cannot take HDR the system does it, and
+    /// doing it here as well would clip the highlights twice.
+    private func inspectColour() async {
+        hdrNotice = nil
+        guard let item = clock.item else { return }
+        guard let track = try? await item.asset.loadTracks(withMediaType: .video).first,
+              let descriptions = try? await track.load(.formatDescriptions),
+              let description = descriptions.first else { return }
+
+        let transfer = HDRDisplay.transfer(of: description)
+        let action = HDRDisplay().action(
+            for: transfer,
+            displaySupportsHDR: await HDRDisplay.displaySupportsHDR()
+        )
+        if case let .unsupportedDolbyVision(reason) = action {
+            hdrNotice = reason
+        }
+    }
+
+    /// Writes the appearance back whenever it changes.
+    /// Reports the picture's shape to the page, once, when it is known.
+    ///
+    /// The page sizes the player's box from this. Assuming 16:9 leaves letterbox bars *inside* the
+    /// player for a 4:3 or 2.35:1 film — which is what the white strip at the right edge was.
+    private func reportAspect() {
+        guard let size = clock.item?.presentationSize, size.width > 0, size.height > 0 else { return }
+        let ratio = size.width / size.height
+        guard ratio.isFinite, ratio > 0.2, ratio < 6 else { return }
+        // Kept here too: `.source` gives the picture this exact shape, so the box is the stream's
+        // frame rather than a guess that leaves the page's own background at the edges.
+        pictureAspect = ratio
+        aspect(ratio)
+    }
+
+    private func saveSubtitleStyle() {
+        if let blob = try? JSONEncoder().encode(subtitleStyle.sanitized) { subtitleStyleData = blob }
+    }
+
+    #if canImport(Speech)
+    /// The language the viewer picked on the settings page, if any.
+    @AppStorage(SpeechSubtitles.preferredLanguageKey) private var speechLanguageCode = ""
+
+    /// The language to recognise in: the viewer's pick first, then the phone's own, then the two
+    /// this app is most used in.
+    ///
+    /// Checked against the on-device models before the item is offered at all. A row that fails the
+    /// moment it is tapped teaches the viewer the feature is broken, when the truth is that this
+    /// device has no model for that language and nothing was ever going to happen.
+    private var speechLanguage: String? {
+        SpeechSubtitles.preferredLanguage(stored: speechLanguageCode)
+    }
+
+    /// Recognises the sound track and appends the result as another subtitle file.
+    @MainActor
+    private func generateSubtitles(language: String) {
+        guard !generatingSubtitles else { return }
+        generatingSubtitles = true
+        subtitleProgress = 0
+        subtitleError = nil
+        // The headers matter: a source that needs a Referer answers nothing without them, and the
+        // recogniser would read an error page as silence.
+        let headers = channel.headers
+        let asset = AVURLAsset(url: channel.url,
+                               options: headers.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let name = L10n.text("Subtitles From the Sound")
+        let hint = channel.name
+        // Keep the handle so leaving the player cancels the export/recognition rather than
+        // letting it run to completion with no one watching.
+        speechTask = Task {
+            do {
+                let track = try await SpeechSubtitles().transcribe(asset: asset, language: language, name: name,
+                                                                   hint: [hint]) { value in
+                    Task { @MainActor in subtitleProgress = value }
+                }
+                subtitleTracks.removeAll { $0.id == track.id }
+                subtitleTracks.append(track)
+                chosenSubtitle = track.id
+                generatingSubtitles = false
+            } catch is CancellationError {
+                generatingSubtitles = false
+            } catch {
+                subtitleError = Self.describe(error)
+                generatingSubtitles = false
+            }
+        }
+    }
+
+    private static func describe(_ error: any Error) -> String {
+        guard let failure = error as? SpeechSubtitles.Failure else { return error.localizedDescription }
+        switch failure {
+        case .languageUnavailable(let language): return L10n.text("No on-device speech model for %@.", language)
+        case .notAuthorized: return L10n.text("Allow Speech Recognition in Settings to write subtitles.")
+        case .noAudio: return L10n.text("This video has no sound track to read.")
+        case .empty: return L10n.text("Nothing was recognised in this video's sound.")
+        case .cancelled: return L10n.text("Cancelled.")
+        case .failed(let reason): return reason
+        }
+    }
+    #endif
 
     @Environment(Store.self) private var store
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// The viewer's player-control layout: which top-row buttons draw directly and which wait in More.
+    @AppStorage(PlayerControlsLayout.storageKey) private var controlsOrder = PlayerControlsLayout.standard.stored
     @State private var pip = PictureInPicture()
     @State private var clock = PlayerClock()
     @State private var tracks = MediaTracks()
     @State private var nowPlaying = VideoNowPlaying()
-    @State private var fillsScreen = false
+    /// How the picture meets its box. Persisted, and the same in every shape.
+    @AppStorage(PictureScaling.key) private var scalingRaw = PictureScaling.source.rawValue
+    /// The stream's own shape, once the item reports it: the box follows it in `.source`.
+    @State private var pictureAspect: CGFloat?
     @State private var speed: Float = 1
     @AppStorage(DanmakuArea.key) private var danmakuArea = DanmakuArea.standard
     @State private var showsDanmakuList = false
-    @State private var showsEpisodes = false
+    /// Set to the stream's address when the viewer asks to hand it to another app.
+    @State private var externalPlayerStream: HandoffStream?
+    /// The intro or credits segment for this item, once a source has claimed one.
+    @State private var skipSegment: SkipSegmentSources.Segment?
+    /// The end-of-episode segment, kept apart because the playhead can be in either one.
+    @State private var skipCredits: SkipSegmentSources.Segment?
+    /// Whether that segment came from a source that knows this exact file.
+    @State private var skipIsFileLevel = false
+    /// Set when the file is Dolby Vision this device cannot decode; shown once, not as a dialog.
+    @State private var hdrNotice: String?
+    /// The subtitle files this channel offers, parsed once per title. Drawn by `SubtitleOverlay`
+    /// rather than by the player, so size, opacity and position can be set.
+    @State private var subtitleTracks: [SubtitleTrack] = []
+    @State private var chosenSubtitle: String?
+    /// Set while the on-device recogniser is working through this title's sound track.
+    @State private var generatingSubtitles = false
+    /// The running speech-to-subtitle task, so leaving the player cancels it instead of
+    /// letting a 40-minute export finish on its own with no one watching.
+    @State private var speechTask: Task<Void, Never>?
+    @State private var subtitleProgress: Double = 0
+    /// Why the last attempt produced nothing, shown in place of the menu item.
+    @State private var subtitleError: String?
+    /// Persisted appearance, shared by every title.
+    @AppStorage("subtitleStyle") private var subtitleStyleData = Data()
+    /// Where the bubble was dragged to, per title.
+    @AppStorage("subtitlePositions") private var subtitlePositionsData = Data()
+    @State private var subtitleStyle = SubtitleStyle.standard
+    @State private var subtitlePositions = SubtitlePositionMemory()
     /// Devices with Yingxia open, for the Play On button; and the one the video was sent to.
     @State private var tvBrowser = PlayOnBrowser()
     @State private var playingOn: String?
@@ -68,20 +363,70 @@ struct MobilePlayerView: View {
     @State private var mountsVolume = false
     /// The screen's brightness before the first slide changed it, put back when the player closes.
     @State private var brightnessBefore: CGFloat?
+    /// The viewer locked the controls: the picture's taps and slides do nothing, and the orientation
+    /// stays put whatever the gyroscope says, until they unlock again.
+    @State private var controlsLocked = false
 
     var body: some View {
         ZStack {
-            PlayerLayerView(player: session.player, fills: fillsScreen, pip: pip).playerBleed(!inline)
-                // Picture in Picture shows only the player's layer, so AVPlayer draws the subtitles there.
-                .onChange(of: pip.active) { _, active in session.subtitles.native = active }
-            // The enhanced picture covers the layer's own, under everything else.
-            EnhancedVideoSurface(enhancer: session.enhancer, fills: fillsScreen, bleeds: !inline)
+            // The picture no longer stretches to this box on every shape: `.source` gives it the stream's
+            // own shape and this black sits behind the bands that leaves. Every other mode fills the box
+            // and the black never shows, which is also what a letterboxed picture needs.
+            Color.black.playerBleed(!inline)
+            PlayerLayerView(player: session.player, gravity: pictureGravity, pip: pip)
+                .pictureBox(scaling, aspect: pictureAspect)
+                .playerBleed(!inline)
+            // The enhanced picture covers the layer's own, under everything else. It bleeds exactly the
+            // edges the AVPlayer layer does, so the two pictures never disagree and leave a strip of page
+            // down one side. On a watch page it stays inside the box the page measured: bleeding sideways
+            // there made the picture wider than the column it was given, and the page's clip cut the film.
+            EnhancedVideoSurface(enhancer: session.enhancer, gravity: pictureGravity,
+                                 bleeds: inline ? [] : .all)
+                .pictureBox(scaling, aspect: pictureAspect)
             if showsDanmaku && !session.danmaku.isEmpty {
                 DanmakuOverlay(player: session.player, comments: session.danmaku, opacity: session.danmakuOpacity, revision: session.danmakuRevision)
                     // Across the whole width, but below the Dynamic Island and above the home indicator when upright.
                     .playerBleed(!inline, edges: .horizontal)
             }
-            SubtitleOverlay(cues: session.subtitles, fills: fillsScreen).playerBleed(!inline)
+            // Parsed subtitle tracks are drawn here, not by the player, so they can be resized and
+            // moved. Empty when the channel offers no subtitle files, so a film without them is
+            // untouched.
+            SubtitleOverlay(
+                track: activeSubtitleTrack,
+                position: clock.position,
+                style: $subtitleStyle,
+                positionKey: channel.url.absoluteString,
+                memory: $subtitlePositions
+            )
+            .playerBleed(!inline, edges: .horizontal)
+            .allowsHitTesting(activeSubtitleTrack != nil)
+            // Floating, not a sheet: an intro is short, and dismissing a dialog takes longer than
+            // the intro does.
+            if let segment = currentSkipSegment {
+                SkipSegmentButton(segment: segment, position: clock.position, isFileLevel: skipIsFileLevel) {
+                    clock.seek(to: segment.end)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 20)
+                .padding(.bottom, inline ? 84 : 128)
+                .playerBleed(!inline, edges: .horizontal)
+            }
+            if let hdrNotice {
+                VStack {
+                    Spacer(minLength: 0)
+                    // The reason, not a generic sentence: "this file's Dolby Vision profile cannot
+                    // be decoded here" tells the viewer to pick another source, which a bare
+                    // "Unsupported" does not.
+                    Label(hdrNotice, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(.black.opacity(0.66), in: Capsule())
+                        .foregroundStyle(.white)
+                        .padding(.bottom, inline ? 60 : 110)
+                }
+                .allowsHitTesting(false)
+            }
+            stallNotice
             // The artwork dissolves into the first frame.
             if let waiting {
                 if inline {
@@ -96,12 +441,12 @@ struct MobilePlayerView: View {
                     waiting.view.playerBleed(true).transition(.opacity)
                 }
             }
-            if pip.active { pipPlaceholder }
+            if pip.active || PictureInPicture.isActive { pipPlaceholder }
             if playingOn != nil { Color.black.playerBleed(!inline) }
             // A tap on the picture shows or hides the controls; a tap on a control keeps them up (see `rows`).
             // Two taps on a side skip, touching and holding plays faster, and sliding sideways seeks.
             PictureGestures(tap: tapped, hold: held, swipe: swiped, levels: slidesLevels) { wider in
-                withAnimation(.easeInOut(duration: 0.25)) { fillsScreen = wider }
+                withAnimation(.easeInOut(duration: 0.25)) { setScaling(wider ? .fill : .source) }
             }
             .playerBleed(!inline)
             .accessibilityHidden(true)
@@ -126,7 +471,20 @@ struct MobilePlayerView: View {
                     .opacity(chromeVisible ? 0 : 1)
                     .animation(.smooth(duration: 0.25), value: chromeVisible)
             }
-            controls.opacity(chromeVisible ? 1 : 0).allowsHitTesting(chromeVisible && !settling)
+            controls.opacity(chromeVisible ? 1 : 0).allowsHitTesting(chromeVisible && !settling && !controlsLocked)
+            // Locked: the whole chrome goes read-only (the picture's taps still reveal it, but nothing
+            // in it reacts) and a single unlock button floats over the picture as the only way out.
+            if controlsLocked {
+                Button { toggleLock() } label: {
+                    Image(systemName: "lock.fill")
+                }
+                .buttonStyle(PlayerCircleStyle(size: 56))
+                .accessibilityLabel(L10n.text("Unlock Controls"))
+                .accessibilityIdentifier("player.unlock")
+                .opacity(chromeVisible ? 1 : 0)
+                .allowsHitTesting(chromeVisible)
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            }
         }
         .animation(.easeInOut(duration: 0.7), value: waiting == nil)
         .animation(.easeInOut(duration: 0.4), value: waiting?.starting)
@@ -136,9 +494,17 @@ struct MobilePlayerView: View {
             nowPlaying.start(session)
             nowPlaying.update(title: channel.name, session: session)
             tvBrowser.start()
+            // AVKit's queued advance is unreliable inside the floating window, so while PiP is up the
+            // session falls back to the ordinary end-of-episode switch, which works everywhere. Sync the
+            // current state too: this view can be rebuilt (a Duo fold/unfold) while PiP is already active,
+            // and a rebuild re-runs onAppear but never re-fires onActiveChange — leaving the queue enabled
+            // inside the floating window would silently break auto-advance there.
+            session.queueingDisabled = pip.active || PictureInPicture.isActive
+            pip.onActiveChange = { session.queueingDisabled = $0 }
         }
         .onDisappear {
             clock.detach(); nowPlaying.stop(); tvBrowser.stop()
+            speechTask?.cancel(); speechTask = nil
             if let brightnessBefore { screen?.brightness = brightnessBefore }
         }
         // Played here again (the Lock Screen, say): the other device no longer has it to itself.
@@ -153,8 +519,35 @@ struct MobilePlayerView: View {
             guard let old else { return .impact(weight: .light) }
             return new.locked != old.locked ? .impact(weight: .medium) : new.rate != old.rate ? .selection : nil
         }
-        .task(id: clock.item.map(ObjectIdentifier.init)) { await tracks.load(clock.item) }
-        .playerEpisodesSheet(isPresented: $showsEpisodes, channel: channel)
+        .sheet(item: $externalPlayerStream) { handoff in
+            ExternalPlayerMenu(stream: handoff.url, headers: channel.headers)
+        }
+        .task(id: clock.item.map(ObjectIdentifier.init)) {
+            await tracks.load(clock.item)
+            await loadSubtitles()
+            await loadSkipSegment()
+            await inspectColour()
+            reportAspect()
+            // `presentationSize` is zero until the item is ready, so the shape is polled for a few
+            // seconds rather than read once and lost: without it `.source` would fall back to filling
+            // the box, which is the crop this setting exists to remove.
+            for _ in 0 ..< 40 where pictureAspect == nil {
+                try? await Task.sleep(for: .milliseconds(150))
+                reportAspect()
+            }
+        }
+        // The duration arrives after the item does, and the credit roll is measured back from the
+        // end of the file: resolved once at item load, when it is still zero, the skip-credits
+        // marker could never be placed. Resolve again the first time it becomes known.
+        .onChange(of: clock.duration > 0) { _, known in
+            guard known else { return }
+            Task { await loadSkipSegment() }
+        }
+        // Persist the caption appearance whenever it changes, so a resize survives the next launch.
+        .onChange(of: subtitleStyle) { _, _ in saveSubtitleStyle() }
+        .onChange(of: subtitlePositions) { _, _ in
+            if let blob = try? JSONEncoder().encode(subtitlePositions) { subtitlePositionsData = blob }
+        }
         .sheet(isPresented: $showsDanmakuList) {
             DanmakuListView(player: session.player, comments: session.danmaku) { showsDanmakuList = false }
                 .danmakuListPresentation()
@@ -187,13 +580,21 @@ struct MobilePlayerView: View {
     // MARK: Taps and slides
 
     private func tapped(_ x: CGFloat, _ width: CGFloat) {
-        let zone = PictureTaps.zone(x: x, width: width, seekable: seekable && showsTransport && playingOn == nil && !pip.active)
+        // Locked controls: a tap only shows or hides them; it never pauses or skips.
+        let zone = PictureTaps.zone(x: x, width: width, seekable: !controlsLocked && seekable && showsTransport && playingOn == nil && !pip.active)
         switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone) {
         case .toggleControls:
+            // Locked controls stay put: a tap may reveal the chrome (so the lock button stays reachable)
+            // but never hides it or pauses — "lock" means the picture and the controls both stop reacting.
+            if controlsLocked {
+                if !chromeVisible { toggleChrome() }
+                return
+            }
             let showing = !chromeVisible
             toggleChrome()
             if showing { settle(); clearLabels() }
         case .togglePlayback:
+            if controlsLocked { break }
             toggleChrome()
             session.togglePlayback()
         case .skip(let seconds, let total, _):
@@ -235,6 +636,7 @@ struct MobilePlayerView: View {
     private var screen: UIScreen? { UIApplication.shared.appWindowScene?.screen }
 
     private func swiped(_ phase: PictureGestures.Swipe) {
+        if controlsLocked { return }
         switch phase {
         case .began(.seek):
             guard showsTransport, seekable, clock.duration > 0, playingOn == nil, !pip.active else { return }
@@ -359,6 +761,7 @@ struct MobilePlayerView: View {
     private var boosts: Bool { showsTransport && seekable && !session.paused && playingOn == nil && !pip.active }
 
     private func held(_ phase: PictureGestures.Hold) {
+        if controlsLocked { return }
         switch phase {
         case .began:
             guard boosts else { return }
@@ -431,27 +834,108 @@ struct MobilePlayerView: View {
 
     /// Play, skip and the seek bar wait for the stream: while it connects or after it fails, only the top row shows.
     private var showsTransport: Bool { !session.loading && session.error == nil }
+    /// A line that stopped making progress. Shown as a thin strip over the picture rather than a
+    /// dialog: the picture stays visible, and the strip goes away by itself once progress resumes.
+    ///
+    /// Tapping it opens the episode picker, where the other lines for this episode are listed with
+    /// their health. It used to say "Switching…" and switch nothing — there was no code behind the
+    /// word, so the strip promised a recovery that never came and the viewer waited on a dead line.
+    @ViewBuilder private var stallNotice: some View {
+        if clock.stalled, showsTransport {
+            VStack {
+                Spacer(minLength: 0)
+                Button { openEpisodes() } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.triangle.2.circlepath").font(.footnote)
+                        Text(L10n.text("This line has stopped. Choose another line"))
+                            .font(.footnote)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(.black.opacity(0.66), in: Capsule())
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, inline ? 60 : 110)
+                .transition(.opacity)
+                .accessibilityIdentifier("player.stalled")
+            }
+            .animation(.easeOut(duration: 0.2), value: clock.stalled)
+        }
+    }
     /// At the top of a watch page: smaller controls, and the page has the title.
     private var inline: Bool { layout == .inline }
+
+    /// Whether the screen itself is genuinely sideways. The Duo's folded outer display in portrait
+    /// reports `regular × compact` — the *same* size classes as a phone held sideways — so
+    /// `verticalSizeClass == .compact` alone mistook the upright outer screen for a landscape one.
+    /// `screen.bounds.width > height` is also wrong: the Duo's inner display reports its *native*
+    /// portrait bounds (2007×2853) even while `currentOrientation == .landscapeLeft/Right` (rot90),
+    /// so a bounds comparison always read "upright" and the unfolded landscape used the portrait
+    /// full-bleed layout — the picture flew off the edges. The interface orientation is the one
+    /// signal that cannot lie: it is a discrete landscape/portrait, not a continuous width:height
+    /// that sits at the critical point during the unfold/rotate animation and flips every frame.
+    private var landscapeScreen: Bool {
+        switch UIApplication.shared.appWindowScene?.interfaceOrientation {
+        case .landscapeLeft, .landscapeRight: return true
+        default: return false
+        }
+    }
+    /// The viewer's pick, defaulting to the stream's own shape when nothing is stored yet.
+    private var scaling: PictureScaling { PictureScaling(rawValue: scalingRaw) ?? .source }
+
+    private func setScaling(_ mode: PictureScaling) {
+        scalingRaw = mode.rawValue
+    }
+
+    /// The layer's gravity. While Picture in Picture is up the inline layer stays a fit: the floating
+    /// window sizes itself from the source layer's gravity, and a fill would pin the window to the
+    /// portrait box and crop the film inside it.
+    private var pictureGravity: AVLayerVideoGravity {
+        pip.active || PictureInPicture.isActive ? .resizeAspect : scaling.gravity
+    }
+
     private var seekable: Bool { session.hasTimeline && !session.isLive }
+
+    /// The picture on a watch page can own a full-height column (held sideways, or on the unfolded Duo),
+    /// so its chrome gets the full-screen size even while the player is `.inline` — compact chrome would
+    /// look lost on a picture that tall. A strip at the top of the page keeps the compact chrome.
+    private var roomyChrome: Bool { !inline || immersive }
 
     private var controls: some View {
         ZStack {
             // Scrims, so white controls read over a bright picture.
             VStack(spacing: 0) {
-                LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom).frame(height: inline ? 70 : 150)
+                LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom).frame(height: roomyChrome ? 150 : 70)
                 Spacer(minLength: 0)
-                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom).frame(height: inline ? 80 : 150)
+                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom).frame(height: roomyChrome ? 150 : 80)
             }
+            // A full-height picture reaches the screen's edges; its scrim must too.
             .playerBleed(!inline)
             .allowsHitTesting(false)
+            // One arrangement for every shape — folded, unfolded upright, held sideways. The Duo's
+            // inner display used to switch to a sideways layout the moment it unfolded, tall or wide,
+            // which put the transport in a column down the left of the picture and the buttons in a
+            // column down the right: two bands of glass over a tall film, on the one screen with the
+            // most room to show it.
             VStack(spacing: 0) {
                 topRow
                 Spacer(minLength: 0)
                 if showsTransport { bottomRow }
+                if showsTransport { bottomBar }
             }
-            .padding(inline ? 8 : 16)
-            if showsTransport { centerRow }
+            // Full Screen and a full-height watch column put the picture over the safe area, which
+            // leaves the controls no inset of their own: Back sat under the notch on a landscape column
+            // and the seek bar under the home indicator. Restore the inset here, on every shape that
+            // bleeds — a strip at the top of the page is already inside the safe area.
+            .safeAreaPadding(!inline ? .all : [])
+            .padding(roomyChrome ? 16 : 8)
+            // The picture keeps its middle: a face, a subtitle, a wide shot is never covered by a
+            // button. Paused is the one time nothing is being watched, so that is the one time the
+            // centre carries a play button — large, unmissable, and gone the moment it resumes.
+            if session.paused, showsTransport, chromeVisible, playingOn == nil, !pip.active, !controlsLocked {
+                centerPlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            }
         }
         .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
@@ -469,8 +953,9 @@ struct MobilePlayerView: View {
                     .accessibilityLabel(L10n.text("Back"))
                     .accessibilityIdentifier("player.close")
                 Spacer(minLength: 0)
+                // The buttons the viewer put in the bar, then the "more" menu with the rest. On a
+                // watch page the episodes are listed right below the picture anyway.
                 toolbar
-                optionsMenu
             }
             .simultaneousGesture(TapGesture().onEnded { poke() })
         } else {
@@ -487,124 +972,416 @@ struct MobilePlayerView: View {
                 .keyboardShortcut(.cancelAction)
             Text(channel.name).font(.headline).lineLimit(1)
                 .shadow(color: .black.opacity(0.6), radius: 4)
-            HStack(spacing: 10) { toolbar; optionsMenu }
+            toolbar
         }
         .simultaneousGesture(TapGesture().onEnded { poke() })
     }
 
+    private var controlsLayout: PlayerControlsLayout { PlayerControlsLayout(stored: controlsOrder) }
+
+    /// Whether a top control applies right now. Contextual controls (quality, audio, subtitles,
+    /// danmaku) drop out when there is nothing to choose, and a few depend on the device or shape.
+    private func available(_ control: PlayerControl) -> Bool {
+        switch control {
+        case .airPlay: true
+        case .episodes: !inline && channel.historyContext != nil
+        case .pictureInPicture: pip.supported
+        case .miniPlayer: true
+        case .lock: !inline
+        case .rotate: !inline && PlayerOrientation.available && (horizontalSizeClass == .compact || verticalSizeClass == .compact)
+        case .danmaku: !session.danmaku.isEmpty
+        case .quality: session.qualities.count > 1
+        case .audio: session.audioChoices.count > 1 || (tracks.audio?.options.count ?? 0) > 1
+        case .subtitles: subtitleTracks.isEmpty && !(tracks.legible?.options.isEmpty ?? true)
+        case .speed: !session.isLive
+        case .pictureSize: true
+        case .videoInfo: true
+        case .speechSubtitles: speechLanguage != nil
+        case .anotherPlayer: true
+        case .backTen: seekable && !inline
+        case .forwardTen: seekable && !inline
+        case .playPause: true
+        case .previousEpisode: store.step(back: true, from: channel, session: session) != nil
+        case .nextEpisode: store.step(back: false, from: channel, session: session) != nil
+        case .fullScreen: toggleFullScreen != nil
+        }
+    }
+
+    /// The top-row slots, with controls that do not apply right now left as gaps — so a control the
+    /// viewer placed in slot 7 sits at the seventh position whatever the current content offers.
+    private var topSlots: [PlayerControl?] {
+        controlsLayout.topSlots.map { control in control.flatMap { available($0) ? $0 : nil } }
+    }
+    private var bottomSlots: [PlayerControl?] {
+        controlsLayout.bottomSlots.map { control in control.flatMap { available($0) ? $0 : nil } }
+    }
+
+    /// The controls left in More, only when they apply.
+    private var moreControls: [PlayerControl] { controlsLayout.more.filter(available) }
+
+    /// Whether the "more" menu has anything to show: a collapsed control or the picture switches.
+    private var showsMoreMenu: Bool { !moreControls.isEmpty || pictureSwitches }
+
     private var toolbar: some View {
         HStack(spacing: 10) {
-            // With Yingxia found on an Apple TV or Mac, one menu holds those and AirPlay.
+            ForEach(Array(topSlots.enumerated()), id: \.offset) { _, control in
+                if let control {
+                    topControlButton(control)
+                } else {
+                    // An empty slot keeps its place on the X axis as a button-sized gap.
+                    Color.clear.frame(width: 44, height: 44)
+                }
+            }
+            // A More menu appears only when something actually collapsed into it.
+            if showsMoreMenu {
+                topControlsMenu
+            }
+        }
+    }
+
+    /// The round glass button for one top control drawn in the bar.
+    @ViewBuilder private func topControlButton(_ control: PlayerControl) -> some View {
+        switch control {
+        case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
                     .frame(width: 44, height: 44)
                     .glassSurface(.regular.interactive(), in: Circle())
                     .contentShape(Circle())
+                    .accessibilityLabel(L10n.text("AirPlay"))
             } else {
                 PlayOnButton(channel: channel, session: session, browser: tvBrowser) { receiver in
                     session.player.pause()
                     playingOn = receiver
                 }
             }
-            if pip.supported {
-                Button { pip.toggle() } label: {
-                    Image(systemName: pip.active ? "pip.exit" : "pip.enter").font(.headline).frame(width: 22, height: 22)
-                }
-                .chromeButton()
-                .disabled(!pip.possible && !pip.active)
-                .accessibilityLabel(L10n.text("Picture in Picture"))
-                .accessibilityIdentifier("player.pip")
+        case .episodes:
+            CatalogPlaybackActions(channel: channel, session: session, openEpisodes: openEpisodes)
+        case .pictureInPicture:
+            Button { pip.toggle() } label: {
+                Image(systemName: pip.active ? "pip.exit" : "pip.enter").font(.headline).frame(width: 22, height: 22)
             }
-            // On a watch page the episodes are on the page itself.
-            if !inline { CatalogPlaybackActions(channel: channel, session: session) }
-            // One button for danmaku: show or hide them, or open the list.
-            if !session.danmaku.isEmpty {
-                Menu {
-                    Toggle(isOn: $showsDanmaku) { Label(L10n.text("Show Danmaku"), systemImage: "text.bubble") }
-                    Picker(selection: $danmakuArea) {
-                        ForEach(DanmakuArea.allCases, id: \.self) { Text($0.title).tag($0) }
-                    } label: { Label(L10n.text("Danmaku Area"), systemImage: "rectangle.tophalf.inset.filled") }
-                    .pickerStyle(.menu)
-                    DanmakuStylePickers(model: session.catalogDanmaku)
-                    Button { showsDanmakuList = true } label: { Label(L10n.text("Danmaku List"), systemImage: "list.bullet.rectangle") }
-                } label: {
-                    Image(systemName: showsDanmaku ? "text.bubble.fill" : "text.bubble").font(.headline).frame(width: 22, height: 22)
-                }
-                .chromeButton()
-                .accessibilityLabel(L10n.text("Danmaku"))
+            .chromeButton()
+            .disabled(!pip.possible && !pip.active)
+            .accessibilityLabel(L10n.text("Picture in Picture"))
+        case .miniPlayer:
+            Button { miniplayer() } label: {
+                Image(systemName: "rectangle.inset.bottomright.filled").font(.headline).frame(width: 22, height: 22)
             }
-            // Turns the picture even with Portrait Orientation Lock on, the way the system's own rotation can't.
-            // Only on a phone-sized screen: iPhone Duo's inner display (regular both ways) ignores orientations.
-            if !inline, PlayerOrientation.available, horizontalSizeClass == .compact || verticalSizeClass == .compact {
-                let landscape = verticalSizeClass == .compact
-                Button { PlayerOrientation.set(landscape: !landscape) } label: {
-                    Image(systemName: landscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate").font(.headline).frame(width: 22, height: 22)
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Mini Player"))
+        case .lock:
+            Button { toggleLock() } label: {
+                Image(systemName: controlsLocked ? "lock.fill" : "lock.open").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text(controlsLocked ? "Unlock Controls" : "Lock Controls"))
+        case .rotate:
+            Button { rotate() } label: {
+                Image(systemName: landscapeScreen ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Rotate"))
+        case .danmaku:
+            danmakuTopButton
+        case .quality:
+            Menu { QualityPicker(session: session) } label: {
+                Image(systemName: "sparkles.tv").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Quality"))
+        case .audio:
+            Menu { audioPicker } label: {
+                Image(systemName: "speaker.wave.2").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Audio"))
+        case .subtitles:
+            Menu { subtitlePicker } label: {
+                Image(systemName: "captions.bubble").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Subtitles"))
+        case .speed:
+            Menu {
+                Picker(L10n.text("Playback Speed"), selection: Binding(get: { speed }, set: { speed = $0; session.setSpeed($0) })) {
+                    ForEach(Self.speeds, id: \.self) { Text(Self.speedLabel($0)).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: "gauge.with.needle").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Playback Speed"))
+        case .pictureSize:
+            Menu {
+                Picker(L10n.text("Picture Size"), selection: Binding(get: { scaling }, set: { setScaling($0) })) {
+                    ForEach(PictureScaling.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Picture Size"))
+        case .videoInfo:
+            Button { showsPlaybackInfo.toggle() } label: {
+                Image(systemName: showsPlaybackInfo ? "info.circle.fill" : "info.circle").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Show Video Info"))
+        case .speechSubtitles:
+            Button { generateSubtitles(language: speechLanguage ?? "") } label: {
+                Image(systemName: generatingSubtitles ? "waveform" : "waveform.badge.plus").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .disabled(generatingSubtitles || !session.hasTimeline)
+            .accessibilityLabel(L10n.text("Write Subtitles From the Sound"))
+        case .anotherPlayer:
+            Button { externalPlayerStream = HandoffStream(url: channel.url) } label: {
+                Image(systemName: "play.rectangle.on.rectangle").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Open in Another Player"))
+        case .backTen:
+            Button { session.skip(-10); sought() } label: {
+                Image(systemName: "gobackward.10").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Back 10 seconds"))
+        case .playPause:
+            Button { session.togglePlayback(); poke() } label: {
+                Image(systemName: session.paused ? "play.fill" : "pause.fill").contentTransition(.symbolEffect(.replace))
+                    .font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text(session.paused ? "Play" : "Pause"))
+            .accessibilityIdentifier("player.playPause")
+        case .forwardTen:
+            Button { session.skip(10); sought() } label: {
+                Image(systemName: "goforward.10").font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text("Forward 10 seconds"))
+        case .previousEpisode:
+            if let previous = store.step(back: true, from: channel, session: session) {
+                Button { previous.go() } label: {
+                    Image(systemName: "backward.end.fill").font(.headline).frame(width: 22, height: 22)
                 }
                 .chromeButton()
-                .accessibilityLabel(L10n.text(landscape ? "Rotate to Portrait" : "Rotate to Landscape"))
-                .accessibilityIdentifier("player.rotate")
+                .disabled(previous.busy)
+                .accessibilityLabel(L10n.text("Previous Episode"))
+            }
+        case .nextEpisode:
+            if let next = store.step(back: false, from: channel, session: session) {
+                Button { next.go() } label: {
+                    Image(systemName: "forward.end.fill").font(.headline).frame(width: 22, height: 22)
+                }
+                .chromeButton()
+                .disabled(next.busy)
+                .accessibilityLabel(L10n.text("Next Episode"))
+            }
+        case .fullScreen:
+            if let toggleFullScreen {
+                let full = layout == .pageFullScreen
+                Button(action: toggleFullScreen) {
+                    Image(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.headline).frame(width: 22, height: 22)
+                }
+                .chromeButton()
+                .accessibilityLabel(L10n.text(full ? "Exit Full Screen" : "Full Screen"))
+                .accessibilityIdentifier("player.fullScreen")
             }
         }
     }
 
-    /// Whether the options have the smoothing and upscaling switches (iPhone and iPad on OS 26).
-    private var pictureSwitches: Bool { VideoEnhancement.canUpscale || VideoEnhancement.canSmooth }
-
-    /// The picture, sound and subtitle settings in one menu: what AVKit's ⋯ menu held, and the stream's quality.
-    private var optionsMenu: some View {
+    /// The danmaku top button: a menu for its settings, or a plain toggle.
+    private var danmakuTopButton: some View {
         Menu {
-            if session.qualities.count > 1 { Menu(L10n.text("Quality")) { QualityPicker(session: session) } }
+            Toggle(isOn: $showsDanmaku) { Label(L10n.text("Show Danmaku"), systemImage: "text.bubble") }
+            Picker(selection: $danmakuArea) {
+                ForEach(DanmakuArea.allCases, id: \.self) { Text($0.title).tag($0) }
+            } label: { Label(L10n.text("Danmaku Area"), systemImage: "rectangle.tophalf.inset.filled") }
+            .pickerStyle(.menu)
+            DanmakuStylePickers(model: session.catalogDanmaku)
+            Button { showsDanmakuList = true } label: { Label(L10n.text("Danmaku List"), systemImage: "list.bullet.rectangle") }
+        } label: {
+            Image(systemName: showsDanmaku ? "text.bubble.fill" : "text.bubble").font(.headline).frame(width: 22, height: 22)
+        }
+        .chromeButton()
+        .accessibilityLabel(L10n.text("Danmaku"))
+    }
+
+    /// The "⋯" menu that holds every control not drawn in a bar.
+    private var topControlsMenu: some View {
+        Menu {
+            ForEach(moreControls) { control in
+                topControlMenuEntry(control)
+            }
+            // The picture switches never leave the menu: they are not a transport control.
             if pictureSwitches {
                 Section(L10n.text("Picture")) {
                     if VideoEnhancement.canSmooth { Toggle(L10n.text("Smooth Motion (60 fps)"), isOn: $smoothsVideo) }
                     if VideoEnhancement.canUpscale { Toggle(L10n.text("Sharper Picture"), isOn: $upscalesVideo) }
                 }
             }
-            if let audio = tracks.audio, audio.options.count > 1 {
-                Menu(L10n.text("Audio")) {
-                    Picker(L10n.text("Audio"), selection: Binding(get: { tracks.selected(in: audio) }, set: { tracks.select($0, in: audio) })) {
-                        ForEach(audio.options, id: \.self) { Text($0.displayName).tag(Optional($0)) }
-                    }
-                    .pickerStyle(.inline)
-                }
-            }
-            // A file whose sound tracks AVFoundation offers no choice between (#428).
-            if session.audioChoices.count > 1 {
-                Menu(L10n.text("Audio")) {
-                    Picker(L10n.text("Audio"), selection: Binding(get: { session.audioChoice }, set: { if let id = $0 { session.chooseAudio(id) } })) {
-                        ForEach(session.audioChoices) { Text($0.name).tag(Optional($0.id)) }
-                    }
-                    .pickerStyle(.inline)
-                }
-            }
-            if let legible = tracks.legible, !legible.options.isEmpty {
-                Menu(L10n.text("Subtitles")) {
-                    Picker(L10n.text("Subtitles"), selection: Binding(get: { tracks.selected(in: legible) }, set: { tracks.select($0, in: legible) })) {
-                        if legible.group.allowsEmptySelection { Text(L10n.text("Off")).tag(AVMediaSelectionOption?.none) }
-                        ForEach(legible.options, id: \.self) { Text($0.displayName).tag(Optional($0)) }
-                    }
-                    .pickerStyle(.inline)
-                }
-            }
-            if !session.isLive {
-                Menu(L10n.text("Playback Speed")) {
-                    Picker(L10n.text("Playback Speed"), selection: Binding(get: { speed }, set: { speed = $0; session.setSpeed($0) })) {
-                        ForEach(Self.speeds, id: \.self) { Text(Self.speedLabel($0)).tag($0) }
-                    }
-                    .pickerStyle(.inline)
-                }
-            }
-            Toggle(L10n.text("Fill Screen"), isOn: $fillsScreen)
-            Toggle(L10n.text("Show Video Info"), isOn: $showsPlaybackInfo)
         } label: {
-            Image(systemName: "slider.horizontal.3").font(.headline).frame(width: 22, height: 22)
-                .symbolVariant(pictureSwitches && (upscalesVideo || smoothsVideo) ? .fill : .none)
+            Image(systemName: "ellipsis.circle").font(.headline).frame(width: 22, height: 22)
         }
         .chromeButton()
-        // "Playback Options" is the catalog's episode menu beside it.
-        .accessibilityLabel(L10n.text("Settings"))
-        .accessibilityIdentifier("player.options")
+        .accessibilityLabel(L10n.text("Playback Options"))
+        .accessibilityIdentifier("player.catalogOptions")
     }
+
+    /// The menu entry for one top control collapsed into More.
+    @ViewBuilder private func topControlMenuEntry(_ control: PlayerControl) -> some View {
+        switch control {
+        case .airPlay:
+            // AirPlay is represented by the system button; in a menu it has no equivalent, so it
+            // stays out of More.
+            EmptyView()
+        case .episodes:
+            Button(action: openEpisodes) {
+                Label(L10n.text("Episodes"), systemImage: "list.bullet.rectangle")
+            }
+            .disabled(store.resolvingEpisode != nil)
+            .accessibilityIdentifier("player.episodes")
+        case .pictureInPicture:
+            Button { pip.toggle() } label: {
+                Label(L10n.text("Picture in Picture"), systemImage: pip.active ? "pip.exit" : "pip.enter")
+            }
+            .disabled(!pip.possible && !pip.active)
+        case .miniPlayer:
+            Button { miniplayer() } label: {
+                Label(L10n.text("Mini Player"), systemImage: "rectangle.inset.bottomright.filled")
+            }
+        case .lock:
+            Button { toggleLock() } label: {
+                Label(L10n.text(controlsLocked ? "Unlock Controls" : "Lock Controls"),
+                      systemImage: controlsLocked ? "lock.fill" : "lock.open")
+            }
+        case .rotate:
+            Button { rotate() } label: {
+                Label(L10n.text("Rotate"), systemImage: landscapeScreen ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+            }
+        case .danmaku:
+            danmakuTopButton
+        case .quality:
+            Menu(L10n.text("Quality")) { QualityPicker(session: session) }
+        case .audio:
+            Menu(L10n.text("Audio")) { audioPicker }
+        case .subtitles:
+            Menu(L10n.text("Subtitles")) { subtitlePicker }
+        case .speed:
+            Menu(L10n.text("Playback Speed")) {
+                Picker(L10n.text("Playback Speed"), selection: Binding(get: { speed }, set: { speed = $0; session.setSpeed($0) })) {
+                    ForEach(Self.speeds, id: \.self) { Text(Self.speedLabel($0)).tag($0) }
+                }
+                .pickerStyle(.inline)
+            }
+        case .pictureSize:
+            Menu(L10n.text("Picture Size")) {
+                Picker(L10n.text("Picture Size"), selection: Binding(get: { scaling }, set: { setScaling($0) })) {
+                    ForEach(PictureScaling.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
+                }
+                .pickerStyle(.inline)
+            }
+        case .videoInfo:
+            Toggle(L10n.text("Show Video Info"), isOn: $showsPlaybackInfo)
+        case .speechSubtitles:
+            speechSubtitleEntry
+        case .anotherPlayer:
+            Button {
+                externalPlayerStream = HandoffStream(url: channel.url)
+            } label: {
+                Label(L10n.text("Open in Another Player"), systemImage: "play.rectangle.on.rectangle")
+            }
+        case .backTen:
+            Button { session.skip(-10); sought() } label: {
+                Label(L10n.text("Back 10 seconds"), systemImage: "gobackward.10")
+            }
+        case .playPause:
+            Button { session.togglePlayback(); poke() } label: {
+                Label(L10n.text(session.paused ? "Play" : "Pause"), systemImage: session.paused ? "play.fill" : "pause.fill")
+            }
+        case .forwardTen:
+            Button { session.skip(10); sought() } label: {
+                Label(L10n.text("Forward 10 seconds"), systemImage: "goforward.10")
+            }
+        case .previousEpisode:
+            if let previous = store.step(back: true, from: channel, session: session) {
+                Button { previous.go() } label: {
+                    Label(L10n.text("Previous Episode"), systemImage: "backward.end.fill")
+                }
+                .disabled(previous.busy)
+            }
+        case .nextEpisode:
+            if let next = store.step(back: false, from: channel, session: session) {
+                Button { next.go() } label: {
+                    Label(L10n.text("Next Episode"), systemImage: "forward.end.fill")
+                }
+                .disabled(next.busy)
+            }
+        case .fullScreen:
+            if let toggleFullScreen {
+                let full = layout == .pageFullScreen
+                Button(action: toggleFullScreen) {
+                    Label(L10n.text(full ? "Exit Full Screen" : "Full Screen"),
+                          systemImage: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+            }
+        }
+    }
+
+    /// The audio picker, drawing from AVFoundation's own choice when the tracks API offers none.
+    @ViewBuilder private var audioPicker: some View {
+        if let audio = tracks.audio, audio.options.count > 1 {
+            Picker(L10n.text("Audio"), selection: Binding(get: { tracks.selected(in: audio) }, set: { tracks.select($0, in: audio) })) {
+                ForEach(audio.options, id: \.self) { Text($0.displayName).tag(Optional($0)) }
+            }
+            .pickerStyle(.inline)
+        } else if session.audioChoices.count > 1 {
+            Picker(L10n.text("Audio"), selection: Binding(get: { session.audioChoice }, set: { if let id = $0 { session.chooseAudio(id) } })) {
+                ForEach(session.audioChoices) { Text($0.name).tag(Optional($0.id)) }
+            }
+            .pickerStyle(.inline)
+        }
+    }
+
+    @ViewBuilder private var subtitlePicker: some View {
+        if let legible = tracks.legible, !legible.options.isEmpty {
+            Picker(L10n.text("Subtitles"), selection: Binding(get: { tracks.selected(in: legible) }, set: { tracks.select($0, in: legible) })) {
+                if legible.group.allowsEmptySelection { Text(L10n.text("Off")).tag(AVMediaSelectionOption?.none) }
+                ForEach(legible.options, id: \.self) { Text($0.displayName).tag(Optional($0)) }
+            }
+            .pickerStyle(.inline)
+        }
+    }
+
+    @ViewBuilder private var speechSubtitleEntry: some View {
+        if let language = speechLanguage {
+            Button {
+                generateSubtitles(language: language)
+            } label: {
+                if generatingSubtitles {
+                    Label(L10n.text("Writing Subtitles…"), systemImage: "waveform")
+                    Text("\(Int(subtitleProgress * 100))%")
+                } else if let subtitleError {
+                    Label(L10n.text("Subtitles Could Not Be Written: %@", subtitleError), systemImage: "exclamationmark.triangle")
+                } else {
+                    Label(L10n.text("Write Subtitles From the Sound"), systemImage: "waveform.badge.plus")
+                }
+            }
+            .disabled(generatingSubtitles || !session.hasTimeline)
+        } else {
+            Button {} label: { Label(L10n.text("No On-Device Speech Model"), systemImage: "speaker.slash") }
+                .disabled(true)
+        }
+    }
+
+
+    /// Whether the options have the smoothing and upscaling switches (iPhone and iPad on OS 26).
+    private var pictureSwitches: Bool { VideoEnhancement.canUpscale || VideoEnhancement.canSmooth }
 
     private static let speeds: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
     private static func speedLabel(_ speed: Float) -> String {
@@ -613,74 +1390,209 @@ struct MobilePlayerView: View {
 
     // MARK: Middle and bottom
 
-    private var centerRow: some View {
-        HStack(spacing: 20) {
-            if seekable && !inline {
-                Button { session.skip(-10); sought() } label: { Image(systemName: "gobackward.10") }
-                    .buttonStyle(PlayerCircleStyle(size: 52))
-                    .accessibilityLabel(L10n.text("Back 10 seconds"))
-            }
-            Button { session.togglePlayback() } label: {
-                // Swapped as the music player's is.
-                Image(systemName: session.paused ? "play.fill" : "pause.fill").contentTransition(.symbolEffect(.replace))
-            }
-                .buttonStyle(PlayerCircleStyle(size: inline ? 50 : 68))
-                .accessibilityLabel(L10n.text(session.paused ? "Play" : "Pause"))
-                .accessibilityIdentifier("player.playPause")
-            if seekable && !inline {
-                Button { session.skip(10); sought() } label: { Image(systemName: "goforward.10") }
-                    .buttonStyle(PlayerCircleStyle(size: 52))
-                    .accessibilityLabel(L10n.text("Forward 10 seconds"))
+    /// The one control the middle ever holds, and only while the picture is still. Big enough to be
+    /// the obvious thing to press when playback stops, and it disappears the moment it resumes, so a
+    /// running film is never watched through a button.
+    private var centerPlay: some View {
+        Button { session.togglePlayback(); poke() } label: {
+            Image(systemName: "play.fill").contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(PlayerCircleStyle(size: roomyChrome ? 72 : 56))
+        .accessibilityLabel(L10n.text("Play"))
+        .accessibilityIdentifier("player.playPause")
+    }
+
+    /// The controls along the bottom edge, in one line: the viewer's bottom-row controls in their
+    /// slot order (an empty slot leaves a button-sized gap), with the exact time at the far right.
+    private var bottomBar: some View {
+        ZStack {
+            HStack(spacing: roomyChrome ? 10 : 8) {
+                ForEach(Array(bottomSlots.enumerated()), id: \.offset) { _, control in
+                    if let control {
+                        transportButton(control)
+                    } else {
+                        Color.clear.frame(width: roomyChrome ? 42 : 36, height: roomyChrome ? 42 : 36)
+                    }
+                }
+                Spacer(minLength: 0)
+                if session.isLive {
+                    Text(L10n.text("LIVE")).font(.caption.weight(.bold))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.red, in: Capsule())
+                } else if session.hasTimeline {
+                    timeLabel
+                }
             }
         }
         .simultaneousGesture(TapGesture().onEnded { poke() })
     }
 
-    /// Previous and Next Episode, small and at the right of the time above the seek bar. Beside ±10 and play, a tap
-    /// that ran past +10 out of habit changed the episode. Then 选集, which opens the episodes in a sheet (#524).
-    @ViewBuilder private var stepButtons: some View {
-        let previous = store.step(back: true, from: channel, session: session)
-        let next = store.step(back: false, from: channel, session: session)
-        // On a watch page the episodes are on the page itself.
-        let episodes = !inline && PlayerEpisodesSheet.offered(for: channel, in: store)
-        if previous != nil || next != nil || episodes || toggleFullScreen != nil {
-            HStack(spacing: 10) {
-                if let previous {
-                    Button { previous.go() } label: { Image(systemName: "backward.end.fill") }
-                        .buttonStyle(PlayerCircleStyle(size: 36))
-                        .disabled(previous.busy)
-                        .accessibilityLabel(L10n.text("Previous Episode"))
-                }
-                if let next {
-                    Button { next.go() } label: { Image(systemName: "forward.end.fill") }
-                        .buttonStyle(PlayerCircleStyle(size: 36))
-                        .disabled(next.busy)
-                        .accessibilityLabel(L10n.text("Next Episode"))
-                }
-                if episodes {
-                    PlayerEpisodesButton(channel: channel, isPresented: $showsEpisodes) {
-                        HStack(spacing: 6) {
-                            Image(systemName: PlayerEpisodesSheet.symbol)
-                            Text(L10n.text("Episodes"))
-                        }
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                        .padding(.horizontal, 14).frame(height: 36)
-                        .glassSurface(.regular.interactive(), in: Capsule())
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-                if let toggleFullScreen {
-                    let full = layout == .pageFullScreen
-                    Button(action: toggleFullScreen) {
-                        Image(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    }
+    /// One round transport button for the bottom row, whatever kind of control it is. Transport
+    /// controls keep their existing behaviour; a round-button control dragged down from the top bar
+    /// renders here as a menu or a button in the same transport style.
+    @ViewBuilder private func transportButton(_ control: PlayerControl) -> some View {
+        switch control {
+        case .backTen:
+            Button { session.skip(-10); sought() } label: { Image(systemName: "gobackward.10") }
+                .buttonStyle(PlayerCircleStyle(size: roomyChrome ? 42 : 36))
+                .accessibilityLabel(L10n.text("Back 10 seconds"))
+        case .playPause:
+            Button { session.togglePlayback(); poke() } label: {
+                Image(systemName: session.paused ? "play.fill" : "pause.fill").contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(PlayerCircleStyle(size: roomyChrome ? 46 : 40))
+            .accessibilityLabel(L10n.text(session.paused ? "Play" : "Pause"))
+            .accessibilityIdentifier("player.playPause")
+        case .forwardTen:
+            Button { session.skip(10); sought() } label: { Image(systemName: "goforward.10") }
+                .buttonStyle(PlayerCircleStyle(size: roomyChrome ? 42 : 36))
+                .accessibilityLabel(L10n.text("Forward 10 seconds"))
+        case .previousEpisode:
+            if let previous = store.step(back: true, from: channel, session: session) {
+                Button { previous.go() } label: { Image(systemName: "backward.end.fill") }
                     .buttonStyle(PlayerCircleStyle(size: 36))
-                    .accessibilityLabel(L10n.text(full ? "Exit Full Screen" : "Full Screen"))
-                    .accessibilityIdentifier("player.fullScreen")
+                    .disabled(previous.busy)
+                    .accessibilityLabel(L10n.text("Previous Episode"))
+            }
+        case .nextEpisode:
+            if let next = store.step(back: false, from: channel, session: session) {
+                Button { next.go() } label: { Image(systemName: "forward.end.fill") }
+                    .buttonStyle(PlayerCircleStyle(size: 36))
+                    .disabled(next.busy)
+                    .accessibilityLabel(L10n.text("Next Episode"))
+            }
+        case .fullScreen:
+            if let toggleFullScreen {
+                let full = layout == .pageFullScreen
+                Button(action: toggleFullScreen) {
+                    Image(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text(full ? "Exit Full Screen" : "Full Screen"))
+                .accessibilityIdentifier("player.fullScreen")
+            }
+        default:
+            // A round-button control dragged down into the transport row.
+            compactButton(control)
+        }
+    }
+
+    /// A top-row control rendered as a compact transport button (36 pt circle) for the bottom row.
+    @ViewBuilder private func compactButton(_ control: PlayerControl) -> some View {
+        switch control {
+        case .airPlay:
+            if tvBrowser.receivers.isEmpty {
+                AirPlayButton()
+                    .frame(width: 36, height: 36)
+                    .glassSurface(.regular.interactive(), in: Circle())
+                    .contentShape(Circle())
+                    .accessibilityLabel(L10n.text("AirPlay"))
+            } else {
+                PlayOnButton(channel: channel, session: session, browser: tvBrowser) { receiver in
+                    session.player.pause(); playingOn = receiver
                 }
             }
-            .simultaneousGesture(TapGesture().onEnded { poke() })
+        case .episodes:
+            CatalogPlaybackActions(channel: channel, session: session, openEpisodes: openEpisodes)
+        case .pictureInPicture:
+            Button { pip.toggle() } label: {
+                Image(systemName: pip.active ? "pip.exit" : "pip.enter")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .disabled(!pip.possible && !pip.active)
+            .accessibilityLabel(L10n.text("Picture in Picture"))
+        case .miniPlayer:
+            Button { miniplayer() } label: { Image(systemName: "rectangle.inset.bottomright.filled") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text("Mini Player"))
+        case .lock:
+            Button { toggleLock() } label: { Image(systemName: controlsLocked ? "lock.fill" : "lock.open") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text(controlsLocked ? "Unlock Controls" : "Lock Controls"))
+        case .rotate:
+            Button { rotate() } label: {
+                Image(systemName: landscapeScreen ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .accessibilityLabel(L10n.text("Rotate"))
+        case .danmaku:
+            Menu {
+                Toggle(isOn: $showsDanmaku) { Label(L10n.text("Show Danmaku"), systemImage: "text.bubble") }
+                Picker(selection: $danmakuArea) {
+                    ForEach(DanmakuArea.allCases, id: \.self) { Text($0.title).tag($0) }
+                } label: { Label(L10n.text("Danmaku Area"), systemImage: "rectangle.tophalf.inset.filled") }
+                .pickerStyle(.menu)
+                DanmakuStylePickers(model: session.catalogDanmaku)
+                Button { showsDanmakuList = true } label: { Label(L10n.text("Danmaku List"), systemImage: "list.bullet.rectangle") }
+            } label: {
+                Image(systemName: showsDanmaku ? "text.bubble.fill" : "text.bubble")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .accessibilityLabel(L10n.text("Danmaku"))
+        case .quality:
+            Menu { QualityPicker(session: session) } label: { Image(systemName: "sparkles.tv") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text("Quality"))
+        case .audio:
+            Menu { audioPicker } label: { Image(systemName: "speaker.wave.2") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text("Audio"))
+        case .subtitles:
+            Menu { subtitlePicker } label: { Image(systemName: "captions.bubble") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text("Subtitles"))
+        case .speed:
+            Menu {
+                Picker(L10n.text("Playback Speed"), selection: Binding(get: { speed }, set: { speed = $0; session.setSpeed($0) })) {
+                    ForEach(Self.speeds, id: \.self) { Text(Self.speedLabel($0)).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: { Image(systemName: "gauge.with.needle") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text("Playback Speed"))
+        case .pictureSize:
+            Menu {
+                Picker(L10n.text("Picture Size"), selection: Binding(get: { scaling }, set: { setScaling($0) })) {
+                    ForEach(PictureScaling.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
+                }
+                .pickerStyle(.inline)
+            } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                .buttonStyle(PlayerCircleStyle(size: 36))
+                .accessibilityLabel(L10n.text("Picture Size"))
+        case .videoInfo:
+            Button { showsPlaybackInfo.toggle() } label: {
+                Image(systemName: showsPlaybackInfo ? "info.circle.fill" : "info.circle")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .accessibilityLabel(L10n.text("Show Video Info"))
+        case .speechSubtitles:
+            Button { generateSubtitles(language: speechLanguage ?? "") } label: {
+                Image(systemName: generatingSubtitles ? "waveform" : "waveform.badge.plus")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .disabled(generatingSubtitles || !session.hasTimeline)
+            .accessibilityLabel(L10n.text("Write Subtitles From the Sound"))
+        case .anotherPlayer:
+            Button { externalPlayerStream = HandoffStream(url: channel.url) } label: {
+                Image(systemName: "play.rectangle.on.rectangle")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .accessibilityLabel(L10n.text("Open in Another Player"))
+        case .backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode, .fullScreen:
+            EmptyView()
+        }
+    }
+
+    /// The position and the length, following the picture while it runs.
+    private var timeLabel: some View {
+        let follows = chromeVisible && !session.paused && clock.scrubbing == nil
+        return TimelineView(.animation(paused: !follows)) { _ in
+            Text(SeekBar<EmptyView>.format(clock.scrubbing ?? (follows ? clock.currentPosition : clock.position))
+                 + " / " + SeekBar<EmptyView>.format(clock.duration))
+                .font(.footnote.monospacedDigit().weight(.medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .shadow(color: .black.opacity(0.5), radius: 3)
+                .accessibilityHidden(true)
         }
     }
 
@@ -691,16 +1603,14 @@ struct MobilePlayerView: View {
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(.red, in: Capsule())
                 Spacer(minLength: 0)
-                stepButtons
             }
         } else if session.hasTimeline {
             // Dragging holds the controls up itself (`hold`); a tap gesture here would compete with the scrubber's drag.
-            SeekBar(clock: clock, moving: chromeVisible && !session.paused, hold: hold, sought: sought) { stepButtons }
+            // The episode and screen buttons live in `bottomBar` now, so the bar keeps only the time
+            // and the track: the bottom of the picture holds one row of controls, not two.
+            SeekBar<EmptyView>(clock: clock, showsClock: false, moving: chromeVisible && !session.paused, hold: hold, sought: sought) { EmptyView() }
         } else {
-            HStack {
-                Spacer(minLength: 0)
-                stepButtons
-            }
+            EmptyView()
         }
     }
 
@@ -708,6 +1618,31 @@ struct MobilePlayerView: View {
     private func sought() {
         poke()
         nowPlaying.update(title: channel.name, session: session)
+    }
+
+    /// Locks or unlocks the controls, and the orientation with them.
+    ///
+    /// The button used to stop the taps and slides and nothing else, while `PlayerOrientation.lock()`
+    /// and `unlock()` sat there with no caller: a lock button that lets the gyroscope turn the film
+    /// while you are holding the phone is not much of a lock. Pinning the orientation it is in when
+    /// the lock goes on is what the label promises, and the rotate button stays out of a locked
+    /// picture too — "lock" pins the orientation, so a by-hand turn must not slip past it.
+    private func toggleLock() {
+        controlsLocked.toggle()
+        if controlsLocked { PlayerOrientation.lock() } else { PlayerOrientation.unlock() }
+        poke()
+    }
+
+    /// Turns the picture to the next orientation by hand; the controls follow the rotation.
+    private func rotate() {
+        let next: UIInterfaceOrientation
+        switch PlayerOrientation.currentOrientation {
+        case .landscapeLeft: next = .landscapeRight
+        case .landscapeRight: next = .portrait
+        default: next = .landscapeLeft
+        }
+        PlayerOrientation.rotate(to: next)
+        poke()
     }
 
     private var pipPlaceholder: some View {
@@ -729,6 +1664,9 @@ struct WatchCoverBackdrop: View {
     var headers: [String: String] = [:]
     var loading = true
     var clear = false
+    /// In a split (landscape / Duo unfolded) layout the cover sits in a wide column, so it should be
+    /// wide (16:9) instead of the portrait poster.
+    var wide = false
     /// What the wait has to say, by how long it has run (see `WaitSpinner`).
     var status: (@MainActor (TimeInterval) -> PlaybackWait)? = nil
     @State private var aspect: CGFloat?
@@ -741,13 +1679,25 @@ struct WatchCoverBackdrop: View {
                 .overlay(Color.black.opacity(0.35))
                 .accessibilityHidden(true)
             if clear, poster != nil {
-                PosterImage(url: poster, headers: headers, aspect: $aspect)
-                    .aspectRatio(aspect ?? 2.0 / 3, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
-                    .padding(.vertical, 14)
-                    .accessibilityHidden(true)
-                    .transition(.opacity)
+                if wide {
+                    // Landscape / unfolded: the cover is a 16:9 picture that fits its wide column.
+                    PosterImage(url: poster, headers: headers, aspect: $aspect)
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(aspect ?? 16.0 / 9.0, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+                        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+                        .padding(.vertical, 14)
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                } else {
+                    // Upright: the poster fills the whole top band, reaching the status bar and both edges,
+                    // so no dead-black band is left beside or above it. PosterImage already scales-to-fill
+                    // and clips, so it just needs the whole band as its frame.
+                    PosterImage(url: poster, headers: headers, aspect: $aspect)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                }
             }
             if loading { WaitSpinner(status: status) }
         }
@@ -804,10 +1754,24 @@ struct WatchPlayback {
     var toggleFullScreen: (_ landscape: Bool) -> Void
     /// Back, out of the page.
     var leave: () -> Void
+    /// The picture owns a full-height column on the page — held sideways, or the unfolded Duo's two-column
+    /// page — rather than a strip at the top. Its chrome then uses the roomy size and stays clear of the
+    /// safe-area insets, which a full-height picture leaves it none of.
+    var immersive: Bool = false
     /// The picture, or an error, has taken the place of the wait: the page's cover can go.
     var started: (Bool) -> Void = { _ in }
     /// The page's player, so the cover over it can say how its wait goes.
     var opened: (PlaybackSession) -> Void = { _ in }
+    /// The picture's width over height, once the stream is known, so the page can size its box to the
+    /// picture instead of assuming 16:9.
+    var aspect: (CGFloat) -> Void = { _ in }
+    /// Whether the player's own controls are showing, so the page can avoid drawing its own bottom
+    /// affordances (the unfolded-upright Duo's details grab-handle) over the transport bar.
+    var chromeVisible: (Bool) -> Void = { _ in }
+    /// Open the episode picker. The page routes this: on the unfolded-upright Duo the full-bleed
+    /// picture has no room for an in-picture panel, so it opens the half-height details sheet instead
+    /// of the store's panel.
+    var openEpisodes: () -> Void = {}
 }
 
 /// The full-screen player sets the app's appearance; one at the top of a page sets only its own.
@@ -824,6 +1788,18 @@ extension View {
     @ViewBuilder func playerBleed(_ bleeds: Bool, edges: Edge.Set = .all) -> some View {
         if bleeds { ignoresSafeArea(edges: edges) } else { self }
     }
+
+    /// Hands the picture the stream's own shape when the viewer asked the box to follow the source, and
+    /// leaves it filling the box for the other three modes. What changes is the *box*, not the picture:
+    /// `.resizeAspect` inside a box of the stream's own shape has nothing to pad, so the frame reaches
+    /// every edge with no crop and no bars — which is the whole point of "按上游来".
+    @ViewBuilder func pictureBox(_ scaling: PictureScaling, aspect: CGFloat?) -> some View {
+        if scaling.followsSource, let aspect, aspect.isFinite, aspect > 0 {
+            self.aspectRatio(aspect, contentMode: .fit)
+        } else {
+            self
+        }
+    }
 }
 
 /// The position and the length in a capsule over a scrubber the width of the screen, as in YouTube's player, and
@@ -834,6 +1810,9 @@ private struct SeekBar<Accessory: View>: View {
     /// The height of the time's row, which the accessory shares: the episode buttons are 36 points round.
     static var timeRow: CGFloat { 36 }
     let clock: PlayerClock
+    /// Off when the chrome shows the time itself, in the row above: the bar is then nothing but
+    /// the track, and the readout appears only while scrubbing, when the finger needs it.
+    var showsClock = true
     /// Playing with the controls showing: the bar follows the player every frame.
     let moving: Bool
     let hold: (Bool) -> Void
@@ -868,15 +1847,17 @@ private struct SeekBar<Accessory: View>: View {
         let x = duration > 0 ? width * value / duration : 0
         let held = drag != nil
         return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(Self.format(value) + " / " + Self.format(duration))
-                if let speed = Self.fineLabel(fineness) { Text(speed).foregroundStyle(.white.opacity(0.75)) }
+            if showsClock || held {
+                HStack(spacing: 8) {
+                    Text(Self.format(value) + " / " + Self.format(duration))
+                    if let speed = Self.fineLabel(fineness) { Text(speed).foregroundStyle(.white.opacity(0.75)) }
+                }
+                .font(.footnote.monospacedDigit().weight(.medium))
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .glassSurface(.regular, in: Capsule())
+                .frame(height: Self.timeRow)
+                .accessibilityHidden(true)
             }
-            .font(.footnote.monospacedDigit().weight(.medium))
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .glassSurface(.regular, in: Capsule())
-            .frame(height: Self.timeRow)
-            .accessibilityHidden(true)
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.3)).frame(height: held ? 6 : 4)
                 Capsule().fill(.white).frame(width: max(0, x), height: held ? 6 : 4)
@@ -1142,10 +2123,14 @@ private struct PictureGestures: UIViewRepresentable {
     }
 }
 
-/// The picture in an AVPlayerLayer, which Picture in Picture takes over while it runs.
-private struct PlayerLayerView: UIViewRepresentable {
+/// The picture in an AVPlayerLayer, which Picture in Picture takes over while it runs. The layer keeps
+/// its player while the instance's own PiP is up — the floating window renders this very layer — and is
+/// hidden inline by the player's placeholder. A layer that is not the running PiP's source drops its
+/// player, so one `AVPlayer` never drives two layers at once.
+struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
-    let fills: Bool
+    /// How the picture meets the layer's box, chosen by the viewer and not by the shape of the device.
+    let gravity: AVLayerVideoGravity
     let pip: PictureInPicture
     final class LayerView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -1153,13 +2138,18 @@ private struct PlayerLayerView: UIViewRepresentable {
     }
     func makeUIView(context: Context) -> LayerView {
         let view = LayerView()
-        view.playerLayer.player = player
+        if pip.shouldRender(view.playerLayer) { view.playerLayer.player = player }
         pip.attach(view.playerLayer)
         return view
     }
     func updateUIView(_ view: LayerView, context: Context) {
-        if view.playerLayer.player !== player { view.playerLayer.player = player }
-        view.playerLayer.videoGravity = fills ? .resizeAspectFill : .resizeAspect
+        let target: AVPlayer? = pip.shouldRender(view.playerLayer) ? player : nil
+        if view.playerLayer.player !== target { view.playerLayer.player = target }
+        // The floating window follows the source layer's `videoGravity`: `.resizeAspect` sizes it to the
+        // video's own shape, while a fill sizes it to the layer's box — a portrait box in landscape,
+        // which crops the film and lets the window drift off the screen. While PiP is up the inline
+        // picture hides behind the placeholder, so the source layer must fit, never fill.
+        view.playerLayer.videoGravity = pip.active ? .resizeAspect : gravity
     }
 }
 
@@ -1168,32 +2158,132 @@ private struct PlayerLayerView: UIViewRepresentable {
     let supported = AVPictureInPictureController.isPictureInPictureSupported()
     private(set) var possible = false
     private(set) var active = false
+    /// Whether Picture in Picture is running, kept apart from the instance so it survives the iPhone Duo
+    /// fold/unfold that tears the player view down and rebuilds it with a fresh `active = false`.
+    private(set) static var isActive = false
+    /// The controller whose floating window is showing right now. Shared so a rebuilt player view
+    /// (iPhone Duo fold/unfold) can adopt it: its `AVPictureInPictureController` is gone with the old
+    /// view, but the floating window still runs, so the fresh instance needs the running controller to
+    /// read "active" and to stop PiP or return inline.
+    private(set) static var current: AVPictureInPictureController?
+    /// The layer the running controller was created on. While Picture in Picture is up, only this layer
+    /// may render the player — the floating window takes its picture. Any other layer must not attach the
+    /// player: an `AVPlayer` drives one layer's video at a time, and a second layer would steal the
+    /// picture from the floating window, leaving it audio-only.
+    private static weak var sourceLayer: AVPlayerLayer?
+    /// Called on the main actor when Picture in Picture starts or stops, so the session can turn off
+    /// its queued-advance while PiP is active (AVKit's queue is unreliable inside the floating window).
+    var onActiveChange: (@MainActor (Bool) -> Void)?
+    /// Whether this instance may adopt the running controller when its view is rebuilt while PiP is up.
+    /// Only the full-screen player may: it is the view a Duo fold tears down and rebuilds, so its rebuilt
+    /// instance must take over the running controller. The mini player lives in the root view and is never
+    /// rebuilt, so it must never adopt — adopting the full-screen player's controller would splice the two
+    /// and mix their state.
+    private let adoptsRunningController: Bool
     @ObservationIgnored private var controller: AVPictureInPictureController?
     @ObservationIgnored private var observation: NSKeyValueObservation?
+    /// The layer the controller was last bound to, so a stopped PiP can bind a fresh controller to the
+    /// layer on screen now (the running controller's source layer can't be changed).
+    @ObservationIgnored private weak var layer: AVPlayerLayer?
+
+    init(adoptsRunningController: Bool = true) {
+        self.adoptsRunningController = adoptsRunningController
+    }
+
+    /// Whether `layer` should render the player right now. While Picture in Picture is up, only the
+    /// running controller's source layer renders; the inline picture is covered by the player's
+    /// placeholder instead.
+    func shouldRender(_ layer: AVPlayerLayer) -> Bool {
+        if !Self.isActive { return true }
+        return Self.sourceLayer === layer
+    }
 
     func attach(_ layer: AVPlayerLayer) {
-        guard supported, controller == nil else { return }
+        guard supported else { return }
+        self.layer = layer
+        // Picture in Picture is already running. Only the full-screen player adopts the running
+        // controller (a Duo fold rebuilt its view); a non-adopting instance — the mini player — keeps
+        // clear of it entirely, so it can never steal the controller or mix its state with the floating
+        // window's.
+        if Self.isActive, let running = Self.current {
+            if adoptsRunningController, controller !== running {
+                controller = running
+                running.delegate = self
+                active = true
+                observe(running)
+            }
+            return
+        }
+        guard controller == nil else { return }
+        makeController(for: layer)
+    }
+
+    func toggle() {
+        guard let controller = controller ?? Self.current else { return }
+        if controller.isPictureInPictureActive { controller.stopPictureInPicture() } else { fitContent(); controller.startPictureInPicture() }
+    }
+
+    /// Fits the floating window to the video's own shape before it opens. The window follows the source
+    /// layer's `videoGravity`; the inline landscape bleed leaves it `.resizeAspectFill`, which sizes the
+    /// window to the layer's portrait box and crops the film. Asserting `.resizeAspect` here — for the
+    /// button and the automatic leave-the-app start alike — tells AVKit to size the window from the
+    /// video's `presentationSize` instead.
+    private func fitContent() {
+        layer?.videoGravity = .resizeAspect
+    }
+
+    private func makeController(for layer: AVPlayerLayer) {
         let controller = AVPictureInPictureController(contentSource: .init(playerLayer: layer))
         controller.delegate = self
-        // Leaving the app while a video plays carries on in Picture in Picture, as AVKit's own player did.
-        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        // Off on purpose. It reads "when the inline picture leaves the screen", and on this app the inline
+        // picture leaves the screen all the time without the viewer going anywhere: every fold, every turn,
+        // every switch between the watch page and Full Screen re-parents the layer. AVKit took each of those
+        // for "the viewer left the app" and opened a floating window beside the page, so the same episode
+        // played twice — once in the page, once in a PiP window over it. Picture in Picture is still one tap
+        // away on the player's own button.
+        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        observe(controller)
+        self.controller = controller
+    }
+
+    private func observe(_ controller: AVPictureInPictureController) {
         observation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] controller, _ in
             let possible = controller.isPictureInPicturePossible
             Task { @MainActor [weak self] in self?.possible = possible }
         }
-        self.controller = controller
     }
 
-    func toggle() {
-        guard let controller else { return }
-        if controller.isPictureInPictureActive { controller.stopPictureInPicture() } else { controller.startPictureInPicture() }
+    /// After a PiP the rebuild adopted is stopped, bind a fresh controller to the layer now on screen:
+    /// the running controller still points at the pre-rebuild layer, whose view is gone, so starting
+    /// again on it would float a picture nobody can see.
+    private func rebind() {
+        controller = nil
+        observation = nil
+        guard supported, let layer else { return }
+        makeController(for: layer)
     }
 
     nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
-        Task { @MainActor [weak self] in self?.active = true }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.fitContent()
+            Self.isActive = true
+            Self.current = self.controller
+            Self.sourceLayer = self.layer
+            self.active = true
+            self.onActiveChange?(true)
+        }
     }
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
-        Task { @MainActor [weak self] in self?.active = false }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            Self.isActive = false
+            Self.current = nil
+            Self.sourceLayer = nil
+            self.active = false
+            self.onActiveChange?(false)
+            self.rebind()
+        }
     }
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         let detail = Diagnostics.describe(error)
@@ -1209,6 +2299,13 @@ private struct PlayerLayerView: UIViewRepresentable {
     private(set) var item: AVPlayerItem?
     /// Where the seek bar is held, until the precise seek it ends with lands.
     private(set) var scrubbing: Double?
+    /// Watches for absence of progress, not for errors: a stream that dies without failing sits at
+    /// the same position for ever, and only this notices.
+    @ObservationIgnored private let watchdog = StallWatchdog()
+    /// The four marks of one attempt, so "it takes ages" becomes resolution, buffering and start.
+    private(set) var marks = PlaybackMarks()
+    /// Set when the watchdog has given up on this line, for the view to act on.
+    private(set) var stalled = false
     @ObservationIgnored private weak var player: AVPlayer?
     @ObservationIgnored private var token: Any?
 
@@ -1305,6 +2402,18 @@ private struct PlayerLayerView: UIViewRepresentable {
         if item !== player.currentItem { item = player.currentItem }
         let seconds = time.seconds
         position = seconds.isFinite ? max(0, seconds) : 0
+        // The first non-zero position means a frame reached the screen.
+        if marks.firstFrame == nil, position > 0 { marks.firstFrame = Date() }
+        if scrubbing == nil, player.timeControlStatus == .playing {
+            switch watchdog.report(position: position) {
+            case .stalled:
+                stalled = true
+            case .exhausted:
+                stalled = true
+            default:
+                if stalled { stalled = false }
+            }
+        }
         let length = player.currentItem?.duration.seconds ?? 0
         let finite = length.isFinite ? max(0, length) : 0
         // Observation reports every assignment, even of the same value; the duration rarely changes.
@@ -1444,5 +2553,12 @@ private struct PlayerLayerView: UIViewRepresentable {
             center.playbackState = .stopped
         }
     }
+}
+
+/// A stream address wrapped so it can drive a `sheet(item:)`. `URL` is `Hashable` but not
+/// `Identifiable`, and conforming it globally would be a surprising thing to do to a Foundation type.
+private struct HandoffStream: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
 }
 #endif

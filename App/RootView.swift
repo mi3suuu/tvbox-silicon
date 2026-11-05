@@ -2,7 +2,7 @@ import SwiftUI
 import TVCore
 
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
-    case home = "Watch Now", discover = "Discover", live = "Live TV", music = "Music", manga = "Manga", search = "Global Search", sites = "Sources", files = "Cloud Files", favorites = "Favorites", history = "Playback History", downloads = "Downloads", settings = "Settings", more = "More"
+    case home = "Watch Now", discover = "Discover", live = "Live TV", music = "Music", search = "Global Search", sites = "Sources", files = "Cloud Files", favorites = "Favorites", history = "Playback History", downloads = "Downloads", settings = "Settings", more = "More"
     /// Messages from the website (App/Announcements.swift); only the phone lists it, in More.
     case messages = "Messages"
     /// Apple TV's sidebar item for the song playing, first while one is loaded; it opens the player.
@@ -18,7 +18,6 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .search: "magnifyingglass"
         case .live: "dot.radiowaves.left.and.right"
         case .music: "music.note"
-        case .manga: "book.fill"
         case .sites: "square.grid.2x2.fill"
         case .files: "folder.fill"
         case .favorites: "heart.fill"
@@ -39,12 +38,23 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    #else
+    /// tvOS has no vertical size class; `tabSafeArea` ignores it there anyway.
+    private var verticalSizeClass: UserInterfaceSizeClass? { nil }
     #endif
     // Untyped so it can hold both More-tab sections and Route pages.
     @State private var morePath = NavigationPath()
     @State private var moreSection: AppSection = .settings
     #if os(iOS)
     @AppStorage(PhoneTabs.storageKey) private var storedTabs = ""
+    /// Where the in-app mini player has been dragged, so it can sit anywhere on screen like YouTube's.
+    @State private var miniDrag = CGSize.zero
+    /// The mini player's size multiplier (1.0 = default), pinch to resize. Clamped so it never grows
+    /// past the screen nor shrinks to nothing.
+    @State private var miniScale: CGFloat = 1.0
+    /// The last drag translation, so each `onChanged` adds only the *delta* (跟手) instead of the
+    /// cumulative translation from the gesture start, which made it fly across the screen.
+    @State private var lastDrag = CGSize.zero
     #endif
     #if os(macOS)
     /// Pushed pages in the detail column. Cleared on section change: the stack keeps them when its root is replaced.
@@ -66,7 +76,7 @@ struct RootView: View {
         // The iPad's sidebar, in the order set in Settings > Edit Tab Bar (#427).
         return PhoneTabs.sidebar(stored: storedTabs, hiding: store.hiddenSections)
         #else
-        let sections = [AppSection.home, .discover, .live, .music, .manga, .search, .sites, .files, .history, .favorites, .downloads, .settings]
+        let sections = [AppSection.home, .discover, .live, .music, .search, .sites, .files, .history, .favorites, .downloads, .settings]
             .filter { !store.hiddenSections.contains($0) }
         #if os(tvOS)
         // Where the remote already goes to change section, so the song is one move away from anywhere.
@@ -84,6 +94,14 @@ struct RootView: View {
         if #available(tvOS 18, *) { return [] }
         return sections.count > Self.topBarSlots ? Array(sections.dropFirst(Self.topBarSlots - 1)) : []
     }
+    #endif
+    #if os(iOS)
+    /// The mini player's Picture in Picture controller, so the small inline picture carries on in a
+    /// floating window when the app is left.
+    @State private var miniPip = PictureInPicture(adoptsRunningController: false)
+    /// The viewer's picture size, shared with the full player.
+    @AppStorage(PictureScaling.key) private var pictureScalingRaw = PictureScaling.source.rawValue
+    private var pictureScaling: PictureScaling { PictureScaling(rawValue: pictureScalingRaw) ?? .source }
     #endif
     /// A message from the website waits while a video plays or another alert or sheet is up.
     private var messageWaits: Bool {
@@ -130,6 +148,9 @@ struct RootView: View {
             // The system tab bar on every size class: iOS 26 floats it over content and
             // collapses extra sections into More, which a hand-built bar imitated poorly.
             platformTabs
+            #if os(iOS)
+                .overlay(alignment: .bottomTrailing) { videoMiniPlayer }
+            #endif
             #endif
         }
         .onChange(of: store.section) { _, section in
@@ -156,6 +177,10 @@ struct RootView: View {
         .alert(L10n.text("Unable to Complete"), isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
             Button(L10n.text("OK"), role: .cancel) { store.error = nil }
         } message: { Text(store.error ?? "") }
+        // The app-switcher shade lives on the scene in TVBoxApp, not here: it must sit above sheets,
+        // the player and every page, and there can be only one. A second one here used to read a
+        // dead `hidesInAppSwitcher` key no settings screen ever wrote, so turning the switch off in
+        // Settings left this inner shade on and the snapshot stayed covered (2026-11-04).
     }
 
     #if !os(macOS)
@@ -169,7 +194,7 @@ struct RootView: View {
     private var barSlots: Int { PhoneTabs.slots(horizontal: sizeClass, vertical: verticalSizeClass) }
     #endif
     private var platformTabs: some View {
-        rootTabs
+        tabView
             #if os(tvOS)
             .musicSidebarHeader()
             // Now Playing is not a page: choosing it opens the full-screen player over the section
@@ -212,20 +237,125 @@ struct RootView: View {
             #endif
     }
 
-    /// On Apple TV, Back on the sidebar leaves the app, which is easy to do by mistake (#499). From any other section it
-    /// goes to Watch Now first, and only Back on Watch Now's sidebar leaves.
-    /// `onExitCommand` on the tab view hears Back only while the sidebar has focus: pages, pushed pages, sheets and the
-    /// player handle their own, and Back from a page still moves to the sidebar (#404). An empty handler would keep the
-    /// press too, so on Watch Now there is none (`nil`) and Back leaves as usual. The modifier stays in place rather than
-    /// in an `if`: swapping views would rebuild the tab view and every section's state with it when moving to or from
-    /// Watch Now. tvOS 17's tab bar with More is left as it was.
-    @ViewBuilder private var rootTabs: some View {
-        #if os(tvOS)
-        tabView.onExitCommand(perform: store.section == .home || !tvMore.isEmpty ? nil : { store.section = .home })
-        #else
-        tabView
-        #endif
+    #if os(iOS)
+    /// The floating mini player after the watch page closes while the video keeps playing, so the
+    /// viewer can still get back to it. Tap to reopen full screen; ✕ stops playback. Leaving the app
+    /// here carries on in Picture in Picture (the inline layer's controller starts it automatically).
+    @ViewBuilder private var videoMiniPlayer: some View {
+        if let channel = store.playing, !store.playsInWatchPage(channel), !store.presentingPlayer {
+            GeometryReader { geo in
+                // YouTube-style in-app player: sized to the screen, pinch-to-resize and draggable to
+                // any corner. Landscape gets a wider picture; portrait a bit over half the width.
+                let landscape = geo.size.width > geo.size.height
+                let baseWidth = landscape ? min(geo.size.width * 0.34, 320) : min(geo.size.width * 0.62, 240)
+                // Pinch scales the whole thing; clamp so it can't outgrow the screen or vanish.
+                let width = min(max(baseWidth * miniScale, 120), geo.size.width - 24)
+                let session = store.playbackSession(for: channel)
+                // The card takes the stream's own shape instead of a fixed 16:9: a 4:3 or 2.35:1 film
+                // in a 16:9 card is either cropped or padded, and the card is too small to afford either.
+                let sourceSize = session.player.currentItem?.presentationSize ?? .zero
+                let ratio = sourceSize.width > 0 && sourceSize.height > 0 ? sourceSize.width / sourceSize.height : 16.0 / 9
+                let height = width / (ratio.isFinite && ratio > 0.2 && ratio < 6 ? ratio : 16.0 / 9)
+                VStack(alignment: .leading, spacing: 0) {
+                    PlayerLayerView(player: session.player, gravity: pictureScaling.gravity, pip: miniPip)
+                        .frame(width: width, height: height).clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        // Both controls live in the picture's corners, and the bar below carries the
+                        // name alone: a row of buttons under a 16:9 thumbnail turns the picture into
+                        // the smaller half of the card, which is what made the video hard to see.
+                        .overlay(alignment: .topLeading) {
+                            Button { session.togglePlayback() } label: {
+                                Image(systemName: session.paused ? "play.fill" : "pause.fill")
+                                    .contentTransition(.symbolEffect(.replace))
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 28, height: 28)
+                                    .background(.black.opacity(0.5), in: Circle())
+                                    // A hairline, or the button vanishes over a dark frame.
+                                    .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(Text(session.paused ? "Play" : "Pause"))
+                            .padding(6)
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            Button {
+                                store.stopPlaying()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 28, height: 28)
+                                    .background(.black.opacity(0.5), in: Circle())
+                                    .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(Text("Stop"))
+                            .padding(6)
+                        }
+                        .onChange(of: channel, initial: true) { _, playingChannel in
+                            let session = store.playbackSession(for: playingChannel)
+                            // Sync the current PiP state at once, not just the callback: the mini player can be
+                            // rebuilt (returning from full screen, a Duo fold) while PiP is already active, and a
+                            // rebuild only re-runs onAppear — it never re-fires onActiveChange. Left unset, the queue
+                            // would advance inside the floating window, where AVKit's queued advance is unreliable.
+                            session.queueingDisabled = miniPip.active || PictureInPicture.isActive
+                            miniPip.onActiveChange = { session.queueingDisabled = $0 }
+                            // The floating mini player has no `PlaybackView`, so nothing else starts the session
+                            // when `store.playing` moves on (auto-advance, series suggestion) or when playback begins
+                            // straight from a Home/Search card. Start it here, once per channel.
+                            if !session.isPlaying(playingChannel) { startCatalogPlayback(session, channel: playingChannel, store: store) }
+                        }
+                    Text(channel.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .frame(width: width, alignment: .leading)
+                }
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.1)) }
+                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .onTapGesture { store.presentingPlayer = true }
+                .offset(miniDrag)
+                // Drag moves it by the *delta* each frame (跟手), not the cumulative translation, which
+                // made a slow finger send it flying. Pinch resizes around 1.0.
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            let delta = CGSize(width: value.translation.width - lastDrag.width,
+                                               height: value.translation.height - lastDrag.height)
+                            lastDrag = value.translation
+                            miniDrag.width += delta.width
+                            miniDrag.height += delta.height
+                        }
+                        .onEnded { _ in
+                            lastDrag = .zero
+                            // Snap back inside the safe area so it never parks off-screen.
+                            let halfW = width / 2, halfH = (height + 38) / 2
+                            let minX = -geo.size.width / 2 + halfW + 8
+                            let maxX = geo.size.width / 2 - halfW - 8
+                            let minY = -geo.size.height / 2 + halfH + 8
+                            let maxY = geo.size.height / 2 - halfH - 8
+                            let x = min(max(miniDrag.width, minX), maxX)
+                            let y = min(max(miniDrag.height, minY), maxY)
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { miniDrag = CGSize(width: x, height: y) }
+                        }
+                )
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            miniScale = min(max(value, 0.5), 2.5)
+                        }
+                        .onEnded { value in
+                            miniScale = min(max(value, 0.5), 2.5)
+                        }
+                )
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
+                .padding(12)
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
+    #endif
 
     @ViewBuilder private var tabView: some View {
         @Bindable var store = store
@@ -258,10 +388,13 @@ struct RootView: View {
             NavigationStack(path: $morePath) {
                 content(.more).routeDestinations()
                     // Any section can be moved into More, so any can be pushed here.
-                    .navigationDestination(for: AppSection.self) { content($0).tvDefaultControls() }
+                    .navigationDestination(for: AppSection.self) { content($0).tvDefaultControls().tabSafeArea(sizeClass, vertical: verticalSizeClass) }
+                    .tabSafeArea(sizeClass, vertical: verticalSizeClass)
             }
             .environment(\.openRoute, RouteOpener { morePath.append($0) })
-        } else { RouteStack { content(item).tvDefaultControls() } }
+        } else {
+            RouteStack { content(item).tvDefaultControls().tabSafeArea(sizeClass, vertical: verticalSizeClass) }
+        }
     }
 
     #if os(tvOS)
@@ -297,9 +430,13 @@ struct RootView: View {
 
     @ViewBuilder private func content(_ section: AppSection) -> some View {
         #if DEBUG
-        if QALaunch.overrides(section) { QALaunch.page(for: section, store: store) } else { sectionRoot(section) }
+        if QALaunch.overrides(section) {
+            QALaunch.page(for: section, store: store).sectionMarker(section)
+        } else {
+            sectionRoot(section).sectionMarker(section)
+        }
         #else
-        sectionRoot(section)
+        sectionRoot(section).sectionMarker(section)
         #endif
     }
 
@@ -310,7 +447,6 @@ struct RootView: View {
         case .search: GlobalSearchView()
         case .live: LiveView()
         case .music: MusicView()
-        case .manga: MangaView()
         case .sites: SitesView()
         case .files: CloudFilesView()
         case .favorites: FavoritesView()
@@ -377,11 +513,13 @@ private struct PlayerPresentation: ViewModifier {
         // Keyed by the channel, every change dismissed the player and presented a new one, so even a
         // queued episode would stop and load.
         // An iPhone watch page plays its own video at the top of the page (`VideoDetailView`).
-        content.fullScreenCover(item: Binding(get: { store.playsInWatchPage(playing) ? nil : playing.map(PlayerSlot.init) },
-                                              set: { if $0 == nil, !store.playsInWatchPage(playing) { playing = nil } })) {
+        content.fullScreenCover(item: Binding(
+            get: { (store.playsInWatchPage(playing) || !store.presentingPlayer) ? nil : playing.map(PlayerSlot.init) },
+            set: { if $0 == nil { store.presentingPlayer = false } }
+        )) {
             // Handed in: the iPad app on a Mac presents a full-screen cover without the presenter's environment
             // objects, and every video stopped the app there ("No Observable object of type Store found").
-            PlaybackView(channel: $0.channel).environment(store)
+            PlaybackView(channel: $0.channel, session: store.playbackSession(for: $0.channel)).environment(store)
         }
         #endif
     }
@@ -478,7 +616,7 @@ struct SidebarStatus: View {
     var body: some View {
         if let version {
             Text(version)
-                .font(.caption).monospacedDigit().foregroundStyle(.tertiary).lineLimit(1)
+                .font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20).frame(height: 40)
                 .overlay(alignment: .top) { Divider().padding(.horizontal, 12) }
@@ -562,8 +700,85 @@ extension View {
         #if os(macOS) || os(tvOS)
         modifier(MacRouteDestinations())
         #else
-        navigationDestination(for: Route.self) { $0.build() }
+        navigationDestination(for: Route.self) { route in
+            PushedRouteTabSafeArea { route.build() }
+        }
         #endif
+    }
+
+    /// The iOS 26 floating tab bar sits over the scroll content instead of reserving a strip, so a
+    /// page's last row would sit under it. On iOS 26 the system still reports the home-indicator
+    /// inset (34pt) — the floating Liquid Glass capsule does *not* publish its own height, because it
+    /// overlays the content rather than widening the safe area. So the last row (and any footer text
+    /// under it) needs an explicit extra reserve on top of that 34pt, sized by width class:
+    ///  • compact width — the phone's bottom capsule. A literal padding on top of the system inset
+    ///    double-counts and leaves a dead strip, so fade the content as it slides under and let the
+    ///    system 34pt inset hold the final row clear of the capsule.
+    ///  • regular width — the Duo's inner display and iPads. The wider floating dock tops out ~57pt
+    ///    off the bottom, so 34pt alone leaves the last row (and the copyright footer under it)
+    ///    caught under the dock's upper lip. Reserve extra with safeAreaPadding so the footer clears
+    ///    the dock. 24pt was not enough — the copyright line sits ~28pt under "Last checked" and was
+    ///    still clipped by the dock (measured with PIL row-scanning, 2026-11-05); 88pt clears it with
+    ///    a little air to spare.
+    @ViewBuilder func tabSafeArea(_ horizontal: UserInterfaceSizeClass? = nil, vertical: UserInterfaceSizeClass? = nil) -> some View {
+        #if os(iOS)
+        if #available(iOS 26, *) {
+            if horizontal == .regular {
+                safeAreaPadding(.bottom, 88)
+            } else if vertical == .regular {
+                // The phone's bottom capsule, on a screen held upright (compact × regular): the floating
+                // Liquid Glass capsule overlays the scroll content (it does not widen the safe area, so the
+                // system's 34pt home-indicator inset is all a plain ScrollView gets). The capsule's top lip
+                // sits ~24pt above that inset, so the last row (and any footer under it) is caught under the
+                // glass and its text is clipped mid-line. Reserve the gap with safeAreaPadding so the
+                // ScrollView's last row scrolls clear of the capsule; the reserve is transparent, so the
+                // content still slides under the glass and reads through it rather than stopping at a hard
+                // edge.
+                safeAreaPadding(.bottom, 40)
+                .overlay(alignment: .bottom) {
+                    LinearGradient(stops: [.init(color: .clear, location: 0),
+                                           .init(color: Color(.systemBackground), location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: 80)
+                        .allowsHitTesting(false)
+                        .ignoresSafeArea(edges: .bottom)
+                }
+            }
+            // compact × compact (the iPhone Duo's folded *outer* display held sideways) is left alone: the
+            // system's narrow bottom capsule is an awkward fit there and the fade reads as a white smear
+            // across a landscape that was never meant to carry a phone's bottom bar.
+        } else {
+            safeAreaPadding(.bottom)
+        }
+        #else
+        self
+        #endif
+    }
+}
+
+/// Pushed pages keep the iOS 26 floating tab bar (the capsule overlays a `NavigationStack`'s pushed
+/// content just as it overlays a tab's root), so their last row is caught under the glass too. This
+/// wrapper reads the current size class and applies the same bottom reserve as `tabSafeArea`, once, for
+/// every `Route` page — instead of sprinkling the fix across every pushed view.
+private struct PushedRouteTabSafeArea<Content: View>: View {
+    @Environment(\.horizontalSizeClass) private var horizontal
+    @Environment(\.verticalSizeClass) private var vertical
+    private let content: Content
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
+    var body: some View {
+        content.tabSafeArea(horizontal, vertical: vertical)
+    }
+}
+
+extension View {
+    /// Names the section a page belongs to, so an acceptance test can tell "the section opened" from
+    /// "some window is on screen".
+    ///
+    /// Without it every section assertion reduces to `windows.count > 0`, which Home satisfies — the
+    /// phone's tab bar draws Home first while a deep link is still landing, so `收藏` and `下载`
+    /// photographed Home and the run passed anyway (2026-11-04).
+    func sectionMarker(_ section: AppSection) -> some View {
+        accessibilityIdentifier("section.\(section.rawValue)")
     }
 }
 
@@ -581,3 +796,4 @@ private struct MacRouteDestinations: ViewModifier {
     }
 }
 #endif
+

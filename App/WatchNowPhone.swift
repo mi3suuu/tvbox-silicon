@@ -15,7 +15,7 @@ struct WatchNowPhonePage: View {
     /// The newest titles not finished yet, for the hero.
     private var upNext: [PlaybackHistoryEntry] {
         guard sections.contains(.upNext) else { return [] }
-        return Array(store.playbackHistory.entries.filter { !$0.completed }.prefix(5))
+        return Array(store.visibleHistory.filter { !$0.completed }.prefix(5))
     }
 
     var body: some View {
@@ -63,9 +63,9 @@ struct WatchNowPhonePage: View {
     }
 
     @ViewBuilder private var rows: some View {
-        if sections.contains(.continueWatching), !store.playbackHistory.entries.isEmpty {
+        if sections.contains(.continueWatching), !store.visibleHistory.isEmpty {
             WatchNowPhoneShelf(title: L10n.text("Continue Watching"), action: { store.section = .history }) {
-                ForEach(store.playbackHistory.entries.prefix(12)) { HistoryCard(entry: $0) }
+                ForEach(store.visibleHistory.prefix(12)) { HistoryCard(entry: $0) }
             }
             .accessibilityIdentifier("home.continueWatching")
         }
@@ -87,9 +87,9 @@ struct WatchNowPhonePage: View {
             }
         }
         if sections.contains(.recommendations) { RecommendationsView(config: config, rails: true) }
-        if sections.contains(.favorites), !store.favorites.items.isEmpty {
+        if sections.contains(.favorites), !store.visibleFavorites.isEmpty {
             WatchNowPhoneShelf(title: L10n.text("Favorites"), action: { store.section = .favorites }) {
-                ForEach(Array(store.favorites.items.prefix(20))) { WatchNowPhoneFavorite(item: $0) }
+                ForEach(Array(store.visibleFavorites.prefix(20))) { WatchNowPhoneFavorite(item: $0) }
             }
         }
         if sections.contains(.liveTV), !config.lives.isEmpty {
@@ -247,7 +247,7 @@ private struct WatchNowPhoneHero: View {
             }
             .frame(width: width * 0.8, height: 120, alignment: .bottom)
             .accessibilityAddTraits(.isHeader)
-            Text([EpisodeLabels.historyLabel(entry.context.episodeName), SourceLabel(entry.context.sourceName).text].filter { !$0.isEmpty }.joined(separator: " · "))
+            Text([entry.context.episodeName, SourceLabel(entry.context.sourceName).text].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.system(size: 14)).lineLimit(1).padding(.top, 14)
             if entry.duration > 0 {
                 HStack(spacing: 8) {

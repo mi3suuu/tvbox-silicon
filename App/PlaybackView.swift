@@ -23,6 +23,8 @@ import TVCore
     private var editingSkip = false
     private var resumeAfterEditing = false
     private var seekingSegment = false
+    /// Whether the player was paused before a quality switch, so the resumed position stays paused too.
+    private var resumePausedAfterQualitySwitch = false
 
     func beginEditingSkip() {
         editingSkip = true
@@ -103,6 +105,9 @@ import TVCore
     private var upcomingObservation: NSKeyValueObservation?
     /// Whether this episode has already tried to queue the next one (once each, even when that failed).
     private var upcomingAttempted = false
+    /// Picture in Picture is active: AVKit's queued advance is unreliable there, so skip the
+    /// queue and fall back to the ordinary end-of-episode switch, which always works in PiP.
+    var queueingDisabled = false { didSet { if queueingDisabled { discardUpcoming() } } }
     /// The queue moves past this episode because the next one was asked for, not because it ended.
     private var skipsToUpcoming = false
     /// The episode the queue moved on to, which `start` then finds already playing.
@@ -130,12 +135,17 @@ import TVCore
     private(set) var muted = false
     private(set) var quality: Int?
     private var playing: Channel?
+    /// The channel on screen now, so a caller reusing this session across an iPhone Duo fold/unfold can tell
+    /// whether it already has this episode and must not start it again from the beginning.
+    func isPlaying(_ channel: Channel) -> Bool { playing == channel }
     /// The episode plays from a download on this device, which no server or connection holds up.
     private var savedDownload = false
     private var automatic: URL?
-    /// The live room playing (at the quality chosen), when it opens again with a fresh address (`LiveReopen`), and
-    /// when its stream last became ready.
+    /// The live room playing (at the quality chosen), and whether it was already given a fresh address.
     private var liveRoom: Channel?
+    /// [mi3s] 二开融合（M1）：上游 1.8.11 #488 的「按播放时长断流重开」策略。
+    /// 我方原有 `recoverLiveAfterDrop` 走的是「丢包类型 + 指数退避」路径，两者互补：
+    /// 本策略治「地址到期」（Huya 约两分钟 403）与「播放列表自相矛盾」，drop 策略治网络掉线/卡死。
     private var liveReopen = LiveReopen()
     private var liveReadyAt: ContinuousClock.Instant?
     private var liveRetrying = false
@@ -255,9 +265,11 @@ import TVCore
         let time = player.currentTime(), paused = player.rate == 0
         detachItem()
         self.quality = quality
+        // Route through pendingResume so the position is restored *before* playback starts:
+        // a naive seek after configure() races the item becoming ready and flashes back from 0.
+        if time.seconds.isFinite, time.seconds > 0 { pendingResume = time.seconds }
+        resumePausedAfterQualitySwitch = paused
         configure(Channel(name: channel.name, group: channel.group, url: url, logo: channel.logo, headers: channel.headers), url: url, generation: generation)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-        if paused { player.pause() }
     }
 
     /// Stops listening to the current item, before another replaces it in the same playback.
@@ -266,11 +278,14 @@ import TVCore
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
         endObserver = nil; failureObserver = nil
         sampler?.cancel(); sampler = nil
+        // The pending live catch-up seek belongs to the old item; a new item must be free to catch up again.
+        catchingUpLive = false
     }
 
     /// A live room that stopped asks its platform for a fresh address and plays on, instead of waiting for the viewer
     /// to try again: one that played a while each time (Huya refuses an address about two minutes in, #488), one
     /// that hasn't once for a playlist that contradicted itself (`LiveReopen`).
+    /// [mi3s] 二开融合（M1）：策略来自上游 1.8.11，与我方 `recoverLiveAfterDrop` 并存。
     private func retryLive(after failure: Error?) -> Bool {
         if liveRetrying { return true } // The failed item's other report of the same failure.
         let played = liveReadyAt.map { ContinuousClock.now - $0 }
@@ -279,15 +294,14 @@ import TVCore
         detachItem(); observation = nil
         let active = generation
         Diagnostics.shared.record(.warning, "player", "live retry room=\(room.url.absoluteString) played=\(played.map { "\(Int($0.components.seconds))s" } ?? "-")")
-        note(L10n.text("The connection dropped. Reconnecting"))
-        Task {
+        preparation = Task { [weak self] in
             do {
                 let resolved = try await LiveCatalog.resolve(room)
-                guard self.generation == active else { return }
+                guard let self, self.generation == active, !Task.isCancelled else { return }
                 self.liveRetrying = false
                 self.configure(resolved.channel, url: resolved.channel.url, generation: active)
             } catch {
-                guard self.generation == active else { return }
+                guard let self, self.generation == active, !Task.isCancelled else { return }
                 self.liveRetrying = false
                 self.error = error.localizedDescription; self.loading = false
             }
@@ -352,6 +366,27 @@ import TVCore
             try? await Task.sleep(for: delay)
             guard let self, self.generation == active, !Task.isCancelled else { return }
             if position > 1 { self.pendingResume = position }
+            self.configure(channel, url: url, generation: active)
+        }
+        return true
+    }
+
+    /// A live stream whose connection dropped (NSURL -1005) or whose media stalled (-15628) reopens from the
+    /// live edge, a few times and a little later each time, before the error shows. Unlike an episode there is
+    /// no position to keep: a fresh item starts at the edge, which is exactly where a live viewer wants to be.
+    private func recoverLiveAfterDrop(_ failure: Error?, channel: Channel, url: URL, generation active: UUID) -> Bool {
+        guard isLive, !savedDownload, !url.isFileURL else { return false }
+        guard PlaybackDropRecovery.isDrop(failure) else { return false }
+        // Live HLS reports the program clock as currentTime, so it advances during healthy playback and
+        // lets the recovery counter reset after a stretch of clean viewing, exactly as an episode's does.
+        let position = player.currentTime().seconds
+        guard let delay = dropRecovery.delay(after: failure, position: position.isFinite ? position : 0) else { return false }
+        detachItem(); observation = nil; loading = true
+        Diagnostics.shared.record(.warning, "player", "live dropped host=\(transfer.host ?? url.host() ?? "-") attempt=\(dropRecovery.attempts) \(failure.map(Self.describe) ?? "-"); reopening at edge")
+        note(L10n.text("The connection dropped. Reconnecting"))
+        preparation = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, self.generation == active, !Task.isCancelled else { return }
             self.configure(channel, url: url, generation: active)
         }
         return true
@@ -463,35 +498,12 @@ import TVCore
             }
         }
         #endif
-        // `-qaSubtitleStyle <JSON>` saves that subtitle style, as Settings › Subtitle Style does.
-        if let json = UserDefaults.standard.string(forKey: "qaSubtitleStyle"),
-           let style = try? JSONDecoder().decode(SubtitleStyle.self, from: Data(json.utf8)) { style.save() }
         #endif
         self.player = player
         enhancer = VideoEnhancer(player: player)
         queueObservation = player.observe(\.currentItem, options: [.new]) { [weak self] _, _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.subtitles.follow(self.player.currentItem)
-                self.queueMoved()
-            }
+            Task { @MainActor [weak self] in self?.queueMoved() }
         }
-        // A style chosen while a video plays (the Mac shows Settings beside the player) also reaches AVPlayer's own
-        // subtitles, drawn in Picture in Picture.
-        styleObserver = NotificationCenter.default.addObserver(forName: SubtitleStyle.changed, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let rules = Self.subtitleRules()
-                for item in self.player.items() { item.textStyleRules = rules }
-            }
-        }
-    }
-    private var styleObserver: NSObjectProtocol?
-    /// The subtitle lines the player's overlay draws (`SubtitleOverlay`).
-    let subtitles = SubtitleCues()
-    /// The saved subtitle style as the rule AVPlayer lays over every subtitle cue it draws itself.
-    private static func subtitleRules() -> [AVTextStyleRule] {
-        AVTextStyleRule(textMarkupAttributes: SubtitleStyle.load().attributes).map { [$0] } ?? []
     }
     private var observation: NSKeyValueObservation?
     private var failureObserver: NSObjectProtocol?
@@ -509,8 +521,7 @@ import TVCore
         stop(); error = nil; errorSymbol = "play.slash.fill"; loading = true; showsPicture = false; sourceDanmaku = []; qualities = []; quality = nil; switchNotice = nil
         begin(channel)
         isLive = LiveCatalog.isRoom(channel.url) || channel.group == L10n.text("Bilibili Live")
-        liveRoom = LiveCatalog.isRoom(channel.url) ? channel : nil; liveReopen = LiveReopen(); liveRetrying = false; rangeRetried = false
-        loopbackRecovered = nil; dropRecovery = PlaybackDropRecovery(); reopenedAfterDrop = false
+        liveRoom = LiveCatalog.isRoom(channel.url) ? channel : nil; liveReopen = LiveReopen(); liveRetrying = false; liveReadyAt = nil
         ErrorReports.shared.playing(live: isLive, format: channel.url.pathExtension, source: channel.historyContext?.sourceKey,
                                     danmaku: UserDefaults.standard.object(forKey: DanmakuPreference.key) == nil || UserDefaults.standard.bool(forKey: DanmakuPreference.key),
                                     sharper: UserDefaults.standard.bool(forKey: VideoEnhancement.upscaleKey))
@@ -597,24 +608,22 @@ import TVCore
     private func makeItem(_ channel: Channel, url: URL) -> AVPlayerItem {
         // Some providers require request headers. AVURLAsset's HTTP-header option is
         // best-effort and is not a guarantee for every redirected HLS segment.
-        let asset = CloudStreams.asset(for: url) ?? HongguoStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
-            ?? AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
-        let item = AVPlayerItem(asset: asset)
-        if url.scheme == HongguoStreams.scheme { item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration }
-        item.textStyleRules = Self.subtitleRules()
-        subtitles.attach(item)
-        #if DEBUG
-        // `-qaSubtitle <n>` turns on the item's nth subtitle track, for screenshots of how subtitles look.
-        if let index = UserDefaults.standard.string(forKey: "qaSubtitle").flatMap(Int.init) {
-            // Or the system's own choice (subtitles off) replaces it once the item loads.
-            player.appliesMediaSelectionCriteriaAutomatically = false
-            Task { @MainActor in
-                if let group = try? await asset.loadMediaSelectionGroup(for: .legible), group.options.indices.contains(index) {
-                    item.select(group.options[index], in: group)
-                }
+        // When the viewer assigned this source a custom HTTP/HTTPS/SOCKS5 proxy, the asset URL goes
+        // through the local relay, which opens the proxy tunnel and forwards the bytes (TLS intact).
+        var assetURL = url
+        if let context = channel.historyContext {
+            // A line-level route (set on the line chip) wins over the source-level route.
+            let flag = context.episodeFlag
+            let lineRoute = LineSettings.shared.route(origin: context.origin, sourceKey: context.sourceKey, flag: flag)
+            let proxyID = lineRoute?.proxyID ?? CustomProxyStore.shared.route(origin: context.origin, sourceKey: context.sourceKey).proxyID
+            if let proxyID, let base = LocalProxyServer.shared.baseSync {
+                assetURL = LocalProxyServer.proxyURL(base: base, url: url, proxyID: proxyID)
             }
         }
-        #endif
+        let asset = CloudStreams.asset(for: url) ?? HongguoStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
+            ?? AVURLAsset(url: assetURL, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+        let item = AVPlayerItem(asset: asset)
+        if url.scheme == HongguoStreams.scheme { item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration }
         return item
     }
 
@@ -670,7 +679,6 @@ import TVCore
                 return
             }
             guard let remuxed else {
-                self.checkingPicture = false
                 self.restorePositionIfNeeded(item)
                 self.loading = self.pendingResume != nil || self.restoringPosition
                 if self.pendingResume == nil { self.player.play() }
@@ -729,7 +737,7 @@ import TVCore
     /// Follows the episode's item (ready, failed, ended), the player's state, and the transfer, for this playback.
     private func watch(_ item: AVPlayerItem, channel: Channel, url: URL, generation activeGeneration: UUID) {
         self.item = item
-        audioChoices = []; audioChoice = nil; liveReadyAt = nil
+        audioChoices = []; audioChoice = nil
         hasTimeline = item.status == .readyToPlay && item.duration.isNumeric
         observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let status = item.status
@@ -743,6 +751,7 @@ import TVCore
                 guard let self, self.generation == activeGeneration else { return }
                 self.hasTimeline = timeline
                 if status == .readyToPlay {
+                    // [mi3s] 二开融合（M1）：记下直播首次就绪时刻，供 LiveReopen 判「地址到期」还是「这条源根本播不动」。
                     if self.isLive { self.liveReadyAt = .now }
                     if UngroupedAudio.playOne(item) { Diagnostics.shared.record(.info, "player", "ungrouped audio tracks; playing the first") }
                     Task { [weak self] in
@@ -758,10 +767,9 @@ import TVCore
                     Task { [weak self] in
                         let refused = await Self.recordVideoFormat(item)
                         guard let self, self.generation == activeGeneration, self.item === item, self.checkingPicture else { return }
-                        // While it is repackaged, `checkingPicture` stays on: the once-a-second resume would otherwise
-                        // jump to the saved position and play this item's sound with no picture until then (#515).
+                        self.checkingPicture = false
                         if Remux.showsPicture(refused) { self.repackage(item, channel: channel, url: url, generation: activeGeneration) }
-                        else { self.checkingPicture = false; self.restorePositionIfNeeded(item) }
+                        else { self.restorePositionIfNeeded(item) }
                     }
                     self.checkSegmentedPicture(item, channel: channel, url: url, generation: activeGeneration)
                 }
@@ -770,6 +778,7 @@ import TVCore
                     if self.retryHDR(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.recoverLoopback(Self.urlErrorCode(failure), channel: channel, url: url, generation: activeGeneration) { return }
                     if self.reopenedAfterDrop, self.resumeAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
+                    if self.recoverLiveAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
                     Diagnostics.shared.record(.error, "player", "failed host=\(self.transfer.host ?? channel.url.host() ?? "-") \(self.transfer.failure.map { "upstream=\($0) " } ?? "")\(detail) \(self.failureContext(channel, url: url, item: item))")
                     if self.retryLive(after: failure) { return }
                     // A refused link is usually an expired one: say so in plain words rather than the system's.
@@ -789,6 +798,7 @@ import TVCore
                 guard let self, self.generation == activeGeneration else { return }
                 if self.recoverLoopback(Self.urlErrorCode(failure), channel: channel, url: url, generation: activeGeneration) { return }
                 if self.resumeAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
+                if self.recoverLiveAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
                 Diagnostics.shared.record(.error, "player", "interrupted host=\(self.transfer.host ?? channel.url.host() ?? "-") at=\(Int(self.player.currentTime().seconds.isFinite ? self.player.currentTime().seconds : -1))s \(failure.map(Self.describe) ?? "-") \(self.failureContext(channel, url: url, item: item))")
                 if self.retryLive(after: failure) { return }
                 self.error = message ?? L10n.text("Playback was interrupted."); self.loading = false
@@ -963,6 +973,7 @@ import TVCore
         playing = nil
         catalogDanmaku.clear()
         historyContext = nil; pendingResume = nil; restoringPosition = false
+        resumePausedAfterQualitySwitch = false
         requestedResumePosition = nil; restoredPosition = nil
         skipScope = nil; skipSettings = EpisodeSkipSettings(); skipPass = EpisodeSkipPass()
         position = 0; duration = 0; editingSkip = false; resumeAfterEditing = false; seekingSegment = false
@@ -988,6 +999,12 @@ import TVCore
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
         failureObserver = nil
         player.pause(); player.removeAllItems(); item = nil
+        #if !os(macOS)
+        // Let the system reclaim the audio focus so other apps can play sound again,
+        // and drop the .moviePlayback routing mode that only matters while playing.
+        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        catch { Diagnostics.shared.failure("player", "audio session deactivate", error) }
+        #endif
     }
     /// Records where the episode is; `item` is the episode's own, which the queue may already have moved past.
     func saveHistory(completed: Bool = false, item: AVPlayerItem? = nil) {
@@ -1009,6 +1026,10 @@ import TVCore
         skipPass = EpisodeSkipPass(); seekingSegment = false
         position = 0; duration = 0
         upcomingAttempted = false
+        // Per-episode recovery state resets here so a retry that fired for the episode before doesn't
+        // suppress this one's own retry, or leave a stale drop/loopback/live state behind on auto-advance.
+        liveReopen = LiveReopen(); liveRetrying = false; rangeRetried = false
+        loopbackRecovered = nil; dropRecovery = PlaybackDropRecovery(); reopenedAfterDrop = false
         // A drive's folder and file names don't name a show to find comments for.
         let source = channel.historyContext?.sourceKey
         if !DanmakuSource.has(channel.url), source != Bilibili.siteKey, source != CloudFiles.sourceKey {
@@ -1033,7 +1054,13 @@ import TVCore
                 }
                 self.restoredPosition = self.player.currentTime().seconds
                 Diagnostics.shared.record(.info, "player", "history resume requested=\(requested) restored=\(self.restoredPosition ?? -1)")
-                if !self.editingSkip { self.player.play() }
+                // A quality switch keeps the pause state it started from, instead of always resuming.
+                if self.resumePausedAfterQualitySwitch {
+                    self.resumePausedAfterQualitySwitch = false
+                    self.player.pause()
+                } else if !self.editingSkip {
+                    self.player.play()
+                }
                 self.saveHistory()
             }
         }
@@ -1082,20 +1109,11 @@ extension PlaybackSession {
             Diagnostics.shared.record(.info, "player", "cloud direct host=\(media.url.host() ?? "-") length=\(media.length)")
         } else if let media = await CatPawOpen.proxiedMedia(address, headers: channel.headers) {
             try Task.checkCancellation()
-            if let direct = await CatPawOpen.directMedia(media) {
-                try Task.checkCancellation()
-                // A drive file whose link the bundle's proxy reveals streams straight from the drive, like the plugins'
-                // (above): through the bundle, a 4K file filled the heap of the phone's Node until it stopped (#530).
-                address = CloudStreams.register(direct) { await CatPawOpen.directMedia(media) }
-                Diagnostics.shared.record(.info, "player", "catpaw direct host=\(direct.url.host() ?? "-") length=\(direct.length)")
-            } else {
-                // The bundle downloads each request with 10 to 16 threads of its own: reading ahead on six at once ran its
-                // Node out of memory, and on one a 4K episode stalled whenever the drive slowed.
-                // Its proxy moves to a new port when iOS took back the sockets of the suspended app (#485).
-                address = CloudStreams.register(media, parallel: 2) { await CatPawOpen.relocated(media) }
-                Diagnostics.shared.record(.info, "player", "catpaw stream length=\(media.length)")
-            }
+            // The bundle downloads each request with 10 to 16 threads of its own: reading ahead on six at once ran its
+            // Node out of memory, and on one a 4K episode stalled whenever the drive slowed.
+            address = CloudStreams.register(media, parallel: 2) { nil }
             prepared.url = address
+            Diagnostics.shared.record(.info, "player", "catpaw stream length=\(media.length)")
         } else if EmbeddedJarHost.isPluginProxy(address) {
             Diagnostics.shared.record(.warning, "player", "plugin proxy stream \(EmbeddedJarHost.proxyRoute(address))")
             prepared.pluginProxy = true
@@ -1202,7 +1220,7 @@ extension PlaybackSession {
     /// switches as before.
     fileprivate func queueUpcomingIfDue(_ item: AVPlayerItem) {
         if upcoming != nil, looping || !playsOn() { return discardUpcoming() }
-        guard !upcomingAttempted, !looping, !isLive, playsOn(), let upcomingEpisode, item.status == .readyToPlay,
+        guard !queueingDisabled, !upcomingAttempted, !looping, !isLive, playsOn(), let upcomingEpisode, item.status == .readyToPlay,
               pendingResume == nil, !restoringPosition else { return }
         let length = item.duration.seconds, time = item.currentTime().seconds
         guard length.isFinite, length > 0, time.isFinite else { return }
@@ -1300,8 +1318,13 @@ extension PlaybackSession {
         let activeGeneration = generation
         transfer = Transfer(); steps = []
         catalogDanmaku.clear(); sourceDanmaku = []
-        error = nil; switchNotice = nil; quality = nil
+        error = nil; errorSymbol = "play.slash.fill"; switchNotice = nil; quality = nil
         begin(channel)
+        isLive = LiveCatalog.isRoom(channel.url) || channel.group == L10n.text("Bilibili Live")
+        liveRoom = LiveCatalog.isRoom(channel.url) ? channel : nil
+        ErrorReports.shared.playing(live: isLive, format: channel.url.pathExtension, source: channel.historyContext?.sourceKey,
+                                    danmaku: UserDefaults.standard.object(forKey: DanmakuPreference.key) == nil || UserDefaults.standard.bool(forKey: DanmakuPreference.key),
+                                    sharper: UserDefaults.standard.bool(forKey: VideoEnhancement.upscaleKey))
         loading = upcoming.item.status != .readyToPlay
         playing = channel; automatic = upcoming.prepared.url
         player.allowsExternalPlayback = !Remux.isRemuxed(upcoming.prepared.url)

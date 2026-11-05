@@ -111,9 +111,32 @@ public struct SubscriptionEntry: Codable, Hashable, Identifiable, Sendable {
     public var address: String
     public var name: String
     public var enabled: Bool
+    // [mi3s] 二开：线路默认路由 + 所属观看环境。两处均为新增存储属性，Swift 无法用 extension 加存储属性，
+    // 因此这是本文件唯一的二开侵入点；解码全部走 decodeIfPresent，上游旧数据一律回落默认值。
+    /// How this subscription's sources reach their upstream by default. Individual sources may
+    /// override it; `.auto` lets the app follow connectivity.
+    public var routing: SourceRoute
+    /// The environment (sandbox) this subscription belongs to. `nil` means it predates environments
+    /// and therefore belongs to the default environment, so an upgrade never hides a viewer's feeds.
+    public var environmentID: UUID?
     public var id: String { address }
-    public init(address: String, name: String = "", enabled: Bool = true) {
-        self.address = address; self.name = name; self.enabled = enabled
+    public init(address: String, name: String = "", enabled: Bool = true, routing: SourceRoute = .auto,
+                environmentID: UUID? = nil) {
+        self.address = address; self.name = name; self.enabled = enabled; self.routing = routing
+        self.environmentID = environmentID
+    }
+
+    private enum CodingKeys: String, CodingKey { case address, name, enabled, routing, environmentID }
+
+    /// A list saved by a build without per-subscription routing decodes as `.auto`, so an upgrade
+    /// keeps every subscription exactly as it behaved before.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        address = try c.decode(String.self, forKey: .address)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        routing = try c.decodeIfPresent(SourceRoute.self, forKey: .routing) ?? .auto
+        environmentID = try c.decodeIfPresent(UUID.self, forKey: .environmentID)
     }
     /// Its name, else where it lives and its file: many subscriptions share a host such as
     /// raw.githubusercontent.com, so a GitHub address reads as its repository.

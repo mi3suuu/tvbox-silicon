@@ -18,21 +18,30 @@ import UniformTypeIdentifiers
     var automatic = UserDefaults.standard.object(forKey: "danmakuAutoMatch") == nil ? true : UserDefaults.standard.bool(forKey: "danmakuAutoMatch") {
         didSet {
             UserDefaults.standard.set(automatic, forKey: "danmakuAutoMatch")
-            if automatic { startAutomatic(automaticContext) } else { cancelAutomatic() }
+            if automatic {
+                startAutomatic(automaticContext)
+            } else {
+                cancelAutomatic()
+                // Turning auto-match off removes the comments it loaded, but keeps hand-picked or imported ones.
+                if commentsAreAutomatic { comments = []; track = ""; source = ""; fromCache = false; offset = 0; revision = UUID() }
+            }
         }
     }
     /// Applies to every track, Bilibili's own and live rooms included; the player's danmaku menu sets it too.
     var opacity = UserDefaults.standard.object(forKey: DanmakuStyle.opacityKey) as? Double ?? DanmakuStyle.standardOpacity {
-        didSet { UserDefaults.standard.set(opacity, forKey: DanmakuStyle.opacityKey) }
+        didSet { persistStyle() }
     }
     /// Read by `DanmakuOverlay` from the same key, so it sizes every track, not only these comments.
     var fontSize = UserDefaults.standard.object(forKey: DanmakuStyle.fontSizeKey) as? Double ?? DanmakuStyle.standardFontSize {
-        didSet { UserDefaults.standard.set(fontSize, forKey: DanmakuStyle.fontSizeKey) }
+        didSet { persistStyle() }
     }
     private var generation = UUID()
     private var automaticTask: Task<Void, Never>?
     private var prefetchTask: Task<Void, Never>?
     private var automaticContext: PlaybackHistoryContext?
+    /// Whether the current comments were produced by automatic matching (versus a hand-picked or imported file).
+    private var commentsAreAutomatic = false
+    private var stylePersistTask: Task<Void, Never>?
     private(set) var automaticState = "idle"
     private(set) var source = ""
     private(set) var fromCache = false
@@ -64,13 +73,14 @@ import UniformTypeIdentifiers
             guard let self else { return }
             defer { if self.generation == active { self.automaticTask = nil } }
             do {
-                let result = try await Self.resolver().resolve(context, first: CatPawDanmaku.comments)
+                let result = try await Self.resolver().resolve(context)
                 try Task.checkCancellation()
                 guard self.generation == active, self.enabled, self.automatic else { return }
                 self.comments = result.comments
                 self.track = result.track; self.source = result.source; self.fromCache = result.cached
                 self.offset = 0; self.revision = UUID()
                 self.automaticState = result.state
+                self.commentsAreAutomatic = true
             } catch {
                 guard self.generation == active else { return }
                 // Optional overlay failures never interrupt video playback or show alerts.
@@ -94,7 +104,7 @@ import UniformTypeIdentifiers
             guard !Task.isCancelled, self.generation == active, !self.comments.isEmpty else { return }
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled, self.generation == active else { return }
-            _ = try? await Self.resolver().resolve(context, ticket: ticket, first: CatPawDanmaku.comments)
+            _ = try? await Self.resolver().resolve(context, ticket: ticket)
         }
     }
     private static func resolver() -> DanmakuResolver {
@@ -119,39 +129,71 @@ import UniformTypeIdentifiers
         try Task.checkCancellation()
         guard generation == active else { throw CancellationError() }
         self.comments = comments; track = anime.title + " · " + episode.title
-        source = "Dandanplay"; fromCache = false; cacheCurrent(ticket: ticket)
+        source = "Dandanplay"; fromCache = false; commentsAreAutomatic = false
+        // The picked episode is what is now loaded; the cache and later retries key off it, not the episode still playing.
+        if let playing = automaticContext { automaticContext = Self.loadedContext(episode, in: playing) }
+        cacheCurrent(ticket: ticket)
         if let context = automaticContext, !siblings.isEmpty {
             DanmakuResolver(dandanServer: client.server.absoluteString).remember(
                 DanmakuMapping(provider: "dandan", title: context.videoName, year: context.year,
                     tracks: siblings.map { DanmakuTrack(number: CatalogDanmakuMatcher.episodeNumber($0.title), title: $0.title, id: $0.id) }),
                 for: context, ticket: ticket)
         }
-        offset = 0; revision = UUID(); enabled = true
+        offset = 0; revision = UUID()
     }
 
     func clear(keepingContext: Bool = false) {
         cancelAutomatic()
         if !keepingContext { automaticContext = nil }
         else if let context = automaticContext { MediaCache.shared.remove(DanmakuResolver.episodeKey(context), kind: .danmaku, scope: context.id) }
-        comments = []; track = ""; source = ""; fromCache = false; offset = 0; revision = UUID()
+        comments = []; track = ""; source = ""; fromCache = false; commentsAreAutomatic = false; offset = 0; revision = UUID()
     }
 
-    func importFile(_ url: URL) throws {
+    func importFile(_ url: URL) async throws {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         guard size <= CatalogDanmakuParser.maximumBytes else { throw TVError.unsupported(L10n.text("The danmaku file is too large.")) }
-        let parsed = try CatalogDanmakuParser.parse(Data(contentsOf: url, options: .mappedIfSafe))
+        // Read and parse off the main actor: a file can be up to 8 MB and hold up to 30,000 comments.
+        let parsed = try await Task.detached(priority: .utility) {
+            try CatalogDanmakuParser.parse(Data(contentsOf: url, options: .mappedIfSafe))
+        }.value
         cancelAutomatic()
         comments = parsed; track = url.deletingPathExtension().lastPathComponent
-        source = L10n.text("Imported file"); fromCache = false; cacheCurrent()
-        offset = 0; revision = UUID(); enabled = true
+        source = L10n.text("Imported file"); fromCache = false; commentsAreAutomatic = false; cacheCurrent()
+        offset = 0; revision = UUID()
     }
     private func cacheCurrent(ticket: MediaCache.Ticket? = nil) {
         guard let context = automaticContext, !comments.isEmpty,
               let data = try? JSONEncoder().encode(AutomaticDanmakuResult(comments: comments, track: track, source: source, state: "loaded")) else { return }
-        MediaCache.shared.store(data, for: DanmakuResolver.episodeKey(context), kind: .danmaku, scope: context.id,
-            ttl: 7 * 86400, ticket: ticket ?? MediaCache.shared.ticket())
+        let scope = context.id, key = DanmakuResolver.episodeKey(context), ttl: TimeInterval = 7 * 86400
+        // Persist off the main actor: MediaCache's store writes the blob and its index to disk synchronously.
+        Task.detached(priority: .utility) {
+            MediaCache.shared.store(data, for: key, kind: .danmaku, scope: scope, ttl: ttl, ticket: ticket ?? MediaCache.shared.ticket())
+        }
+    }
+    /// The picked episode expressed as a context for the video that is playing, so caching and retries land on the right episode.
+    private static func loadedContext(_ episode: CatalogDanmakuEpisode, in base: PlaybackHistoryContext) -> PlaybackHistoryContext {
+        var context = PlaybackHistoryContext(origin: base.origin, sourceKey: base.sourceKey, sourceName: base.sourceName,
+            videoID: base.videoID, videoName: base.videoName, poster: base.poster,
+            episodeID: episode.id, episodeName: episode.title, episodeFlag: episode.title)
+        context.year = base.year
+        context.officialPage = base.officialPage
+        context.posterHeaders = base.posterHeaders
+        return context
+    }
+    /// Coalesces slider changes into one disk write after the drag settles.
+    private func persistStyle() {
+        stylePersistTask?.cancel()
+        let opacity = self.opacity
+        let fontSize = self.fontSize
+        stylePersistTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            UserDefaults.standard.set(opacity, forKey: DanmakuStyle.opacityKey)
+            UserDefaults.standard.set(fontSize, forKey: DanmakuStyle.fontSizeKey)
+            self?.stylePersistTask = nil
+        }
     }
 }
 
@@ -263,8 +305,10 @@ struct CatalogDanmakuSettingsView: View {
         }
         .onDisappear { work?.cancel() }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.xml, .json]) { result in
-            do { try model.importFile(result.get()); dismiss() }
-            catch { self.error = error.localizedDescription }
+            Task { @MainActor in
+                do { try await model.importFile(result.get()); dismiss() }
+                catch { self.error = error.localizedDescription }
+            }
         }
     }
 

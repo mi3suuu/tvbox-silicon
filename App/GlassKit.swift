@@ -101,6 +101,18 @@ extension View {
     @ViewBuilder func minimizesTabBarOnScroll() -> some View {
         if #available(iOS 26, *) { tabBarMinimizeBehavior(.onScrollDown) } else { self }
     }
+
+    /// Hides or shows a bar managed by SwiftUI. `.toolbarVisibility(_:for:)` (iOS 18+) is the
+    /// reliable form; the older `.toolbar(_, for:)` is deprecated on iOS 27, where it silently
+    /// stops hiding the floating Liquid Glass tab bar — leaving the capsule over a full-screen
+    /// video. Before iOS 18 the old form is all there is.
+    @ViewBuilder func setBarVisibility(_ visibility: Visibility, for placement: ToolbarPlacement) -> some View {
+        if #available(iOS 18, *) {
+            toolbarVisibility(visibility, for: placement)
+        } else {
+            toolbar(visibility, for: placement)
+        }
+    }
     #endif
 
     // iOS 17 and tvOS 17 stand-ins for iOS 18 and tvOS 18 APIs. macOS 15 always takes the first branch.
@@ -115,6 +127,27 @@ extension View {
             self
             #else
             simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in action() })
+            #endif
+        }
+    }
+
+    /// Tells the poster loader whether this scroll view is moving, so decoding is capped while the
+    /// finger is down. Pairs with `ImageLoadGate`: the phase is the input, the gate is the policy.
+    @ViewBuilder func reportsScrollingToPosterLoader() -> some View {
+        if #available(iOS 18, tvOS 18, *) {
+            onScrollPhaseChange { _, phase in
+                Task { await PosterLoader.shared.setScrolling(phase != .idle) }
+            }
+        } else {
+            #if os(tvOS)
+            self
+            #else
+            simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { _ in Task { await PosterLoader.shared.setScrolling(true) } }
+                    .onEnded { _ in Task { await PosterLoader.shared.setScrolling(false) } }
+            )
+            .onDisappear { Task { await PosterLoader.shared.setScrolling(false) } }
             #endif
         }
     }
@@ -165,69 +198,22 @@ extension Color {
     }
 }
 
-// Content-first surfaces: neutral backgrounds, quiet controls, and strong selection contrast.
-
-/// The icon's navy canvases with neutral controls: the active state is light on dark (dark on light),
-/// never a hue, so it reads the same on Liquid Glass.
-enum Brand {
-    /// Selection, prominent actions and progress. A fixed grey rather than `.primary`: as a tint,
-    /// `.primary` turned prominent buttons white-on-white. On Apple TV no button is filled with it,
-    /// so it never sits beside the white focus.
-    static let accent = Color(light: Color(white: 0.12), dark: Color(white: 0.92))
-    /// Label colour on an accent fill.
-    static let onAccent = Color(light: .white, dark: Color(white: 0.06))
-    /// The icon's cyan, for decoration only (icon tiles, charts, artwork placeholders), not for state.
-    static let cyan = Color(red: 0.30, green: 0.78, blue: 1.0)
-    static let indigo = Color(red: 0.42, green: 0.50, blue: 1.0)
-    static let teal = Color(red: 0.20, green: 0.84, blue: 0.80)
-    static let amber = Color(red: 1.0, green: 0.76, blue: 0.30)
-    static let rose = Color(red: 0.95, green: 0.38, blue: 0.42)
-    /// Yingxia's own credit. Third-party notices keep their authors' copyright lines unchanged.
-    static let copyright = "© 2026 getmegaportal.com"
-    static let website = URL(string: "https://www.getmegaportal.com")!
-}
-
-enum Layout {
-    #if os(tvOS)
-    static let gutter: CGFloat = 64, posterMin: CGFloat = 240, cardMin: CGFloat = 480, tileMin: CGFloat = 340
-    static let heroTitle: CGFloat = 68, detailPoster: CGFloat = 300, episodeMin: CGFloat = 200
-    #elseif os(macOS)
-    static let gutter: CGFloat = 24, posterMin: CGFloat = 174, cardMin: CGFloat = 280, tileMin: CGFloat = 220
-    static let heroTitle: CGFloat = 48, detailPoster: CGFloat = 210, episodeMin: CGFloat = 120
-    #else
-    static let gutter: CGFloat = 16, posterMin: CGFloat = 104, cardMin: CGFloat = 280, tileMin: CGFloat = 160
-    static let heroTitle: CGFloat = 34, detailPoster: CGFloat = 130, episodeMin: CGFloat = 90
-    #endif
-    /// Poster grid gaps: three columns on a phone need tighter spacing than a TV wall.
-    #if os(tvOS)
-    static let gridSpacing: CGFloat = 40, gridRowSpacing: CGFloat = 48
-    #elseif os(macOS)
-    static let gridSpacing: CGFloat = 18, gridRowSpacing: CGFloat = 22
-    #else
-    static let gridSpacing: CGFloat = 10, gridRowSpacing: CGFloat = 18
-    #endif
-    /// Space between a page's sections, between a section header and its content, and between cards.
-    /// The TV needs room for the focus lift, so a focused card never touches its neighbours.
-    #if os(tvOS)
-    static let sectionSpacing: CGFloat = 72, headerSpacing: CGFloat = 24, cardSpacing: CGFloat = 40
-    #elseif os(macOS)
-    static let sectionSpacing: CGFloat = 40, headerSpacing: CGFloat = 14, cardSpacing: CGFloat = 16
-    #else
-    static let sectionSpacing: CGFloat = 32, headerSpacing: CGFloat = 12, cardSpacing: CGFloat = 12
-    #endif
-    static var cardColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: cardMin), spacing: cardSpacing)]
+// MARK: - Settings page shell
+//
+// The settings sub-pages (AI translation, environments, artwork language …) are
+// built on SwiftUI's `Form`, which is the right control for a list of labelled
+// switches and fields. The problem was that a bare `Form` brings its own
+// background and its own type ramp, so walking from a hand-drawn page like
+// Cloud Files into one of these felt like leaving the app. This modifier keeps
+// the control and gives it the house background, so only the layout differs.
+extension View {
+    func settingsPage() -> some View {
+        self
+            #if !os(tvOS)
+            .scrollContentBackground(.hidden)
+            #endif
+            .background(Brand.pageBackground)
     }
-    static var posterColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: posterMin), spacing: gridSpacing, alignment: .top)]
-    }
-    #if os(tvOS)
-    static let maxWidth: CGFloat = 1800
-    static let settingsWidth: CGFloat = 1200
-    #else
-    static let maxWidth: CGFloat = 1240
-    static let settingsWidth: CGFloat = 760
-    #endif
 }
 
 /// Shared opaque surfaces keep content and controls legible in both appearances.
@@ -522,54 +508,6 @@ struct LiftButtonStyle: ButtonStyle {
     }
 }
 
-struct IconTile: View {
-    let symbol: String
-    var tint: Color = Brand.cyan
-    var size: CGFloat = 44
-    var body: some View {
-        #if os(tvOS)
-        let size = max(size, 56)
-        #endif
-        Image(systemName: symbol)
-            .font(.system(size: size * 0.42, weight: .semibold))
-            .foregroundStyle(tint)
-            .frame(width: size, height: size)
-            .background(tint.opacity(0.16), in: RoundedRectangle(cornerRadius: size * 0.26, style: .continuous))
-    }
-}
-
-struct Pill: View {
-    let text: String
-    var symbol: String?
-    var tint: Color = .secondary
-    var body: some View {
-        HStack(spacing: 5) {
-            if let symbol { Image(systemName: symbol) }
-            Text(text).lineLimit(1)
-        }
-        .font(.caption.weight(.semibold)).foregroundStyle(tint)
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .glassSurface(.regular.tint(tint.opacity(0.15)), in: Capsule())
-    }
-}
-
-/// Multi-line notices are separate from short metadata badges.
-struct StatusNotice: View {
-    let text: String
-    var symbol: String = "exclamationmark.triangle.fill"
-    var tint: Color = Brand.amber
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(tint)
-            Text(text).foregroundStyle(.primary).fixedSize(horizontal: false, vertical: true)
-        }
-        .font(.subheadline)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .glassSurface(.regular.tint(tint.opacity(0.12)), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
 #if !os(tvOS)
 private struct FilterChipStyle: ButtonStyle {
     let selected: Bool
@@ -688,92 +626,6 @@ struct Chip: View {
     }
 }
 
-/// A page with nothing in it yet: a symbol, what the page is for, and one way forward. The button is
-/// also the remote's focus target; a tvOS page with nothing to focus strands it.
-struct EmptyPage<Footer: View>: View {
-    let symbol: String
-    let title: String
-    let message: String
-    let action: String
-    let actionSymbol: String
-    let perform: () -> Void
-    @ViewBuilder var footer: Footer
-    #if os(tvOS)
-    private let icon: CGFloat = 132, titleSize: CGFloat = 46, text: CGFloat = 28, spacing: CGFloat = 30, width: CGFloat = 960
-    #else
-    private let icon: CGFloat = 84, titleSize: CGFloat = 24, text: CGFloat = 15, spacing: CGFloat = 18, width: CGFloat = 420
-    #endif
-    var body: some View {
-        VStack(spacing: spacing) {
-            Image(systemName: symbol)
-                .font(.system(size: icon * 0.42, weight: .bold))
-                .foregroundStyle(Brand.accent)
-                .frame(width: icon, height: icon)
-                .background(Brand.accent.opacity(0.14), in: Circle())
-                .accessibilityHidden(true)
-            VStack(spacing: spacing * 0.4) {
-                Text(title).font(.system(size: titleSize, weight: .bold))
-                // No vertical fixedSize: on the Mac it made the page's minimum height that of the
-                // message wrapped at zero width, which stretched the split view past the window.
-                Text(message)
-                    .font(.system(size: text)).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: width)
-            Button(action: perform) { Label(action, systemImage: actionSymbol).padding(.horizontal, 8) }
-                .controlButton(prominent: true).controlSize(.large)
-            footer.font(.system(size: text * 0.8)).monospacedDigit().foregroundStyle(.tertiary)
-        }
-        .padding(Layout.gutter)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-extension EmptyPage where Footer == EmptyView {
-    init(symbol: String, title: String, message: String, action: String, actionSymbol: String, perform: @escaping () -> Void) {
-        self.init(symbol: symbol, title: title, message: message, action: action, actionSymbol: actionSymbol, perform: perform) { EmptyView() }
-    }
-}
-
-/// Nothing to list under a page's header or filters, centred in the width below them and sized for the screen,
-/// with an optional way out. A bare ContentUnavailableView hugged the leading edge of leading stacks, and on
-/// tvOS left the remote nothing to focus under the filters.
-struct EmptyResults: View {
-    let symbol: String
-    let title: String
-    var message: String?
-    var action: String?
-    var actionSymbol = "arrow.clockwise"
-    var perform: (() -> Void)?
-    #if os(tvOS)
-    private let icon: CGFloat = 60, titleSize: CGFloat = 38, text: CGFloat = 26, spacing: CGFloat = 22, width: CGFloat = 900, inset: CGFloat = 60
-    #else
-    private let icon: CGFloat = 36, titleSize: CGFloat = 20, text: CGFloat = 15, spacing: CGFloat = 12, width: CGFloat = 420, inset: CGFloat = 48
-    #endif
-    var body: some View {
-        VStack(spacing: spacing) {
-            Image(systemName: symbol).font(.system(size: icon, weight: .light)).foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(spacing: spacing * 0.4) {
-                Text(title).font(.system(size: titleSize, weight: .semibold))
-                if let message {
-                    Text(message).font(.system(size: text)).foregroundStyle(.secondary)
-                }
-            }
-            .multilineTextAlignment(.center).frame(maxWidth: width)
-            if let action, let perform {
-                Button(action: perform) { Label(action, systemImage: actionSymbol).padding(.horizontal, 8) }
-                    .controlButton().padding(.top, spacing * 0.4)
-            }
-        }
-        .padding(.vertical, inset).padding(.horizontal, Layout.gutter)
-        .frame(maxWidth: .infinity)
-        // Down from filters at the leading edge reaches the centred button.
-        .tvFocusSection()
-        .accessibilityElement(children: .contain)
-    }
-}
-
 /// Two-line card title that always takes two lines of height (so cards in a grid row match)
 /// but centres a one-line title instead of leaving a gap under it.
 struct CardTitle: View {
@@ -873,6 +725,10 @@ private final class PosterBitmap: @unchecked Sendable {
 
 private actor PosterLoader {
     static let shared = PosterLoader()
+    /// Caps how many posters decode at once while a grid is moving. Scrolling competes with
+    /// decoding for the same cores, so a fast fling that asks for twenty posters is slower than one
+    /// that asks for two — the gate turns that into a policy instead of a hope.
+    private let gate = ImageLoadGate()
     private let cache = NSCache<NSString, PosterBitmap>()
     private var pending: [PosterResource: Task<PosterBitmap, Error>] = [:]
     private var revision = MediaCache.shared.revision
@@ -884,6 +740,10 @@ private actor PosterLoader {
         let key = resource.cacheKey as NSString
         if let image = cache.object(forKey: key) { return image }
         if let task = pending[resource] { return try await task.value }
+        // No slot means the queue is full while scrolling: this poster is off screen by the time a
+        // slot frees, so skip it rather than piling work behind the finger. It will be asked for
+        // again if it scrolls back.
+        guard await gate.begin() else { throw CancellationError() }
         let task = Task {
             let disk = MediaCache.shared
             let ticket = disk.ticket()
@@ -912,10 +772,14 @@ private actor PosterLoader {
         do {
             let bitmap = try await task.value
             pending[resource] = nil
+            await gate.finish()
             if current == MediaCache.shared.revision { cache.setObject(bitmap, forKey: key, cost: bitmap.image.bytesPerRow * bitmap.image.height) }
             return bitmap
-        } catch { pending[resource] = nil; throw error }
+        } catch { pending[resource] = nil; await gate.finish(); throw error }
     }
+
+    /// Told by a grid as it starts and stops moving.
+    func setScrolling(_ scrolling: Bool) { gate.setScrolling(scrolling) }
 }
 
 struct PosterImage: View {
@@ -959,7 +823,7 @@ struct PosterImage: View {
         }
     }
 
-    static let placeholder: CGImage = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { context in
+    private static let placeholder: CGImage = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { context in
         UIColor(white: 0.2, alpha: 1).setFill(); context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
     }.cgImage!
 
@@ -979,7 +843,7 @@ struct PosterImage: View {
     }
 
     /// The middle of the image at the frame's shape, as a fill would show it.
-    static func cover(_ image: CGImage?, _ size: CGSize) -> CGImage {
+    private static func cover(_ image: CGImage?, _ size: CGSize) -> CGImage {
         guard let image else { return placeholder }
         guard size.width > 0, size.height > 0 else { return image }
         let width = CGFloat(image.width), height = CGFloat(image.height), shape = size.width / size.height
@@ -1046,86 +910,6 @@ extension View {
 
 // MARK: Skeleton loading
 
-struct Shimmer: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var phase: CGFloat = 0
-    func body(content: Content) -> some View {
-        content.overlay {
-            if !reduceMotion {
-                GeometryReader { proxy in
-                    LinearGradient(colors: [.clear, .white.opacity(0.20), .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: proxy.size.width * 0.6)
-                        .offset(x: -proxy.size.width * 0.6 + phase * proxy.size.width * 1.6)
-                        // Scoped to the band. `withAnimation` in `onAppear` gave the endless animation to everything
-                        // else that moved in that update: on iPadOS 18 the whole Watch Now page, laid out while
-                        // its placeholders shimmered, kept sliding up and jumping back every 1.35 s (#512).
-                        .animation(.linear(duration: 1.35).repeatForever(autoreverses: false), value: phase)
-                }
-                .allowsHitTesting(false)
-            }
-        }
-        .onAppear { phase = 1 }
-    }
-}
-
-struct SkeletonBlock: View {
-    var cornerRadius: CGFloat = 12
-    var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(Color.primary.opacity(0.09))
-            .modifier(Shimmer())
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-    }
-}
-
-struct PosterSkeletonGrid: View {
-    var count = 12
-    var body: some View {
-        LazyVGrid(columns: Layout.posterColumns, spacing: Layout.gridRowSpacing) {
-            ForEach(0..<count, id: \.self) { _ in
-                VStack(alignment: .leading, spacing: 10) {
-                    Color.clear.aspectRatio(2.0 / 3.0, contentMode: .fit).overlay { SkeletonBlock(cornerRadius: 20) }
-                    SkeletonBlock(cornerRadius: 6).frame(height: 14)
-                    SkeletonBlock(cornerRadius: 6).frame(width: 70, height: 12)
-                }
-            }
-        }
-        .accessibilityElement(children: .ignore).accessibilityLabel(L10n.text("Loading…"))
-    }
-}
-
-struct ChannelSkeletonGrid: View {
-    var count = 12
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: Layout.cardMin), spacing: 12)], spacing: 12) {
-            ForEach(0..<count, id: \.self) { _ in
-                HStack(spacing: 14) {
-                    SkeletonBlock(cornerRadius: 14).frame(width: 50, height: 50)
-                    VStack(alignment: .leading, spacing: 8) {
-                        SkeletonBlock(cornerRadius: 6).frame(maxWidth: 170).frame(height: 14)
-                        SkeletonBlock(cornerRadius: 6).frame(width: 90, height: 10)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(12).contentPanel()
-            }
-        }
-        .accessibilityElement(children: .ignore).accessibilityLabel(L10n.text("Loading channels…"))
-    }
-}
-
-struct ChipSkeletonRow: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach([64, 88, 72, 100, 76, 84], id: \.self) { width in
-                SkeletonBlock(cornerRadius: 18).frame(width: CGFloat(width), height: 36)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 4).accessibilityHidden(true)
-    }
-}
-
 extension View {
     /// While a page is still loading it may have no focusable control. tvOS then sends
     /// the Menu/Back press to the system, which leaves the app instead of going back.
@@ -1156,223 +940,6 @@ private struct LoadingFocus: ViewModifier {
     }
 }
 #endif
-
-struct DetailSkeleton: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            VStack(alignment: .leading, spacing: 10) {
-                SkeletonBlock(cornerRadius: 6).frame(height: 14)
-                SkeletonBlock(cornerRadius: 6).frame(height: 14)
-                SkeletonBlock(cornerRadius: 6).frame(maxWidth: 260).frame(height: 14)
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                SkeletonBlock(cornerRadius: 6).frame(width: 110, height: 18)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: Layout.episodeMin), spacing: 10)], spacing: 10) {
-                    ForEach(0..<10, id: \.self) { _ in SkeletonBlock(cornerRadius: 20).frame(height: 40) }
-                }
-            }
-        }
-        .accessibilityElement(children: .ignore).accessibilityLabel(L10n.text("Loading details…"))
-    }
-}
-
-/// What a loading card shows. `reason` explains a slow load and appears after `LoadingCard.patience`.
-struct LoadingProgress {
-    var title: String
-    var detail: String? = nil
-    var fraction: Double? = nil
-    var reason: String? = nil
-    /// The last steps taken, newest last; the card shows the latest two under the detail.
-    var steps: [String] = []
-}
-
-extension LoadingProgress {
-    /// A source request: the plugin's live stage and the server it waits on, or the site's server.
-    static func source(_ site: Site, origin: URL, title: String) -> LoadingProgress {
-        if site.runtime == .jar {
-            guard let state = PluginPreparation.snapshot(site: site, origin: origin) else { return LoadingProgress(title: title) }
-            return LoadingProgress(title: state.stage == .loading ? title : state.stage.title,
-                                   detail: state.detail, fraction: state.fraction, reason: state.reason)
-        }
-        return server(URL(string: site.api)?.host(), title: title)
-    }
-
-    /// A plain request to one server.
-    static func server(_ host: String?, title: String) -> LoadingProgress {
-        guard let host, !host.isEmpty else { return LoadingProgress(title: title) }
-        return LoadingProgress(title: title, detail: L10n.text("Waiting for %@", host),
-                               reason: L10n.text("%@ is responding slowly. The server may be busy or far away; you can keep waiting or try another source.", host))
-    }
-}
-
-/// Time since this view appeared, for inline waits too small for a `LoadingCard`.
-struct ElapsedTime: View {
-    @State private var started = Date()
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            Text(Duration.seconds(max(0, Int(timeline.date.timeIntervalSince(started)))).formatted(.time(pattern: .minuteSecond)))
-                .monospacedDigit().foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// Every wait starts as a spinner; after `quiet` seconds the card takes its place with what it waits on and how
-/// long it has run, and past `patience` seconds why it is still loading. A card across the page column, like the
-/// rows around it, re-polled twice a second.
-struct LoadingCard: View {
-    static let quiet: TimeInterval = 1.5
-    static let patience: TimeInterval = 10
-    /// The width of a compact card, for one over a video or alone in an empty page.
-    static let compact: CGFloat = 620
-    /// Hides the card for waits shorter than this, such as the brief stall after every seek.
-    var appearAfter: TimeInterval = 0
-    var maxWidth: CGFloat = .infinity
-    let progress: () -> LoadingProgress
-    @State private var started = Date()
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
-            let elapsed = max(0, timeline.date.timeIntervalSince(started))
-            let speaks = elapsed >= appearAfter + Self.quiet
-            Group {
-                if speaks {
-                    card(progress(), elapsed: Int(elapsed)).transition(.opacity)
-                } else if elapsed >= appearAfter {
-                    ProgressView().frame(maxWidth: maxWidth).padding(.vertical, 14).transition(.opacity)
-                }
-            }
-            .animation(.smooth(duration: 0.3), value: speaks)
-        }
-    }
-
-    private func card(_ state: LoadingProgress, elapsed: Int) -> some View {
-        let explains = Double(elapsed) >= Self.patience && state.reason != nil
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 14) {
-                ProgressView().controlSize(.small)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(state.title).font(.callout.weight(.semibold)).lineLimit(1)
-                    if let detail = state.detail {
-                        Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    }
-                    ForEach(Array(state.steps.suffix(2).enumerated()), id: \.offset) { _, step in
-                        Text(step).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 16)
-                Text(Duration.seconds(elapsed).formatted(.time(pattern: .minuteSecond)))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            }
-            if let fraction = state.fraction {
-                ProgressView(value: fraction).progressViewStyle(.linear).tint(Brand.accent)
-            }
-            if explains, let reason = state.reason {
-                Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(.horizontal, 18).padding(.vertical, 14)
-        .frame(maxWidth: maxWidth, alignment: .leading)
-        .glassSurface(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .accessibilityElement(children: .combine)
-        .animation(.smooth(duration: 0.25), value: state.title)
-        .animation(.smooth(duration: 0.25), value: explains)
-    }
-}
-
-/// Keeps recovery actions prominent while preserving diagnostics on demand.
-struct ErrorStateCard: View {
-    let title: String
-    let message: String
-    let details: String
-    var retry: (() -> Void)?
-    var goBack: (() -> Void)?
-    var busy = false
-    var backTitle = L10n.text("Back to sources")
-    @State private var showsDetails = false
-
-    var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "rectangle.slash")
-                .font(.system(size: 30, weight: .light))
-                .foregroundStyle(Brand.accent)
-                .frame(width: 76, height: 76)
-                .background(Brand.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 25))
-                .overlay { RoundedRectangle(cornerRadius: 25).strokeBorder(Brand.accent.opacity(0.18)) }
-                .accessibilityHidden(true)
-            VStack(spacing: 10) {
-                Text(title).font(.title2.weight(.semibold)).foregroundStyle(.primary)
-                Text(message).font(.body).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .multilineTextAlignment(.center)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { actions }
-                VStack(spacing: 12) { actions }
-            }
-            .controlSize(.large)
-            VStack(spacing: 14) {
-                Divider().overlay(Color.primary.opacity(0.04))
-                Button {
-                    showsDetails.toggle()
-                } label: {
-                    HStack(spacing: 6) {
-                        Text(L10n.text(showsDetails ? "Hide details" : "Show details"))
-                        Image(systemName: showsDetails ? "chevron.up" : "chevron.down").font(.caption2.weight(.semibold))
-                    }
-                    .font(.callout).foregroundStyle(.secondary)
-                    .padding(.vertical, 6).contentShape(Rectangle())
-                }
-                #if os(tvOS)
-                .controlButton()
-                #else
-                .buttonStyle(.plain)
-                #endif
-                if showsDetails {
-                    ScrollView {
-                        Text(details).font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true).selectable().padding(14)
-                    }
-                    .frame(height: detailsHeight)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
-                }
-            }
-        }
-        .padding(28)
-        .frame(maxWidth: recoveryWidth)
-        .contentPanel(cornerRadius: 28)
-        .frame(maxWidth: .infinity)
-        .onChange(of: details) { showsDetails = false }
-    }
-
-    private var recoveryWidth: CGFloat {
-        #if os(tvOS)
-        900
-        #else
-        560
-        #endif
-    }
-    private var detailsHeight: CGFloat {
-        #if os(tvOS)
-        240
-        #else
-        180
-        #endif
-    }
-
-    @ViewBuilder private var actions: some View {
-        if let retry {
-            Button(action: retry) {
-                Label(L10n.text("Retry"), systemImage: "arrow.clockwise").padding(.horizontal, 12)
-            }
-            .controlButton(prominent: true).tint(Brand.accent).disabled(busy)
-        }
-        if let goBack {
-            Button(action: goBack) { Text(backTitle).padding(.horizontal, 8) }
-                .controlButton().tint(.secondary)
-        }
-    }
-}
 
 #if os(tvOS)
 enum TVStyle {

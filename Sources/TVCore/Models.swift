@@ -323,3 +323,18 @@ public struct Channel: Identifiable, Codable, Hashable, Sendable {
     }
     private enum CodingKeys: String, CodingKey { case name, group, url, logo, headers, skipScope, historyContext, resumePosition }
 }
+
+// MARK: - 二开扩展（映匣融合层）
+//
+// 以下是二开新增、上游没有的实现。为了不侵入上游逻辑，一律以 extension 追加在文件末尾；
+// 上游若日后新增同名成员，此段会编译报错（redeclaration），届时删掉这里改用上游实现即可。
+
+extension Subscription {
+    /// The same subscription with a different set of source entries, everything else (its live
+    /// playlists, its raw document, when it was imported) unchanged. Per-source routing rewrites a
+    /// subscription this way: the viewer's choices live in `Site.api`, so the merged list has to be
+    /// rebuilt from the rewritten sites rather than mutated field by field.
+    public func with(sites: [Site]) -> Subscription {
+        Subscription(origin: origin, importedAt: importedAt, sites: sites, lives: lives, raw: raw)
+    }
+}
