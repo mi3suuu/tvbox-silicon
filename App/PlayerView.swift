@@ -29,6 +29,10 @@ struct PlaybackView: View {
     @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
     #if os(tvOS)
     @AppStorage(PlaybackInfo.key) private var showsPlaybackInfo = false
+    // [mi3s] 二开融合（上游 1.8.11）：tvOS 播放倍速与「铺满屏幕」两个播放器内选项。
+    // 上游把两者做成 NativePlayerView 的 transport bar 菜单项，状态留在这里。
+    @State private var playbackSpeed: Float = 1
+    @State private var fillsScreen = false
     #endif
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -83,7 +87,11 @@ struct PlaybackView: View {
                                  live: session.isLive, previous: episodeAction(store.step(back: true, from: channel, session: session)),
                                  next: episodeAction(store.step(back: false, from: channel, session: session)), waiting: waitContent,
                                  enhancer: session.enhancer, upscale: $upscalesVideo, smooth: $smoothsVideo, info: $showsPlaybackInfo,
+                                 // [mi3s] 二开融合（上游 1.8.11）：Playback Speed / Fill Screen / Danmaku Area。
+                                 speed: playbackSpeed, setSpeed: { playbackSpeed = $0; session.setSpeed($0) },
+                                 fills: $fillsScreen, danmakuArea: $danmakuArea,
                                  exitWhileWaiting: session.showsPicture ? nil : { dismiss() }).ignoresSafeArea()
+                    .onAppear { playbackSpeed = session.player.defaultRate }
             }
             // Until the picture starts, AVKit's player keeps the Back press to itself, so a stream that never
             // loads (a dead live channel) left no way out but quitting the app. This takes focus and closes instead.
@@ -934,6 +942,17 @@ private struct NativePlayerView: UIViewControllerRepresentable {
     var upscale: Binding<Bool> = .constant(false)
     var smooth: Binding<Bool> = .constant(false)
     var info: Binding<Bool> = .constant(false)
+    // [mi3s] 二开融合（上游 1.8.11）：播放倍速、铺满屏幕、弹幕区域。
+    /// The speed picked in the Playback Speed menu, which `setSpeed` makes the player's default rate.
+    var speed: Float = 1
+    var setSpeed: @MainActor (Float) -> Void = { _ in }
+    /// Fill Screen: the picture is cropped to the whole screen rather than fitted inside it, as on iPhone.
+    var fills: Binding<Bool> = .constant(false)
+    var danmakuArea: Binding<DanmakuArea> = .constant(.standard)
+    private static let speeds: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
+    private static func speedLabel(_ speed: Float) -> String {
+        Double(speed).formatted(.number.precision(.fractionLength(0...2))) + "×"
+    }
     /// Closes the player on Back until the picture starts. The overlay that takes focus for that loses it
     /// once the transport bar shows (an episode button takes it), and AVKit then keeps the press to itself.
     var exitWhileWaiting: (() -> Void)? = nil
@@ -979,6 +998,9 @@ private struct NativePlayerView: UIViewControllerRepresentable {
         if controller.player !== player { controller.player = player }
         // Live has no timeline worth scrubbing: keep it at the live edge.
         if controller.requiresLinearPlayback != live { controller.requiresLinearPlayback = live }
+        // [mi3s] 二开融合（上游 1.8.11）：Fill Screen 切换画面填充方式（裁切 vs 等比）。
+        let gravity: AVLayerVideoGravity = fills.wrappedValue ? .resizeAspectFill : .resizeAspect
+        if controller.videoGravity != gravity { controller.videoGravity = gravity }
         context.coordinator.host?.rootView = overlay
         context.coordinator.exit = exitWhileWaiting
         context.coordinator.back.isEnabled = exitWhileWaiting != nil
@@ -996,8 +1018,15 @@ private struct NativePlayerView: UIViewControllerRepresentable {
         let binding = $showsDanmaku
         var items: [UIMenuElement] = []
         if !comments.isEmpty {
-            items.append(UIAction(title: L10n.text("Danmaku"), image: UIImage(systemName: showsDanmaku ? "text.bubble.fill" : "text.bubble"),
-                                  state: showsDanmaku ? .on : .off) { _ in binding.wrappedValue.toggle() })
+            // [mi3s] 二开融合（上游 1.8.11）：弹幕开关升为二级菜单，并入「弹幕区域」。
+            let area = danmakuArea
+            let areas = DanmakuArea.allCases.map { option in
+                UIAction(title: option.title, state: area.wrappedValue == option ? .on : .off) { _ in area.wrappedValue = option }
+            }
+            items.append(UIMenu(title: L10n.text("Danmaku"), image: UIImage(systemName: showsDanmaku ? "text.bubble.fill" : "text.bubble"), children: [
+                UIAction(title: L10n.text("Show Danmaku"), state: showsDanmaku ? .on : .off) { _ in binding.wrappedValue.toggle() },
+                UIMenu(title: L10n.text("Danmaku Area"), image: UIImage(systemName: "rectangle.tophalf.inset.filled"), children: areas),
+            ]))
         }
         if qualities.count > 1 {
             let choose = choose
@@ -1011,6 +1040,12 @@ private struct NativePlayerView: UIViewControllerRepresentable {
             let options = audio.map { option in UIAction(title: option.name, state: option.id == audioChoice ? .on : .off) { _ in chooseAudio(option.id) } }
             items.append(UIMenu(title: L10n.text("Audio"), image: UIImage(systemName: "speaker.wave.2"), children: options))
         }
+        // [mi3s] 二开融合（上游 1.8.11）：直播没有倍速的意义，只在点播上给。
+        if !live {
+            let setSpeed = setSpeed, speed = speed
+            let options = Self.speeds.map { rate in UIAction(title: Self.speedLabel(rate), state: rate == speed ? .on : .off) { _ in setSpeed(rate) } }
+            items.append(UIMenu(title: L10n.text("Playback Speed") + " · " + Self.speedLabel(speed), image: UIImage(systemName: "gauge.with.dots.needle.67percent"), children: options))
+        }
         if let previous {
             items.insert(UIAction(title: L10n.text("Previous Episode"), subtitle: previous.name, image: UIImage(systemName: "backward.end.fill"),
                                   attributes: previous.busy ? [.disabled] : []) { _ in previous.play() }, at: 0)
@@ -1019,16 +1054,21 @@ private struct NativePlayerView: UIViewControllerRepresentable {
             items.insert(UIAction(title: L10n.text("Next Episode"), subtitle: next.name, image: UIImage(systemName: "forward.end.fill"),
                                   attributes: next.busy ? [.disabled] : []) { _ in next.play() }, at: previous == nil ? 0 : 1)
         }
-        if VideoEnhancement.canUpscale || VideoEnhancement.canSmooth {
-            let upscale = upscale, smooth = smooth
-            var options: [UIMenuElement] = []
+        // [mi3s] 二开融合（上游 1.8.11）：Picture 菜单升级——加入 Fill Screen，且无增强能力时也保留该菜单。
+        do {
+            let upscale = upscale, smooth = smooth, fills = fills
+            var options: [UIMenuElement] = [
+                UIAction(title: L10n.text("Fill Screen"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"),
+                         state: fills.wrappedValue ? .on : .off) { _ in fills.wrappedValue.toggle() },
+            ]
             if VideoEnhancement.canUpscale {
                 options.append(UIAction(title: L10n.text("Sharper Picture"), state: upscale.wrappedValue ? .on : .off) { _ in upscale.wrappedValue.toggle() })
             }
             if VideoEnhancement.canSmooth {
                 options.append(UIAction(title: L10n.text("Smooth Motion (60 fps)"), state: smooth.wrappedValue ? .on : .off) { _ in smooth.wrappedValue.toggle() })
             }
-            items.append(UIMenu(title: L10n.text("Picture"), image: UIImage(systemName: "wand.and.sparkles"), children: options))
+            let enhances = VideoEnhancement.canUpscale || VideoEnhancement.canSmooth
+            items.append(UIMenu(title: L10n.text("Picture"), image: UIImage(systemName: enhances ? "wand.and.sparkles" : "aspectratio"), children: options))
         }
         let info = info
         items.append(UIAction(title: L10n.text("Show Video Info"), image: UIImage(systemName: "info.circle"),
@@ -1278,6 +1318,14 @@ private struct DesktopPlaybackView: View {
                         barButton("forward.end.fill", L10n.text("Next Episode"), help: next.name) { next.go() }
                             .disabled(next.busy)
                     }
+                    // [mi3s] 二开融合（上游 1.8.11，#524）：选集按钮上移到 transport bar，不再埋在 ⋯ › Episodes。
+                    PlayerEpisodesButton(channel: channel, isPresented: $showsEpisodes) {
+                        Image(systemName: PlayerEpisodesSheet.symbol).font(.system(size: 14, weight: .medium))
+                            .frame(width: 34, height: 34)
+                            .glassSurface(.regular.interactive(), in: Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
                     if !tvBrowser.receivers.isEmpty {
                         PlayOnButton(channel: channel, session: session, browser: tvBrowser) { receiver in
                             session.player.pause()
