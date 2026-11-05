@@ -843,7 +843,8 @@ struct PosterImage: View {
     }
 
     /// The middle of the image at the frame's shape, as a fill would show it.
-    private static func cover(_ image: CGImage?, _ size: CGSize) -> CGImage {
+    /// [mi3s] 二开融合（I-07）：由 `private` 提为 internal，供上游 1.8.11 的 `MangaCover`（tvOS 分支）复用同一裁剪实现。
+    static func cover(_ image: CGImage?, _ size: CGSize) -> CGImage {
         guard let image else { return placeholder }
         guard size.width > 0, size.height > 0 else { return image }
         let width = CGFloat(image.width), height = CGFloat(image.height), shape = size.width / size.height

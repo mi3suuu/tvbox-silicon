@@ -87,6 +87,7 @@ struct CatalogPlaybackActions: View {
 }
 #endif
 
+#if !os(tvOS)
 // MARK: - [mi3s] 二开融合：上游 playerSheet 保留
 //
 // 上游 1.8.11 在 CatalogPlaybackActions.swift 里定义了 `View.playerSheet()`（播放器上的设置 sheet 用深色，
@@ -106,3 +107,4 @@ extension View {
         #endif
     }
 }
+#endif
