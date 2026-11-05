@@ -388,7 +388,7 @@ public struct MusicExtensionLX: MusicExtensionLXBridge {
     public init(library: LXSourceLibrary = .shared, runtime: LXSourceRuntime = .shared) { self.library = library; self.runtime = runtime }
 
     public func request(event: String, data: JSONValue, options: JSONValue) async throws -> JSONValue {
-        guard event == "musicUrl" else { throw TVError.unsupported(L10n.text("This extension asks an LX Music source for something Yingxia doesn't support.")) }
+        guard event == "musicUrl" else { throw TVError.unsupported(L10n.text("This extension asks an LX Music source for something Mi3s doesn't support.")) }
         let enabled = library.enabled
         guard !enabled.isEmpty else { throw TVError.unsupported(L10n.text("This extension plays songs through an LX Music source. Add one in Music Settings.")) }
         let key = options["source"]?.string ?? data[path: "musicInfo", "source"]?.string ?? ""

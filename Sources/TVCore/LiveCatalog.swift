@@ -230,8 +230,8 @@ extension LiveSource {
 
 /// HTTP for the live platforms' web APIs.
 enum LiveHTTP {
-    static let desktopAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    static let mobileAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    static let desktopAgent = Endpoints.liveDesktopUserAgent
+    static let mobileAgent = Endpoints.liveMobileUserAgent
 
     private final class Redirects: NSObject, URLSessionTaskDelegate {
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {

@@ -102,7 +102,7 @@ public struct HYWProvider: MusicStreamProvider {
     public let platforms: Set<MusicPlatform> = [.qq]
     let transport: MusicTransport
     let key: String
-    static let base = "https://103.79.184.97/api/music/url"
+    static let base = Endpoints.hywMusicBaseURL
     static let timeout: TimeInterval = 8
     public init(key: String, transport: MusicTransport = URLSessionMusicTransport()) {
         self.key = key.trimmingCharacters(in: .whitespacesAndNewlines); self.transport = transport

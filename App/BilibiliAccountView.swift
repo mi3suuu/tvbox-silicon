@@ -7,6 +7,7 @@ import TVCore
 struct BilibiliAccountView: View {
     @State private var account = BilibiliAccount.load()
     @State private var attempt = 0
+    @State private var confirmingSignOut = false
     #if os(iOS)
     @State private var signingIn = false
     #endif
@@ -17,7 +18,7 @@ struct BilibiliAccountView: View {
                 SettingsGroup(footer: L10n.text("Bilibili plays the qualities your account allows. Sign-in details stay on this device.")) {
                     SettingsRow(symbol: "person.crop.circle.fill", tint: .pink, title: account.name.isEmpty ? L10n.text("Signed In") : account.name,
                                 subtitle: L10n.text(account.vip ? "Premium member" : "Signed In")) {
-                        Button(L10n.text("Sign Out")) { BilibiliAccount.signOut(); account = BilibiliAccount(); attempt += 1 }.settingsButton()
+                        Button(L10n.text("Sign Out")) { confirmingSignOut = true }.settingsButton()
                     }
                 }
             } else {
@@ -35,6 +36,11 @@ struct BilibiliAccountView: View {
             }
         }
         .task(id: attempt) { await refresh() }
+        .confirmationDialog(L10n.text("Sign out of Bilibili?"), isPresented: $confirmingSignOut, titleVisibility: .visible) {
+            Button(L10n.text("Sign Out"), role: .destructive) { BilibiliAccount.signOut(); account = BilibiliAccount(); attempt += 1 }
+        } message: {
+            Text(L10n.text("You'll need to sign in again to play 1080P+ and access your account's PGC rights."))
+        }
         #if os(iOS)
         .sheet(isPresented: $signingIn) {
             WebSignInView(service: .bilibili, signedIn: { account = BilibiliAccount.load() }) {

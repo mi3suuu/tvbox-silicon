@@ -718,10 +718,10 @@ private struct DiscoverTVSearchCard: View {
                         HStack(spacing: 2) {
                             ForEach(0..<5) { index in
                                 Image(systemName: rating / 2 >= Double(index + 1) ? "star.fill" : rating / 2 > Double(index) ? "star.leadinghalf.filled" : "star")
-                                    .font(.system(size: 20)).foregroundStyle(rating / 2 > Double(index) ? Color.yellow : .white.opacity(0.4))
+                                    .font(.system(size: 20)).foregroundStyle(rating / 2 > Double(index) ? Brand.amber : .white.opacity(0.4))
                             }
                         }
-                        Text(rating, format: .number.precision(.fractionLength(1))).font(.system(size: 23)).foregroundStyle(.yellow)
+                        Text(rating, format: .number.precision(.fractionLength(1))).font(.system(size: 23)).foregroundStyle(Brand.amber)
                     }.accessibilityElement(children: .ignore)
                         .accessibilityLabel("TMDB \(rating.formatted(.number.precision(.fractionLength(1))))")
                 }

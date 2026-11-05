@@ -311,7 +311,7 @@ struct SaveCodeButton: View {
         guard let picture else { error = L10n.text("Couldn't get a sign-in code. Try again."); return }
         let access = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard access == .authorized || access == .limited else {
-            error = L10n.text("Allow Yingxia to add photos in Settings, then try again."); return
+            error = L10n.text("Allow Mi3s to add photos in Settings, then try again."); return
         }
         do {
             try await Self.addToPhotos(picture)

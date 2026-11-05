@@ -105,3 +105,83 @@ private func historyContext(video: String = "series", episode: String = "1", sou
     #expect(posted.keepingPoster(list).poster == own)
     #expect(bare.keepingPoster(nil).poster == nil)
 }
+
+// MARK: - 环境隔离
+
+@Test @MainActor func historyPartitionsByEnvironmentAndDefaultsToTheActiveOne() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "history-env-" + UUID().uuidString + ".json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let history = PlaybackHistory(file: file)
+    let first = UUID(), second = UUID()
+    history.defaultEnvironmentID = first
+    // 不传 environment 的记录（视频播放器走的就是这条路）应落在 active 环境，而不是 nil 全归默认。
+    history.activeEnvironmentID = first
+    history.record(historyContext(video: "A"), position: 10, duration: 100)
+    history.activeEnvironmentID = second
+    history.record(historyContext(video: "B"), position: 20, duration: 100)
+    // 第一个环境只看到 A，第二个只看到 B。
+    #expect(history.entries(in: first).map(\.context.videoID) == ["A"])
+    #expect(history.entries(in: second).map(\.context.videoID) == ["B"])
+    // 落盘后再读，环境跟着记录走。
+    let restored = PlaybackHistory(file: file)
+    restored.defaultEnvironmentID = first
+    #expect(restored.entries(in: first).map(\.context.videoID) == ["A"])
+    #expect(restored.entries(in: second).map(\.context.videoID) == ["B"])
+}
+
+@Test @MainActor func historyBeforeEnvironmentsBelongsToTheDefault() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "history-legacy-" + UUID().uuidString + ".json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let history = PlaybackHistory(file: file)
+    let defaultID = UUID()
+    // 升级前写的记录 environment == nil，必须归默认环境而不是凭空消失。
+    history.defaultEnvironmentID = defaultID
+    history.record(historyContext(video: "legacy"), position: 10, duration: 100, environment: nil)
+    #expect(history.entries(in: defaultID).map(\.context.videoID) == ["legacy"])
+    #expect(history.entries(in: UUID()).isEmpty)
+}
+
+@Test @MainActor func removingALegacyNilEntryDoesNotDeleteOtherEnvironments() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "history-remove-" + UUID().uuidString + ".json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let history = PlaybackHistory(file: file)
+    let defaultID = UUID(), other = UUID()
+    history.defaultEnvironmentID = defaultID
+    // 同一条视频：一条 legacy（nil，归默认环境），一条在 other 环境。
+    history.record(historyContext(video: "shared"), position: 10, duration: 100, environment: nil)
+    history.record(historyContext(video: "shared"), position: 20, duration: 100, environment: other)
+    // 删 legacy 那条（environment == nil）时，other 环境的记录必须保留。
+    let legacy = history.entries(in: defaultID).first!
+    history.remove(legacy.id, environment: legacy.environment)
+    #expect(history.entries(in: defaultID).isEmpty)
+    #expect(history.entries(in: other).map(\.context.videoID) == ["shared"])
+}
+
+@Test @MainActor func rewatchOfALegacyEntryInTheDefaultEnvironmentReplacesIt() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "history-rewatch-" + UUID().uuidString + ".json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let history = PlaybackHistory(file: file)
+    let defaultID = UUID()
+    history.defaultEnvironmentID = defaultID
+    history.activeEnvironmentID = defaultID
+    // 一条 legacy nil 记录，之后在默认环境重看同一条视频（environment 显式 = defaultID）。
+    history.record(historyContext(video: "show"), position: 10, duration: 100, environment: nil)
+    history.record(historyContext(video: "show"), position: 50, duration: 100, environment: defaultID)
+    // nil 与 defaultID 归一化后是同一条，去重后只留一条（新位置 50）。
+    let entries = history.entries(in: defaultID)
+    #expect(entries.count == 1)
+    #expect(entries.first?.position == 50)
+}
+
+@Test @MainActor func clearHistoryRemovesLegacyNilEntriesToo() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "history-clear-" + UUID().uuidString + ".json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let history = PlaybackHistory(file: file)
+    let defaultID = UUID()
+    history.defaultEnvironmentID = defaultID
+    history.record(historyContext(video: "legacy"), position: 10, duration: 100, environment: nil)
+    // Clear-history 的删除集合用当前环境的 visible 计算，其中含 legacy 记录；用归一化环境删除后应清空。
+    let visible = history.entries(in: defaultID)
+    history.remove(Set(visible.map(\.id)), environment: defaultID)
+    #expect(history.entries(in: defaultID).isEmpty)
+}

@@ -166,7 +166,7 @@ public final class LXSourceLibrary: @unchecked Sendable {
         source.sources = declared.filter { LXSourceKey.platform($0.key) != nil }
         guard !source.sources.isEmpty else {
             await runtime.close(source.id)
-            throw TVError.unsupported(L10n.text("This source plays none of the catalogs Yingxia searches (QQ Music, NetEase Cloud Music, Kuwo, Migu)."))
+            throw TVError.unsupported(L10n.text("This source plays none of the catalogs Mi3s searches (QQ Music, NetEase Cloud Music, Kuwo, Migu)."))
         }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try Data(script.utf8).write(to: file(source.id), options: .atomic)

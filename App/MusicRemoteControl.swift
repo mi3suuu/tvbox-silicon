@@ -65,7 +65,7 @@ extension Store {
         }
         if !active { active = true; addTargets() }
         let commands = MPRemoteCommandCenter.shared()
-        commands.nextTrackCommand.isEnabled = music.queue?.hasNext == true
+        commands.nextTrackCommand.isEnabled = music.canAdvance
         commands.previousTrackCommand.isEnabled = true
 
         var info: [String: Any] = [
@@ -128,7 +128,7 @@ extension Store {
         on(commands.pauseCommand) { music, _ in music.pause(); return .success }
         on(commands.togglePlayPauseCommand) { music, _ in music.toggle(); return .success }
         on(commands.nextTrackCommand) { music, _ in
-            guard music.queue?.hasNext == true else { return .noSuchContent }
+            guard music.canAdvance else { return .noSuchContent }
             music.next(); return .success
         }
         on(commands.previousTrackCommand) { music, _ in music.previous(); return .success }

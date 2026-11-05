@@ -26,8 +26,8 @@ public enum XunleiSignIn {
     static let clientID = "Xp6vsxz_7IYVw2BB"
     static let clientSecret = "Xp6vsy4tN9toTVdMSpomVdXpRmES"
     static let packageName = "com.xunlei.downloadprovider"
-    static let clientVersion = "25.0.6.30"
-    static let authVersion = "downloadprovider-25.0.6.30"
+    static let clientVersion = Endpoints.xunleiClientVersion
+    static let authVersion = Endpoints.xunleiAuthVersion
     static let appID = "40"
     static let sdkVersion = "513006"
     static let deviceSignKey = "34a062aaa22f906fca4fefe9fb3a3021"

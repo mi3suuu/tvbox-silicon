@@ -181,7 +181,7 @@ public struct MusicDownloadedCollection: Codable, Identifiable, Hashable, Sendab
     /// Stops running downloads without failing them, for when the app goes to the background:
     /// they continue from where they were on `wake()`.
     public func suspend() {
-        for id in running.keys { stop(id); update(id) { $0.status = .queued } }
+        for id in Array(running.keys) { stop(id); update(id) { $0.status = .queued } }
         save()
     }
     public func wake() { schedule() }
@@ -322,16 +322,18 @@ public struct MusicDownloadedCollection: Codable, Identifiable, Hashable, Sendab
     private func folder(_ id: String) -> URL { root.appending(path: id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id) }
     private var index: URL { root.appending(path: "music-downloads.json") }
     private var collectionIndex: URL { root.appending(path: "music-collections.json") }
+    private var store: JSONFileStore<[MusicDownload]> { JSONFileStore(file: index) }
+    private var collectionStore: JSONFileStore<[MusicDownloadedCollection]> { JSONFileStore(file: collectionIndex) }
     private func hasMedia(_ item: MusicDownload) -> Bool {
         guard let media = item.media else { return false }
         return FileManager.default.fileExists(atPath: folder(item.id).appending(path: media).path)
     }
 
     private func load() {
-        if let data = try? Data(contentsOf: collectionIndex), let stored = try? JSONDecoder().decode([MusicDownloadedCollection].self, from: data) {
+        if let stored = collectionStore.load() {
             collections = stored
         }
-        guard let data = try? Data(contentsOf: index), let stored = try? JSONDecoder().decode([MusicDownload].self, from: data) else { return }
+        guard let stored = store.load() else { return }
         items = stored.compactMap { item in
             var item = item
             if item.status == .completed {
@@ -352,15 +354,10 @@ public struct MusicDownloadedCollection: Codable, Identifiable, Hashable, Sendab
 
     private func save() {
         savedAt = Date()
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        // The folder itself may have been deleted in Finder.
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? data.write(to: index, options: .atomic)
+        store.save(items)
     }
 
     private func saveCollections() {
-        guard let data = try? JSONEncoder().encode(collections) else { return }
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? data.write(to: collectionIndex, options: .atomic)
+        collectionStore.save(collections)
     }
 }

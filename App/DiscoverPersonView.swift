@@ -10,11 +10,11 @@ struct DiscoverPersonView: View {
     let name: String
     let profile: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var person: TMDBCatalog.PersonProfile?
+    @State private var load: LoadState<TMDBCatalog.PersonProfile> = .loading
     @State private var paint: DiscoverPaint?
-    @State private var loading = true
-    @State private var failed = false
     @State private var revision = 0
+    /// The loaded profile, surfaced through the load state so `loading` and `failed` can't drift apart.
+    private var person: TMDBCatalog.PersonProfile? { load.value }
     #if os(tvOS)
     @FocusState private var tvChip: String?
     #endif
@@ -40,9 +40,9 @@ struct DiscoverPersonView: View {
     }
     /// The list with nothing in it: a way back from filters that match nothing, or a retry.
     @ViewBuilder private var emptyState: some View {
-        if failed {
+        if load.isFailed {
             EmptyResults(symbol: "wifi.exclamationmark", title: L10n.text("Couldn't Load Results"), action: L10n.text("Try Again")) { revision += 1 }
-        } else if !loading && works.isEmpty {
+        } else if load.isLoaded && works.isEmpty {
             if kind != "all" || contribution != "all" {
                 EmptyResults(symbol: "line.3.horizontal.decrease", title: L10n.text("No Results"), message: L10n.text("No works match these filters."),
                              action: L10n.text("Reset Filters"), actionSymbol: "xmark") { kind = "all"; contribution = "all" }
@@ -63,7 +63,7 @@ struct DiscoverPersonView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     header(width: geometry.size.width)
-                    if loading { ProgressView().padding(30).frame(maxWidth: .infinity) }
+                    if load.isLoading { ProgressView().padding(30).frame(maxWidth: .infinity) }
                     emptyState
                     ForEach(Array(works.enumerated()), id: \.element.id) { index, work in
                         RouteLink { DiscoverDetailView(item: work.item) } label: {
@@ -97,15 +97,15 @@ struct DiscoverPersonView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .task(id: revision) {
-            loading = true; failed = false
+            load = .loading
             do {
                 let loaded = try await TMDBCatalog.person(id)
                 try Task.checkCancellation()
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.35)) { person = loaded; loading = false }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.35)) { load = .loaded(loaded) }
                 // Use the central collage poster's palette so the wall and timeline share one colour.
                 let posters = wallPosters
                 if !posters.isEmpty { paint = await DiscoverPainter.shared.paint(posters[min(4, posters.count - 1)]) }
-            } catch { if !Task.isCancelled { loading = false; failed = true } }
+            } catch { if !Task.isCancelled { load = .failed(error) } }
         }
         #if !os(tvOS)
         .sheet(isPresented: $biographyShown) {
@@ -227,7 +227,7 @@ extension DiscoverPersonView {
                            identifier: "discover.person.contribution")
                 }
                 .padding(.horizontal, Self.tvMargin).padding(.top, 40).focusSection()
-                if loading { ProgressView().frame(maxWidth: .infinity).padding(60) }
+                if load.isLoading { ProgressView().frame(maxWidth: .infinity).padding(60) }
                 emptyState
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(250), spacing: 50, alignment: .top), count: 6), alignment: .leading, spacing: 60) {
                     ForEach(works, id: \.id) { work in

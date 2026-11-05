@@ -41,7 +41,7 @@ struct FeedbackView: View {
     #endif
 
     static var note: String {
-        L10n.text("Your feedback becomes a public issue on Yingxia's GitHub page, with the app and system versions, the device model, the language and the included details. Please don't include accounts or passwords.")
+        L10n.text("Your feedback becomes a public issue on Mi3s's GitHub page, with the app and system versions, the device model, the language and the included details. Please don't include accounts or passwords.")
     }
     static var logNote: String {
         L10n.text("The diagnostic log goes to the developer only, not into the public issue. It helps find what went wrong.")
@@ -53,7 +53,8 @@ struct FeedbackView: View {
         L10n.text("Your subscriptions and what you played lately help find the problem. Edit or remove anything you'd rather keep private.")
     }
     private var freshContext: String {
-        Feedback.context(subscriptions: store.subscriptions, errors: store.subscriptionErrors, history: store.playbackHistory.entries)
+        // Hidden subscriptions must not surface in a feedback report: it is a public diagnostic dump.
+        Feedback.context(subscriptions: store.visibleSubscriptions, errors: store.subscriptionErrors, history: store.visibleHistory)
     }
     private var empty: Bool { message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var thanks: String? { sent.map { L10n.text("Thanks! Your feedback is issue #%lld.", $0.number) } }
@@ -305,7 +306,7 @@ private struct FeedbackPage: View {
                 .overlay { tile.strokeBorder(.white.opacity(0.22), lineWidth: 0.5) }
                 .shadow(color: Brand.indigo.opacity(0.45), radius: 18, y: 8)
                 .padding(.bottom, 8)
-            Text(L10n.text("Help Make Yingxia Better")).font(compact ? .title2.weight(.bold) : .title.weight(.bold))
+            Text(L10n.text("Help Make Mi3s Better")).font(compact ? .title2.weight(.bold) : .title.weight(.bold))
             Text(L10n.text("Report a problem or share an idea. It goes straight to the developer."))
                 .font(compact ? .body : .title3).foregroundStyle(.secondary)
         }
@@ -342,7 +343,7 @@ private struct FeedbackPage: View {
             ZStack(alignment: .topLeading) {
                 // TextEditor has no prompt: this sits where its first line starts.
                 if message.isEmpty {
-                    Text(kind.prompt).foregroundStyle(.tertiary).padding(.leading, 5)
+                    Text(kind.prompt).foregroundStyle(.secondary).padding(.leading, 5)
                         #if os(iOS)
                         .padding(.top, 8)
                         #endif
@@ -380,7 +381,7 @@ private struct FeedbackPage: View {
                     ProgressView().controlSize(.small)
                 }
                 #if os(macOS)
-                Text(verbatim: "⌘↩").font(.callout).foregroundStyle(.tertiary)
+                Text(verbatim: "⌘↩").font(.callout).foregroundStyle(.secondary)
                 #endif
                 Button(action: send) {
                     Label(sending ? (progress == nil ? L10n.text("Sending…") : L10n.text("Uploading…")) : L10n.text("Send"),
@@ -520,7 +521,7 @@ private struct FeedbackPage: View {
     private var details: some View {
         let details = Feedback.details
         let language = Locale(identifier: details.language).localizedString(forIdentifier: details.language) ?? details.language
-        let app = chip("app.badge.fill", "\(L10n.text("Yingxia")) \(details.app)"), system = chip(deviceSymbol, details.system)
+        let app = chip("app.badge.fill", "\(L10n.text("Mi3s")) \(details.app)"), system = chip(deviceSymbol, details.system)
         let model = chip("cpu", details.model), lang = chip("character.bubble", language)
         return VStack(alignment: .leading, spacing: 10) {
             Text(L10n.text("Sent with your message")).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
@@ -882,7 +883,7 @@ private extension Feedback.Kind {
     var prompt: String {
         switch self {
         case .bug: L10n.text("What happened? What did you expect instead?")
-        case .idea: L10n.text("What would make Yingxia better for you?")
+        case .idea: L10n.text("What would make Mi3s better for you?")
         case .other: L10n.text("What's on your mind?")
         }
     }

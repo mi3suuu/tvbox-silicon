@@ -17,9 +17,9 @@ import TVCore
         guard Self.enabled, store.extrasUnlocked, ticker == nil else { return }
         let receiver = BilibiliCastReceiver.shared
         #if os(tvOS)
-        receiver.name = L10n.text("Yingxia") + " · Apple TV"
+        receiver.name = L10n.text("Mi3s") + " · Apple TV"
         #else
-        receiver.name = L10n.text("Yingxia") + " · " + (Host.current().localizedName ?? "Mac")
+        receiver.name = L10n.text("Mi3s") + " · " + (Host.current().localizedName ?? "Mac")
         #endif
         receiver.onEvent = { event in Task { @MainActor in BilibiliCastController.shared.handle(event) } }
         receiver.start()

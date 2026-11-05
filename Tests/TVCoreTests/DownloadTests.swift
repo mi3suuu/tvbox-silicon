@@ -212,3 +212,26 @@ import Testing
     #expect(starts == 2)
     library.pause(item.id)
 }
+
+@Test func downloadSourceDecodesLegacyJSONWithoutOrigin() throws {
+    // A download saved before `origin` and `sourceKey` existed must still decode, with the source key
+    // defaulting to the site key and no origin — so an old vault never silently hides a saved download.
+    let legacy = #"{"siteKey":"s","siteName":"S","videoID":"v","episodeID":"1","episodeName":"第 1 集","address":"https://example.com/1.mp4","flag":"line"}"#
+    let source = try JSONDecoder().decode(DownloadSource.self, from: Data(legacy.utf8))
+    #expect(source.siteKey == "s")
+    #expect(source.sourceKey == "s")
+    #expect(source.origin == nil)
+    #expect(source.videoID == "v")
+}
+
+@Test func downloadSourceCarriesOriginAndOriginalKeyForTheVault() {
+    // A merged source carries its own subscription origin and original key, which the vault matches on.
+    let origin = URL(string: "https://sub.example/config.json")!
+    var site = Site(key: "renamed", name: "S", type: 3, api: "csp_Test", raw: ["key": .string("original")])
+    site.provenance = SourceProvenance(origin: origin, spider: nil)
+    let episode = Episode(id: "1", name: "第 1 集", address: "https://example.com/1.mp4", flag: "line")
+    let source = DownloadSource(site: site, videoID: "v", episode: episode)
+    #expect(source.siteKey == "renamed")
+    #expect(source.sourceKey == "original")
+    #expect(source.origin == origin)
+}

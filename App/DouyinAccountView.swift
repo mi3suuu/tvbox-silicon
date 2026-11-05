@@ -12,6 +12,7 @@ struct DouyinAccountView: View {
     @State private var account = DouyinAccount.load()
     @State private var attempt = 0
     @State private var error: String?
+    @State private var confirmingSignOut = false
     #if os(tvOS)
     @State private var link: DouyinHandoff.Link?
     #else
@@ -24,7 +25,7 @@ struct DouyinAccountView: View {
                 SettingsGroup(footer: L10n.text("Douyin Live search uses this sign-in. It stays on this device.")) {
                     SettingsRow(symbol: "person.crop.circle.fill", tint: .black, title: account.name.isEmpty ? L10n.text("Signed In") : account.name,
                                 subtitle: L10n.text("Signed In")) {
-                        Button(L10n.text("Sign Out")) { DouyinAccount.signOut(); account = DouyinAccount(); attempt += 1 }.settingsButton()
+                        Button(L10n.text("Sign Out")) { confirmingSignOut = true }.settingsButton()
                     }
                 }
             } else {
@@ -54,6 +55,11 @@ struct DouyinAccountView: View {
             if let error { Label(error, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(Brand.amber) }
         }
         .task(id: attempt) { await run() }
+        .confirmationDialog(L10n.text("Sign out of Douyin?"), isPresented: $confirmingSignOut, titleVisibility: .visible) {
+            Button(L10n.text("Sign Out"), role: .destructive) { DouyinAccount.signOut(); account = DouyinAccount(); attempt += 1 }
+        } message: {
+            Text(L10n.text("You'll need to sign in again to use Douyin Live search."))
+        }
         #if !os(tvOS)
         .sheet(isPresented: $signingIn) { DouyinLoginView { account = $0 } }
         #endif
@@ -94,11 +100,11 @@ struct DouyinAccountView: View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(L10n.text("Sign In to Douyin")).font(.title2.weight(.bold))
-                Text(L10n.text("Douyin signs in only on its own web page, which Apple TV can't show. Sign in with Yingxia on your iPhone instead:"))
+                Text(L10n.text("Douyin signs in only on its own web page, which Apple TV can't show. Sign in with Mi3s on your iPhone instead:"))
                     .font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 VStack(alignment: .leading, spacing: 8) {
-                    step(1, L10n.text("On your iPhone, open Yingxia, go to Settings > Douyin, and sign in."))
-                    step(2, L10n.text("Scan this code with the iPhone's Camera and open it in Yingxia."))
+                    step(1, L10n.text("On your iPhone, open Mi3s, go to Settings > Douyin, and sign in."))
+                    step(2, L10n.text("Scan this code with the iPhone's Camera and open it in Mi3s."))
                     step(3, L10n.text("Tap Send to Apple TV."))
                 }
             }

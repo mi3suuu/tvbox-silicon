@@ -27,6 +27,10 @@ public final class MediaCache: @unchecked Sendable {
     private var entries: [String: Entry] = [:]
     private var generation: UInt64 = 0
     private var frequentScopes = Set<String>()
+    /// When the index was last written to disk, for throttling `persist`. The index is disposable
+    /// (the blob files are the source of truth), so collapsing rapid rewrites is safe: at worst a
+    /// freshly-added entry is re-downloaded after a crash, never a broken cache.
+    private var lastPersist: Date = .distantPast
     public func prioritize(_ scopes: Set<String>) { lock.withLock { frequentScopes = scopes } }
     public var revision: UInt64 { lock.withLock { generation } }
 
@@ -36,7 +40,8 @@ public final class MediaCache: @unchecked Sendable {
            let loaded = try? JSONDecoder().decode([String: Entry].self, from: data) {
             entries = loaded.filter { $0.key.count == 64 && $0.key.allSatisfy { $0.isHexDigit } && $0.value.bytes >= 0 }
         }
-        lock.withLock { prune(now: Date()); persist() }
+        let evicted = lock.withLock { let e = prune(now: Date()); persist(); return e }
+        deleteBlobs(evicted)
     }
     public func ticket() -> Ticket { lock.withLock { Ticket(generation: generation) } }
     private func id(_ key: String, _ kind: Kind, _ scope: String) -> String {
@@ -44,74 +49,116 @@ public final class MediaCache: @unchecked Sendable {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
     public func data(for key: String, kind: Kind, scope: String = "", now: Date = Date()) -> Data? {
-        lock.withLock {
-            let key = id(key, kind, scope)
-            guard var entry = entries[key] else { return nil }
-            guard entry.expires > now, let data = try? Data(contentsOf: root.appending(path: key)), data.count == entry.bytes else {
-                erase(key); persist(); return nil
+        let key = id(key, kind, scope)
+        let file = root.appending(path: key)
+        // Snapshot the entry's metadata under the lock, then read its blob outside it: a poster grid
+        // flings many reads at once, and none of them may hold the lock across its own disk I/O.
+        let snapshot = lock.withLock { entries[key].map { ($0.bytes, $0.expires) } }
+        guard let snapshot else { return nil }
+        guard snapshot.1 > now, let data = try? Data(contentsOf: file), data.count == snapshot.0 else {
+            // An expired, missing or truncated blob is forgotten: the dictionary under the lock, the file outside it.
+            let removed = lock.withLock {
+                let removed = entries.removeValue(forKey: key) != nil
+                if removed { persist() }
+                return removed
             }
+            if removed { try? FileManager.default.removeItem(at: file) }
+            return nil
+        }
+        lock.withLock {
+            guard var entry = entries[key] else { return }
             let needsSave = now.timeIntervalSince(entry.used) > 60
             entry.used = now; entries[key] = entry
             if needsSave { persist() }
-            return data
         }
+        return data
     }
     @discardableResult public func store(_ data: Data, for key: String, kind: Kind, scope: String = "",
                                          ttl: TimeInterval, ticket: Ticket, now: Date = Date()) -> Bool {
-        lock.withLock {
-            guard ticket.generation == generation, !data.isEmpty, data.count <= min(budget, 8 * 1024 * 1024), ttl > 0 else { return false }
-            let key = id(key, kind, scope)
-            do {
-                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-                try data.write(to: root.appending(path: key), options: .atomic)
-                entries[key] = Entry(kind: kind, scope: scope, bytes: data.count, expires: now.addingTimeInterval(ttl), used: now)
-                prune(now: now); persist()
-                return entries[key] != nil
-            } catch { return false } // Cache failures never prevent playback.
+        guard !data.isEmpty, data.count <= min(budget, 8 * 1024 * 1024), ttl > 0 else { return false }
+        guard lock.withLock({ ticket.generation == generation }) else { return false }
+        let key = id(key, kind, scope)
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try data.write(to: root.appending(path: key), options: .atomic)
+        } catch { return false } // Cache failures never prevent playback.
+        // The blob is on disk; index it and evict what no longer fits under the lock, then delete the
+        // evicted files outside it.
+        let evicted = lock.withLock {
+            entries[key] = Entry(kind: kind, scope: scope, bytes: data.count, expires: now.addingTimeInterval(ttl), used: now)
+            let evicted = prune(now: now)
+            persist()
+            return evicted
         }
+        deleteBlobs(evicted)
+        return true
     }
     public func remove(scope: String) {
-        lock.withLock {
+        let keys = lock.withLock {
             generation &+= 1
-            for key in entries.keys.filter({ entries[$0]?.scope == scope }) { erase(key) }
+            let keys = entries.keys.filter({ entries[$0]?.scope == scope })
+            for key in keys { entries[key] = nil }
             persist()
+            return keys
         }
+        deleteBlobs(keys)
     }
     public func remove(_ key: String, kind: Kind, scope: String = "") {
-        lock.withLock { generation &+= 1; erase(id(key, kind, scope)); persist() }
+        let keys = lock.withLock {
+            generation &+= 1
+            let key = id(key, kind, scope)
+            let removed = entries.removeValue(forKey: key) != nil
+            persist()
+            return removed ? [key] : []
+        }
+        deleteBlobs(keys)
     }
     public func clear() {
         lock.withLock {
             generation &+= 1; entries.removeAll()
-            try? FileManager.default.removeItem(at: root)
         }
+        try? FileManager.default.removeItem(at: root)
     }
     public func summary(now: Date = Date()) -> Summary {
-        lock.withLock {
-            prune(now: now); persist()
-            return Summary(bytes: entries.values.reduce(0) { $0 + $1.bytes }, artwork: entries.values.filter { $0.kind == .artwork }.count,
-                           danmaku: entries.values.filter { $0.kind == .danmaku }.count, lookups: entries.values.filter { $0.kind == .lookup }.count,
-                           catalogs: entries.values.filter { $0.kind == .catalog }.count)
+        let evicted = lock.withLock { () -> [String] in
+            let e = prune(now: now); persist(); return e
+        }
+        deleteBlobs(evicted)
+        return lock.withLock {
+            Summary(bytes: entries.values.reduce(0) { $0 + $1.bytes }, artwork: entries.values.filter { $0.kind == .artwork }.count,
+                    danmaku: entries.values.filter { $0.kind == .danmaku }.count, lookups: entries.values.filter { $0.kind == .lookup }.count,
+                    catalogs: entries.values.filter { $0.kind == .catalog }.count)
         }
     }
-    private func erase(_ key: String) { entries[key] = nil; try? FileManager.default.removeItem(at: root.appending(path: key)) }
-    private func prune(now: Date) {
-        for key in entries.keys.filter({ entries[$0]!.expires <= now }) { erase(key) }
+    private func deleteBlobs(_ keys: [String]) {
+        for key in keys { try? FileManager.default.removeItem(at: root.appending(path: key)) }
+    }
+    /// Evicts expired, overflow and over-quota entries from the index, returning the blob keys to delete
+    /// so the caller can remove the files outside the lock.
+    private func prune(now: Date) -> [String] {
+        var removed: [String] = []
+        for key in entries.keys.filter({ entries[$0]!.expires <= now }) { entries[key] = nil; removed.append(key) }
         // Lookup scope is a work, not an episode. Retain only the last 20 successful work mappings.
         let lookups = entries.filter { $0.value.kind == .lookup }.sorted { $0.value.used > $1.value.used }
-        for (key, _) in lookups.dropFirst(20) { erase(key) }
+        for (key, _) in lookups.dropFirst(20) { entries[key] = nil; removed.append(key) }
         var size = entries.values.reduce(0) { $0 + $1.bytes }
         let evictionOrder = entries.sorted {
             let left = frequentScopes.contains($0.value.scope), right = frequentScopes.contains($1.value.scope)
             return left == right ? $0.value.used < $1.value.used : !left
         }
         for (key, entry) in evictionOrder where size > budget {
-            size -= entry.bytes; erase(key)
+            size -= entry.bytes; entries[key] = nil; removed.append(key)
         }
+        return removed
     }
     private func persist() {
+        // Collapse rapid rewrites (a grid fling downloads many posters at once): encoding the whole
+        // index and rewriting the file every time was a synchronous I/O spike on the calling thread.
+        let now = Date()
+        guard now.timeIntervalSince(lastPersist) >= 1.0 else { return }
         guard let data = try? JSONEncoder().encode(entries) else { return }
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try? data.write(to: root.appending(path: "index.json"), options: .atomic)
+        lastPersist = now
     }
 }

@@ -19,16 +19,36 @@ public final class BilibiliLiveChat: @unchecked Sendable {
 
     public func start(_ handler: @escaping Handler) {
         lock.withLock { self.handler = handler }
-        Task { await connect() }
+        Task { await run() }
     }
 
     public func stop() {
-        lock.withLock { handler = nil }
-        heartbeat?.cancel(); heartbeat = nil
-        socket?.cancel(with: .goingAway, reason: nil); socket = nil
+        lock.withLock {
+            handler = nil
+            heartbeat?.cancel(); heartbeat = nil
+            socket?.cancel(with: .goingAway, reason: nil); socket = nil
+        }
     }
 
-    private func connect() async {
+    /// Connects and, while the chat is still wanted, reconnects after a drop with a short backoff so a
+    /// transient network wobble doesn't leave the comments silent for the rest of the stream.
+    private func run() async {
+        var wait: Duration = .seconds(1)
+        while lock.withLock({ handler != nil }) {
+            let connected = await connect()
+            guard lock.withLock({ handler != nil }) else { return }
+            guard connected else { return } // Token/handshake refused: nothing to retry against.
+            wait = .seconds(1) // The socket stayed up long enough to reach here; reset the backoff.
+            // Back off before retrying a dropped socket, then reconnect.
+            try? await Task.sleep(for: wait)
+            wait = min(wait * 2, .seconds(30))
+        }
+    }
+
+    /// One connection attempt: token, WebSocket, heartbeat, then the receive loop. Returns true when the
+    /// socket was established (even if it later dropped), false when it never got that far.
+    @discardableResult
+    private func connect() async -> Bool {
         let signer = BilibiliSigner.shared
         let account = BilibiliAccount.load()
         let cookie = await signer.cookie(account: account.cookie)
@@ -36,16 +56,16 @@ public final class BilibiliLiveChat: @unchecked Sendable {
               let reply = try? await signer.json(URL(string: "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?" + query)!, cookie: cookie),
               let data = reply["data"]?.object, let token = data["token"]?.string else {
             Diagnostics.shared.record(.warning, "live.chat", "room=\(room) no chat token")
-            return
+            return false
         }
         let host = data["host_list"]?.array?.first?.object
         let address = "wss://\(host?["host"]?.string ?? "broadcastlv.chat.bilibili.com"):\(host?["wss_port"]?.int ?? 443)/sub"
-        guard let url = URL(string: address), lock.withLock({ handler != nil }) else { return }
+        guard let url = URL(string: address), lock.withLock({ handler != nil }) else { return false }
         var request = URLRequest(url: url)
         request.setValue(Bilibili.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://live.bilibili.com", forHTTPHeaderField: "Origin")
         let socket = session.webSocketTask(with: request)
-        self.socket = socket
+        lock.withLock { self.socket = socket }
         socket.resume()
         func field(_ name: String) -> String? {
             cookie.components(separatedBy: ";").map { $0.trimmingCharacters(in: .whitespaces) }.first { $0.hasPrefix(name + "=") }.map { String($0.dropFirst(name.count + 1)) }
@@ -53,17 +73,19 @@ public final class BilibiliLiveChat: @unchecked Sendable {
         let auth: [String: Any] = ["uid": Int(field("DedeUserID") ?? "") ?? 0, "roomid": room, "protover": 2, "platform": "web", "type": 2,
                                    "key": token, "buvid": field("buvid3") ?? ""]
         try? await socket.send(.data(Self.packet(operation: 7, body: (try? JSONSerialization.data(withJSONObject: auth)) ?? Data())))
-        heartbeat = Task { [weak self] in
+        let heartbeat = Task { [weak self] in
             while !Task.isCancelled {
                 try? await self?.socket?.send(.data(Self.packet(operation: 2, body: Data("[object Object]".utf8))))
                 try? await Task.sleep(for: .seconds(30))
             }
         }
+        lock.withLock { self.heartbeat = heartbeat }
         Diagnostics.shared.record(.info, "live.chat", "room=\(room) connected uid=\(auth["uid"] ?? 0)")
         while lock.withLock({ handler != nil }) {
             guard let message = try? await socket.receive() else { break }
             if case .data(let data) = message { read(data) }
         }
+        return true
     }
 
     static func packet(operation: UInt32, body: Data) -> Data {

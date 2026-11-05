@@ -15,14 +15,18 @@ struct DownloadsView: View {
     @State private var kind = Kind.videos
     private var library: DownloadLibrary { .shared }
     enum Kind: Hashable { case videos, music }
+    /// Downloads the Privacy Vault may show. A hidden source's episodes vanish from this list entirely,
+    /// like its history and favourites do. A download saved before its source carried an origin stays
+    /// visible: the vault can only hide what it can name.
+    private var visibleItems: [DownloadItem] { store.vault.visibleDownloads(library.items) }
 
     var body: some View {
-        let pending = library.items.filter(\.isPending)
-        let shows = DownloadShow.group(library.items.filter { $0.status == .completed })
+        let pending = visibleItems.filter(\.isPending)
+        let shows = DownloadShow.group(visibleItems.filter { $0.status == .completed })
         Group {
             if hasMusic && kind == .music {
                 MusicDownloadsView(embedded: true)
-            } else if library.items.isEmpty {
+            } else if visibleItems.isEmpty {
                 // One message instead of an empty storage card above it: a 0 KB total says nothing new.
                 EmptyDownloads(available: library.usage.available) { store.section = .sites }
             } else {
@@ -30,11 +34,11 @@ struct DownloadsView: View {
             }
         }
         .modifier(DownloadKindBar(shown: hasMusic, kind: $kind))
-        .onAppear { if library.items.isEmpty && hasMusic { kind = .music } }
+        .onAppear { if visibleItems.isEmpty && hasMusic { kind = .music } }
         .screenBackdrop()
         .tabTitle(L10n.text("Downloads"))
         .task { await library.measure() }
-        .onChange(of: library.items.filter { $0.status == .completed }.count) { Task { await library.measure() } }
+        .onChange(of: visibleItems.filter { $0.status == .completed }.count) { Task { await library.measure() } }
         #if os(macOS)
         // Space in one line under the window title, as Finder's status bar has it: beside a whole disk the
         // downloads were a sliver on a bar that was nearly all "Other".
@@ -646,11 +650,12 @@ struct DownloadPicker: View {
     let site: Site
     let flag: String
     let episodes: [Episode]
+    var origin: URL? = nil
     var added: (Int) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
     @State private var selection: Set<String> = []
     private var library: DownloadLibrary { .shared }
-    private func source(_ episode: Episode) -> DownloadSource { DownloadSource(site: site, videoID: video.id, episode: episode) }
+    private func source(_ episode: Episode) -> DownloadSource { DownloadSource(site: site, videoID: video.id, episode: episode, origin: origin) }
     private var available: [Episode] { episodes.filter { library.item(for: source($0)).map { $0.status == .failed } ?? true } }
     #if os(macOS)
     /// The checklist's natural height, so the sheet fits a few episodes instead of a fixed, mostly empty box.
@@ -743,7 +748,7 @@ struct DownloadPicker: View {
                     Text(L10n.text("Download Episodes")).font(.title3.weight(.semibold))
                     Text(video.name).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(macSubtitle).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                    Text(macSubtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
@@ -764,7 +769,7 @@ struct DownloadPicker: View {
                 .toggleStyle(.checkbox)
                 .disabled(available.isEmpty)
                 if let free = library.usage.available {
-                    Text(L10n.text("%@ free", DownloadFormat.size(free))).font(.caption).monospacedDigit().foregroundStyle(.tertiary)
+                    Text(L10n.text("%@ free", DownloadFormat.size(free))).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                         .lineLimit(1).fixedSize()
                 }
                 Spacer(minLength: 12)

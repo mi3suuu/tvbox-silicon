@@ -17,6 +17,10 @@ import TVCore
     private(set) var chosen = false
     private var key: String?
     private var request: TMDBMatch.Request?
+    /// Monotonic token for every details fetch — a season switch, a chosen work, a re-opened choice. Each new
+    /// operation bumps it, so only the latest fetch may land. Without this a fast S2 → S3 tap races two fetches
+    /// and whichever returns last wins, and a season switch in flight can overwrite a work the viewer just chose.
+    private var fetchToken = 0
 
     var numbering: TMDBMatch.Numbering { answer?.match?.numbering ?? answer?.numbering ?? .season }
     /// The agent's offset counts only for the work it matched, not one the viewer picked instead.
@@ -36,7 +40,13 @@ import TVCore
             chosen = true
             switch choice {
             case .none: phase = .notFound
-            case .work(let type, let id, let season): await load(type, id: id, season: season)
+            case .work(let type, let id, let season):
+                // A kept choice carries no numbering/offset, so a match that relied on them (absolute
+                // numbering, an offset) would fall back to per-season numbering and episode 0 on re-open.
+                // Take them from the kept answer when it is the same work.
+                let saved = await TMDBMatchStore.shared.answer(for: key)
+                let align = alignment(type, id: id, in: saved)
+                await load(type, id: id, season: season, numbering: align.numbering, offset: align.offset)
             }
             return true
         }
@@ -90,10 +100,56 @@ import TVCore
     func choose(_ type: TMDBMatch.MediaType, id: Int, season: Int?) async {
         guard let key else { return }
         let season = type == .tv ? season ?? answer?.season ?? 1 : nil
+        let align = alignment(type, id: id, in: answer)
+        // A new choice supersedes any in-flight season switch or details fetch, so a season switch that
+        // returns later cannot overwrite the work the viewer just picked.
+        fetchToken += 1
         chosen = true
         await TMDBMatchStore.shared.choose(.work(type, id, season: season), for: key)
         if let request { Task.detached { await TMDBMatch.link(request, to: type, id: id, season: season) } }
-        await load(type, id: id, season: season)
+        await load(type, id: id, season: season, numbering: align.numbering, offset: align.offset)
+    }
+
+    /// Switch the series to another season: fetch that season's details so the episode list lines up with it.
+    func selectSeason(_ number: Int) async {
+        guard let details, details.mediaType == .tv else { return }
+        fetchToken += 1
+        let token = fetchToken
+        phase = .looking; step = .season(number)
+        do {
+            let value = try await TMDBMatch.details(.tv, id: details.id, season: number)
+            // A faster second tap supersedes this fetch; only the latest one lands.
+            guard !Task.isCancelled, token == fetchToken else { return }
+            withAnimation(.smooth(duration: 0.35)) {
+                self.details = value
+                // Keep the answer in step with the season on screen: its details and season change, its
+                // numbering/offset (how the source counts its episodes) and unmatched stay.
+                if let old = answer {
+                    let match = old.match.map {
+                        TMDBMatch.Match(mediaType: $0.mediaType, id: $0.id, season: number, numbering: $0.numbering,
+                                        offset: $0.offset, confidence: $0.confidence, unmatched: $0.unmatched)
+                    }
+                    answer = TMDBMatch.Answer(status: .matched, match: match, season: number, numbering: old.numbering,
+                                              unmatched: old.unmatched, candidates: old.candidates, details: value)
+                }
+                phase = .matched
+            }
+            // Remember the last season the viewer looked at, so reopening the video stays on it. Only the
+            // local choice is written — the source-video link is left alone, since merely browsing another
+            // season must not re-broadcast a new association for everyone. Marking it chosen also stops a
+            // kept auto-match from later re-fetching the match's original season over the one the viewer
+            // just picked.
+            chosen = true
+            if let key {
+                await TMDBMatchStore.shared.choose(.work(.tv, details.id, season: number), for: key)
+            }
+        } catch {
+            guard !Task.isCancelled, token == fetchToken else { return }
+            Diagnostics.shared.record(.warning, "tmdb", "season details failed: \(error.localizedDescription)")
+            // Keep the old season's list; only the phase is restored, so the picker still marks the season
+            // actually on screen (not the one the failed request was for).
+            withAnimation(.smooth(duration: 0.3)) { phase = .matched }
+        }
     }
 
     /// A video the page won't look up (AI-generated, a short drama): the page stops waiting for TMDB.
@@ -107,16 +163,31 @@ import TVCore
         withAnimation(.smooth(duration: 0.3)) { details = nil; phase = .notFound }
     }
 
-    private func load(_ type: TMDBMatch.MediaType, id: Int, season: Int?) async {
+    private func load(_ type: TMDBMatch.MediaType, id: Int, season: Int?, numbering: TMDBMatch.Numbering, offset: Int?) async {
+        fetchToken += 1
+        let token = fetchToken
         phase = .looking; step = .loading
         do {
             let value = try await TMDBMatch.details(type, id: id, season: season)
-            withAnimation(.smooth(duration: 0.35)) { details = value; phase = .matched }
+            guard !Task.isCancelled, token == fetchToken else { return }
+            let match = TMDBMatch.Match(mediaType: type, id: id, season: season, numbering: numbering,
+                                        offset: offset, confidence: 0, unmatched: "")
+            let answer = TMDBMatch.Answer(status: .matched, match: match, season: season, numbering: numbering,
+                                          unmatched: "", candidates: [], details: value)
+            withAnimation(.smooth(duration: 0.35)) { show(answer) }
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, token == fetchToken else { return }
             Diagnostics.shared.record(.warning, "tmdb", "details failed: \(error.localizedDescription)")
             phase = .failed
         }
+    }
+
+    /// The numbering and offset to load `type`/`id` with: the match's when the answer is that same work (a
+    /// re-opened or re-chosen match keeps how the source counts its episodes), else the answer's numbering and
+    /// no offset — a title the viewer picked by hand has no agent match to take them from.
+    private func alignment(_ type: TMDBMatch.MediaType, id: Int, in answer: TMDBMatch.Answer?) -> (numbering: TMDBMatch.Numbering, offset: Int?) {
+        if let match = answer?.match, match.mediaType == type, match.id == id { return (match.numbering, match.offset) }
+        return (answer?.numbering ?? .season, nil)
     }
 
     private func show(_ answer: TMDBMatch.Answer) {
@@ -336,25 +407,49 @@ struct TMDBCastRow: View {
     }
 }
 
-/// TMDB's "you may like". A title here isn't from any source, so choosing one searches the viewer's sources for
-/// it, as an index source's titles do.
-struct TMDBRelatedRow: View {
+/// A related title's row: a 16:9 rounded thumbnail on the left, the title and a line of year/type on the
+/// right, as Bilibili's 相关推荐 list cards. One card serves TMDB's "you may like", the source's own related
+/// titles, and a video's episodes when neither has anything.
+struct RelatedCard: View {
+    let title: String
+    let subtitle: String
+    let poster: URL?
+    var headers: [String: String] = [:]
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            PosterImage(url: poster, headers: headers)
+                .frame(width: 120, height: 120 * 9.0 / 16.0)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                    .lineLimit(2).multilineTextAlignment(.leading)
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
+/// TMDB's "you may like" as a vertical list of cards, so a narrow detail column (the iPhone Duo's right
+/// column) fills downward instead of one shelf of posters that ends early. A title here isn't from any
+/// source, so choosing one searches the viewer's sources for it, as an index source's titles do.
+struct TMDBRelatedList: View {
     let titles: [TMDBMatch.Candidate]
     let search: (String) -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(L10n.text("You May Like")).font(.headline)
-            ScrollView(.horizontal) {
-                LazyHStack(alignment: .top, spacing: TMDBMetrics.spacing) {
-                    ForEach(titles, id: \.key) { title in
-                        Button { search(title.name) } label: { TMDBCandidateTile(candidate: title) }
-                            .tmdbCardButton()
-                    }
+        LazyVStack(alignment: .leading, spacing: 14) {
+            ForEach(titles, id: \.key) { title in
+                Button { search(title.name) } label: {
+                    RelatedCard(title: title.name,
+                                subtitle: [title.year.map(String.init), L10n.text(title.mediaType == .tv ? "TV Series" : "Movie")].compactMap { $0 }.joined(separator: " · "),
+                                poster: title.poster)
                 }
-                .padding(.vertical, TMDBMetrics.focusRoom)
+                .tmdbCardButton()
             }
-            .scrollIndicators(.never)
-            .scrollClipDisabled()
         }
     }
 }
@@ -410,7 +505,7 @@ struct TMDBFooter: View {
                     #endif
             }
             Text(L10n.text("This product uses the TMDB API but is not endorsed or certified by TMDB."))
-                .font(.caption2).foregroundStyle(.tertiary)
+                .font(.caption2).foregroundStyle(.secondary)
         }
         #if DEBUG
         // `-qaTMDBPicker 1` opens the picker, for screenshots.
@@ -730,6 +825,9 @@ struct TMDBEpisodeTile: View {
     let name: String
     let info: TMDBMatch.EpisodeInfo?
     var current = false
+    /// 0…1 of how far this episode was watched, to draw a resume bar over its still. Distinct from
+    /// `current`: an episode you stopped halfway through gets this bar, not the "now playing" badge.
+    var resumeProgress: Double? = nil
     var loading = false
     /// nil fills the grid cell.
     var width: CGFloat? = TMDBMetrics.episodeTile
@@ -752,12 +850,43 @@ struct TMDBEpisodeTile: View {
                     }
                 }
                 .posterClip(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .coverOverlay { if current { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Brand.accent, lineWidth: 2) } }
+                .coverOverlay { if current { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Brand.accent, lineWidth: 2.5) } }
+                // Resume: a bar along the still's foot showing how much was watched, so a half-watched
+                // episode reads at a glance without claiming the "now playing" highlight above.
+                .coverOverlay(alignment: .bottom) {
+                    if let resumeProgress {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Rectangle().fill(Color.black.opacity(0.45))
+                                Rectangle().fill(Brand.accent).frame(width: geo.size.width * CGFloat(resumeProgress))
+                            }
+                        }
+                        .frame(height: 3)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                }
+                .coverOverlay(alignment: .topLeading) {
+                    if current {
+                        Label(L10n.text("Now Playing"), systemImage: "play.fill")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(Brand.accent, in: Capsule())
+                            .foregroundStyle(Brand.onAccent)
+                            .padding(6)
+                    } else if resumeProgress != nil {
+                        Label(L10n.text("Resume"), systemImage: "play.fill")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .foregroundStyle(.white)
+                            .padding(6)
+                    }
+                }
             Text(name).font(.subheadline.weight(current ? .bold : .semibold)).lineLimit(1)
                 .foregroundStyle(current ? Brand.accent : .primary).cardCaption()
             // Always a second line, so tiles in a row stay one height.
             Text(info.map(\.name).flatMap { $0.isEmpty || $0 == name ? nil : $0 } ?? " ")
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1).cardCaption()
+                .font(.caption).foregroundStyle(current ? Brand.accent : .secondary).lineLimit(1).cardCaption()
         }
         .frame(width: width, alignment: .leading)
         .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)

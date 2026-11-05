@@ -22,6 +22,16 @@ enum VideoEnhancement {
     /// Both notes, for a settings group that explains its switches underneath.
     static var note: String { [canUpscale ? upscaleNote : nil, canSmooth ? smoothNote : nil].compactMap { $0 }.joined(separator: " ") }
 
+    /// Whether the viewer has switched either enhancement on. The device may be *capable* (`canUpscale` /
+    /// `canSmooth`) while the switches stay off; only a switched-on setting needs the pipeline, its layer and
+    /// its background queue. Building all of that when both switches are off only leaves an idle
+    /// `AVSampleBufferDisplayLayer` being added to and removed from the layer tree across a Duo fold/unfold,
+    /// which is a use-after-free hazard the two-column scene teardown has crashed on (SIGSEGV / SIGILL).
+    static var enabled: Bool {
+        canUpscale && UserDefaults.standard.bool(forKey: upscaleKey)
+            || canSmooth && UserDefaults.standard.bool(forKey: smoothKey)
+    }
+
     /// Whether this device can upscale: OS 26 on a real device (the Simulator has no processors).
     static let canUpscale: Bool = {
         #if targetEnvironment(simulator)
@@ -113,7 +123,10 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         layer.videoGravity = .resizeAspect
         layer.isHidden = true
         layer.backgroundColor = nil
-        guard VideoEnhancement.canUpscale || VideoEnhancement.canSmooth else { return }
+        // Only build the pipeline when the viewer actually switched an enhancement on. With both switches
+        // off there is nothing to process, and the idle layer/pipeline is a use-after-free hazard across a
+        // Duo fold/unfold (SIGSEGV / SIGILL on scene teardown).
+        guard VideoEnhancement.enabled else { return }
         #if !targetEnvironment(simulator)
         if #available(macOS 26, iOS 26, tvOS 26, *) {
             engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in
@@ -136,9 +149,17 @@ private protocol EnhancementEngine: AnyObject, Sendable {
 
     /// The surface's size in pixels, which decides how much to upscale.
     func setDisplaySize(_ size: CGSize) {
-        guard size != displaySize else { return }
+        // Layout can hand us sub-pixel sizes that flicker between passes; only react to a real change,
+        // otherwise layout -> refresh -> report -> observed state -> layout loops forever.
+        guard abs(size.width - displaySize.width) > 0.5 || abs(size.height - displaySize.height) > 0.5 else { return }
         displaySize = size
-        refresh()
+        // This runs inside `layoutSubviews` — a CoreAnimation layout transaction. Calling `refresh()`
+        // synchronously here reads `displayRequest` (which touches the @Observable `status`) and, via the
+        // pipeline's report, can write observed state again, so SwiftUI's observation tracking flags a
+        // layout feedback loop and the watchdog kills the app (0x8BADF00D, "点开视频/切横屏闪退").
+        // Defer it out of the transaction so layout settles first; the 250 ms refresh timer below covers
+        // any missed pass, and the next size change re-arms this one.
+        Task { @MainActor [weak self] in self?.refresh() }
     }
 
     private func refresh() {
@@ -212,16 +233,19 @@ private protocol EnhancementEngine: AnyObject, Sendable {
     private func apply(_ status: VideoEnhancementStatus, summary: String, note: String?, format: VideoFormatBox?) {
         if let note { Diagnostics.shared.record(.info, "enhance", note) }
         if let format { self.format = format.format }
-        defer { announceDisplay() }
+        // Nothing changed in what the view observes: return before touching any @Observable state, so a
+        // report fired from layout (layoutSubviews -> setDisplaySize -> refresh -> report) cannot mutate
+        // observed state inside a layout pass and start a SwiftUI feedback loop (watchdog 0x8BADF00D).
+        guard status != self.status else { return }
         #if DEBUG
         let frame = layer.frame, host = layer.superlayer
         self.summary = summary + " · layer \(Int(frame.width))x\(Int(frame.height)) hidden \(layer.isHidden) hosted \(host != nil) timebase \(layer.controlTimebase != nil) · grid \(options.outputRate) \(displayState) request \(displayRequest.map { "\($0.rate)" } ?? "none")"
         #else
         self.summary = summary
         #endif
-        guard status != self.status else { return }
         self.status = status
         layer.isHidden = !status.active
+        announceDisplay()
     }
 }
 
@@ -279,26 +303,29 @@ private protocol EnhancementEngine: AnyObject, Sendable {
 /// Where the enhanced picture is drawn: the session's layer, sized to the player's own picture.
 struct EnhancedVideoSurface: View {
     let enhancer: VideoEnhancer
-    var fills = false
-    /// Whether AVKit's picture runs under the safe areas, as it does on a screen of its own. At the top of an iPhone
-    /// watch page it keeps to its frame, so the enhanced picture must too.
-    var bleeds = true
+    /// How the picture meets its box: the viewer's size pick, not a per-shape guess.
+    var gravity: AVLayerVideoGravity = .resizeAspect
+    /// Which safe-area edges AVKit's picture runs under. On a screen of its own it runs under every
+    /// edge (`.all`); at the top of an iPhone watch page the picture keeps to its frame vertically but
+    /// bleeds sideways so the Duo's asymmetric outer notch/corner inset doesn't leave a strip of page
+    /// showing beside the picture. Passing `.all` mirrors the old `bleeds: true`, `[]` mirrors `false`.
+    var bleeds: Edge.Set = .all
     var body: some View {
-        if VideoEnhancement.canUpscale || VideoEnhancement.canSmooth {
+        if VideoEnhancement.enabled {
             // The same area as AVKit's own picture: inside the safe area (under the Mac's title bar) the fitted
             // picture came out smaller than AVKit's, and under the status bar above a watch page's player it came out
             // taller and higher; either way AVKit's picture showed around its edges.
-            Host(enhancer: enhancer, fills: fills).ignoresSafeArea(edges: bleeds ? .all : []).allowsHitTesting(false).accessibilityHidden(true)
+            Host(enhancer: enhancer, gravity: gravity).ignoresSafeArea(edges: bleeds).allowsHitTesting(false).accessibilityHidden(true)
         }
     }
 
     #if os(macOS)
     private struct Host: NSViewRepresentable {
         let enhancer: VideoEnhancer
-        let fills: Bool
+        let gravity: AVLayerVideoGravity
         func makeNSView(context: Context) -> SurfaceView { SurfaceView(enhancer: enhancer) }
         func updateNSView(_ view: SurfaceView, context: Context) {
-            enhancer.layer.videoGravity = fills ? .resizeAspectFill : .resizeAspect
+            enhancer.layer.videoGravity = gravity
         }
     }
 
@@ -332,10 +359,10 @@ struct EnhancedVideoSurface: View {
     #else
     private struct Host: UIViewRepresentable {
         let enhancer: VideoEnhancer
-        let fills: Bool
+        let gravity: AVLayerVideoGravity
         func makeUIView(context: Context) -> SurfaceView { SurfaceView(enhancer: enhancer) }
         func updateUIView(_ view: SurfaceView, context: Context) {
-            enhancer.layer.videoGravity = fills ? .resizeAspectFill : .resizeAspect
+            enhancer.layer.videoGravity = gravity
         }
     }
 
@@ -397,6 +424,11 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
     private var interpolator: Stage?
     private var wanted: (scale: String?, smooth: String?) = (nil, nil)
     private var starting: Set<String> = []
+    /// When the work size last changed (unfold / rotation). Rebuilding a processor's ML session while the
+    /// size is still settling tears down and restarts `VTFrameProcessor` back-to-back, which can crash
+    /// (SIGSEGV) inside VideoToolbox. Hold off the teardown until the size has held steady for a moment.
+    private var sizeChangedAt = 0.0
+    private var builtSize: (width: Int, height: Int)?
     /// Configurations that failed or ran too slowly, not tried again for this item.
     private var refused: Set<String> = []
     private var slow = 0
@@ -863,9 +895,22 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
         let smoothKey = options.smooth && !tooFast && Self.interpolationFits(width: work.width, height: work.height)
             ? "smooth \(work.width)x\(work.height)\(work != (width, height) ? " from \(width)x\(height)" : "")" : nil
         wanted = (scaleKey, smoothKey)
-        if scaler?.key != scaleKey { scaler = nil }
-        if interpolator?.key != smoothKey { interpolator = nil }
-        if let scaleKey, let factor, scaler == nil {
+        // The work size decides which processor we build. When it changes (unfold, rotation) the size often
+        // flickers across a few values in quick succession; tearing down and restarting the ML session for
+        // each one crashes VideoToolbox (SIGSEGV). While the size is still settling, drop the processors and
+        // skip rebuilding — AVKit's own picture shows — then build once the size has held steady for 0.25 s.
+        if builtSize.map({ $0 != work }) ?? true {
+            builtSize = work
+            sizeChangedAt = CACurrentMediaTime()
+            scaler = nil
+            interpolator = nil
+        }
+        let settling = CACurrentMediaTime() - sizeChangedAt < 0.25
+        if !settling {
+            if scaler?.key != scaleKey { scaler = nil }
+            if interpolator?.key != smoothKey { interpolator = nil }
+        }
+        if let scaleKey, let factor, scaler == nil, !settling {
             start(scaleKey) {
                 let configuration = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: width, frameHeight: height, scaleFactor: factor)
                 guard configuration.supportedPixelFormats.contains(format) else { throw StageError.format }
@@ -873,7 +918,7 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
                                  width: Int((Float(width) * factor).rounded()), height: Int((Float(height) * factor).rounded()), format: format)
             }
         }
-        if let smoothKey, interpolator == nil {
+        if let smoothKey, interpolator == nil, !settling {
             start(smoothKey) {
                 // Two: exact phases come back at about an eighth of a frame either way, and three cost ~5 ms more a frame (M1 Pro).
                 guard let configuration = VTLowLatencyFrameInterpolationConfiguration(frameWidth: work.width, frameHeight: work.height, numberOfInterpolatedFrames: 2)

@@ -49,16 +49,24 @@ public struct PlaybackHistoryEntry: Identifiable, Codable, Hashable, Sendable {
     public let position: Double
     public let duration: Double
     public let updatedAt: Date
+    /// The environment that recorded this. Nil for entries written before environments existed, which
+    /// belong to the default one — so an upgrade never hides a viewer's whole history.
+    public let environment: UUID?
     public var id: String { context.id }
+    /// Dedup/removal key: `id` plus the environment, so the same video watched in two environments
+    /// keeps one "continue watching" entry each instead of one silently clobbering the other.
+    public var environmentKey: String { "\(context.id)\u{1F}\(environment?.uuidString ?? "")" }
     public var completed: Bool { duration > 0 && position >= duration - 1 }
     public var resumePosition: Double { completed ? 0 : position }
     public var progress: Double { duration > 0 ? min(1, max(0, position / duration)) : 0 }
 
-    public init(context: PlaybackHistoryContext, position: Double, duration: Double, updatedAt: Date) {
+    public init(context: PlaybackHistoryContext, position: Double, duration: Double,
+                updatedAt: Date, environment: UUID? = nil) {
         self.context = context
         self.position = position
         self.duration = duration
         self.updatedAt = updatedAt
+        self.environment = environment
     }
 
     public static func resumeTarget(_ position: Double, duration: Double) -> Double? {
@@ -83,6 +91,21 @@ extension PlaybackHistoryEntry {
 @MainActor @Observable public final class PlaybackHistory {
     public static let shared = PlaybackHistory()
     public static let limit = 200
+
+    /// The entries that belong to one environment. `nil` selects the default environment, which owns
+    /// everything written before environments existed.
+    public func entries(in environment: UUID?) -> [PlaybackHistoryEntry] {
+        let defaultID = defaultEnvironmentID
+        return entries.filter { ($0.environment ?? defaultID) == (environment ?? defaultID) }
+    }
+
+    /// The id of the default environment. Set by the app once `Environments` is loaded.
+    public var defaultEnvironmentID: UUID?
+    /// The environment new records belong to when the caller does not say. The app keeps this in
+    /// step with `Environments.activeID`, because most recorders — the video player above all — hold
+    /// `PlaybackHistory.shared` and have no reference to the store to ask. Nil means "not set yet,
+    /// write to the default environment".
+    public var activeEnvironmentID: UUID?
     public private(set) var entries: [PlaybackHistoryEntry] = []
     public private(set) var persistenceError: String?
     private let file: URL
@@ -99,23 +122,30 @@ extension PlaybackHistoryEntry {
         let directory = URL.applicationSupportDirectory
         #endif
         self.file = file ?? directory.appending(path: "playback-history-v1.json")
-        if let data = try? Data(contentsOf: self.file), data.count <= 2 * 1024 * 1024,
-           let decoded = try? JSONDecoder().decode([PlaybackHistoryEntry].self, from: data) {
+        if let decoded = JSONFileStore<[PlaybackHistoryEntry]>(file: self.file, maxBytes: 2 * 1024 * 1024).load() {
             var seen = Set<String>()
             entries = Array(decoded.filter { Self.valid($0) }.sorted { $0.updatedAt > $1.updatedAt }
-                .filter { seen.insert($0.id).inserted }.prefix(Self.limit))
+                .filter { seen.insert($0.environmentKey).inserted }.prefix(Self.limit))
         }
         prioritizeCaches()
     }
 
-    public func record(_ context: PlaybackHistoryContext, position: Double, duration: Double, now: Date = Date()) {
+    public func record(_ context: PlaybackHistoryContext, position: Double, duration: Double,
+                       now: Date = Date(), environment: UUID? = nil) {
         guard position.isFinite, position >= 1, duration.isFinite, duration >= 0 else { return }
+        // An explicit environment wins; otherwise stamp the environment the app is showing now.
+        // Callers that pass nothing (the video player, QA seeds) used to write `nil` and every
+        // environment saw the same row — the "environment isolation does nothing" report.
+        let target = environment ?? activeEnvironmentID
         let entry = PlaybackHistoryEntry(context: context, position: duration > 0 ? min(position, duration) : position,
-                                         duration: duration, updatedAt: now)
+                                         duration: duration, updatedAt: now, environment: target)
         guard Self.valid(entry) else { return }
-        if let old = entries.first(where: { $0.id == entry.id }), old.context == context,
+        // Normalize nil to the default environment, so a re-watch of a legacy (nil) entry in the
+        // default environment replaces it instead of leaving a duplicate beside the new one.
+        if let old = entries.first(where: { $0.id == entry.id && sameEnvironment($0, entry) }),
+           old.context == context,
            abs(old.position - entry.position) < 0.25, old.duration == duration { return }
-        entries.removeAll { $0.id == entry.id }
+        entries.removeAll { $0.id == entry.id && sameEnvironment($0, entry) }
         entries.insert(entry, at: 0)
         let dropped = entries.dropFirst(Self.limit)
         for entry in dropped { clean(entry) }
@@ -129,19 +159,41 @@ extension PlaybackHistoryEntry {
     public func adopt(_ synced: [PlaybackHistoryEntry]) {
         var seen = Set<String>()
         let next = Array(synced.filter { Self.valid($0) }.sorted { $0.updatedAt > $1.updatedAt }
-            .filter { seen.insert($0.id).inserted }.prefix(Self.limit))
-        let kept = Set(next.map(\.id))
-        for entry in entries where !kept.contains(entry.id) { clean(entry) }
+            .filter { seen.insert($0.environmentKey).inserted }.prefix(Self.limit))
+        let kept = Set(next.map(\.environmentKey))
+        for entry in entries where !kept.contains(entry.environmentKey) { clean(entry) }
         entries = next
         prioritizeCaches(); persist()
     }
 
-    public func remove(_ id: String) { remove(Set([id])) }
-    public func remove(_ ids: Set<String>) {
-        for entry in entries where ids.contains(entry.id) { clean(entry) }
-        entries.removeAll { ids.contains($0.id) }; prioritizeCaches(); persist(); onChange?()
+    /// Removes the entries with the given ids in one environment. `nil` selects the default
+    /// environment (everything written before environments existed), matching `entries(in:)` — not
+    /// "all environments", which would silently delete the same video watched elsewhere.
+    public func remove(_ id: String) { remove(Set([id]), environment: nil) }
+    public func remove(_ id: String, environment: UUID?) { remove(Set([id]), environment: environment) }
+    public func remove(_ ids: Set<String>, environment: UUID? = nil) {
+        let target = environment ?? defaultEnvironmentID
+        for entry in entries where ids.contains(entry.id) && (entry.environment ?? defaultEnvironmentID) == target { clean(entry) }
+        entries.removeAll { ids.contains($0.id) && ($0.environment ?? defaultEnvironmentID) == target }
+        prioritizeCaches(); persist(); onChange?()
     }
     public func clear() { for entry in entries { clean(entry) }; entries.removeAll(); prioritizeCaches(); persist(); onChange?() }
+
+    /// Deletes every entry belonging to `environment` (legacy `nil` entries count as the default
+    /// environment), used when that environment is removed. The caches they own go with them.
+    public func delete(environment: UUID) {
+        for entry in entries where (entry.environment ?? defaultEnvironmentID) == environment { clean(entry) }
+        entries.removeAll { ($0.environment ?? defaultEnvironmentID) == environment }
+        prioritizeCaches(); persist(); onChange?()
+    }
+
+    /// Two entries are in the same environment once `nil` is normalized to the default one, so a
+    /// legacy (`nil`) entry and an entry explicitly stamped with the default environment's id are
+    /// treated as one — deduplication and removal no longer diverge from `entries(in:)`.
+    private func sameEnvironment(_ lhs: PlaybackHistoryEntry, _ rhs: PlaybackHistoryEntry) -> Bool {
+        (lhs.environment ?? defaultEnvironmentID) == (rhs.environment ?? defaultEnvironmentID)
+    }
+
     private func prioritizeCaches() {
         cache.prioritize(Set(entries.flatMap { entry in
             [entry.id] + (entry.context.poster.map { [PosterResource.artworkScope($0)] } ?? [])
@@ -160,11 +212,6 @@ extension PlaybackHistoryEntry {
     }
 
     private func persist() {
-        do {
-            let data = try JSONEncoder().encode(entries)
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: file, options: .atomic)
-            persistenceError = nil
-        } catch { persistenceError = error.localizedDescription }
+        persistenceError = JSONFileStore<[PlaybackHistoryEntry]>(file: file).save(entries)
     }
 }

@@ -68,14 +68,19 @@ import AVKit
             plan = .channel(CloudFiles.channel(context, resumePosition: position))
         } else if let context = sent.historyContext, let config = store.subscription,
                   let site = config.sites.first(where: { $0.origin(or: config.origin) == context.origin && $0.sourceKey == context.sourceKey }) {
+            // A hidden source must not arrive here through Play On: the other device's stream would
+            // otherwise bypass the vault, which only guards this device's own playback.
+            if !store.vault.permitsPlayback(sourceKey: context.sourceKey, origin: context.origin) {
+                return PlayOn.Reply(accepted: false, message: L10n.text("This title is hidden. Unlock the Privacy Vault to play it."))
+            }
             let client = CatalogClient(site: site, origin: config.origin, jarURL: config.spiderURL).applying(config)
             plan = .source(client, context, request.video)
         } else if let direct {
             plan = .channel(direct)
         } else if let context = sent.historyContext {
-            return PlayOn.Reply(accepted: false, message: L10n.text("Yingxia on %@ doesn't have the source %@. Add the same subscription there, then try again.", here, context.sourceName))
+            return PlayOn.Reply(accepted: false, message: L10n.text("Mi3s on %@ doesn't have the source %@. Add the same subscription there, then try again.", here, context.sourceName))
         } else {
-            return PlayOn.Reply(accepted: false, message: L10n.text("This video plays from inside Yingxia on this device, so %@ can't open it.", here))
+            return PlayOn.Reply(accepted: false, message: L10n.text("This video plays from inside Mi3s on this device, so %@ can't open it.", here))
         }
         let route = switch plan { case .source: "source"; case .channel(let channel): CloudFiles.isFile(channel.url) ? "file" : "direct" }
         Diagnostics.shared.record(.info, "play-on", "request source=\(sent.historyContext?.sourceKey ?? "-") route=\(route)")

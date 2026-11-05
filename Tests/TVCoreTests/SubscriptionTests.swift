@@ -283,3 +283,36 @@ import Testing
     #expect(site.runtime == .unsupported)
     #endif
 }
+
+@Test func subscriptionEntryCarriesItsEnvironmentAndDecodesLegacyData() throws {
+    // A record saved before environments existed has no environmentID and must decode as nil.
+    let legacy = Data(#"{"address":"https://example.com/tv.json","name":"","enabled":true,"routing":"auto"}"#.utf8)
+    let decoded = try JSONDecoder().decode(SubscriptionEntry.self, from: legacy)
+    #expect(decoded.environmentID == nil)
+    #expect(decoded.address == "https://example.com/tv.json")
+
+    // A record stamped by the current build round-trips its environment id.
+    let id = UUID()
+    var entry = SubscriptionEntry(address: "https://example.com/tv.json", name: "Home", environmentID: id)
+    entry.enabled = true
+    let encoded = try JSONEncoder().encode(entry)
+    let roundTripped = try JSONDecoder().decode(SubscriptionEntry.self, from: encoded)
+    #expect(roundTripped.environmentID == id)
+}
+
+@Test func environmentsTreatNilAsDefaultAndIsolateRecords() {
+    var environments = Environments()
+    let defaultID = environments.all[0].id
+    // Before a second environment exists, nil (legacy) maps to the default one.
+    #expect(environments.shows(nil) == true)
+    #expect(environments.shows(defaultID) == true)
+    // Adding a second environment activates it, so legacy/default records drop out of view.
+    let second = environments.add(name: "Kids")
+    #expect(environments.shows(nil) == false)
+    #expect(environments.shows(second.id) == true)
+    #expect(environments.shows(defaultID) == false)
+    // Switching back shows them again.
+    environments.activate(defaultID)
+    #expect(environments.shows(nil) == true)
+    #expect(environments.shows(second.id) == false)
+}

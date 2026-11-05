@@ -149,7 +149,7 @@ struct MessagesView: View {
         Group {
             if messages.isEmpty {
                 ContentUnavailableView(L10n.text("No Messages"), systemImage: "megaphone",
-                                       description: Text(L10n.text("News and notices from Yingxia appear here.")))
+                                       description: Text(L10n.text("News and notices from Mi3s appear here.")))
             } else {
                 ScrollView {
                     VStack(spacing: 12) {

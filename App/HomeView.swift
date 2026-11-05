@@ -78,6 +78,7 @@ struct HomeView: View {
                     .pageContainer()
                     .frame(width: proxy.size.width, alignment: .top)
                 }
+                .reportsScrollingToPosterLoader()
                 #if DEBUG
                 .task { if let target = QALaunch.scrollTarget { try? await Task.sleep(for: .seconds(8)); reader.scrollTo(target, anchor: .bottom) } }
                 #endif
@@ -104,33 +105,55 @@ struct HomeView: View {
 
     /// A section that will be on the page once it is built. Empty data is skipped so a placeholder does not appear and then vanish.
     private func showsPlaceholder(_ config: Subscription) -> Bool {
-        (showsContinueWatching && !store.playbackHistory.entries.isEmpty)
+        (showsUpNext && !upNextEntries.isEmpty)
+            || (showsContinueWatching && !store.visibleHistory.isEmpty)
             || (showsPinnedSources && !store.pinnedSources.isEmpty)
             || showsRecommendations
-            || (showsFavorites && !store.favorites.items.isEmpty)
+            || (showsFavorites && !store.visibleFavorites.isEmpty)
             || (showsLiveTV && !config.lives.isEmpty)
     }
 
     @ViewBuilder private var sections: some View {
         VStack(alignment: .leading, spacing: Layout.sectionSpacing) {
-            if showsContinueWatching, !store.playbackHistory.entries.isEmpty { continueWatching }
+            if showsUpNext, !upNextEntries.isEmpty { upNext }
+            if showsContinueWatching, !store.visibleHistory.isEmpty { continueWatching }
             if let config = store.subscription {
                 if showsPinnedSources, store.orderedSites(config).contains(where: { store.pinnedSources.contains($0, origin: config.origin) }) {
                     pinnedSources(config)
                 }
                 if showsRecommendations { RecommendationsView(config: config) }
-                if showsFavorites, !store.favorites.items.isEmpty { favorites }
+                if showsFavorites, !store.visibleFavorites.isEmpty { favorites }
                 if showsLiveTV, !config.lives.isEmpty { playlists(config).id("live") }
-                if !(showsContinueWatching || showsPinnedSources || showsRecommendations || showsFavorites || showsLiveTV) { allHidden }
+                if !(showsUpNext || showsContinueWatching || showsPinnedSources || showsRecommendations || showsFavorites || showsLiveTV) { allHidden }
             } else {
                 welcome
             }
         }
     }
 
+    /// The newest titles not finished yet, for the Up Next shelf.
+    private var upNextEntries: [PlaybackHistoryEntry] {
+        guard showsUpNext else { return [] }
+        return Array(store.visibleHistory.filter { !$0.completed }.prefix(5))
+    }
+
+    private var upNext: some View {
+        VStack(alignment: .leading, spacing: Layout.headerSpacing) {
+            SectionHeader(title: L10n.text("Up Next")) { store.section = .history }
+            ChipRow {
+                HStack(spacing: Layout.cardSpacing) {
+                    ForEach(upNextEntries) { HistoryCard(entry: $0) }
+                }.padding(.vertical, 6)
+            }
+        }
+    }
+
     private func placeholders(_ config: Subscription) -> some View {
         VStack(alignment: .leading, spacing: Layout.sectionSpacing) {
-            if showsContinueWatching, !store.playbackHistory.entries.isEmpty {
+            if showsUpNext, !upNextEntries.isEmpty {
+                loadingSection(HomeSection.upNext.title, action: { store.section = .history }) { cardRow }
+            }
+            if showsContinueWatching, !store.visibleHistory.isEmpty {
                 loadingSection(HomeSection.continueWatching.title, action: { store.section = .history }) { cardRow }
             }
             if showsPinnedSources, !store.pinnedSources.isEmpty {
@@ -144,7 +167,7 @@ struct HomeView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(L10n.text("Loading…"))
             }
-            if showsFavorites, !store.favorites.items.isEmpty {
+            if showsFavorites, !store.visibleFavorites.isEmpty {
                 loadingSection(HomeSection.favorites.title, action: { store.section = .favorites }) { cardRow }
             }
             if showsLiveTV, !config.lives.isEmpty {
@@ -212,7 +235,7 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 16) {
                 AppMark(size: heroTitle * 1.4)
-                Text(L10n.text("Yingxia")).font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                Text(L10n.text("Mi3s")).font(.title3.weight(.semibold)).foregroundStyle(.secondary)
             }
             .padding(.bottom, 32)
             Text(L10n.text("Your cinema,\non every screen."))
@@ -237,7 +260,8 @@ struct HomeView: View {
             }
             .controlSize(.large)
             if store.importing {
-                LoadingCard { .server(URL(string: store.subscriptionAddress)?.host(), title: L10n.text("Importing…")) }
+                LoadingCard { .server(URL(string: store.subscriptionAddress)?.host(),
+                    title: store.importTotal > 1 ? L10n.text("Importing… %lld of %lld", store.importDone, store.importTotal) : L10n.text("Importing…")) }
                     .frame(maxWidth: heroTitle * 9)
                     .padding(.top, 24)
             }
@@ -300,7 +324,7 @@ struct HomeView: View {
             SectionHeader(title: L10n.text("Continue Watching")) { store.section = .history }
             ChipRow {
                 HStack(spacing: Layout.cardSpacing) {
-                    ForEach(store.playbackHistory.entries.prefix(12)) { HistoryCard(entry: $0) }
+                    ForEach(store.visibleHistory.prefix(12)) { HistoryCard(entry: $0) }
                 }.padding(.vertical, 6)
             }
         }
@@ -311,7 +335,7 @@ struct HomeView: View {
             SectionHeader(title: L10n.text("Favorites")) { store.section = .favorites }
             ChipRow {
                 HStack(spacing: Layout.cardSpacing) {
-                    ForEach(Array(store.favorites.items.prefix(12))) { item in
+                    ForEach(Array(store.visibleFavorites.prefix(12))) { item in
                         HomeFavoriteCard(item: item).frame(width: Layout.cardMin)
                     }
                 }.padding(.vertical, 6)

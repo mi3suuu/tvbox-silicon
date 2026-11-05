@@ -180,9 +180,9 @@ struct MusicNowPlaying: View {
         // Both services ask to be named when their audio plays.
         if music.failure == nil, let provider = music.selection?.candidate.provider {
             if provider == .gdstudio {
-                Text(L10n.text("Source: GD Music (music.gdstudio.xyz)")).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                Text(L10n.text("Source: GD Music (music.gdstudio.xyz)")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             } else if provider == .xinghai {
-                Text(L10n.text("Source: Xinghai (yy.zddyr.top)")).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                Text(L10n.text("Source: Xinghai (yy.zddyr.top)")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
         }
     }
@@ -218,7 +218,7 @@ struct MusicNowPlaying: View {
             }
             if inQueue {
                 Button { music.next() } label: { Image(systemName: "forward.fill") }
-                    .controlButton().disabled(music.queue?.hasNext != true).accessibilityLabel(L10n.text("Next"))
+                    .controlButton().disabled(!music.canAdvance).accessibilityLabel(L10n.text("Next"))
             }
             #if os(tvOS)
             if !inQueue {
@@ -359,7 +359,7 @@ struct MusicLyricLines: View {
                     #endif
                     .id(index)
                 }
-                Text(L10n.text("Lyrics from %@", lyrics.platform.name)).font(.caption).foregroundStyle(.tertiary).padding(.top, 12)
+                Text(L10n.text("Lyrics from %@", lyrics.platform.name)).font(.caption).foregroundStyle(.secondary).padding(.top, 12)
             }
             .scrollTargetLayout()
             .padding(.horizontal, Layout.gutter * 1.5).padding(.vertical, 40)
@@ -612,7 +612,10 @@ struct MusicScrubber: View {
                 .frame(maxHeight: .infinity)
                 .contentShape(.rect)
                 .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { value in if total > 0 { dragging = min(1, max(0, value.location.x / proxy.size.width)) } }
+                    .onChanged { value in
+                        guard total > 0, proxy.size.width > 0 else { return }
+                        dragging = min(1, max(0, value.location.x / proxy.size.width))
+                    }
                     .onEnded { _ in
                         if let dragging { music.seek(to: dragging * total) }
                         dragging = nil
@@ -647,7 +650,7 @@ struct MusicScrubber: View {
     var failed = false
 
     static var note: String {
-        L10n.text("Scripts made for LX Music's custom sources. They are asked for a song's audio after the channels above, for QQ Music, NetEase Cloud Music, Kuwo and Migu songs. Yingxia includes none: add only sources you trust.")
+        L10n.text("Scripts made for LX Music's custom sources. They are asked for a song's audio after the channels above, for QQ Music, NetEase Cloud Music, Kuwo and Migu songs. Mi3s includes none: add only sources you trust.")
     }
 
     func add(address text: String) {
@@ -790,7 +793,7 @@ struct MusicLXSourcesSection: View {
     var changed: () -> Void = {}
 
     static var note: String {
-        L10n.text("Scripts in the Listenify music extension format. Their charts and playlists show on the Music page and their songs in Music search; songs play from what the extension gives, or through your LX Music sources when it asks for one. Yingxia includes none: add only extensions you trust.")
+        L10n.text("Scripts in the Listenify music extension format. Their charts and playlists show on the Music page and their songs in Music search; songs play from what the extension gives, or through your LX Music sources when it asks for one. Mi3s includes none: add only extensions you trust.")
     }
 
     func add(address text: String) {

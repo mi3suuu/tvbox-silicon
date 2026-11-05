@@ -122,6 +122,7 @@ struct DiscoverBrowseView: View {
                         Label(L10n.text(layout == "grid" ? "List View" : "Grid View"), systemImage: layout == "grid" ? "list.bullet" : "square.grid.3x3")
                     }
                 } label: { Image(systemName: "ellipsis") }
+                    .accessibilityLabel(L10n.text("Layout Options"))
                     .accessibilityIdentifier("discover.browse.layout")
             }
         }

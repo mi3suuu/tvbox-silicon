@@ -52,7 +52,7 @@ import TVCore
     var availableTitle: String? {
         guard let latest = available.first else { return nil }
         guard Self.channel == .testFlight, let live = feed.testflight?[ReleaseFeed.platform]?.build else {
-            return L10n.text("Yingxia %@ is available", latest.version)
+            return L10n.text("Mi3s %@ is available", latest.version)
         }
         return L10n.text("New build (%@) in TestFlight", String(live))
     }
@@ -152,7 +152,7 @@ import TVCore
             return
         }
         if manual {
-            if available.isEmpty { message = L10n.text("Yingxia %@ is the latest version.", displayVersion) }
+            if available.isEmpty { message = L10n.text("Mi3s %@ is the latest version.", displayVersion) }
             else { show() }
         } else { announce() }
     }
@@ -275,7 +275,7 @@ struct ReleaseNotesView: View {
                     .textCase(.uppercase).foregroundStyle(.white.opacity(0.8))
             }
             .accessibilityElement(children: .combine)
-            Text(update == nil ? L10n.text("What's New in Yingxia") : L10n.text("Something New Is Here"))
+            Text(update == nil ? L10n.text("What's New in Mi3s") : L10n.text("Something New Is Here"))
                 .font(.system(size: Size.title, weight: .heavy)).tracking(-0.6)
                 .lineLimit(2).minimumScaleFactor(0.7).fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
@@ -289,16 +289,16 @@ struct ReleaseNotesView: View {
 
     private var subtitle: String {
         if update == nil { return L10n.text("Here's what's new in version %@.", version) }
-        guard testFlight else { return L10n.text("Yingxia %@ is ready with new features.", version) }
+        guard testFlight else { return L10n.text("Mi3s %@ is ready with new features.", version) }
         #if os(tvOS)
-        return L10n.text("Yingxia %@ is ready in TestFlight. Open TestFlight on this Apple TV and update Yingxia to get these features.", version)
+        return L10n.text("Mi3s %@ is ready in TestFlight. Open TestFlight on this Apple TV and update Mi3s to get these features.", version)
         #else
-        return L10n.text("Yingxia %@ is ready in TestFlight. Open TestFlight and tap Update to get these features.", version)
+        return L10n.text("Mi3s %@ is ready in TestFlight. Open TestFlight and tap Update to get these features.", version)
         #endif
     }
 
     private var eyebrow: String {
-        let name = L10n.text("Yingxia %@", version)
+        let name = L10n.text("Mi3s %@", version)
         return "\(name) · \(update == nil ? L10n.text("What's New") : testFlight ? L10n.text("In TestFlight") : L10n.text("Now Available"))"
     }
 

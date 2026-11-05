@@ -7,7 +7,7 @@ import Network
 /// sign-in from the iPhone app over the local network (`DouyinHandoff`).
 public struct DouyinAccount: Codable, Equatable, Sendable {
     /// The desktop browser Douyin's sign-in page and its account check expect.
-    public static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    public static let userAgent = Endpoints.douyinWebUserAgent
     /// The douyin.com cookies of the signed-in web session.
     public var cookie = ""
     public var name = ""
@@ -155,7 +155,7 @@ public enum DouyinHandoff {
                 throw TVError.unsupported(L10n.text("Connect this device to Wi-Fi or Ethernet first."))
             }
             let listener = try NWListener(using: .tcp)
-            received = onReceive
+            queue.sync { self.received = onReceive }
             listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
             let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
                 // State updates arrive on `queue`, one at a time.

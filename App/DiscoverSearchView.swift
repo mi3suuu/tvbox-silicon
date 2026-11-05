@@ -14,6 +14,7 @@ struct DiscoverSearchView: View {
     @State private var expanded: Set<TMDBCatalog.SearchKind> = []
     @State private var focused = false
     @State private var revision = 0
+    @State private var confirmingClearHistory = false
     private var keyword: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var request: DiscoverSearchRequest { .init(keyword: keyword, feed: feed, filter: filter, revision: revision) }
     private let sections: [DiscoverFilterSection] = [.type, .genres, .years, .sort, .platform, .language, .region, .keywords]
@@ -66,6 +67,9 @@ struct DiscoverSearchView: View {
         .tint(.primary)
         .task(id: request) { expanded.removeAll(); await model.load(request) }
         .onChange(of: path.count) { _, value in if value > 0 { focused = false; filterSection = nil } }
+        .confirmationDialog(L10n.text("Clear Search History?"), isPresented: $confirmingClearHistory, titleVisibility: .visible) {
+            Button(L10n.text("Clear"), role: .destructive) { model.clearHistory() }
+        }
     }
 
     private var topChrome: some View {
@@ -139,7 +143,7 @@ struct DiscoverSearchView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(L10n.text("Recent Searches")).font(.system(size: 16, weight: .semibold)); Spacer()
-                Button { model.clearHistory() } label: { Image(systemName: "trash").font(.system(size: 13)).foregroundStyle(.secondary) }
+                Button { confirmingClearHistory = true } label: { Image(systemName: "trash").font(.system(size: 13)).foregroundStyle(.secondary) }
                     .accessibilityLabel(L10n.text("Clear Search History"))
             }.padding(.horizontal, 16)
             ScrollView(.horizontal) {
@@ -204,7 +208,7 @@ struct DiscoverSearchView: View {
         }
     }
     private func titleButton(_ item: TMDBCatalog.Item) -> some View {
-        Button { model.remember(keyword); model.rememberOpened(item); focused = false; path.append(item) } label: { DiscoverSearchRow(item: item) }
+        Button { model.remember(keyword); focused = false; path.append(item) } label: { DiscoverSearchRow(item: item) }
             .buttonStyle(.plain).accessibilityIdentifier("discover.search.result.\(item.key)")
     }
 }
@@ -224,10 +228,10 @@ struct DiscoverSearchRow: View {
                         HStack(spacing: 1) {
                             ForEach(0..<5) { index in
                                 Image(systemName: rating / 2 >= Double(index + 1) ? "star.fill" : rating / 2 > Double(index) ? "star.leadinghalf.filled" : "star")
-                                    .font(.system(size: 11)).frame(width: 12).foregroundStyle(rating / 2 > Double(index) ? Color.yellow : .secondary)
+                                    .font(.system(size: 11)).frame(width: 12).foregroundStyle(rating / 2 > Double(index) ? Brand.amber : .secondary)
                             }
                         }
-                        Text(rating, format: .number.precision(.fractionLength(1))).font(.system(size: 13)).foregroundStyle(.yellow)
+                        Text(rating, format: .number.precision(.fractionLength(1))).font(.system(size: 13)).foregroundStyle(Brand.amber)
                     }.frame(height: 18).accessibilityElement(children: .ignore).accessibilityLabel("TMDB \(rating.formatted(.number.precision(.fractionLength(1))))")
                 }
                 Text(item.overview.isEmpty ? " " : item.overview).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2).lineSpacing(2)
@@ -320,7 +324,6 @@ struct DiscoverSearchGroup {
     var loading = false
     var failed = false
     var history: [String] = UserDefaults.standard.stringArray(forKey: "discover.search.keywords") ?? []
-    var opened: [TMDBCatalog.Item] = (UserDefaults.standard.data(forKey: "discover.search.opened").flatMap { try? JSONDecoder().decode([TMDBCatalog.Item].self, from: $0) }) ?? []
     private var generation = 0
     var isEmpty: Bool { groups.values.allSatisfy { $0.count == 0 } }
     func load(_ request: DiscoverSearchRequest) async {
@@ -371,12 +374,6 @@ struct DiscoverSearchGroup {
         history = Array(history.prefix(12)); UserDefaults.standard.set(history, forKey: "discover.search.keywords")
     }
     func clearHistory() { history = []; UserDefaults.standard.removeObject(forKey: "discover.search.keywords") }
-    func rememberOpened(_ item: TMDBCatalog.Item) {
-        opened.removeAll { $0.key == item.key }; opened.insert(item, at: 0); opened = Array(opened.prefix(12)); saveOpened()
-    }
-    func clearOpened() { opened = []; saveOpened() }
-    func removeOpened(_ item: TMDBCatalog.Item) { opened.removeAll { $0.key == item.key }; saveOpened() }
-    private func saveOpened() { UserDefaults.standard.set(try? JSONEncoder().encode(opened), forKey: "discover.search.opened") }
 }
 #if os(macOS)
 /// The Mac's catalog search, a page in the window rather than the iPhone's full-screen sheet: the search field sits in
@@ -391,6 +388,7 @@ struct DiscoverMacSearchView: View {
     @State private var filterSection: DiscoverFilterSection?
     @State private var expanded: Set<TMDBCatalog.SearchKind> = []
     @State private var revision = 0
+    @State private var confirmingClearHistory = false
     private var keyword: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var request: DiscoverSearchRequest { .init(keyword: keyword, feed: feed, filter: filter, revision: revision) }
     private let sections: [DiscoverFilterSection] = [.type, .genres, .years, .sort, .platform, .language, .region, .keywords]
@@ -433,6 +431,9 @@ struct DiscoverMacSearchView: View {
             }
         }
         .task(id: request) { expanded.removeAll(); await model.load(request) }
+        .confirmationDialog(L10n.text("Clear Search History?"), isPresented: $confirmingClearHistory, titleVisibility: .visible) {
+            Button(L10n.text("Clear"), role: .destructive) { model.clearHistory() }
+        }
     }
 
     private var filters: some View {
@@ -464,7 +465,7 @@ struct DiscoverMacSearchView: View {
             HStack {
                 Text(L10n.text("Recent Searches")).font(.title3.weight(.semibold))
                 Spacer()
-                Button { model.clearHistory() } label: { Image(systemName: "trash") }
+                Button { confirmingClearHistory = true } label: { Image(systemName: "trash") }
                     .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel(L10n.text("Clear Search History"))
             }
             DiscoverChipFlow(spacing: 8) {
@@ -517,7 +518,7 @@ struct DiscoverMacSearchView: View {
     }
 
     private func open(_ item: TMDBCatalog.Item) {
-        model.remember(keyword); model.rememberOpened(item)
+        model.remember(keyword)
         openRoute?(Route { AnyView(DiscoverDetailView(item: item)) })
     }
     private func open(_ person: TMDBCatalog.SearchPerson) {

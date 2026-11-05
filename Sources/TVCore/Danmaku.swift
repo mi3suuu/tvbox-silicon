@@ -25,6 +25,9 @@ public enum DanmakuSource {
 
     static func register(_ url: URL, bilibiliCID cid: String, duration: Double?) {
         lock.withLock {
+            // Re-registering a URL must not leave a duplicate in `order`: the oldest copy would otherwise be
+            // evicted and delete the only `tracks` entry while a stale copy of the URL lingers.
+            order.removeAll { $0 == url.absoluteString }
             tracks[url.absoluteString] = Track(cid: cid, duration: duration); order.append(url.absoluteString)
             while order.count > 8 { tracks[order.removeFirst()] = nil }
         }
@@ -70,7 +73,9 @@ enum BilibiliDanmaku {
 
     static func load(cid: String, duration: Double?, session: URLSession) async -> [Danmaku] {
         // Unknown length: try the first hour; segments past the end come back empty.
-        let count = max(1, min(60, Int(((duration ?? 3600) / segment).rounded(.up))))
+        // Clamp before Int() so a non-finite (live streams report .indefinite) or absurd duration can't trap.
+        let seconds = duration?.isFinite == true ? max(0, min(duration!, segment * 60)) : 3600
+        let count = max(1, Int((seconds / segment).rounded(.up)))
         let segments = await withTaskGroup(of: [Danmaku].self) { group in
             for index in 1...count {
                 group.addTask { await fetch(cid: cid, index: index, session: session) }
@@ -112,7 +117,9 @@ enum BilibiliDanmaku {
                 }
             }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, (1...6).contains(mode) else { continue }
+            // `progress` is int64; a malformed segment can carry a negative value (two's-complement varint),
+            // which would sort to the front and pollute the list, so it is dropped like the other bad rows.
+            guard !trimmed.isEmpty, (1...6).contains(mode), time >= 0 else { continue }
             let position: Danmaku.Position = mode == 4 ? .bottom : mode == 5 ? .top : .scroll
             comments.append(Danmaku(time: Double(time) / 1000, position: position, color: UInt32(truncatingIfNeeded: color) & 0xFFFFFF,
                                     scale: min(1.5, max(0.7, Double(size) / 25)), text: String(trimmed.prefix(100))))

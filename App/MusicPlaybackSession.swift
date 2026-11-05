@@ -293,7 +293,9 @@ typealias MusicTrack = TVCore.MusicTrack
     }
 
     func seek(to seconds: Double) {
-        let target = max(0, min(seconds, (duration ?? seconds) - 0.5))
+        // Clamp short of the end only when the end is known; with an unknown duration the
+        // requested second is the target, not a half-second short of it.
+        let target = duration.map { max(0, min(seconds, $0 - 0.5)) } ?? max(0, seconds)
         position = target; seekingTo = target
         let run = generation
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in

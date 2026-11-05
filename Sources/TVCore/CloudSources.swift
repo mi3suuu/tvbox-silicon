@@ -33,7 +33,7 @@ public enum CloudSources {
     public static func fetch(http: HTTPClient) async throws -> Subscription {
         let (data, finalURL) = try await http.get(address, headers: ["User-Agent": HTTPClient.subscriptionUserAgent])
         let document = try Subscription.parse(data, origin: finalURL)
-        guard accepts(document) else { throw TVError.unsupported(L10n.text("Update Yingxia to use its built-in sources.")) }
+        guard accepts(document) else { throw TVError.unsupported(L10n.text("Update Mi3s to use its built-in sources.")) }
         return document
     }
 

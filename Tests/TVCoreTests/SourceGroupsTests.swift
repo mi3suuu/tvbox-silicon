@@ -126,3 +126,63 @@ private func document(_ origin: String, sites: [(key: String, api: String)]) thr
     #expect(moved.map(\.address) == ["bing", "yi", "jia"])
     #expect(moved.map(\.name) == ["Bing", "Yi", "Jia"])
 }
+
+/// The bug behind "the sources page only shows the built-in ones": an entry is known by the address
+/// the viewer typed, its copy by where that address finally landed. A subscription behind a
+/// redirect had two different strings, so no group matched and every source it brought disappeared.
+@Test func aSubscriptionThatRedirectedStillListsItsSources() throws {
+    let document = try document("https://cdn.example/final.json", keys: ["show", "movie"])
+    let entries = [entry("https://short.example/moved", name: "Moved", enabled: true)]
+    let merged = try #require(Subscription.merge([document]))
+    let groups = SourceGroups.make(entries: entries, documents: ["https://short.example/moved": document],
+                                   builtIns: [], builtInOrigin: document.origin, mergedSites: merged.sites,
+                                   pinOrder: [], userHidden: { _ in false }, includeHidden: false, jarURL: nil)
+    #expect(groups.map(\.id) == ["https://short.example/moved"])
+    #expect(groups[0].sites.map(\.key).sorted() == ["movie", "show"])
+}
+
+/// Whatever goes wrong, a source that exists is listed somewhere: an empty page reads as data loss.
+@Test func aSourceWithNoVisibleSubscriptionStillAppears() throws {
+    let document = try document("https://one.example/a.json", keys: ["orphan"])
+    let merged = try #require(Subscription.merge([document]))
+    // The entry is switched off, so no subscription group can claim the source.
+    let entries = [entry("https://one.example/a.json", name: "One", enabled: false)]
+    let groups = SourceGroups.make(entries: entries, documents: ["https://one.example/a.json": document],
+                                   builtIns: [], builtInOrigin: document.origin, mergedSites: merged.sites,
+                                   pinOrder: [], userHidden: { _ in false }, includeHidden: false, jarURL: nil)
+    #expect(groups.map(\.id) == ["other"])
+    #expect(groups[0].sites.map(\.key) == ["orphan"])
+}
+
+/// A privacy-hidden source must not surface at all while the vault is locked — not in its own group,
+/// and crucially not in the "Hidden Sources" group, whose count would tell a locked-out viewer how
+/// much is in the vault ("没解锁不应该能看到已隐藏"). A plain user-hidden source still lands there.
+@Test func aPrivacyHiddenSourceLeavesNoTraceWhileLocked() throws {
+    let document = try document("https://one.example/a.json", keys: ["vault", "plain"])
+    let merged = try #require(Subscription.merge([document]))
+    let entries = [entry("https://one.example/a.json", name: "One", enabled: true)]
+    let documents = ["https://one.example/a.json": document]
+    // "vault" is hidden by the privacy vault (locked → invisible); "plain" is a normal user hide.
+    let groups = SourceGroups.make(entries: entries, documents: documents,
+                                   builtIns: [], builtInOrigin: document.origin, mergedSites: merged.sites,
+                                   pinOrder: [],
+                                   userHidden: { $0.key == "plain" || $0.key == "vault" },
+                                   includeHidden: false, jarURL: nil,
+                                   privacyHidden: { $0.key == "vault" })
+    // Only the ordinary hide shows up; the vault-hidden source is nowhere. The subscription group
+    // itself vanishes because every one of its sources is hidden (vault or plain).
+    #expect(groups.map(\.id) == ["hidden"])
+    #expect(groups[0].sites.map(\.key) == ["plain"])
+    #expect(!groups.flatMap(\.sites).contains { $0.key == "vault" })
+
+    // Unlocked, the vault source is back in its own group and the Hidden group holds only "plain".
+    let open = SourceGroups.make(entries: entries, documents: documents,
+                                 builtIns: [], builtInOrigin: document.origin, mergedSites: merged.sites,
+                                 pinOrder: [],
+                                 userHidden: { $0.key == "plain" },
+                                 includeHidden: false, jarURL: nil,
+                                 privacyHidden: { _ in false })
+    #expect(open.map(\.id) == ["https://one.example/a.json", "hidden"])
+    #expect(open[0].sites.map(\.key) == ["vault"])
+    #expect(open[1].sites.map(\.key) == ["plain"])
+}

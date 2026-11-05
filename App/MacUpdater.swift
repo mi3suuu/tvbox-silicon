@@ -155,7 +155,7 @@ import TVCore
             relaunchWatchdog = nil
             guard phase == .installing else { return }
             Diagnostics.shared.record(.error, "updates", "Relaunch to update stalled: still open 12 s after Relaunch: \(Self.blockers()) relaunching=\(relaunching)")
-            fail(L10n.text("Yingxia couldn't relaunch to finish the update. Quit Yingxia and open it again."))
+            fail(L10n.text("Mi3s couldn't relaunch to finish the update. Quit Mi3s and open it again."))
         }
     }
 
@@ -196,7 +196,7 @@ extension MacUpdater: SPUUserDriver {
 
     func showUpdateNotFoundWithError(_ error: any Error, acknowledgement: @escaping () -> Void) {
         // The release feed announced a version this appcast doesn't have (yet), e.g. one built before Sparkle.
-        if installRequested { fail(L10n.text("This update can't be installed from within Yingxia yet. Download it instead."), error) }
+        if installRequested { fail(L10n.text("This update can't be installed from within Mi3s yet. Download it instead."), error) }
         else { phase = .idle }
         acknowledgement()
     }

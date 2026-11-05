@@ -33,9 +33,11 @@ public final class BilibiliCastReceiver: @unchecked Sendable {
 
     public static let shared = BilibiliCastReceiver()
     /// Called on a background queue.
+    /// Written once on the main thread before the receiver starts, then only read on `queue`. Do not
+    /// mutate while running: there is no lock, so a mid-run write would race the queue's reads.
     public var onEvent: (@Sendable (Event) -> Void)?
-    /// The name phones list this device under.
-    public var name = "Yingxia"
+    /// The name phones list this device under. Same start-before-read discipline as `onEvent`.
+    public var name = "Mi3s"
 
     private static let group = "239.255.255.250"
     private static let ssdpPort: UInt16 = 1900

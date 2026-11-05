@@ -61,7 +61,7 @@ public final class ErrorReports: @unchecked Sendable {
 
     /// The app only: helper processes (TVBoxProbe, the source sweep) share the log folder and never report.
     public func start() async {
-        let saved = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([String: Group].self, from: $0) } ?? [:]
+        let saved = JSONFileStore<[String: Group]>(file: file).load() ?? [:]
         let first = lock.withLock {
             defer { started = true }
             if !started { groups.merge(saved) { current, old in Self.combine(old, current) } }
@@ -198,8 +198,7 @@ public final class ErrorReports: @unchecked Sendable {
     public func save() {
         lock.lock(); let snapshot = groups; saveScheduled = false; lock.unlock()
         if snapshot.isEmpty { try? FileManager.default.removeItem(at: file); return }
-        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(snapshot).write(to: file, options: .atomic)
+        JSONFileStore<[String: Group]>(file: file).save(snapshot)
     }
 
     private var address: URL? {

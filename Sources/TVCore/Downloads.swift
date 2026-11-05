@@ -11,13 +11,40 @@ public struct DownloadSource: Codable, Hashable, Sendable {
     public let address: String
     public let flag: String
     public let detailID: String?
-    public init(site: Site, videoID: String, episode: Episode) {
+    /// The subscription this source came from, for the Privacy Vault. Nil for downloads saved before
+    /// this field existed, and for a bare source whose subscription origin was not known at save time.
+    /// The vault only hides a download whose origin and key it can name, so a nil origin stays visible.
+    public let origin: URL?
+    /// The source's original key (`Site.sourceKey`), which the vault matches on. Kept beside `siteKey`
+    /// because a merged subscription can rename a clashing key, and the vault's identity uses the
+    /// original one. Defaults to `siteKey` for downloads saved before this field existed.
+    public let sourceKey: String
+    public init(site: Site, videoID: String, episode: Episode, origin: URL? = nil) {
         siteKey = site.key; siteName = site.name; self.videoID = videoID
         episodeID = episode.id; episodeName = episode.name; address = episode.address; flag = episode.flag; detailID = episode.videoID
+        self.origin = origin ?? site.provenance?.origin
+        sourceKey = site.sourceKey
     }
     public var episode: Episode { Episode(id: episodeID, name: episodeName, address: address, flag: flag, videoID: detailID) }
     /// The same episode, on the same source and line.
     public var key: String { [siteKey, videoID, flag, episodeID].joined(separator: "\u{1F}") }
+
+    private enum CodingKeys: String, CodingKey {
+        case siteKey, siteName, videoID, episodeID, episodeName, address, flag, detailID, origin, sourceKey
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        siteKey = try c.decode(String.self, forKey: .siteKey)
+        siteName = try c.decode(String.self, forKey: .siteName)
+        videoID = try c.decode(String.self, forKey: .videoID)
+        episodeID = try c.decode(String.self, forKey: .episodeID)
+        episodeName = try c.decode(String.self, forKey: .episodeName)
+        address = try c.decode(String.self, forKey: .address)
+        flag = try c.decode(String.self, forKey: .flag)
+        detailID = try c.decodeIfPresent(String.self, forKey: .detailID)
+        origin = try c.decodeIfPresent(URL.self, forKey: .origin)
+        sourceKey = try c.decodeIfPresent(String.self, forKey: .sourceKey) ?? siteKey
+    }
 }
 
 public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
@@ -193,7 +220,7 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
 
     public func pauseAll() {
         for item in items where item.status == .queued || item.isActive { stop(item.id); update(item.id) { $0.status = .paused } }
-        save()
+        save(); schedule()
     }
 
     public func resumeAll() {
@@ -204,7 +231,7 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     /// Stops running downloads without pausing them, for when the app goes to the background:
     /// they continue from where they were on `wake()`.
     public func suspend() {
-        for id in running.keys { stop(id); update(id) { $0.status = .queued } }
+        for id in Array(running.keys) { stop(id); update(id) { $0.status = .queued } }
         save()
     }
     public func wake() { schedule() }
@@ -427,13 +454,14 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
 
     private func folder(_ id: String) -> URL { root.appending(path: id) }
     private var index: URL { root.appending(path: "downloads.json") }
+    private var store: JSONFileStore<[DownloadItem]> { JSONFileStore(file: index) }
     private func hasMedia(_ item: DownloadItem) -> Bool {
         guard let media = item.media else { return false }
         return FileManager.default.fileExists(atPath: folder(item.id).appending(path: media).path)
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: index), let stored = try? JSONDecoder().decode([DownloadItem].self, from: data) else { return }
+        guard let stored = store.load() else { return }
         items = stored.compactMap { item in
             var item = item
             if item.status == .completed {
@@ -448,9 +476,6 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
 
     private func save() {
         savedAt = Date()
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        // The folder itself may have been deleted in Finder.
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? data.write(to: index, options: .atomic)
+        store.save(items)
     }
 }

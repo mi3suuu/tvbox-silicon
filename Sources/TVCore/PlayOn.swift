@@ -59,9 +59,9 @@ public enum PlayOn {
         public var errorDescription: String? {
             switch self {
             case .noAnswer(let name):
-                L10n.text("%@ didn't answer. Make sure Yingxia is open on it and both devices are on the same network.", name)
+                L10n.text("%@ didn't answer. Make sure Mi3s is open on it and both devices are on the same network.", name)
             case .localNetworkDenied:
-                L10n.text("Turn on Local Network for Yingxia in the Settings app, then try again.")
+                L10n.text("Turn on Local Network for Mi3s in the Settings app, then try again.")
             }
         }
     }
@@ -96,14 +96,17 @@ public enum PlayOn {
 public final class PlayOnReceiver: @unchecked Sendable {
     public static let shared = PlayOnReceiver()
     /// Decides on a request and answers it; called off the main thread.
+    /// Written once on the main thread before `start()`, then only read on `queue`. Do not mutate
+    /// while running: there is no lock, so a mid-run write would race the queue's reads.
     public var onRequest: (@Sendable (PlayOn.Request) async -> PlayOn.Reply)?
+    /// What this device advertises itself as. Same start-before-read discipline as `onRequest`.
     public var kind = PlayOn.Kind.tv
     /// The name senders list this device under, as Bonjour registered it (numbered when another device has it).
     public var name: String { queue.sync { registered } }
     private let queue = DispatchQueue(label: "tvbox.play-on.receiver")
     private var listener: NWListener?
     private var running = false
-    private var registered = "Yingxia"
+    private var registered = "Mi3s"
 
     public func start() { queue.async { self.running = true; self.listen() } }
     public func stop() {

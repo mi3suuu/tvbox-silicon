@@ -335,6 +335,10 @@ struct Transfer: Sendable {
                 catch let error as TransferError {
                     failure = error
                     if case .expired = error { refused += 1; continue }
+                    // A streamed body is appended to the file as it arrives. `.incomplete` means part
+                    // of it is already on disk, so retrying here would write the whole file a second
+                    // time and corrupt it. Fail and let the download start over cleanly.
+                    if sink != nil, case .incomplete = error { throw error }
                     if !error.retriable { throw error }
                 } catch let error as URLError where error.code == .cancelled {
                     throw CancellationError()
@@ -343,6 +347,9 @@ struct Transfer: Sendable {
                 } catch let error as URLError where [.notConnectedToInternet, .timedOut, .networkConnectionLost, .cannotConnectToHost,
                                                      .cannotFindHost, .dnsLookupFailed, .secureConnectionFailed, .badServerResponse].contains(error.code) {
                     failure = error
+                    // A mid-stream network drop leaves a partial streamed file; retrying would append
+                    // a second copy rather than resume. Fail and start the request over.
+                    if sink != nil { throw error }
                 } catch { throw error }
             }
             if refused == urls.count { throw failure }
