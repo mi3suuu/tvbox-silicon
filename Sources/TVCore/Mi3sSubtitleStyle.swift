@@ -26,6 +26,16 @@ public struct Mi3sSubtitleStyle: Codable, Equatable, Sendable {
     /// Default matches the system caption size on a phone.
     public static let defaultFontSize: Double = 17
 
+    /// Where the app keeps this style in `UserDefaults`. Deliberately **not** the upstream key:
+    /// upstream's `SubtitleStyle` (the system caption look it hands to AVPlayer) already owns
+    /// `"subtitleStyle"`, and the two JSON shapes share no field name. A shared key meant the
+    /// settings page and the player's own bubble each wiped the other back to its defaults.
+    public static let storageKey = "mi3sSubtitleStyle"
+
+    /// The key this style used before fusion. Read once, so an upgrade keeps the bubble the
+    /// viewer dragged; nothing writes here again.
+    public static let legacyStorageKey = "subtitleStyle"
+
     // MARK: 字段
 
     /// Point size of the caption text.

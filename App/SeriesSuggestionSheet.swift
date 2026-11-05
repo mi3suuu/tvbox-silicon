@@ -81,7 +81,7 @@ struct SeriesSuggestionSheet: View {
             Image(systemName: "play.circle.fill").font(.title2)
         }
         .padding(10)
-        .background(Brand.pageBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Brand.pageBackground, in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel(L10n.text("Play %@", suggestion.video.name))

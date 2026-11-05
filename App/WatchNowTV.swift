@@ -14,7 +14,7 @@ struct WatchNowTVPage: View {
     /// The newest titles not finished yet, for the hero.
     private var upNext: [PlaybackHistoryEntry] {
         guard sections.contains(.upNext) else { return [] }
-        return Array(store.playbackHistory.entries.filter { !$0.completed }.prefix(5))
+        return Array(store.visibleHistory.filter { !$0.completed }.prefix(5))
     }
 
     var body: some View {
@@ -58,10 +58,14 @@ struct WatchNowTVPage: View {
         .ignoresSafeArea()
     }
 
+    /// [mi3s] 二开：一律走 `visibleHistory` / `visibleFavorites`。上游 `WatchNowTVPage` 直读
+    /// `playbackHistory.entries` 与 `favorites.items`，那是裸数据；保险库锁定期间这两条轨会
+    /// 把被藏源的条目连同缩略图一起画在 Apple TV 首屏上。同机 iOS 走 `WatchNowPhone` 已是可见性
+    /// 出口，tvOS 这一支是融合时按上游落盘时漏掉的（W1 修了三处遮蔽，这一处不在其清单里）。
     @ViewBuilder private var rows: some View {
-        if sections.contains(.continueWatching), !store.playbackHistory.entries.isEmpty {
+        if sections.contains(.continueWatching), !store.visibleHistory.isEmpty {
             WatchNowTVRail(title: L10n.text("Continue Watching"), seeAll: WatchNowTVSeeAll(height: WatchNowTVCover.height) { store.section = .history }) {
-                ForEach(store.playbackHistory.entries.prefix(12)) { HistoryCard(entry: $0) }
+                ForEach(store.visibleHistory.prefix(12)) { HistoryCard(entry: $0) }
             }
             .id("continue")
         }
@@ -84,9 +88,9 @@ struct WatchNowTVPage: View {
             }
         }
         if sections.contains(.recommendations) { RecommendationsView(config: config, rails: true).id("recommendations") }
-        if sections.contains(.favorites), !store.favorites.items.isEmpty {
+        if sections.contains(.favorites), !store.visibleFavorites.isEmpty {
             WatchNowTVRail(title: L10n.text("Favorites"), seeAll: WatchNowTVSeeAll(height: WatchNowTVCover.height) { store.section = .favorites }) {
-                ForEach(Array(store.favorites.items.prefix(20))) { WatchNowTVFavorite(item: $0) }
+                ForEach(Array(store.visibleFavorites.prefix(20))) { WatchNowTVFavorite(item: $0) }
             }
             .id("favorites")
         }

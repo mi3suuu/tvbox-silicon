@@ -704,7 +704,7 @@ struct VideoDetailView: View {
                 tmdbStatus
                 if let detail, !synopsisText(detail).isEmpty {
                     synopsis(detail).font(.body).padding(.horizontal, 18).padding(.vertical, 14)
-                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: Radius.large, style: .continuous))
                 }
             } else {
                 HStack(alignment: .top, spacing: 14) {

@@ -167,7 +167,7 @@ struct LoadingCard: View {
         }
         .padding(.horizontal, 18).padding(.vertical, 14)
         .frame(maxWidth: maxWidth, alignment: .leading)
-        .glassSurface(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .glassSurface(.regular, in: RoundedRectangle(cornerRadius: Radius.hero, style: .continuous))
         .accessibilityElement(children: .combine)
         .animation(.smooth(duration: 0.25), value: state.title)
         .animation(.smooth(duration: 0.25), value: explains)
@@ -228,7 +228,7 @@ struct ErrorStateCard: View {
                             .fixedSize(horizontal: false, vertical: true).selectable().padding(14)
                     }
                     .frame(height: detailsHeight)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: Radius.card))
                 }
             }
         }

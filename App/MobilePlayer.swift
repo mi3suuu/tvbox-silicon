@@ -101,6 +101,14 @@ struct MobilePlayerView: View {
     private func loadSubtitles() async {
         if let style = try? JSONDecoder().decode(Mi3sSubtitleStyle.self, from: subtitleStyleData) {
             subtitleStyle = style.sanitized
+        } else if subtitleStyleData.isEmpty,
+                  let legacy = UserDefaults.standard.data(forKey: Mi3sSubtitleStyle.legacyStorageKey),
+                  let style = try? JSONDecoder().decode(Mi3sSubtitleStyle.self, from: legacy) {
+            // [mi3s] 二开：升级一次性迁移。旧版把自绘外观存在上游那个键上；能按我方模型解出来就
+            // 说明是我们自己写的那份，接过来并落到新键。上游 `SubtitleStyle` 的 JSON 字段完全不同，
+            // 在这里解不出来，因此不会被误当成自绘外观搬走。
+            subtitleStyle = style.sanitized
+            saveSubtitleStyle()
         }
         if let memory = try? JSONDecoder().decode(SubtitlePositionMemory.self, from: subtitlePositionsData) {
             subtitlePositions = memory
@@ -331,7 +339,9 @@ struct MobilePlayerView: View {
     /// Why the last attempt produced nothing, shown in place of the menu item.
     @State private var subtitleError: String?
     /// Persisted appearance, shared by every title.
-    @AppStorage("subtitleStyle") private var subtitleStyleData = Data()
+    // [mi3s] 二开：键位与上游分开（见 `Mi3sSubtitleStyle.storageKey`）。共用一个键时，
+    // 设置页的「Subtitle Style」与这里各自把对方写成默认值。
+    @AppStorage(Mi3sSubtitleStyle.storageKey) private var subtitleStyleData = Data()
     /// Where the bubble was dragged to, per title.
     @AppStorage("subtitlePositions") private var subtitlePositionsData = Data()
     @State private var subtitleStyle = Mi3sSubtitleStyle.standard

@@ -130,7 +130,7 @@ struct SeriesEndScreen: View {
         // an empty plate.
         PosterImage(url: video.poster, headers: video.posterHeaders)
             .aspectRatio(2.0 / 3.0, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.medium))
     }
 
     private var emptyState: some View {
