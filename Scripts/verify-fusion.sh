@@ -88,3 +88,26 @@ orphan = sorted(ondisk - ref)
 print("   index.json 本地引用 %d 个 → 文件缺失 %d%s" % (len(local), len(miss), " ✓" if not miss else "：" + str(miss)))
 print("   磁盘孤儿 %d 个（应全为共享库）：%s" % (len(orphan), orphan))
 PY
+
+echo
+echo "⑦ Java host 版本一致（陈旧 jar 会让源在设备上全空）"
+python3 - <<'PY2'
+import subprocess, re, os
+src = 'Runtime/JavaHost/src/main/java/tvbox/runtime/BytecodeCompatibility.java'
+want = re.search(r'VERSION = "(host-v[0-9]+)"', open(src).read())
+want = want.group(1) if want else '?'
+# 只查「会被 Xcode 拷进 App」的与源产物，不查历史 DerivedData
+targets = ['build/JavaHost/host.jar']
+for d in os.listdir('build/AppleRuntime') if os.path.isdir('build/AppleRuntime') else []:
+    p = 'build/AppleRuntime/%s/Resources/JavaHost/host.jar' % d
+    if os.path.exists(p): targets.append(p)
+bad = []
+for t in targets:
+    out = subprocess.run(['unzip', '-p', t, 'tvbox/runtime/BytecodeCompatibility.class'],
+                         capture_output=True).stdout
+    got = re.search(rb'host-v[0-9]+', out)
+    got = got.group(0).decode() if got else '?'
+    if got != want: bad.append((t, got))
+print("   源码 %s / 检查 %d 个产物 → 不符 %d%s" % (want, len(targets), len(bad),
+      ("：" + str(bad)) if bad else " ✓"))
+PY2
