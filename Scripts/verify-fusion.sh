@@ -201,3 +201,8 @@ for key, needles in grants.items():
 raise SystemExit(0 if ok else 1)
 PY2
 [ $? -ne 0 ] && fail=$((fail+1))
+
+echo
+echo "⑪ manifest ⟷ 代码（90 条逐条落地文件解析）"
+python3 Scripts/verify-manifest.py
+[ $? -ne 0 ] && fail=$((fail+1))
