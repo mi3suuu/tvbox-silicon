@@ -27,6 +27,8 @@ enum VideoEnhancement {
     /// its background queue. Building all of that when both switches are off only leaves an idle
     /// `AVSampleBufferDisplayLayer` being added to and removed from the layer tree across a Duo fold/unfold,
     /// which is a use-after-free hazard the two-column scene teardown has crashed on (SIGSEGV / SIGILL).
+    // [mi3s] 二开：总开关。上游只有 canUpscale / canSmooth 两个能力判定，
+    // 没有「用户把画质增强关掉」这一层 —— 这里补上，读取两个独立的 UserDefaults 键。
     static var enabled: Bool {
         canUpscale && UserDefaults.standard.bool(forKey: upscaleKey)
             || canSmooth && UserDefaults.standard.bool(forKey: smoothKey)

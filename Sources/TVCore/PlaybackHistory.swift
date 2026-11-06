@@ -49,6 +49,10 @@ public struct PlaybackHistoryEntry: Identifiable, Codable, Hashable, Sendable {
     public let position: Double
     public let duration: Double
     public let updatedAt: Date
+    // [mi3s] 二开：播放环境隔离。上游的 PlaybackHistory 只有全局一条时间线 —— 同一部剧在
+    // 客厅 TV 与 iPhone 上看到的位置互相覆盖。这里给每条记录加 environment 字段，
+    // 环境本身由我方新增的 Sources/TVCore/Environments.swift 管理（上游无此文件）。
+    // environment 为 nil 表示 environments 出现之前写入的旧记录，仍按默认环境归类。
     /// The environment that recorded this. Nil for entries written before environments existed, which
     /// belong to the default one — so an upgrade never hides a viewer's whole history.
     public let environment: UUID?
