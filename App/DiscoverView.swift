@@ -833,6 +833,7 @@ private struct DiscoverNativeHeroPager: UIViewRepresentable {
         var parent: DiscoverNativeHeroPager
         var needsReload = false
         init(_ parent: DiscoverNativeHeroPager) { self.parent = parent }
+        // [mi3s] 二开：把当前选中的 key 反查成下标，供 page 闭包读取（上游无）
         var selectedIndex: Int { parent.selection.flatMap { key in parent.items.firstIndex { $0.key == key } } ?? 0 }
         func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { parent.items.count }
         func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize { collectionView.bounds.size }

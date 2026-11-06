@@ -481,6 +481,7 @@ struct FavoritesView: View {
 
     private var musicSection: some View {
         VStack(alignment: .leading, spacing: Layout.headerSpacing) {
+            // [mi3s] 二开：收藏页标题改为「喜欢的歌曲」，上游是 Music
             SectionHeader(title: L10n.text("Liked Songs"))
             LazyVStack(alignment: .leading, spacing: MusicLayout.rowSpacing) {
                 ForEach(visible(.music)) { item in

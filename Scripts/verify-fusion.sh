@@ -111,3 +111,29 @@ for t in targets:
 print("   源码 %s / 检查 %d 个产物 → 不符 %d%s" % (want, len(targets), len(bad),
       ("：" + str(bad)) if bad else " ✓"))
 PY2
+
+echo
+echo "⑧ 上游文件改动全量（含无 [mi3s] 标记的）"
+python3 - <<'PY2'
+import subprocess
+def ls(r): return set(subprocess.run(['git','ls-tree','-r','--name-only',r],capture_output=True,text=True).stdout.splitlines())
+ours, base, head = ls('import/ours'), ls('22180e4'), ls('HEAD')
+rows=[]
+for x in sorted(ours & base):
+    if x not in head or not x.endswith('.swift'): continue
+    a=subprocess.run(['git','rev-parse',f'HEAD:{x}'],capture_output=True,text=True).stdout.strip()
+    b=subprocess.run(['git','rev-parse',f'22180e4:{x}'],capture_output=True,text=True).stdout.strip()
+    if not (a and b and a!=b): continue
+    t=subprocess.run(['git','show',f'HEAD:{x}'],capture_output=True,text=True).stdout
+    o=subprocess.run(['git','rev-parse',f'import/ours:{x}'],capture_output=True,text=True).stdout.strip()
+    rows.append((x, '[mi3s]' in t, a==o))
+m=sum(1 for r in rows if r[1]); u=[r for r in rows if not r[1]]
+merge=[r for r in u if not r[2]]
+print("   被改动的上游 .swift  %d 个" % len(rows))
+print("     带 [mi3s] 标记       %d" % m)
+print("     无标记 / 沿用我方版  %d" % (len(u)-len(merge)))
+print("     无标记 / 融合改写    %d  ← 最需要逐处标记的一类" % len(merge))
+if merge:
+    for x,_,_ in merge[:5]: print("         ", x)
+print("   详见 Docs/fusion/10-上游文件改动全量清单.md")
+PY2

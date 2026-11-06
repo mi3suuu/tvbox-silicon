@@ -242,6 +242,7 @@ struct HistoryCard: View {
 
     /// The short episode label when history kept a netdisk file's name (#521, #522): the card cut a long name off after
     /// the show's, so every episode of a series looked the same.
+    // [mi3s] 二开：网盘文件名会让同剧各集显示相同，这里截出集标签（#521 #522）
     private var episodeLabel: String { EpisodeLabels.historyLabel(entry.context.episodeName) }
 
     private var cardLabel: some View {

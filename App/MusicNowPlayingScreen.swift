@@ -89,6 +89,7 @@ struct MusicNowPlayingScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
                 if let track = music.track {
+                    // [mi3s] 二开：正在播放页加收藏项，上游无
                     FavoriteMenuButton(item: .music(track), name: track.title)
                     Divider()
                 }

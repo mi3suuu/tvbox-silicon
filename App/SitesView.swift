@@ -27,6 +27,7 @@ struct SitesView: View {
     /// Seeds the fold before the first frame, so the page never draws every group open and then
     /// fold: restoring in `.task` runs after the first render, which reads as the page flickering.
     /// Picking starts open (see `applyDefaultFold`).
+    // [mi3s] 二开：首帧前就种下折叠状态，避免每次进页面先全展开再折起（上游无此 init）
     init(pick: ((Site) -> Void)? = nil, pickable: [Site] = [], picked: String? = nil) {
         self.pick = pick
         self.pickable = pickable
@@ -191,6 +192,7 @@ struct SitesView: View {
                 if open { collapsed.insert(group.id) } else { collapsed.remove(group.id) }
                 // A picking visit folds for its own convenience and leaves the Sources page's saved
                 // fold alone: borrowing a page to choose from must not rearrange it.
+                // [mi3s] 二开：借用选择页时不动 Sources 页自己的折叠记忆
                 if pick == nil { foldState.save(collapsed) }
             }
         } label: {
@@ -255,6 +257,7 @@ struct SitesView: View {
         let ids = store.sourceGroups(includeHidden: false).map(\.id)
         withAnimation(.snappy(duration: 0.3)) { collapsed = all ? Set(ids) : [] }
         // Same rule as a single header: only the Sources page owns the saved fold.
+        // [mi3s] 二开：展开/折叠全部后也只由 Sources 页写折叠记忆
         if pick == nil { foldState.save(collapsed) }
     }
 

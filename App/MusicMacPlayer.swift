@@ -269,6 +269,7 @@ private struct MusicMacMenu: View {
             if let quality = MusicMacNowPlaying.quality(music) { Text(quality) }
             if let credit = MusicMacNowPlaying.credit(music) { Text(credit) }
             if let track = music.track {
+                // [mi3s] 二开：Mac 播放器菜单加收藏项，上游无
                 FavoriteMenuButton(item: .music(track), name: track.title)
                 Divider()
             }

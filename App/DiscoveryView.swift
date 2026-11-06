@@ -165,6 +165,7 @@ struct GlobalSearchView: View {
                             }.scrollTargetLayout()
                             // A single row of results leaves nothing under the right of the rows above; as a section the
                             // remote still moves Down onto it (#481).
+                            // [mi3s] 二开：单行结果时 tvOS 遥控器 Down 落不下来（#481）
                             .tvFocusSection()
                             // Scrolling the end into view asks for the next page; while it stays in view each new page asks again.
                             if model.canLoadMore(model.selectedSource) || model.loadingMore {
@@ -300,6 +301,7 @@ struct GlobalSearchView: View {
                     }
                     // The chips sit at the left, under the field and the summary row's far end: as a section, Down
                     // from anywhere above lands on them (#481).
+                    // [mi3s] 二开：同上，让 Down 能落到筛选 chips（#481）
                     .focusSection()
                     #else
                     SourceStrip(items: sourceItems.map { .init(id: $0.id, name: $0.name, count: $0.count, dot: $0.dot) }, selection: model.selectedSource ?? "") { id in
@@ -995,6 +997,7 @@ struct RecommendationsView: View {
                     SourceStrip(items: sites.map { .init(id: $0.key, name: $0.name) }, selection: site.key) { key in
                         // Clear before the key changes. The load task opens a category-only home after it returns;
                         // an onChange that also clears would run after a cached load and wipe that category.
+                        // [mi3s] 二开：切源时清掉上一个源的分类筛选，避免残留
                         if key != sourceKey { category = nil }
                         sourceKey = key; revision = 0; forceRefresh = false
                     } actions: { key in

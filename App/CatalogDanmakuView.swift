@@ -73,6 +73,7 @@ import UniformTypeIdentifiers
             guard let self else { return }
             defer { if self.generation == active { self.automaticTask = nil } }
             do {
+                // [mi3s] 二开：弹幕解析优先取 CatPaw 侧的 comments，上游无此参数
                 let result = try await Self.resolver().resolve(context, first: CatPawDanmaku.comments)
                 try Task.checkCancellation()
                 guard self.generation == active, self.enabled, self.automatic else { return }
@@ -104,6 +105,7 @@ import UniformTypeIdentifiers
             guard !Task.isCancelled, self.generation == active, !self.comments.isEmpty else { return }
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled, self.generation == active else { return }
+            // [mi3s] 二开：同上，ticket 路径也走 CatPaw 优先
             _ = try? await Self.resolver().resolve(context, ticket: ticket, first: CatPawDanmaku.comments)
         }
     }
