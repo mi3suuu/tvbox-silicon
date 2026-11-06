@@ -1242,7 +1242,8 @@ private struct DesktopPlaybackView: View {
                 Color.black
                 let bare = session.isLive || !session.hasTimeline
                 // A new player view whenever the controls come or go (see DesktopNativePlayer).
-                DesktopNativePlayer(player: session.player, fillsFrame: fillsFrame, live: bare, waiting: waitContent, enhancer: session.enhancer)
+                DesktopNativePlayer(player: session.player, fillsFrame: fillsFrame, live: bare, waiting: waitContent, enhancer: session.enhancer,
+                                    subtitles: session.subtitles)
                     .id(bare)
                 if showsDanmaku && !session.danmaku.isEmpty { DanmakuOverlay(player: session.player, comments: session.danmaku, opacity: session.danmakuOpacity, revision: session.danmakuRevision).ignoresSafeArea() }
                 // Under the title bar's buttons, so it stays put while they come and go.
@@ -1413,7 +1414,17 @@ private struct DesktopNativePlayer: NSViewRepresentable {
     var live = false
     var waiting: PlaybackWaitContent? = nil
     var enhancer: VideoEnhancer? = nil
-    final class Coordinator { var host: PassthroughHostingView<AnyView>? }
+    var subtitles: SubtitleCues? = nil
+    // [mi3s] 二开（补上游能力）：macOS 的 PiP 窗口只显示播放器自己的画面，
+    // 所以进出 PiP 时要把字幕切到原生渲染，否则 PiP 里看不到字幕。
+    // 我方 DesktopNativePlayer 此前丢了这两个回调（allowsPictureInPicturePlayback 还在），
+    // 会导致 PiP 时字幕消失。回调名与上游 22180e4 一致。
+    @MainActor final class Coordinator: NSObject, @preconcurrency AVPlayerViewPictureInPictureDelegate {
+        var host: PassthroughHostingView<AnyView>?
+        var subtitles: SubtitleCues?
+        func playerViewWillStartPicture(inPicture playerView: AVPlayerView) { subtitles?.native = true }
+        func playerViewDidStopPicture(inPicture playerView: AVPlayerView) { subtitles?.native = false }
+    }
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
@@ -1433,6 +1444,9 @@ private struct DesktopNativePlayer: NSViewRepresentable {
         view.player = player
         view.showsFullScreenToggleButton = true
         view.allowsPictureInPicturePlayback = true
+        // [mi3s] 二开（补上游能力）：把 coordinator 挂成 PiP delegate 并带上字幕
+        context.coordinator.subtitles = subtitles
+        view.pictureInPictureDelegate = context.coordinator
         view.showsSharingServiceButton = false
         view.speeds = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].map { AVPlaybackSpeed(rate: Float($0), localizedName: "\($0)×") }
         return view
