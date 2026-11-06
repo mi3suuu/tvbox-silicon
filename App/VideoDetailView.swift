@@ -1925,6 +1925,8 @@ private enum CloudDrive: String, Identifiable {
 }
 
 /// Episode names often lead with a size tag ("[1.18GB] S01E41.mkv"); show it as trailing detail.
+// [mi3s] 二开：`EpisodeRow` 由 `private` 提为 `internal`，让上游 `PlayerEpisodesSheet` 也能复用同一行
+// 渲染（否则两处各画一套，字号/间距迟早走偏）。见 03-侵入点登记表 I-06。
 struct EpisodeRow: View {
     let name: String
     /// The episode's short label (第1集), shown in place of the name; the size tag stays as detail.

@@ -329,6 +329,9 @@ public struct Channel: Identifiable, Codable, Hashable, Sendable {
 // 以下是二开新增、上游没有的实现。为了不侵入上游逻辑，一律以 extension 追加在文件末尾；
 // 上游若日后新增同名成员，此段会编译报错（redeclaration），届时删掉这里改用上游实现即可。
 
+// [mi3s] 二开：给上游 `Subscription` 加一个不可变构造器（见 03-侵入点登记表 I-02）。
+// 上游没有「换掉 sites 但保留其余字段」的入口，而按源路由改派必须这么做；
+// 写成 `extension` 而不是改主类，是为了不碰上游那个 struct。
 extension Subscription {
     /// The same subscription with a different set of source entries, everything else (its live
     /// playlists, its raw document, when it was imported) unchanged. Per-source routing rewrites a
