@@ -90,14 +90,29 @@ struct SiteView: View {
                         LazyVGrid(columns: Layout.posterColumns, spacing: Layout.gridRowSpacing) {
                             ForEach(browser.videos) { video in
                                 // An index source (a ranking or list site) names titles; other sources play them.
-                                if isIndex {
-                                    Button { store.searchVideos(video.name) } label: { PosterCard(video: video) }.cardButton()
-                                } else {
-                                    RouteLink { CatalogDestination(video: video, client: client) } label: { PosterCard(video: video) }.cardButton()
+                                // [mi3s] 二开融合（D-11 回填）：最后一张封面出现时追加下一页，
+                                // 滚动不会停在页边界。失败的一页交给底部 footer 的 Retry，
+                                // 不在滚动里反复重试（与上游 1.8.11 SitesView 同语义）。
+                                // 用 Group 包住 if/else 才能挂 .onAppear —— 语句块后面不能直接接修饰符。
+                                Group {
+                                    if isIndex {
+                                        Button { store.searchVideos(video.name) } label: { PosterCard(video: video) }.cardButton()
+                                    } else {
+                                        RouteLink { CatalogDestination(video: video, client: client) } label: { PosterCard(video: video) }.cardButton()
+                                    }
+                                }
+                                .onAppear {
+                                    guard browser.moreError == nil, video.id == browser.videos.last?.id else { return }
+                                    startRequest { await loadMore() }
                                 }
                             }
                         }
                         .opacity(browser.busy && !browser.videos.isEmpty ? 0.55 : 1).animation(.smooth, value: browser.busy)
+                        // [mi3s] 二开融合（D-11 回填）：底部续页状态条。
+                        // tvFocusSection 让 tvOS 从任意列的封面按 Down 都能落到它。
+                        if !browser.videos.isEmpty && (browser.hasMore || browser.loadingMore || browser.moreError != nil) {
+                            loadMoreFooter.tvFocusSection()
+                        }
                     }.pageContainer()
                 }
                 .safeAreaInset(edge: .bottom) { if browser.pageCount > 1 { pager } }
@@ -194,6 +209,38 @@ struct SiteView: View {
     private func load(page next: Int) async {
         await browser.load(.list(category: browser.category.isEmpty ? nil : browser.category, query: browser.query, page: next, filters: browser.filters),
                            client: client)
+    }
+
+    // [mi3s] 二开融合（D-11 回填）：追加下一页而不清空当前列表。
+    // CatalogBrowser.loadMore(client:) 自带 hasMore/loadingMore/moreError 三态与去重，
+    // UI 只负责触发与呈现。
+    private func loadMore() async {
+        await browser.loadMore(client: client)
+    }
+
+    // [mi3s] 二开融合（D-11 回填）：底部续页状态条，三态与上游一致
+    // （加载中 / 加载更多 / 重试），文案沿用上游 key。
+    @ViewBuilder private var loadMoreFooter: some View {
+        if let message = browser.moreError {
+            VStack(spacing: 10) {
+                Text(message).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                Button(L10n.text("Try Again")) { startRequest { await loadMore() } }
+                    .controlButton()
+                    .accessibilityIdentifier("site.loadMore.retry")
+            }
+            .padding(.vertical, 18).frame(maxWidth: .infinity)
+        } else if browser.loadingMore {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text(L10n.text("Loading…")).font(.footnote).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 18).frame(maxWidth: .infinity)
+        } else if browser.hasMore {
+            Button(L10n.text("Load More")) { startRequest { await loadMore() } }
+                .controlButton()
+                .padding(.vertical, 18).frame(maxWidth: .infinity)
+                .accessibilityIdentifier("site.loadMore")
+        }
     }
 }
 
