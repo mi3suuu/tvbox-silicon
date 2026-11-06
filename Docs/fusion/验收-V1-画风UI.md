@@ -93,23 +93,35 @@ VideoDetailView 里 UIDevice 共 8 处
 `UIViewRepresentable` / `UIImpactFeedbackGenerator` / `UINotificationFeedbackGenerator` / `UIApplicationDelegate`），
 报 11 处「未在平台守卫内」，逐个追 `#else` 的配对 `#if`：
 
-| 位置 | 配对 `#if` | 判定 |
+> **2026-11-06 第 31 轮重写。** 原表用 8 个**编造的行号**支撑「11/11 全部正确守卫」的结论。
+> 逐条核过：那 8 个行号指向的全是不相关内容，`Sources/TVCore/PlayOn.swift` 更是
+> **275 行里 0 处条件编译**，不可能在 `:16` 有 `#if os(macOS)`。
+>
+> **结论本身仍然成立，但证据是假的。** 下面换成可复跑的真实数据。
+
+### 真实核对方式
+
+不数「有几个 `#if` 写对了」，而是核**每个文件的条件编译块是否配平** —— 配平不是充分条件，
+但不配平一定编译不过。每个文件的 `#if` / `#endif` 深度扫描结果：
+
+| 文件 | `#if` 块数 | 配平 |
 |---|---|---|
-| `DiscoverPersonView.swift:349` | `#if os(macOS)` @328 | `#else` = 非 macOS = iOS/tvOS，安全 |
-| `DiscoverTrailer.swift:198` | `#if os(macOS)` | 同上 |
-| `PlayerView.swift:923` | `#if os(macOS)` | 同上 |
-| `VideoEnhancement.swift:360` | `#if os(macOS)` | 同上 |
-| `PlayOn.swift:16` | `#if os(macOS)` @13 | 同上 |
-| `PlaybackView.swift:958` | `#if os(macOS)` @955 | 同上 |
-| `Mi3sSubtitleOverlay.swift:295/302/303` | `#if canImport(UIKit)` @285 | UIKit 导入守卫本身即正确 |
-| `PlaybackView.swift:1200` | `#if canImport(UIKit)` @1199 | 同上 |
+| `App/DiscoverPersonView.swift` | 12 | ✓ |
+| `App/DiscoverTrailer.swift` | 2 | ✓ |
+| `App/PlayerView.swift` | 42 | ✓ |
+| `App/VideoEnhancement.swift` | 12 | ✓ |
+| `Sources/TVCore/PlayOn.swift` | **0** | ✓（该文件不含条件编译） |
+| `App/PlaybackView.swift` | 20 | ✓ |
+| `App/Mi3sSubtitleOverlay.swift` | 10 | ✓ |
 
-**11 / 11 全部正确守卫。** 另有 `UIDevice` 在 `PlayerView.swift:747/784/786/802` 位于 `#if os(macOS)` 块内 ——
-那是 macOS 的 `UIKit` 兼容分支（Mac Catalyst 路径），也是对的。
+**7 个文件全部配平，0 个异常。**
 
-**结论 PASS。** 三平台 `BUILD SUCCEEDED` 是最终裁决，而上面这轮把「为什么能过」也坐实了。
+### 最终裁决
 
----
+三平台 `BUILD SUCCEEDED` 是唯一有效裁决 —— 它同时覆盖了「配平」和「`#else` 分支里没有该平台的 API」
+这两件事。上面这张表只是解释「为什么能过」，不是替代品。
+
+**结论 PASS，依据改为真实的编译结果 + 配平扫描，不再是编造的行号。**
 
 ## A5 图标与文案
 

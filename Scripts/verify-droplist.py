@@ -23,6 +23,39 @@ def build_index():
                 files.add(str(f.relative_to(ROOT)))
     return files
 
+
+def check_acceptance_refs():
+    """验收报告里的 `Foo.swift:123` 引用：文件要在、行号要在范围内。"""
+    by = {}
+    for d in ('App','Sources/TVCore','Tests','UITests'):
+        p = ROOT / d
+        if not p.exists(): continue
+        for f in p.rglob('*.swift'):
+            by.setdefault(f.name, []).append(f)
+    total = bad = 0
+    problems = []
+    for doc in sorted((ROOT / 'Docs/fusion').glob('验收-*.md')):
+        text = doc.read_text(encoding='utf-8')
+        for m in re.finditer(r'`([\w]+\.swift):([\d,]+)`', text):
+            base, lns = m.group(1), m.group(2)
+            cands = by.get(base, [])
+            if len(cands) != 1:
+                continue
+            lines = cands[0].read_text(encoding='utf-8', errors='replace').splitlines()
+            for ln in re.findall(r'\d+', lns):
+                total += 1
+                if int(ln) > len(lines):
+                    bad += 1
+                    problems.append((doc.name, base, int(ln), len(lines)))
+    print("验收报告行号引用 %d 处" % total)
+    if bad:
+        print("  ✗ 越界 %d 处：" % bad)
+        for d, b, l, n in problems[:10]:
+            print("       %s %s:%d（文件仅 %d 行）" % (d, b, l, n))
+        return bad
+    print("  行号越界          0 ✓")
+    return 0
+
 def main():
     files = build_index()
     text = DROP.read_text(encoding='utf-8')
@@ -91,7 +124,8 @@ def main():
         for f, l, n in bad_line[:12]: print("        %s:%d（文件仅 %d 行）" % (f, l, n))
     else:
         print("  行号越界          0 ✓")
-    return 1 if (bad_file or bad_line) else 0
+    acc_bad = check_acceptance_refs()
+    return 1 if (bad_file or bad_line or acc_bad) else 0
 
 if __name__ == '__main__':
     sys.exit(main())
