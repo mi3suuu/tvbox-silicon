@@ -61,6 +61,74 @@ final class DuoAcceptanceUITests: XCTestCase {
         XCTAssertGreaterThan(groups.count, 0, "Sources listed no subscription groups at all")
     }
 
+    /// **The white-screen regression.** A page's content must actually be drawn in every size class.
+    ///
+    /// 2026-11-06: `RootView.tabSafeArea` is a `@ViewBuilder` whose iOS 26 branch only handled
+    /// regular-width and regular-height. compact × compact — the Duo's folded outer display held
+    /// sideways, **and every ordinary iPhone in landscape** — matched neither, so the branch produced
+    /// `EmptyView`. Because that modifier is applied to the root of every tab page, the whole page
+    /// (`Home` included) was replaced by nothing: window geometry was correct, `section.<Title>` was on
+    /// screen, the tab capsule drew, and the content area came out pure white `(255,255,255)`.
+    ///
+    /// A marker assertion cannot catch this class of bug: `section.home` still exists as an element
+    /// even when the view behind it draws nothing (the marker is an accessibility identifier on the
+    /// container, and containers survive their content collapsing). So the assertion here is on the
+    /// **screenshot**: sample a grid inside the content area and fail when every sample is pure white.
+    ///
+    /// `Scripts/audit-duo-ui.sh` drives the same check with the hinge closed and the orientation set to
+    /// landscape; run this test from `Scripts/test-duo-ui.sh` so the device is already in that state.
+    func testContentIsDrawnInCompactCompact() throws {
+        for section in ["home", "discover", "sites", "settings"] {
+            launch(section: section.key)
+            XCTAssertTrue(marker(section.title).waitForExistence(timeout: 30),
+                          "\(section.key) never opened")
+            Thread.sleep(forTimeInterval: 2.5)
+            attach("drawn-\(section.key)")
+
+            let pureWhite = whiteSamples(in: XCUIScreen.main.screenshot())
+            XCTAssertLessThan(pureWhite, 16,
+                "\(section.key) drew an empty page: \(pureWhite)/16 sampled points are pure white. "
+                + "A whole-page \(EmptyView) from a @ViewBuilder fallback looks exactly like this.")
+            app.terminate()
+            Thread.sleep(forTimeInterval: 1)
+        }
+    }
+
+    /// How many of a 4 × 4 grid of points inside the content area are pure white.
+    ///
+    /// The content area is inset from the screen edges: the tab bar / sidebar capsule and the status bar
+    /// are system chrome and legitimately near-white in light mode, so sampling them would produce false
+    /// failures. The band sampled is 15 %–85 % horizontally and 20 %–80 % vertically.
+    ///
+    /// "Pure white" is `min(r, g, b) > 250`. The app's own background is the `Backdrop` tint
+    /// (`244, 246, 251`), whose blue channel sits at 251 but whose red is 244 — so it does not count as
+    /// white here, which is exactly what makes "page not built" distinguishable from "page built but
+    /// empty".
+    private func whiteSamples(in screenshot: XCUIScreenshot) -> Int {
+        guard let cg = screenshot.image.cgImage else { return 0 }
+        let width = cg.width, height = cg.height
+        guard width > 0, height > 0,
+              let data = cg.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data) else { return 0 }
+        let bytesPerRow = cg.bytesPerRow
+        let bytesPerPixel = cg.bitsPerPixel / 8
+
+        var white = 0
+        for row in 0..<4 {
+            for column in 0..<4 {
+                let fx = 0.15 + (0.85 - 0.15) * (Double(column) + 0.5) / 4
+                let fy = 0.20 + (0.80 - 0.20) * (Double(row) + 0.5) / 4
+                let x = min(width - 1, max(0, Int(fx * Double(width))))
+                let y = min(height - 1, max(0, Int(fy * Double(height))))
+                let offset = y * bytesPerRow + x * bytesPerPixel
+                guard offset + 2 < CFDataGetLength(data) else { continue }
+                let r = Int(bytes[offset]), g = Int(bytes[offset + 1]), b = Int(bytes[offset + 2])
+                if min(r, min(g, b)) > 250 { white += 1 }
+            }
+        }
+        return white
+    }
+
     /// Settings must report a version, which is how a screenshot proves the build under test is the one
     /// that was just installed rather than a stale copy.
     func testSettingsShowsVersion() throws {
