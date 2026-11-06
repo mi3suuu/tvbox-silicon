@@ -11,6 +11,9 @@ public struct DownloadSource: Codable, Hashable, Sendable {
     public let address: String
     public let flag: String
     public let detailID: String?
+    // [mi3s] 二开：记录来源订阅（隐私保险库需要）。上游的下载项不带 origin —— 保险库
+    // 只能隐藏「能同时说出 origin 与 siteKey」的下载，所以这里补上。为 nil 表示
+    // 该字段出现之前存的旧记录，或保存时不知道来源订阅的裸源；nil 一律保持可见。
     /// The subscription this source came from, for the Privacy Vault. Nil for downloads saved before
     /// this field existed, and for a bare source whose subscription origin was not known at save time.
     /// The vault only hides a download whose origin and key it can name, so a nil origin stays visible.

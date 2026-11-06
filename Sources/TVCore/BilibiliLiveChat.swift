@@ -17,6 +17,9 @@ public final class BilibiliLiveChat: @unchecked Sendable {
 
     public init(room: Int) { self.room = room }
 
+    // [mi3s] 二开：整类的 handler / heartbeat / socket 读写都走 lock.withLock。
+    // 上游这三处是裸赋值 —— `start` 与 `stop` 可从不同线程并发进来，stop 清空 handler 后
+    // run 循环仍会读到非 nil 继续发心跳；socket 也可能在回调线程被 cancel 两次。
     public func start(_ handler: @escaping Handler) {
         lock.withLock { self.handler = handler }
         Task { await run() }

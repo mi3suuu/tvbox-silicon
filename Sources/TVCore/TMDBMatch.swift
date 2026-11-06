@@ -186,6 +186,9 @@ public enum TMDBMatch {
         public let id: Int
         public let name: String
         public let originalName: String
+        // [mi3s] 二开：originalLanguage 与 images 两个字段，供海报语言选择器使用。
+        // 上游的 TMDbDetails 只带 poster/logo 单张图，无法按语言选；这里加上
+        // TMDB 自己声明的原语言与「按语言分组的全部图」，旧缓存里没有这两个字段（可选类型）。
         /// TMDB's own language for the title, for the artwork-language picker. Absent in details cached before it.
         public let originalLanguage: String?
         public let tagline: String

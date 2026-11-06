@@ -266,6 +266,7 @@
 		854245265CFB2D739FCBDAEB /* PlaybackWaitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57642E0B8E9377FD57BC9D7F /* PlaybackWaitView.swift */; };
 		85586B8E5EBB58EE523F9FCE /* PluginSignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C5AB58ECA34E84E70A20906 /* PluginSignInView.swift */; };
 		858FA22A2D9276C2596DCED9 /* MusicNowPlayingPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D10D9BAFE11E31196C70422 /* MusicNowPlayingPanels.swift */; };
+		85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */; };
 		862B4D7324AB9499E249FB15 /* DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B784080CDE6CF171AEA5E7 /* DiscoverView.swift */; };
 		87B2F825565E0BAC988FC145 /* JNA-Apache2.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8320284C7FB9590C44BA7102 /* JNA-Apache2.txt */; };
 		88B3E7E6F674F06094DA9BEB /* WebCastSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD7A0AABA43477E9E02D2D67 /* WebCastSettingsView.swift */; };
@@ -314,6 +315,7 @@
 		A022AB71228E8F72AE664ECF /* Store+Subscriptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8770B6D1D8E71A51323B90B7 /* Store+Subscriptions.swift */; };
 		A125C19021DB4DC7DFADCBDA /* MangaSourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0E5BAF6D854E7CE5DA362D0 /* MangaSourcesView.swift */; };
 		A149AE9D183C5FB64D411761 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ADB3063A14E368A71892DCEE /* Assets.xcassets */; };
+		A1D25FF82C16A6CF78FDFBA8 /* AITranslatorAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */; };
 		A506927D2B180243F6475AD2 /* SkipSegmentButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 730EFA0F65236AF3FA40F76A /* SkipSegmentButton.swift */; };
 		A56871A4FB1AF94086FED70D /* Spacing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87D507D0CB659B3A79977CD9 /* Spacing.swift */; };
 		A6A01A74BB02107B9B37DF21 /* MangaQA.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0894F8B5758D4C02A76BCD8E /* MangaQA.swift */; };
@@ -345,6 +347,7 @@
 		B9C1E5DA31DD3CC5FA8EF045 /* Store+SourceAdmin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DA68D231C18E8CD3C69E0E5 /* Store+SourceAdmin.swift */; };
 		BA2A29F18602E8BF1C65CCDB /* MangaDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B33761B860B18DD0F3CE7FAC /* MangaDetailView.swift */; };
 		BA97CE75C2E0DF21635E17EA /* CloudFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A0D2EAF4F07329DAB40B97D /* CloudFilesView.swift */; };
+		BB123BCA3A508B0B08D97994 /* AITranslatorAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */; };
 		BB172629DDB7D3BC53009E9A /* SettingsPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A69C65DB9F24A27E28C819 /* SettingsPlayback.swift */; };
 		BB4A23786D789829360C242B /* TVBoxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A2BB58B1720E9D6D85F93F4 /* TVBoxApp.swift */; };
 		BB831CF3D63240DF89E53C9F /* releases.json in Resources */ = {isa = PBXBuildFile; fileRef = 73945256FDDE0952A22BF98C /* releases.json */; };
@@ -483,6 +486,7 @@
 		04E8471F5AF8D64B17693833 /* TVBox-tvOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "TVBox-tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0558AED26E6028C2881DD044 /* PythonHost */ = {isa = PBXFileReference; lastKnownFileType = folder; name = PythonHost; path = build/PythonHost; sourceTree = SOURCE_ROOT; };
 		06D9469858E5C5A118DED875 /* libffi.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = libffi.txt; sourceTree = "<group>"; };
+		075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AITranslatorAdapter.swift; sourceTree = "<group>"; };
 		084C8344E2997DB3ED8FE974 /* Keystone-GPL2.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Keystone-GPL2.txt"; sourceTree = "<group>"; };
 		0894F8B5758D4C02A76BCD8E /* MangaQA.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MangaQA.swift; sourceTree = "<group>"; };
 		08B7C43C763200E67A22E365 /* Capstone-LLVM.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Capstone-LLVM.txt"; sourceTree = "<group>"; };
@@ -732,6 +736,7 @@
 			isa = PBXGroup;
 			children = (
 				7DD9CCBC29ECDB9D8B254CBF /* AITranslationView.swift */,
+				075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */,
 				F43A8E3DBB135075D0CF9D44 /* Announcements.swift */,
 				7FB6ADF5D41A7842884ED8A4 /* ArtworkLanguageView.swift */,
 				A0E8559808CF7D11225EB30B /* Assets.xcassets */,
@@ -1347,6 +1352,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2C9DAB7BDC6194CAAE63292C /* AITranslationView.swift in Sources */,
+				85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */,
 				8A685170BCEDE3AE50C538DA /* Announcements.swift in Sources */,
 				0BAEA44063C146779B061BB1 /* ApplePython.c in Sources */,
 				36506AEA4D6F2E1541C1BCD1 /* AppleRuntime.m in Sources */,
@@ -1489,6 +1495,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				032345C5D74C16D8BC65731B /* AITranslationView.swift in Sources */,
+				A1D25FF82C16A6CF78FDFBA8 /* AITranslatorAdapter.swift in Sources */,
 				D5E6CDAD56F3272FD731DBDE /* Announcements.swift in Sources */,
 				452280EFF985A9357EAAD738 /* ArtworkLanguageView.swift in Sources */,
 				C868FA361E3AFD4CD42B3146 /* AsyncView.swift in Sources */,
@@ -1629,6 +1636,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				030DFAB42502A2FB222D80BC /* AITranslationView.swift in Sources */,
+				BB123BCA3A508B0B08D97994 /* AITranslatorAdapter.swift in Sources */,
 				D54D6BFE675267FF2D16FC49 /* Announcements.swift in Sources */,
 				B7C3291A656E2548E80F1E4B /* ApplePython.c in Sources */,
 				FD9721B84A06B25F362AF291 /* AppleRuntime.m in Sources */,
