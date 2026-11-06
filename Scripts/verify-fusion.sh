@@ -156,3 +156,48 @@ print("     派生类（plist/pbxproj，真源在 project.yml）:", sum(1 for x 
 print("     二进制（AppIcon）:", sum(1 for x in nsw if x.endswith('.png')))
 print("   详见 Docs/fusion/10-上游文件改动全量清单.md")
 PY2
+
+echo
+echo "⑩ 声明式能力 ↔ 代码用法（双向）"
+python3 - <<'PY2'
+import re, pathlib
+ok = True
+
+# 1) URL scheme：project.yml 声明 ↔ ExternalPlayer.known 代码
+src = pathlib.Path('Sources/TVCore/ExternalPlayer.swift').read_text(encoding='utf-8')
+code_schemes = set(re.findall(r'scheme:\s*"([^"]+)"', src))
+yml = pathlib.Path('project.yml').read_text(encoding='utf-8')
+m = re.search(r'LSApplicationQueriesSchemes:\s*\[([^\]]+)\]', yml)
+declared = {s.strip() for s in m.group(1).split(',')} if m else set()
+miss = code_schemes - declared
+extra = declared - code_schemes
+print("   URL scheme  代码 %d / 声明 %d" % (len(code_schemes), len(declared)))
+if miss:
+    ok = False
+    print("     ✗ 代码有但没声明（canOpenURL 恒 false，功能静默失效）：%s" % sorted(miss))
+if extra:
+    print("     · 声明了但代码没用（冗余无害）：%s" % sorted(extra))
+if not miss: print("     代码→声明 缺失 0 ✓")
+
+# 2) 敏感权限：声明了就必须真有代码用
+grants = {
+    'NSSpeechRecognitionUsageDescription': ['SFSpeechRecognizer', 'SpeechSubtitle', 'Speech.'],
+    'NSPhotoLibraryAddUsageDescription': ['UIImageWriteToSavedPhotosAlbum', 'PHPhotoLibrary', 'saveImage'],
+    'NSLocalNetworkUsageDescription': ['NWBrowser', 'NetService', 'Bonjour'],
+}
+allsrc = ''
+for d in ('App', 'Sources/TVCore'):
+    for f in pathlib.Path(d).glob('*.swift'):
+        allsrc += f.read_text(encoding='utf-8', errors='replace')
+print("   权限声明 → 代码用法")
+for key, needles in grants.items():
+    if key not in yml and key not in allsrc:
+        continue
+    used = any(n in allsrc for n in needles)
+    mark = "✓" if used else "✗ 声明了但代码没用到"
+    if not used: ok = False
+    print("     %-36s %s" % (key, mark))
+
+raise SystemExit(0 if ok else 1)
+PY2
+[ $? -ne 0 ] && fail=$((fail+1))
