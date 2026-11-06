@@ -11,7 +11,7 @@
     Scripts/audit-deep-chain.py build/audit-snap/yingxia.json --output build/audit-deep
     Scripts/audit-deep-chain.py <snap> --limit 2
 """
-import argparse, importlib.util, json, pathlib, sys, time
+import argparse, importlib.util, json, pathlib, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -50,6 +50,72 @@ def first_episode(detail):
     return None, None
 
 
+def verify_now(url, header, play):
+    """在拿到地址的当下就判断它是不是真媒体。返回 {kind, http, note}。"""
+    # multi 型（多清晰度）是数组，取第一个可用的
+    if isinstance(url, list):
+        picked = None
+        for item in url:
+            cand = item.get('url') if isinstance(item, dict) else item
+            if isinstance(cand, str) and cand.startswith(('http://', 'https://')):
+                picked = cand
+                break
+        url = picked
+    if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+        return {'kind': 'no-url'}
+    if str(url).startswith('http://127.0.0.1:'):
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(url).query)
+        inner = (q.get('url') or [None])[0]
+        if not inner:
+            return {'kind': 'proxy-no-inner'}
+        url = inner
+    hdrs = dict(header) if isinstance(header, dict) else {}
+    if play.get('UA'):
+        hdrs['User-Agent'] = play['UA']
+    # body 和状态码必须分开取：body 里也有换行，rpartition 会错位（踩过）
+    cmd = ['curl', '-s', '-L', '--max-time', '15', '-r', '0-511',
+           '-w', '\n---STATUS:%{http_code}---']
+    for k, v in hdrs.items():
+        cmd += ['-H', f'{k}: {v}']
+    out = subprocess.run(cmd + [url], capture_output=True).stdout
+    marker = b'\n---STATUS:'
+    if marker in out:
+        body, _, tail = out.rpartition(marker)
+        code = tail.split(b'---')[0].decode(errors='replace')
+    else:
+        body, code = out, '?'
+    return {'kind': classify_media(body), 'http': code}
+
+
+def classify_media(blob):
+    """判响应是不是媒体。顺序很重要：先认二进制魔数，再判文本。
+    踩过：先判 `b'<head' in head[:100]` 会把 mp4 的二进制误判成 HTML（avc1/moov 里含这些字节）。"""
+    if not blob:
+        return 'empty'
+    # ① 强魔数先判，二进制优先
+    if blob.startswith(b'#EXTM3U'):
+        return 'hls'
+    if b'ftyp' in blob[:16]:
+        return 'mp4'
+    if len(blob) > 376 and blob[0] == 0x47 and blob[188] == 0x47:
+        return 'mpegts'
+    if len(blob) >= 8 and blob[4:8] in (b'ftyp', b'moov', b'mdat', b'styp'):
+        return 'isobmff'
+    # ISOBMFF 盒子里常见的 box 类型（avc1/avcC/stsd/hdlr/moov 等）
+    if any(tag in blob[:512] for tag in (b'avc1', b'avcC', b'moov', b'mdat', b'stsd', b'hdlr', b'stbl')):
+        return 'isobmff'
+    # ② 再判文本
+    head = blob[:200].lstrip().lower()
+    if head.startswith(b'<!doctype') or head.startswith(b'<html') or head.startswith(b'<head'):
+        return 'html'
+    if b'<html' in head[:120] or b'<!doctype' in head[:120]:
+        return 'html'
+    if len(blob) < 200 and all(32 <= b < 127 or b in (9, 10, 13) for b in blob):
+        return 'text-error'
+    return 'unknown'
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('snapshots', nargs='+')
@@ -72,6 +138,8 @@ def main():
             folder = out / ident
             folder.mkdir(exist_ok=True)
             rec = {'id': ident, 'key': site.get('key'), 'name': site.get('name')}
+            # 站点级 header，App 会并入播放请求头（Catalog.swift:421）
+            rec['_site_header'] = site.get('header')
             t0 = time.monotonic()
             session = None
             try:
@@ -128,7 +196,14 @@ def main():
                                            'has_header': bool(hdr),
                                            'header_keys': sorted(hdr) if isinstance(hdr, dict) else [],
                                            'playUrl': p.get('playUrl') or None,
-                                           'has_danmaku': bool(p.get('danmaku'))}
+                                           'has_danmaku': bool(p.get('danmaku')),
+                                           # 原始值，供 audit-playback-media.py 按 App 逻辑重放
+                                           '_header_raw': hdr,
+                                           '_ua': p.get('UA') or p.get('ua') or None}
+                            # 立刻验媒体：地址可能带时效签名，事后批量校验会失败，所以在这一刻就判。
+                            # 注意必须传**完整** raw_url，不能传 head —— head 是截断到 120 字符的展示用值，
+                            # 截断后签名不完整，一定 403（踩过，查了三轮才定位）。
+                            rec['play']['verified'] = verify_now(raw_url, hdr, p)
                         except Exception as e:
                             rec['play'] = {'error': str(e)[:300]}
             except Exception as e:

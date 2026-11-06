@@ -22,11 +22,37 @@ MAGIC_TS = (b'\x47',)  # 188-byte MPEG-TS 包以 0x47 起头
 
 
 def fetch(url, headers=None, timeout=12, nbytes=512):
+    """headers 可以是 list['k: v'] 或 dict。App 侧（Catalog.swift:421-431）会合并三处：
+    site.raw['header']、play 返回的 result['header']（dict 或 JSON 字符串）、result['UA']。
+    这里接受 dict，就是照抄 App 的合并结果。"""
     cmd = ['curl', '-s', '-L', '--max-time', str(timeout), '-r', f'0-{nbytes - 1}']
-    for h in (headers or []):
-        cmd += ['-H', h]
+    items = headers.items() if isinstance(headers, dict) else [(None, h) for h in (headers or [])]
+    for k, v in items:
+        cmd += ['-H', f'{k}: {v}' if k else str(v)]
     cmd.append(url)
     return subprocess.run(cmd, capture_output=True).stdout
+
+
+def replay_headers(rec):
+    """按 App 的三处合并逻辑拼出请求头。"""
+    hdrs = {}
+    site = rec.get('_site_header')
+    if isinstance(site, dict):
+        hdrs.update({k: v for k, v in site.items() if isinstance(v, str)})
+    pl = rec.get('play') or {}
+    ph = pl.get('_header_raw')
+    if isinstance(ph, dict):
+        hdrs.update({k: v for k, v in ph.items() if isinstance(v, str)})
+    elif isinstance(ph, str):
+        try:
+            parsed = json.loads(ph)
+            if isinstance(parsed, dict):
+                hdrs.update({k: v for k, v in parsed.items() if isinstance(v, str)})
+        except Exception:
+            pass
+    if pl.get('_ua'):
+        hdrs['User-Agent'] = pl['_ua']
+    return hdrs
 
 
 def classify(blob):
@@ -78,12 +104,19 @@ def main():
         blob = fetch(url)
         kind = classify(blob)
         if args.headers and kind not in ('hls', 'mp4', 'mpegts', 'isobmff'):
-            base = url.rsplit('/', 1)[0] + '/'
-            blob2 = fetch(url, ['User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                f'Referer: {base}'])
-            kind2 = classify(blob2)
-            if kind2 in ('hls', 'mp4', 'mpegts', 'isobmff'):
-                kind = kind2 + '（需 header）'
+            # ① 先按 App 的真实合并逻辑重放（site.header + play.header + UA）
+            app_hdrs = replay_headers(r)
+            if app_hdrs:
+                k2 = classify(fetch(url, app_hdrs))
+                if k2.startswith(('hls', 'mp4', 'mpegts', 'isobmff')):
+                    kind = k2 + '（需 App header）'
+            # ② 再用通用 UA+Referer 兜底
+            if not kind.startswith(('hls', 'mp4', 'mpegts', 'isobmff')):
+                base = url.rsplit('/', 1)[0] + '/'
+                k3 = classify(fetch(url, ['User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                          f'Referer: {base}']))
+                if k3.startswith(('hls', 'mp4', 'mpegts', 'isobmff')):
+                    kind = k3 + '（需 UA+Referer）'
         ok = kind.startswith(('hls', 'mp4', 'mpegts', 'isobmff'))
         (playable if ok else notplayable).append((r['key'], kind, url[:60]))
 
