@@ -143,6 +143,16 @@ enum SettingsStyle {
 
 // MARK: Settings
 
+// [mi3s] 二开：此处原本是上游 1901 行的设置页实现，已按「每条二开能力独立成文件」
+// 拆成六个文件，本文件只留共用构件（SettingsGroup / SettingsRow / SettingsLinkRow /
+// SettingsActionRow / SettingsPage / SettingsStyle）与下面的平台分派：
+//   App/SettingsForm.swift         FormSettingsView    —— iPhone / iPad / Mac 的整页表单
+//   App/SettingsTV.swift           TVSettingsView      —— Apple TV 的 TV 风格设置页
+//   App/SettingsPlayback.swift     播放相关分组
+//   App/SettingsPrivacy.swift      隐私与保险库
+//   App/SettingsContributors.swift 贡献者
+//   App/SettingsDiagnostics.swift  诊断日志
+// 上游若在本文件新增设置项，请加进对应的独立文件，不要重新长回这里（D-06）。
 struct SettingsView: View {
     var body: some View {
         #if os(tvOS)

@@ -31,6 +31,10 @@ import UIKit
     private var window: UIWindow?
     private var picture: ExternalDisplayViewController?
     private var sceneNotifications: [NSObjectProtocol] = []
+    // [mi3s] 二开：剧集完结卡片（SeriesEnd）在外接屏上的镜像。
+    // 这段依赖本类的私有状态（store / picture / window），拆成独立文件需要把三者
+    // 一起重构成可注入的 host，代价高于收益，所以留在本文件内，按侵入登记表 I-34 记账。
+    // 上游若在本类新增镜像内容，请沿用同一套 syncXxx / removeXxx 形状。
     private weak var store: Store?
     private var seriesEndHost: UIHostingController<AnyView>?
     /// Which end-of-series this host is showing. Rebuilding on every change would
