@@ -202,3 +202,30 @@ macro expansion @State:2:9: error: cannot find 'SubtitlePositionMemory' in scope
 > iOS 剩余错误**全部是 M6 字幕符号**（`SubtitleStyle.standard` / `SubtitlePositionMemory`），W5 裁决中，与本线无关。
 > 本线修 `ExternalPlayerMenu` 前，iOS 同一条链上还有第三类错误；修完后只剩 M6。
 > `build/AppleRuntime` 我在本 worktree 建了软链指向主工作树，仅为让 tvOS 能编；该目录在 `.gitignore` 内，不入库。
+
+---
+
+## ⚠️ 并入主线时的变更（captain 追加，2026-11-06）
+
+本文件下方「断点 1」记录的是**本线当时**的处置：新建 `App/ExternalPlayerMenu.swift`。
+**实际并入 `fusion/main` 时改成了另一条路**，读下文前先看这里：
+
+| | 本线原方案 | 并入后实际 |
+|---|---|---|
+| 文件 | `App/ExternalPlayerMenu.swift`（本线新建） | **不存在**（该文件被跳过，未提交） |
+| 类型 | `ExternalPlayerMenu` | **`Mi3sExternalPlayerMenu`** |
+| 位置 | 独立文件 | `App/Mi3sSubtitleOverlay.swift:205` |
+| 调用 | `MobilePlayer.swift:523` | `MobilePlayer.swift:533` |
+
+**为什么改**：M6 字幕体系裁决（路线 A）把我方 `App/SubtitleOverlay.swift` 整文件改名为
+`App/Mi3sSubtitleOverlay.swift`，里面的 `SubtitleOverlay` / `SubtitleSettingsView` / `ExternalPlayerMenu`
+三类一并加 `Mi3s` 前缀。那份改名后的文件里**本来就有** `Mi3sExternalPlayerMenu` 的完整实现，
+字号、排序、`ExternalPlayer.installed()` 全部在内。
+
+所以本线新建的 `App/ExternalPlayerMenu.swift` 会与它**重复定义同名类型**，冲突。跳过是对的。
+
+> 结论：本线对「外置播放器交接」这个能力的所有结论**仍然成立**（能力在、有调用点、能编译），
+> 只是文件路径与类型名不同。下游若要查这个能力，认 `Mi3sExternalPlayerMenu` 这个名字。
+
+---
+
