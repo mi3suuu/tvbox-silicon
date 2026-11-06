@@ -14,6 +14,9 @@ struct HomeView: View {
     @AppStorage(HomeSection.recommendations.key) private var showsRecommendations = true
     @AppStorage(HomeSection.favorites.key) private var showsFavorites = true
     @AppStorage(HomeSection.liveTV.key) private var showsLiveTV = true
+    // [mi3s] 二开：首页板块显隐。上游首页固定渲染全部板块，无法隐藏不用的（例如
+    // 不看直播的用户仍占着一整行）。这里给每个板块一个 @AppStorage 开关，由
+    // HomeSection 枚举（本文件内）统一管理 key；全部关掉时显示 allHidden 空态。
     @AppStorage(HomeSection.upNext.key) private var showsUpNext = true
     /// The first frame is only the section placeholders. The source row is built on the next turn, so the page can appear before that layout.
     @State private var settled = false

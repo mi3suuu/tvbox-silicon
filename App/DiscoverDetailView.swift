@@ -7,6 +7,10 @@ import AVKit
 struct DiscoverDetailView: View {
     @Environment(Store.self) private var store
 
+    // [mi3s] 二开：按语言取图。TMDB 的裸 poster/logo 字段只回答「元数据语言」，
+    // 用户选了「影片原语言」仍会看到元数据语种的海报。这里把本页所有取图收成一处，
+    // 由我方新增的 App/ArtworkLanguageView.swift（上游无此文件）决定。上游本页有 6 处
+    // 各自读 details?.poster，现统一走 artwork。
     /// The poster, backdrop and logo for this title, in the language the viewer chose.
     ///
     /// TMDB's plain `poster`/`logo` fields answer in the *metadata* language, so a viewer who chose
