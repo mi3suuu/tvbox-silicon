@@ -162,6 +162,9 @@ private struct SubtitleTranslationHost: ViewModifier {
 }
 #endif
 
+// [mi3s] 二开：本节说明 AI 翻译与 Apple Translation 的分工。
+// 实现本身已搬到 App/AITranslatorAdapter.swift（I-42），此处只留说明，供读本文件的人知道
+// 「为什么重封装器里有两个翻译后端、为什么它们不是竞品」。
 // MARK: - AI translation as the repackager's translator
 
 /// Makes the AI translator usable through the same `SubtitleTranslating` seam the device's
