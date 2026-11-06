@@ -115,7 +115,16 @@ struct SiteView: View {
                         }
                     }.pageContainer()
                 }
-                .safeAreaInset(edge: .bottom) { if browser.pageCount > 1 { pager } }
+                // [mi3s] 二开融合（D-12 回填）：页码条与自动续页互斥。
+                // loadMoreFooter 在滚动区末尾，pager 是固定底栏 —— 两者同屏会出现
+                // 「滚到底有 Load More，屏底还有页码条」两套翻页控件（D-12 说的混装）。
+                // 规则：只要这个源支持续页（hasMore / loadingMore / moreError 任一为真）
+                // 就不显示页码条，交给自动续页；不支持的源仍用页码条。
+                .safeAreaInset(edge: .bottom) {
+                    if browser.pageCount > 1 && !browser.hasMore && !browser.loadingMore && browser.moreError == nil {
+                        pager
+                    }
+                }
                 .catalogSearchable(text: Binding(get: { query }, set: { value in
                     query = value
                     if value.isEmpty && !browser.query.isEmpty { startRequest { await home() } }
