@@ -8,6 +8,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+fail=0
+
 echo "########## 融合完整性核对 ##########"
 echo
 
@@ -211,3 +213,12 @@ echo
 echo "⑫ drop-list ⟷ 代码（路径与行号是否仍然有效）"
 python3 Scripts/verify-droplist.py
 [ $? -ne 0 ] && fail=$((fail+1))
+
+echo
+if [ "$fail" -eq 0 ]; then
+  echo "########## 全部通过（12 项 + 自检） ##########"
+  exit 0
+else
+  echo "########## 有 $fail 项失败 ##########"
+  exit 1
+fi

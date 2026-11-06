@@ -13,7 +13,7 @@
 | **D-** | 丢弃：上游已有等价实现，我方版本不接 | 低（上游那套已在用） |
 | **P-** | 待定：需逐条 diff 后再定 —— **现已全部关闭** | — |
 | **DUO-** | 社区 Duo 适配审计出来的未解决项 | 中（要真机验） |
-| **N-** | 未接入：能力在，但缺调用方 / 缺平台 | 中（补线即可） |
+| **N-** | **保留在本地仓库、不推上游**（我方工具链 / 签名 / 设计源图）。**不是「没接进来」** —— 这些文件全部在 `HEAD` 里、全部可用 | —（本就该留） |
 | **V-** | 验收发现的缺口 | 低-中 |
 
 **总计 34 条：D 14 / DUO 7 / N 8 / V 3 / P 2（已关闭）。**
@@ -60,17 +60,19 @@
 
 ---
 
-## 四、N 组 · 未接入（8 条）
+## 四、N 组 · 保留本地不外推（8 条）
 
-> 「能力在，但缺调用方 / 缺平台」。都写明了建议解法。
+> **这 8 条不是「没接进来」，是「故意不推给上游」。** 全部文件都在 `HEAD` 里、全部可用、
+> 三平台编译通过。第 29 轮逐条 `ls` 核过。
+> 列它们的目的：下次同步上游时，知道这些是我方独有、不要被上游覆盖掉。
 
 | # | 项目 | 判定 |
 |---|---|---|
 | N-01 | `Config/sign.entitlements` | 保留在本仓库（签名用），不上推上游 |
-| N-02 | `Scripts/install-duo.sh` / `shoot-duo.sh` / `test-duo-ui.sh` / `verify-ipa.sh` / `audit-*.sh` / `audit-pixels.py` / `contact-sheet.py` / `e2e-verify.sh` | 全部保留（零冲突） |
+| N-02 | `Scripts/install-duo.sh` / `Scripts/shoot-duo.sh` / `Scripts/test-duo-ui.sh` / `Scripts/verify-ipa.sh` / `Scripts/audit-*.sh` / `Scripts/audit-pixels.py` / `Scripts/contact-sheet.py` / `Scripts/e2e-verify.sh` | 全部保留（零冲突） |
 | N-03 | `Scripts/qa-fixture/*`（fixture 视频/字幕/服务器） | 保留 |
 | N-04 | `Scripts/hinge/*`（Duo 折叠模拟） | 保留 |
-| N-05 | `Docs/*二开审计/验收/迁移*` | 保留 |
+| N-05 | `Docs/二开审计-2026-11-04.md` / `Docs/二开审计-第二轮-2026-11-04.md` / `Docs/二开审计-第三轮-修复记录-2026-11-04.md` / `Docs/二开融合迁移计划表.md` / `Docs/真机验收.md` / `Docs/IPA验证与测试规划-2026-11-04.md` / `Docs/iPhone-Duo-三形态UI验证清单.md` / `Docs/iPhone-Duo-模拟器折叠验证.md` | 保留（8 份，逐份已核） |
 | N-06 | `Services/tmdb-match/*` | 保留（我方 TMDB 服务） |
 | N-07 | `Design/icon-sources/*` + `Design/preview-s-variants.swift` | 保留（Mi3s 图标源图） |
 | N-08 | `.gitignore` / `AGENTS.md` | 取并集，不覆盖上游 |
