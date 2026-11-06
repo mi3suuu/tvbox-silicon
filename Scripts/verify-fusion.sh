@@ -214,9 +214,52 @@ echo "⑫ drop-list ⟷ 代码（路径与行号是否仍然有效）"
 python3 Scripts/verify-droplist.py
 [ $? -ne 0 ] && fail=$((fail+1))
 
+
+echo
+echo "⑬ 分线作业实录（worktree 是否真有产出）"
+python3 - <<'PY2'
+import subprocess, pathlib, sys
+out = subprocess.run(['git','worktree','list','--porcelain'],capture_output=True,text=True).stdout
+wts=[]
+cur={}
+for line in out.splitlines():
+    if line.startswith('worktree '): cur={'path': line[9:]}
+    elif line.startswith('branch '): cur['branch']=line[7:]
+    elif line.startswith('HEAD '): cur['head']=line[5:]
+    elif line=='' and cur: wts.append(cur); cur={}
+if cur: wts.append(cur)
+
+base = subprocess.run(['git','rev-parse','fusion/main~0'],capture_output=True,text=True).stdout.strip()
+rows=[]
+for w in wts:
+    br = w.get('branch','').replace('refs/heads/','')
+    if not br.startswith('wt/'): continue
+    n = subprocess.run(['git','rev-list','--count',f'fusion/base..{br}'],capture_output=True,text=True).stdout.strip()
+    rows.append((br, int(n or 0)))
+
+active=[r for r in rows if r[1]>0]
+idle=[r for r in rows if r[1]==0]
+print("   worktree 分支 %d 个：有产出 %d / 零产出 %d" % (len(rows), len(active), len(idle)))
+for br,n in sorted(active, key=lambda x:-x[1]):
+    print("      %-26s %3d 提交" % (br, n))
+if idle:
+    print("      零产出（应已清理，若出现说明又建了空壳）：")
+    for br,_ in idle: print("        ", br)
+    sys.exit(1)
+
+# 六份分线交付文档必须在
+need = ['W1-vault','W2-cloud','W3-source','W4-playback','W5-subtitle','W6-playerui']
+have = {f.stem for f in pathlib.Path('Docs/fusion/lines').glob('*.md')}
+miss = [n for n in need if n not in have]
+print("   分线交付文档 %d/6" % (6-len(miss)), end='')
+print("  缺失：%s" % miss if miss else " ✓")
+if miss: sys.exit(1)
+PY2
+[ $? -ne 0 ] && fail=$((fail+1))
+
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "########## 全部通过（12 项 + 自检） ##########"
+  echo "########## 全部通过（13 项 + 自检） ##########"
   exit 0
 else
   echo "########## 有 $fail 项失败 ##########"
