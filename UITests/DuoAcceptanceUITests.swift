@@ -78,7 +78,11 @@ final class DuoAcceptanceUITests: XCTestCase {
     /// `Scripts/audit-duo-ui.sh` drives the same check with the hinge closed and the orientation set to
     /// landscape; run this test from `Scripts/test-duo-ui.sh` so the device is already in that state.
     func testContentIsDrawnInCompactCompact() throws {
-        for section in ["home", "discover", "sites", "settings"] {
+        // The four sections a whole-page `EmptyView` would blank: Home first (the tab bar draws it), then
+        // the three the white-screen report covered. Drawn from `sections`, so the key/title pairing stays
+        // in one place instead of being re-typed here.
+        let covered = ["home", "discover", "sites", "settings"]
+        for section in Self.sections.filter({ covered.contains($0.key) }) {
             launch(section: section.key)
             XCTAssertTrue(marker(section.title).waitForExistence(timeout: 30),
                           "\(section.key) never opened")
@@ -88,7 +92,7 @@ final class DuoAcceptanceUITests: XCTestCase {
             let pureWhite = whiteSamples(in: XCUIScreen.main.screenshot())
             XCTAssertLessThan(pureWhite, 16,
                 "\(section.key) drew an empty page: \(pureWhite)/16 sampled points are pure white. "
-                + "A whole-page \(EmptyView) from a @ViewBuilder fallback looks exactly like this.")
+                + "A whole-page EmptyView from a @ViewBuilder fallback looks exactly like this.")
             app.terminate()
             Thread.sleep(forTimeInterval: 1)
         }
