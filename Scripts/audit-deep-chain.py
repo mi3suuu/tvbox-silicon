@@ -86,10 +86,13 @@ def main():
                 else:
                     d = session.call({'ac': 'detail', 'ids': v['vod_id']}, 'detail')
                     dv = first_video(d)
+                    raw_play = (dv or {}).get('vod_play_url') or ''
                     rec['detail'] = {
+                        # vod_name 可能为 None 或空串（立播 / 比特 实测如此），不能拿它当成功判据
                         'name': (dv or {}).get('vod_name'),
                         'play_from': (dv or {}).get('vod_play_from'),
-                        'episodes': len(((dv or {}).get('vod_play_url') or '').split('#')),
+                        'episodes': len(raw_play.split('#')) if raw_play else 0,
+                        'has_play_url': bool(raw_play),
                     }
                     ep_name, ep_key = first_episode(d)
                     if not ep_key:
@@ -98,9 +101,25 @@ def main():
                         try:
                             p = session.call({'ac': 'play', 'flag': (dv or {}).get('vod_play_from', '').split('$$$')[0],
                                               'play': ep_key, 'id': v['vod_id']}, 'play')
+                            # url 有三种形态，不能一律 str() 截断：
+                            #   字符串       —— 单清晰度
+                            #   数组         —— 多清晰度 [{'name':'清晰 480P','url':...}, …]（PlaybackResolution.swift 负责挑）
+                            #   127.0.0.1:*  —— App 内置代理，审计进程退出后即失效
+                            raw_url = p.get('url')
+                            if isinstance(raw_url, list):
+                                first = raw_url[0] if raw_url else {}
+                                kind = 'multi'
+                                head = str(first.get('url') if isinstance(first, dict) else first)[:100]
+                            elif isinstance(raw_url, str):
+                                kind = 'proxy' if raw_url.startswith('http://127.0.0.1:') else 'direct'
+                                head = raw_url[:120]
+                            else:
+                                kind, head = 'none', ''
                             rec['play'] = {'episode': ep_name,
                                            'parse': p.get('parse'),
-                                           'url': str(p.get('url'))[:120]}
+                                           'kind': kind,
+                                           'is_array': isinstance(raw_url, list),
+                                           'url': head}
                         except Exception as e:
                             rec['play'] = {'error': str(e)[:300]}
             except Exception as e:
@@ -115,9 +134,21 @@ def main():
     (out / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))
 
     # 汇总
+    # 判据说明：detail 阶段「成功」不等于 vod_name 非空。
+    #   立播 实测 vod_name=""，比特 实测 vod_name=None —— 但两者都能取到播放地址。
+    #   所以按「拿到了可解析的剧集 key」判定，而不是看标题。
     ok_play = [r for r in results if (r.get('play') or {}).get('url')]
-    ok_detail = [r for r in results if (r.get('detail') or {}).get('name')]
-    print(f"\n深度链：详情成功 {len(ok_detail)}/{len(results)} ｜ 播放解析成功 {len(ok_play)}/{len(results)}")
+    ok_detail = [r for r in results if 'skipped' not in (r.get('detail') or {})
+                 and 'error' not in (r.get('detail') or {})]
+    print(f"\n深度链：详情可解析 {len(ok_detail)}/{len(results)} ｜ 播放解析成功 {len(ok_play)}/{len(results)}")
+    kinds = {}
+    for r in results:
+        p = r.get('play') or {}
+        if p.get('url'):
+            kinds[p.get('kind', '?')] = kinds.get(p.get('kind', '?'), 0) + 1
+            print(f"  ✓ {r['key']}: parse={p.get('parse')} [{p.get('kind')}] {str(p.get('url'))[:56]}")
+    if kinds:
+        print("  形态分布:", kinds)
 
 
 if __name__ == '__main__':
