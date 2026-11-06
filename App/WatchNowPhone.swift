@@ -15,6 +15,7 @@ struct WatchNowPhonePage: View {
     /// The newest titles not finished yet, for the hero.
     private var upNext: [PlaybackHistoryEntry] {
         guard sections.contains(.upNext) else { return [] }
+        // [mi3s] 二开：接入隐私保险库（上游直接用 store.playbackHistory）
         return Array(store.visibleHistory.filter { !$0.completed }.prefix(5))
     }
 

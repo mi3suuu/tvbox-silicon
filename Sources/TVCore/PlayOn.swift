@@ -96,6 +96,7 @@ public enum PlayOn {
 public final class PlayOnReceiver: @unchecked Sendable {
     public static let shared = PlayOnReceiver()
     /// Decides on a request and answers it; called off the main thread.
+    // [mi3s] 二开：同 BilibiliCast，投屏参数 start 前写一次、之后只读
     /// Written once on the main thread before `start()`, then only read on `queue`. Do not mutate
     /// while running: there is no lock, so a mid-run write would race the queue's reads.
     public var onRequest: (@Sendable (PlayOn.Request) async -> PlayOn.Reply)?

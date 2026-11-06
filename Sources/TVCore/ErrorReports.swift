@@ -61,6 +61,7 @@ public final class ErrorReports: @unchecked Sendable {
 
     /// The app only: helper processes (TVBoxProbe, the source sweep) share the log folder and never report.
     public func start() async {
+        // [mi3s] 二开：改用 JSONFileStore（上游裸 Data/write，无原子写与损坏容忍）
         let saved = JSONFileStore<[String: Group]>(file: file).load() ?? [:]
         let first = lock.withLock {
             defer { started = true }

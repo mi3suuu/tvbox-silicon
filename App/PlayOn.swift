@@ -70,6 +70,7 @@ import AVKit
                   let site = config.sites.first(where: { $0.origin(or: config.origin) == context.origin && $0.sourceKey == context.sourceKey }) {
             // A hidden source must not arrive here through Play On: the other device's stream would
             // otherwise bypass the vault, which only guards this device's own playback.
+            // [mi3s] 二开：Play On 也要过隐私保险库。上游只守本机播放，投到另一台设备就绕过了
             if !store.vault.permitsPlayback(sourceKey: context.sourceKey, origin: context.origin) {
                 return PlayOn.Reply(accepted: false, message: L10n.text("This title is hidden. Unlock the Privacy Vault to play it."))
             }

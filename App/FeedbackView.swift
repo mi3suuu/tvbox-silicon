@@ -54,6 +54,7 @@ struct FeedbackView: View {
     }
     private var freshContext: String {
         // Hidden subscriptions must not surface in a feedback report: it is a public diagnostic dump.
+        // [mi3s] 二开：反馈是公开诊断包，隐藏订阅不得出现在里面（上游传 store.subscriptions / store.playbackHistory）
         Feedback.context(subscriptions: store.visibleSubscriptions, errors: store.subscriptionErrors, history: store.visibleHistory)
     }
     private var empty: Bool { message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }

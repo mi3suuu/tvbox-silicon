@@ -33,6 +33,7 @@ public final class BilibiliCastReceiver: @unchecked Sendable {
 
     public static let shared = BilibiliCastReceiver()
     /// Called on a background queue.
+    // [mi3s] 二开：投屏参数改为 start 前写一次、之后只读（上游无此约束说明，跨线程写会与 queue 竞争）
     /// Written once on the main thread before the receiver starts, then only read on `queue`. Do not
     /// mutate while running: there is no lock, so a mid-run write would race the queue's reads.
     public var onEvent: (@Sendable (Event) -> Void)?

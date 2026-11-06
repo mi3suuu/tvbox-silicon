@@ -27,6 +27,7 @@ public enum DanmakuSource {
         lock.withLock {
             // Re-registering a URL must not leave a duplicate in `order`: the oldest copy would otherwise be
             // evicted and delete the only `tracks` entry while a stale copy of the URL lingers.
+            // [mi3s] 二开：重注册同一 URL 先清 order 里的旧副本，否则最老的一份被淘汰时会删掉唯一的 tracks 条目
             order.removeAll { $0 == url.absoluteString }
             tracks[url.absoluteString] = Track(cid: cid, duration: duration); order.append(url.absoluteString)
             while order.count > 8 { tracks[order.removeFirst()] = nil }

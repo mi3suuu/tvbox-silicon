@@ -10,6 +10,7 @@ struct DiscoverPersonView: View {
     let name: String
     let profile: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // [mi3s] 二开：人物页改用 LoadState，loading/failed 不会各自漂移
     @State private var load: LoadState<TMDBCatalog.PersonProfile> = .loading
     @State private var paint: DiscoverPaint?
     @State private var revision = 0

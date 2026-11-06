@@ -7,6 +7,7 @@ import TVCore
 struct BilibiliAccountView: View {
     @State private var account = BilibiliAccount.load()
     @State private var attempt = 0
+    // [mi3s] 二开：退出登录前确认（上游直接退出）
     @State private var confirmingSignOut = false
     #if os(iOS)
     @State private var signingIn = false

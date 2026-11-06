@@ -168,6 +168,7 @@ struct DiscoverCalendarView: View {
         do { weeks[key] = try await TMDBCalendar.week(kind, region: region) } catch {
             // URLSession throws URLError(.cancelled) on task cancellation, not CancellationError;
             // a cancelled load (viewer switched kind/region) must not be marked as a failure.
+            // [mi3s] 二开：取消不等于失败。URLSession 在任务取消时抛 URLError(.cancelled) 而非 CancellationError，上游会把它记成失败
             if Task.isCancelled { return }
             Diagnostics.shared.record(.warning, "calendar", "calendar=\(key) failed=\(String(reflecting: error))")
             failed.insert(key)

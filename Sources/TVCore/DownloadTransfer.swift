@@ -335,6 +335,7 @@ struct Transfer: Sendable {
                 catch let error as TransferError {
                     failure = error
                     if case .expired = error { refused += 1; continue }
+                    // [mi3s] 二开：`.incomplete` 不重试 —— 流式 body 已写了半份，重试会写第二遍损坏文件
                     // A streamed body is appended to the file as it arrives. `.incomplete` means part
                     // of it is already on disk, so retrying here would write the whole file a second
                     // time and corrupt it. Fail and let the download start over cleanly.

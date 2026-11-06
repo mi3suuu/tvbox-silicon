@@ -12,6 +12,7 @@ struct DouyinAccountView: View {
     @State private var account = DouyinAccount.load()
     @State private var attempt = 0
     @State private var error: String?
+    // [mi3s] 二开：退出登录前确认（上游直接退出）
     @State private var confirmingSignOut = false
     #if os(tvOS)
     @State private var link: DouyinHandoff.Link?

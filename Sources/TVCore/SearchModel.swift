@@ -61,6 +61,7 @@ import Observation
         (results.first { $0.id == source }?.page?.videos ?? []) + batches.filter { $0.source == source }.flatMap(\.videos)
     }
 
+    // [mi3s] 二开：来源筛选只在本次会话内有效，新搜索重置为全部源（上游会记住上次选择，静默过滤掉别的源）
     /// Shows one source's results (nil: every source). The choice lives only for the current session:
     /// a fresh search resets it to every source, so a source picked last time can never quietly filter
     /// the next search.
