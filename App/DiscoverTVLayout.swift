@@ -718,6 +718,7 @@ private struct DiscoverTVSearchCard: View {
                         HStack(spacing: 2) {
                             ForEach(0..<5) { index in
                                 Image(systemName: rating / 2 >= Double(index + 1) ? "star.fill" : rating / 2 > Double(index) ? "star.leadinghalf.filled" : "star")
+                                    // [mi3s] 二开：硬编码 .yellow 换成 Brand.amber（与全站评分色统一）
                                     .font(.system(size: 20)).foregroundStyle(rating / 2 > Double(index) ? Brand.amber : .white.opacity(0.4))
                             }
                         }

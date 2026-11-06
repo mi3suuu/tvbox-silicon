@@ -7,6 +7,7 @@ import Network
 /// sign-in from the iPhone app over the local network (`DouyinHandoff`).
 public struct DouyinAccount: Codable, Equatable, Sendable {
     /// The desktop browser Douyin's sign-in page and its account check expect.
+    // [mi3s] 二开：UA 外提到 Endpoints.swift（上游此处硬编码完整 UA 串）
     public static let userAgent = Endpoints.douyinWebUserAgent
     /// The douyin.com cookies of the signed-in web session.
     public var cookie = ""
@@ -155,6 +156,7 @@ public enum DouyinHandoff {
                 throw TVError.unsupported(L10n.text("Connect this device to Wi-Fi or Ethernet first."))
             }
             let listener = try NWListener(using: .tcp)
+            // [mi3s] 二开：onReceive 写入加锁（上游此处直接赋值，跨线程写未保护）
             queue.sync { self.received = onReceive }
             listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
             let port: UInt16 = try await withCheckedThrowingContinuation { continuation in

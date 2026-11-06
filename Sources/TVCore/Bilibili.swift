@@ -32,6 +32,7 @@ public struct BilibiliAccount: Codable, Equatable, Sendable {
     private static let defaultsKey = "bilibiliAccount"
 
     public static func load() -> Self {
+        // [mi3s] 二开：改用 JSONFileStore 统一读写（上游此处裸 Data(contentsOf:)，无原子写与损坏容忍）
         if let account = JSONFileStore<Self>(file: fileURL).load() { return account }
         #if os(tvOS)
         if let data = UserDefaults.standard.data(forKey: defaultsKey), let account = try? JSONDecoder().decode(Self.self, from: data) {

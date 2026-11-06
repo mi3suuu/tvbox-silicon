@@ -102,6 +102,8 @@ public struct HYWProvider: MusicStreamProvider {
     public let platforms: Set<MusicPlatform> = [.qq]
     let transport: MusicTransport
     let key: String
+    // [mi3s] 二开：端点外提到 Endpoints.swift（上游此处硬编码 IP）；
+    // 需要换源或分环境时只改 Endpoints，不动这个文件。
     static let base = Endpoints.hywMusicBaseURL
     static let timeout: TimeInterval = 8
     public init(key: String, transport: MusicTransport = URLSessionMusicTransport()) {

@@ -103,6 +103,7 @@ struct PluginSignInView: View {
                 Text(L10n.text("Open the %@ app on your phone, scan this code, and confirm the sign-in.", name))
                     .font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text(L10n.text("%@ needs this account for the line you chose. The video plays once you confirm.", prompt.source))
+                    // [mi3s] 二开：说明文字从 tertiary 提到 secondary（tertiary 在浅色下对比度不足）
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if expired {

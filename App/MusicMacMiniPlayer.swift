@@ -76,6 +76,7 @@ struct MusicMacMiniPlayer: View {
 
     private var close: some View {
         Button { dismissWindow(id: Self.windowID) } label: {
+            // [mi3s] 二开：xmark 字号 8 → 11（8pt 在 Mac 上几乎不可点）
             Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
                 .frame(width: 18, height: 18)
                 .background(.black.opacity(0.55), in: Circle())

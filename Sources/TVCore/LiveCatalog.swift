@@ -230,6 +230,7 @@ extension LiveSource {
 
 /// HTTP for the live platforms' web APIs.
 enum LiveHTTP {
+    // [mi3s] 二开：UA 外提到 Endpoints.swift（上游此处硬编码两条完整 UA 串）
     static let desktopAgent = Endpoints.liveDesktopUserAgent
     static let mobileAgent = Endpoints.liveMobileUserAgent
 

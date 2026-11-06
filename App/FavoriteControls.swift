@@ -80,6 +80,7 @@ struct ArtworkBadgeButton: View {
                 .artworkBadge(fill: destructive && hovering ? Brand.rose : nil)
         }
         .buttonStyle(.plain)
+        // [mi3s] 二开：无障碍标签
         .accessibilityLabel(L10n.text(destructive ? "Remove from Favorites" : "Add to Favorites"))
         #if !os(tvOS)
         .onHover { hovering = $0 }

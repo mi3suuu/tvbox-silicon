@@ -152,6 +152,7 @@ struct CloudFolderView: View {
             }
             .glassRow()
             .contextMenu { FavoriteMenuButton(item: item, name: file.name) }
+            // [mi3s] 二开：无障碍标签（上游只有图标可点，VoiceOver 读不出意图）
             .accessibilityLabel(L10n.text("Play %@", file.name))
             .accessibilityIdentifier("files.play." + file.name)
         } else {

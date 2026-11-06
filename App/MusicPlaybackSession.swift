@@ -293,8 +293,8 @@ typealias MusicTrack = TVCore.MusicTrack
     }
 
     func seek(to seconds: Double) {
-        // Clamp short of the end only when the end is known; with an unknown duration the
-        // requested second is the target, not a half-second short of it.
+        // [mi3s] 二开：只在时长已知时才预留 0.5 秒；时长未知（直播/流未就绪）时
+        // 原来的 `(duration ?? seconds) - 0.5` 会 seek 到 seconds-0.5，等于每次都少半秒。
         let target = duration.map { max(0, min(seconds, $0 - 0.5)) } ?? max(0, seconds)
         position = target; seekingTo = target
         let run = generation

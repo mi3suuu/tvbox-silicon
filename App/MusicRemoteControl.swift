@@ -65,6 +65,7 @@ extension Store {
         }
         if !active { active = true; addTargets() }
         let commands = MPRemoteCommandCenter.shared()
+        // [mi3s] 二开：与 MusicMiniPlayer 统一用 canAdvance，避免两处判断不一致
         commands.nextTrackCommand.isEnabled = music.canAdvance
         commands.previousTrackCommand.isEnabled = true
 

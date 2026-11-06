@@ -47,6 +47,7 @@ struct MusicMiniPlayer: View {
                         .contentTransition(.symbolEffect(.replace))
                 }
                 if !inline {
+                    // [mi3s] 二开：统一用 canAdvance（上游此处直接读 queue?.hasNext，未覆盖单曲循环等情形）
                     button("forward.fill", label: "Next") { music.next() }.disabled(!music.canAdvance)
                     // Closes the strip without opening Now Playing first; Continue Playing keeps the song.
                     button("xmark", label: "Stop") { music.stop() }.font(.body).foregroundStyle(.secondary)

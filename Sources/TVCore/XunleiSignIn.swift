@@ -26,6 +26,7 @@ public enum XunleiSignIn {
     static let clientID = "Xp6vsxz_7IYVw2BB"
     static let clientSecret = "Xp6vsy4tN9toTVdMSpomVdXpRmES"
     static let packageName = "com.xunlei.downloadprovider"
+    // [mi3s] 二开：版本号外提到 Endpoints.swift（上游此处硬编码，25.0.6.30 会随服务端失效）
     static let clientVersion = Endpoints.xunleiClientVersion
     static let authVersion = Endpoints.xunleiAuthVersion
     static let appID = "40"

@@ -238,6 +238,7 @@ struct FilterChipLabel: View {
         #if os(macOS)
         HStack(spacing: 6) {
             Text(title).lineLimit(1)
+            // [mi3s] 二开：chevron 字号 10 → 11（10pt 在浅色下像条短横线）
             Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
         }
         .font(.system(size: 13)).padding(.horizontal, 12).frame(height: 30)
