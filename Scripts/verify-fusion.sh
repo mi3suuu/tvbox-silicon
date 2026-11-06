@@ -263,9 +263,15 @@ echo "⑭ 第三方声明 ⟷ 代码（声称打包的路径必须存在）"
 python3 Scripts/verify-notices.py
 [ $? -ne 0 ] && fail=$((fail+1))
 
+
+echo
+echo "⑮ 上游文件侵入（无 [mi3s] 标记的实质改动必须不增长）"
+python3 Scripts/verify-intrusion.py
+[ $? -ne 0 ] && fail=$((fail+1))
+
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "########## 全部通过（14 项 + 自检） ##########"
+  echo "########## 全部通过（15 项 + 自检） ##########"
   exit 0
 else
   echo "########## 有 $fail 项失败 ##########"
