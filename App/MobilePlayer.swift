@@ -386,6 +386,11 @@ struct MobilePlayerView: View {
             PlayerLayerView(player: session.player, gravity: pictureGravity, pip: pip)
                 .pictureBox(scaling, aspect: pictureAspect)
                 .playerBleed(!inline)
+                // [mi3s] 与上游一致：Picture in Picture 只显示 player layer，自绘的
+                // Mi3sSubtitleOverlay 进不去那个窗口。进 PiP 时把字幕交还给 AVPlayer 自己画
+                // （`native = true`），退出时收回自绘层。不这样 PiP 里就没有字幕。
+                .onChange(of: pip.active) { _, active in session.subtitles.native = active }
+                .onChange(of: PictureInPicture.isActive) { _, active in session.subtitles.native = active }
             // The enhanced picture covers the layer's own, under everything else. It bleeds exactly the
             // edges the AVPlayer layer does, so the two pictures never disagree and leave a strip of page
             // down one side. On a watch page it stays inside the box the page measured: bleeding sideways

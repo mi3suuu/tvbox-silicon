@@ -1077,8 +1077,28 @@ struct VideoDetailView: View {
     /// opens sideways and the interface turns a beat later, so between the unfold and the turn this is
     /// already true while the orientation still reads upright. Every layout decision reads this, never
     /// `landscapeScreen` on its own, so the first frame of an unfold is the landscape one.
-    private var sideways: Bool { landscapeScreen || (duoExpanded && unfoldingToLandscape) }
+    /// [mi3s] 二开：`sideways` 只在展开时有意义。
+    ///
+    /// 原来是 `landscapeScreen || (duoExpanded && unfoldingToLandscape)` —— `landscapeScreen` 读的是
+    /// `interfaceOrientation`，它**不随折叠复位**：内屏横持时已是 landscape，折回外屏后读数不变
+    /// （外屏是竖着拿的，可界面还没转回来）。于是折叠后页面继续按横屏两列布局画，看起来像「折回去
+    /// 还是横屏」。
+    ///
+    /// 折叠态的方向由 `holdPortrait(true)` 声明式钉住（`mask = .portrait`），页面应当立刻按竖屏画，
+    /// 而不是等 `interfaceOrientation` 追上来。所以未展开时直接返回假，展开时才读屏幕方向。
+    private var sideways: Bool { duoExpanded && (landscapeScreen || unfoldingToLandscape) }
     private var portraitExpanded: Bool { duoExpanded && !sideways }
+    /// [mi3s] 二开：本页此刻该不该显示 tab bar。
+    ///
+    /// 播放一旦交给应用内小窗（`store.playing` 有值但这一页不管它播放），本页就不在台前了。
+    /// 这时仍按播放页的规则隐藏 tab bar，会让用户从小窗回到任何标签页时都看不到 tab bar ——
+    /// 表现就是「切到小窗后 tab 不见了」。小窗在台前时把 tab bar 交还给标签页，本页重新回到台前
+    /// 时再由下面的播放页规则接管。
+    private var barVisible: Bool {
+        if store.presentingPlayer { return false }
+        if let channel = store.playing, !store.playsInWatchPage(channel) { return true }
+        return duoExpanded && (!portraitExpanded || fullScreen)
+    }
     /// The page is laid out left/right — picture on one side, details and episodes beside it — rather
     /// than stacked. True for a phone held sideways and for the unfolded Duo's wide inner display; Full
     /// Screen owns the whole display instead, so it never splits.
@@ -1220,7 +1240,11 @@ struct VideoDetailView: View {
         // The unfolded-upright Duo (portraitExpanded) plays full-bleed down to the home indicator, so its
         // tab bar hides to keep the seek bar clear; the unfolded landscape column and Full Screen keep it
         // resident. Gated on `duoExpanded` so a plain upright phone still hides its tab bar in Full Screen.
-        .setBarVisibility(duoExpanded && (!portraitExpanded || fullScreen) ? .visible : .hidden, for: .tabBar)
+        // [mi3s] 二开：小窗（应用内 mini player）出现时，本页已经不在台前，它的 tab bar 规则
+        // 不能再生效 —— 否则从小窗回到标签页时 tab bar 仍然隐藏，看起来像「tab 不见了」。
+        // `store.presentingPlayer` 是播放页；小窗走的是 `store.playing != nil && !playsInWatchPage`，
+        // 两者任一成立都说明本页不再拥有屏幕。
+        .setBarVisibility(barVisible ? .visible : .hidden, for: .tabBar)
         .onAppear {
             store.watchPageScopes.formUnion(watchScopes)
             // The folded-out Duo is its own landscape screen; only the upright outer display is held
@@ -1261,8 +1285,8 @@ struct VideoDetailView: View {
             if expanded {
                 landLandscape()
             } else {
-                // Folded back to the outer display, which is held portrait: drop the hold with it, so a
-                // fold during the turn cannot leave the landscape layout up on the cover screen.
+                // 折回外屏：撤掉「正落向横屏」的标记。竖屏由上面 `holdPortrait(true)` 声明式钉住
+                // （`mask = .portrait` + `requestGeometryUpdate(.portrait)`），页面方向跟着它走。
                 unfoldingToLandscape = false
             }
             // A Full Screen started on the inner display must not carry onto the outer one: folding
