@@ -257,9 +257,15 @@ if miss: sys.exit(1)
 PY2
 [ $? -ne 0 ] && fail=$((fail+1))
 
+
+echo
+echo "⑭ 第三方声明 ⟷ 代码（声称打包的路径必须存在）"
+python3 Scripts/verify-notices.py
+[ $? -ne 0 ] && fail=$((fail+1))
+
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "########## 全部通过（13 项 + 自检） ##########"
+  echo "########## 全部通过（14 项 + 自检） ##########"
   exit 0
 else
   echo "########## 有 $fail 项失败 ##########"

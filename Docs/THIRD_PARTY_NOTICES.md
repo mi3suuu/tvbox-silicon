@@ -50,19 +50,26 @@ How Unicorn's and Keystone's GPL-2.0 terms apply to apps that embed this runtime
 
 ## Reference implementation
 
-The built-in Hongguo source uses the catalog and player response formats from
-[jackotom/hongguo-drama](https://github.com/jackotom/hongguo-drama), commit
-`2d2314213c2457c63f84055518d38a27210c7ad1` (GPL-3.0). Its `src/native/app-source.js`
-and `sm3.js` are adapted as ES modules under `Sources/TVCore/ScriptAssets/sites/hongguo/`.
-The signing algorithms' earlier drpys/hongguoTV attribution, modification record,
-and full GPL license are retained there and bundled with the app. Changes dated
-2026-10-12 replace Node/Electron dependencies with QuickJS and native Apple crypto.
-The built-in Xifan and Hema sources (`Xifan.js`, `Hema.js`) follow its `src/native/xifan.js` and
-`src/native/hema.js` at commit `f210689c4adbf0986e3412cdb12a1c710c5dd611` (v4.1); the record is in the same
-`NOTICE.txt`.
-The catalog adapter and native sample-by-sample CENC media preparation are implemented
-for Yingxia. No Electron, FFmpeg, captured user cookies, or fixed device IDs are bundled
-for this source.
+**No adapted third-party code is bundled for Hongguo, Xifan or Hema (updated 2026-11-06).**
+
+The earlier adaptation of
+[jackotom/hongguo-drama](https://github.com/jackotom/hongguo-drama) (commit
+`2d2314213c2457c63f84055518d38a27210c7ad1`, GPL-3.0) — `src/native/app-source.js`
+and `sm3.js` as ES modules — together with `Xifan.js` and `Hema.js` (following that
+project's `src/native/xifan.js` / `src/native/hema.js` at commit
+`f210689c4adbf0986e3412cdb12a1c710c5dd611`), was **dropped in the 1.8.11 fusion**.
+Those local site scripts are superseded by the upstream cloud manifest
+(`ScriptAssets/sites/index.json`); see `Docs/fusion/02-未纳入清单.md` entry D-03.
+
+Verified 2026-11-06: `Sources/TVCore/ScriptAssets/sites/hongguo/` does not exist,
+`Xifan.js` and `Hema.js` are absent, the manifest contains no `hongguo` reference, and
+no `sm3` / `drpys` / `jackotom` string appears anywhere in the shipped sources. The GPL
+`LICENSE` and `NOTICE.txt` that travelled with those files were dropped with them, since
+they only ever covered code that is no longer present.
+
+The catalog adapter and native sample-by-sample CENC media preparation remain
+first-party implementations for Yingxia. No Electron, FFmpeg, captured user cookies,
+or fixed device IDs are bundled.
 
 [FongMi/TV](https://github.com/FongMi/TV) is a GPL-3.0 reference implementation. The local reference checkout, when present, retains its own Git history and license. It is not included as an app build target. Its `quickjs/src/main/assets/js/lib/cheerio.min.js` and `crypto-js.js` assets (commit `c616c0aa3613e87529791587a9f71b78c278c991`) are copied unmodified into `Runtime/ScriptHost/assets/js/lib/` and bundled with the script host. Its `cat.js`, `gbk.js`, and `similarity.js` assets are copied unmodified from commit `4a11089cb6a1377cbf437ebccd24468296357132` into the same directory. The upstream license is retained as `Runtime/ScriptHost/LICENSE.assets` and `ScriptHost/LICENSE.assets` in the app. Embedded library copyright notices are preserved.
 
@@ -72,7 +79,21 @@ The bundled standalone Node.js binary retains its complete distributed license a
 
 ## Python runtime (Mac)
 
-`Scripts/build-python-host.sh` bundles a relocatable CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone), installed by uv. CPython is distributed under the PSF License; its license and the notices for its bundled components remain at `PythonHost/python/lib/python3.12/LICENSE.txt`. The validation used CPython 3.12.11 on macOS arm64.
+`Scripts/build-python-host.sh` bundles a relocatable CPython from
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+installed by uv. CPython is distributed under the PSF License. Validation used
+CPython 3.12.11 on macOS arm64.
+
+**Known gap (recorded 2026-11-06, not yet fixed):** the earlier text claimed the PSF
+license "remains at `PythonHost/python/lib/python3.12/LICENSE.txt`", but
+`Scripts/build-python-host.sh` only copies `host.py`, `sandbox/spider.sb` and
+`PythonHost/base/` into the build output — it never copies a CPython `LICENSE.txt`, and
+that path does not exist in this repository. The interpreter is fetched at build time by
+uv, so its license file lives in the fetched distribution, not here.
+
+Closing this requires `build-python-host.sh` to copy the interpreter's `LICENSE.txt` next
+to the bundled runtime. Until then, this notice states the actual situation rather than
+promising a file that is not produced.
 
 The spider libraries are pinned in `Runtime/PythonHost/requirements.txt`. Each one keeps its license in its `*.dist-info` directory under `PythonHost/site-packages`.
 
