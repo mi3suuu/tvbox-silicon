@@ -117,6 +117,15 @@ function nativeCrypto(request) {
         if (request.output === 'base64') return { data: result.toString('base64') };
         return { text: result.toString('utf8') };
     }
+    if (request.op === 'random') {
+        // [mi3s] 上游 host.mjs 漏了这个 op，而 Swift 侧 ScriptCrypto 早就支持它。
+        // 结果：走 ScriptHost/node 的 .javascript 源一旦调 random 就整源初始化失败
+        // （实测 builtin.hongguo 报 "unsupported crypto operation"）。
+        // 参数与返回格式对齐 Sources/TVCore/ScriptCrypto.swift:54 的 random 分支。
+        const count = Number(request.count);
+        if (!Number.isInteger(count) || count < 1 || count > 1024) throw new Error('invalid random byte count');
+        return { data: crypto.randomBytes(count).toString('base64') };
+    }
     if (request.op === 'hash') return { hex: crypto.createHash(alg).update(bytes('data')).digest('hex') };
     if (request.op === 'hmac') return { hex: crypto.createHmac(alg, bytes('key')).update(bytes('data')).digest('hex') };
     if (request.op === 'pow') {
