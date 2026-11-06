@@ -115,11 +115,20 @@ def main():
                                 head = raw_url[:120]
                             else:
                                 kind, head = 'none', ''
+                            # play 还可能带这些字段，App 侧都要用，审计必须记下来：
+                            #   playUrl —— 站点级前缀（Catalog.swift:432/480），拼在最终地址前
+                            #   header  —— 请求头，很多源必须带 Referer/UA 才出流
+                            #   danmaku —— 弹幕地址
+                            hdr = p.get('header')
                             rec['play'] = {'episode': ep_name,
                                            'parse': p.get('parse'),
                                            'kind': kind,
                                            'is_array': isinstance(raw_url, list),
-                                           'url': head}
+                                           'url': head,
+                                           'has_header': bool(hdr),
+                                           'header_keys': sorted(hdr) if isinstance(hdr, dict) else [],
+                                           'playUrl': p.get('playUrl') or None,
+                                           'has_danmaku': bool(p.get('danmaku'))}
                         except Exception as e:
                             rec['play'] = {'error': str(e)[:300]}
             except Exception as e:
