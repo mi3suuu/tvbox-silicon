@@ -152,7 +152,8 @@ private func video() async throws -> URL {
 
 /// The server takes the same sizes (UPLOADS in Services/error-reports/src/index.ts).
 @Test func feedbackSizeLimitsMatchTheServer() throws {
-    let server = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    // [mi3s] 二开：同上，向上搜索仓库根（见 RepositoryRoot.swift）。
+    let server = RepositoryRoot.find(from: #filePath)
         .appending(path: "Services/error-reports/src/index.ts")
     let source = try String(contentsOf: server, encoding: .utf8)
     for kind in [Feedback.Attachment.Kind.image, .video, .log] {

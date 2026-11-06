@@ -8,7 +8,8 @@ import Testing
 /// records what the converter's sources were for the current versions: line 1 is VERSION and every input,
 /// line 2 is DEX2JAR_VERSION and the inputs of dex2jar's own output.
 @Test func javaHostVersionChangesWithTheConverter() throws {
-    let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    // [mi3s] 二开：改为向上搜索仓库根，不再假设「包根 == 仓库根」（见 RepositoryRoot.swift）。
+    let root = RepositoryRoot.find(from: #filePath)
     let java = root.appending(path: "Runtime/JavaHost/src/main/java")
     let manager = FileManager.default
     let vendored = try #require(manager.enumerator(atPath: java.appending(path: "com/googlecode").path))
