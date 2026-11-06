@@ -502,6 +502,15 @@ import TVCore
         }
         #endif
         #endif
+        #if DEBUG
+        // [mi3s] 二开（补上游 QA 钩子）：`-qaSubtitleStyle <JSON>` 保存字幕样式，
+        // 截图 / 视觉回归时用，等价于在「设置 › 字幕样式」里手动调。
+        // 上游有这两个钩子，我方换字幕架构时漏掉了；我方 API 是 SubtitleStyle.load()/save()。
+        if let json = UserDefaults.standard.string(forKey: "qaSubtitleStyle"),
+           let style = try? JSONDecoder().decode(SubtitleStyle.self, from: Data(json.utf8)) {
+            style.save()
+        }
+        #endif
         self.player = player
         enhancer = VideoEnhancer(player: player)
         queueObservation = player.observe(\.currentItem, options: [.new]) { [weak self] _, _ in
