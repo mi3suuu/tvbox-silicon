@@ -60,6 +60,7 @@ public actor WebDAV {
     /// Writes `data` as a file named `name` inside `folder` on the share. WebDAV's `PUT` is the whole
     /// file at once, which suits a backup that's a single JSON blob. Overwrites an existing file of the
     /// same name, as a fresh backup should.
+    // [mi3s] 二开：网盘上传（见 Pan115Files 的同类说明）。WebDAV 是标准 PUT，按状态码判成败。
     func upload(_ server: AListServer, folder: String, name: String, data: Data) async throws {
         let parent = AListServer.folder(folder)
         let path = parent == "/" ? "/\(name)" : "\(parent)/\(name)"

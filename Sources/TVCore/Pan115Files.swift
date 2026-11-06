@@ -30,6 +30,9 @@ actor Pan115Files {
     private var name: String { L10n.text("115 Cloud") }
 
     /// Creates a folder named `name` under `parent` (a 115 cid), returning its cid.
+    // [mi3s] 二开：网盘上传（云备份 W2 的落地端）。115 是单步 form-upload，与 Quark 的两步
+    // upload session、AList 的 /api/fs/put、WebDAV 的裸 PUT 机制都不同，无法合并成一个
+    // 共用 extension，故各自实现在各自文件内，统一登记 I-38。
     func mkdir(_ name: String, parent: String) async throws -> String {
         let answer = try await call(URL(string: "https://webapi.115.com/files/add?pid=\(parent)&cname=\(name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name)")!)
         guard let cid = Self.text(answer["cid"]), !cid.isEmpty else {

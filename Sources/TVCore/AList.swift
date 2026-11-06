@@ -231,6 +231,8 @@ public actor AList {
 
     /// Writes `data` as a file named `name` inside `folder`. AList's `/api/fs/put` takes the whole
     /// file in one `PUT` body (as its web UI's upload does), which suits a single-JSON backup.
+    // [mi3s] 二开：网盘上传（见 Pan115Files 的同类说明）。AList 走 /api/fs/put 整文件 PUT，
+    // 需要 Authorization 头带 token。
     func upload(_ server: AListServer, folder: String, name: String, data: Data) async throws {
         var token = tokens[server.id]
         if token == nil, !server.username.isEmpty { token = try await login(server) }

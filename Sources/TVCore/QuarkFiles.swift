@@ -36,6 +36,8 @@ actor QuarkFiles {
     private var referer: String { service == .quark ? "https://pan.quark.cn/" : "https://drive.uc.cn/" }
 
     /// Creates a folder named `name` under `parent` (a drive folder id), returning its id.
+    // [mi3s] 二开：网盘上传（见 Pan115Files 的同类说明）。Quark 需要先 /file/upload 开
+    // upload session，再传分片 —— 与 115 的单步 form-upload 不是同一套协议。
     func mkdir(_ name: String, parent: String) async throws -> String {
         let answer = try await call("/file?\(query)&pdir_fid=\(parent)&file_name=\(name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name)&dir=1", body: ["pdir_fid": parent, "file_name": name, "dir": true])
         guard let fid = answer["data"] as? String, !fid.isEmpty else {
