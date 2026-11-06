@@ -1,3 +1,4 @@
+// [mi3s] 二开：本文件内新增的测试覆盖 源分组的可见性规则（隐藏订阅 / 重定向订阅 / 隐私锁定源的呈现）
 import Foundation
 import Testing
 @testable import TVCore

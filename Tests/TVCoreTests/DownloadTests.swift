@@ -1,3 +1,4 @@
+// [mi3s] 二开：本文件内新增的测试覆盖 下载源携带 origin / originalKey（保险库需要），并兼容无 origin 的旧 JSON
 import Foundation
 import Testing
 @testable import TVCore

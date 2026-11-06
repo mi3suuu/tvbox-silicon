@@ -1,3 +1,5 @@
+// [mi3s] 二开：本文件内新增的测试覆盖 播放环境隔离（见 Sources/TVCore/PlaybackHistory.swift 的 [mi3s] 说明）：
+//   分区、旧记录归默认环境、删除不误伤其它环境、重看不重复写入
 import Foundation
 import Testing
 @testable import TVCore

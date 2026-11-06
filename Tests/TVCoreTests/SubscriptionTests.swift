@@ -1,4 +1,5 @@
 #if canImport(CoreImage.CIFilterBuiltins)
+// [mi3s] 二开：本文件内新增的测试覆盖 订阅条目携带环境字段 + 旧数据兼容解码
 import CoreImage.CIFilterBuiltins
 #endif
 import Foundation
