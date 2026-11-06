@@ -14,7 +14,7 @@ echo
 echo "① 二开文件融入"
 python3 - <<'PY'
 import subprocess, re, os
-def f(r): return set(subprocess.run(['git','ls-tree','-r','--name-only',r],capture_output=True,text=True).stdout.splitlines())
+def f(r): return set(subprocess.run(['git','-c','core.quotepath=false','ls-tree','-r','--name-only',r],capture_output=True,text=True).stdout.splitlines())
 ours, base, head = f('import/ours'), f('22180e4'), f('HEAD')
 ext = ('.swift','.strings','.yml','.md','.js','.json','.plist')
 added = {x for x in ours - base if x.endswith(ext)}
@@ -116,7 +116,7 @@ echo
 echo "⑧ 上游文件改动全量（含无 [mi3s] 标记的）"
 python3 - <<'PY2'
 import subprocess
-def ls(r): return set(subprocess.run(['git','ls-tree','-r','--name-only',r],capture_output=True,text=True).stdout.splitlines())
+def ls(r): return set(subprocess.run(['git','-c','core.quotepath=false','ls-tree','-r','--name-only',r],capture_output=True,text=True).stdout.splitlines())
 ours, base, head = ls('import/ours'), ls('22180e4'), ls('HEAD')
 rows=[]
 for x in sorted(ours & base):
@@ -135,5 +135,24 @@ print("     无标记 / 沿用我方版  %d" % (len(u)-len(merge)))
 print("     无标记 / 融合改写    %d  ← 最需要逐处标记的一类" % len(merge))
 if merge:
     for x,_,_ in merge[:5]: print("         ", x)
+print("   详见 Docs/fusion/10-上游文件改动全量清单.md")
+PY2
+
+echo
+echo "⑨ 非 .swift 重叠改动（工程/资源/脚本）"
+python3 - <<'PY2'
+import subprocess
+def ls(r): return set(subprocess.run(['git','-c','core.quotepath=false','ls-tree','-r','--name-only',r],capture_output=True,text=True).stdout.splitlines())
+ours, base, head = ls('import/ours'), ls('22180e4'), ls('HEAD')
+nsw=[]
+for x in sorted(ours & base):
+    if x not in head or x.endswith('.swift'): continue
+    a=subprocess.run(['git','rev-parse',f'HEAD:{x}'],capture_output=True,text=True).stdout.strip()
+    b=subprocess.run(['git','rev-parse',f'22180e4:{x}'],capture_output=True,text=True).stdout.strip()
+    if a and b and a!=b: nsw.append(x)
+print("   非 .swift 改动 %d 个" % len(nsw))
+print("     其中标记类（project.yml/host.mjs/.strings/.gitignore）:", sum(1 for x in nsw if x.endswith(('.yml','.mjs','.strings')) or x=='.gitignore'))
+print("     派生类（plist/pbxproj，真源在 project.yml）:", sum(1 for x in nsw if x.endswith(('.plist','.pbxproj'))))
+print("     二进制（AppIcon）:", sum(1 for x in nsw if x.endswith('.png')))
 print("   详见 Docs/fusion/10-上游文件改动全量清单.md")
 PY2
