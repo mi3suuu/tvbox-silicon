@@ -1742,7 +1742,7 @@
 "Pick something to watch next." = "挑选接下来要看的吧。";
 "Play Trailer" = "播放预告片";
 "Playback moved on, so the saved title was not resumed." = "播放已经继续，因此没有恢复保存的标题。";
-"Playing %@ in %d s" = "%d 秒后播放 %@";
+"Playing %@ in %d s" = "%2$d 秒后播放 %1$@";
 "Reachable" = "可连接";
 "Related" = "相关推荐";
 "Remove the passcode?" = "移除密码？";
@@ -1971,3 +1971,6 @@
 "Gestures" = "手势";
 "Brightness and Volume" = "亮度和音量";
 "Area" = "区域";
+"This source is hidden. Unlock the Privacy Vault to browse it." = "这个源已隐藏。解锁隐私保险库后才能浏览。";
+"This source is hidden. Unlock the Privacy Vault to use it." = "这个源已隐藏。解锁隐私保险库后才能使用。";
+"This title is hidden. Unlock the Privacy Vault to play it." = "这个条目已隐藏。解锁隐私保险库后才能播放。";

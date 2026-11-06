@@ -1742,7 +1742,7 @@
 "Pick something to watch next." = "挑選接下來要看的吧。";
 "Play Trailer" = "播放預告片";
 "Playback moved on, so the saved title was not resumed." = "播放已經繼續，因此沒有恢復儲存的標題。";
-"Playing %@ in %d s" = "%d 秒後播放 %@";
+"Playing %@ in %d s" = "%2$d 秒後播放 %1$@";
 "Reachable" = "可連線";
 "Related" = "相關推薦";
 "Remove the passcode?" = "移除密碼？";
@@ -1971,3 +1971,6 @@
 "Gestures" = "手勢";
 "Brightness and Volume" = "亮度和音量";
 "Area" = "區域";
+"This source is hidden. Unlock the Privacy Vault to browse it." = "這個來源已隱藏。解鎖隱私保險庫後才能瀏覽。";
+"This source is hidden. Unlock the Privacy Vault to use it." = "這個來源已隱藏。解鎖隱私保險庫後才能使用。";
+"This title is hidden. Unlock the Privacy Vault to play it." = "這個項目已隱藏。解鎖隱私保險庫後才能播放。";

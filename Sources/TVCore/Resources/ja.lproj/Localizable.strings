@@ -1742,7 +1742,7 @@
 "Pick something to watch next." = "次に見るものを選びましょう。";
 "Play Trailer" = "予告編を再生";
 "Playback moved on, so the saved title was not resumed." = "再生が進んだため、保存したタイトルは再開されませんでした。";
-"Playing %@ in %d s" = "%d 秒後に %@ を再生します";
+"Playing %@ in %d s" = "%2$d 秒後に %1$@ を再生します";
 "Reachable" = "接続可能";
 "Related" = "関連作品";
 "Remove the passcode?" = "パスコードを削除しますか？";
@@ -1971,3 +1971,6 @@
 "Gestures" = "ジェスチャ";
 "Brightness and Volume" = "明るさと音量";
 "Area" = "表示範囲";
+"This source is hidden. Unlock the Privacy Vault to browse it." = "このソースは非表示です。プライバシー保管庫をロック解除して閲覧してください。";
+"This source is hidden. Unlock the Privacy Vault to use it." = "このソースは非表示です。プライバシー保管庫をロック解除して使用してください。";
+"This title is hidden. Unlock the Privacy Vault to play it." = "この項目は非表示です。プライバシー保管庫をロック解除して再生してください。";
