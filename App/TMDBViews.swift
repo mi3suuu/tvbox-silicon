@@ -17,9 +17,9 @@ import TVCore
     private(set) var chosen = false
     private var key: String?
     private var request: TMDBMatch.Request?
-    /// Monotonic token for every details fetch — a season switch, a chosen work, a re-opened choice. Each new
-    /// operation bumps it, so only the latest fetch may land. Without this a fast S2 → S3 tap races two fetches
-    /// and whichever returns last wins, and a season switch in flight can overwrite a work the viewer just chose.
+    // [mi3s] 二开：fetchToken 竞态防护。上游此处没有这个 token —— 快速连点 S2 → S3 时两次
+    // fetch 并发，谁后返回谁覆盖；切换季时在途的响应还会覆盖用户刚选的那部作品。
+    // 每次新操作令 token 自增，只有最新一次的结果允许落盘。
     private var fetchToken = 0
 
     var numbering: TMDBMatch.Numbering { answer?.match?.numbering ?? answer?.numbering ?? .season }
@@ -41,9 +41,9 @@ import TVCore
             switch choice {
             case .none: phase = .notFound
             case .work(let type, let id, let season):
-                // A kept choice carries no numbering/offset, so a match that relied on them (absolute
-                // numbering, an offset) would fall back to per-season numbering and episode 0 on re-open.
-                // Take them from the kept answer when it is the same work.
+                // [mi3s] 二开：重开已保存的选择时补回 numbering / offset。上游保存的 choice
+                // 不带这两个字段 —— 重新打开时依赖它们的匹配（绝对集数、偏移）会退回按季编号
+                // 并显示第 0 集。这里从同一部作品的已保存答案里取回来。
                 let saved = await TMDBMatchStore.shared.answer(for: key)
                 let align = alignment(type, id: id, in: saved)
                 await load(type, id: id, season: season, numbering: align.numbering, offset: align.offset)
@@ -368,16 +368,6 @@ enum TMDBMetrics {
     #endif
 }
 
-extension View {
-    @ViewBuilder func tmdbCardButton() -> some View {
-        #if os(tvOS)
-        // The cards' focus plate: borderless only grew the focused tile a little, too little to see which one it was.
-        cardButton()
-        #else
-        buttonStyle(.plain)
-        #endif
-    }
-}
 
 // MARK: Matched
 
@@ -410,49 +400,10 @@ struct TMDBCastRow: View {
 /// A related title's row: a 16:9 rounded thumbnail on the left, the title and a line of year/type on the
 /// right, as Bilibili's 相关推荐 list cards. One card serves TMDB's "you may like", the source's own related
 /// titles, and a video's episodes when neither has anything.
-struct RelatedCard: View {
-    let title: String
-    let subtitle: String
-    let poster: URL?
-    var headers: [String: String] = [:]
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            PosterImage(url: poster, headers: headers)
-                .frame(width: 120, height: 120 * 9.0 / 16.0)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                    .lineLimit(2).multilineTextAlignment(.leading)
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-    }
-}
 
 /// TMDB's "you may like" as a vertical list of cards, so a narrow detail column (the iPhone Duo's right
 /// column) fills downward instead of one shelf of posters that ends early. A title here isn't from any
 /// source, so choosing one searches the viewer's sources for it, as an index source's titles do.
-struct TMDBRelatedList: View {
-    let titles: [TMDBMatch.Candidate]
-    let search: (String) -> Void
-    var body: some View {
-        LazyVStack(alignment: .leading, spacing: 14) {
-            ForEach(titles, id: \.key) { title in
-                Button { search(title.name) } label: {
-                    RelatedCard(title: title.name,
-                                subtitle: [title.year.map(String.init), L10n.text(title.mediaType == .tv ? "TV Series" : "Movie")].compactMap { $0 }.joined(separator: " · "),
-                                poster: title.poster)
-                }
-                .tmdbCardButton()
-            }
-        }
-    }
-}
 
 /// The facts that don't fit in a line: who made it, where, when, its original name.
 struct TMDBInfoGrid: View {
