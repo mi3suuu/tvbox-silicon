@@ -180,6 +180,8 @@ struct MusicNowPlaying: View {
         // Both services ask to be named when their audio plays.
         if music.failure == nil, let provider = music.selection?.candidate.provider {
             if provider == .gdstudio {
+                // [mi3s] 二开：标明音源出处。上游不显示音乐来自哪个第三方服务 ——
+                // 用户无从判断音质与可用性的来源。另加 next 的 accessibilityLabel。
                 Text(L10n.text("Source: GD Music (music.gdstudio.xyz)")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             } else if provider == .xinghai {
                 Text(L10n.text("Source: Xinghai (yy.zddyr.top)")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)

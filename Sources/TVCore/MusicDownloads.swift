@@ -181,6 +181,9 @@ public struct MusicDownloadedCollection: Codable, Identifiable, Hashable, Sendab
     /// Stops running downloads without failing them, for when the app goes to the background:
     /// they continue from where they were on `wake()`.
     public func suspend() {
+        // [mi3s] 二开：全部暂停时把在跑的条目退回 queued（上游只 stop 不改状态，
+        // 恢复后这些条目仍显示为正在下载）。索引读写统一走 JSONFileStore --
+        // 上游裸 Data(contentsOf:)/write，无原子写与损坏容忍。
         for id in Array(running.keys) { stop(id); update(id) { $0.status = .queued } }
         save()
     }

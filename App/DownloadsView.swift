@@ -15,6 +15,8 @@ struct DownloadsView: View {
     @State private var kind = Kind.videos
     private var library: DownloadLibrary { .shared }
     enum Kind: Hashable { case videos, music }
+    // [mi3s] 二开：接入隐私保险库。上游直接渲染 library.items —— 已隐藏源的剧集仍显示在下载页。
+    // 与历史、收藏同规则：保险库只能隐藏「能同时说出 origin 与 siteKey」的下载。
     /// Downloads the Privacy Vault may show. A hidden source's episodes vanish from this list entirely,
     /// like its history and favourites do. A download saved before its source carried an origin stays
     /// visible: the vault can only hide what it can name.

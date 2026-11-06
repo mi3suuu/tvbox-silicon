@@ -14,6 +14,7 @@ struct DiscoverSearchView: View {
     @State private var expanded: Set<TMDBCatalog.SearchKind> = []
     @State private var focused = false
     @State private var revision = 0
+    // [mi3s] 二开：清空搜索历史前确认（上游直接 clearHistory，误触即不可恢复）
     @State private var confirmingClearHistory = false
     private var keyword: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var request: DiscoverSearchRequest { .init(keyword: keyword, feed: feed, filter: filter, revision: revision) }
@@ -388,6 +389,7 @@ struct DiscoverMacSearchView: View {
     @State private var filterSection: DiscoverFilterSection?
     @State private var expanded: Set<TMDBCatalog.SearchKind> = []
     @State private var revision = 0
+    // [mi3s] 二开：清空搜索历史前确认（上游直接 clearHistory，误触即不可恢复）
     @State private var confirmingClearHistory = false
     private var keyword: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var request: DiscoverSearchRequest { .init(keyword: keyword, feed: feed, filter: filter, revision: revision) }
