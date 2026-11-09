@@ -1330,18 +1330,24 @@ struct OneSkinChrome: View {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
                 // 已经在加速：位移用于改档（横滑）或保持（下滑）。
-                if boost != nil {
+                if gestureState.isBoosting {
                     movedHold(value.translation)
                     return
                 }
                 // 首次按下：记时刻、起长按定时器。
-                if pressStartedAt == nil {
-                    pressStartedAt = Date()
+                if gestureState.pressStartedAt == nil {
+                    gestureState.pressStartedAt = Date()
                     let startLocation = value.startLocation
-                    holdTask?.cancel()
-                    holdTask = Task { @MainActor in
+                    gestureState.holdTask?.cancel()
+                    gestureState.holdTask = Task { @MainActor in
                         try? await Task.sleep(for: .milliseconds(450))
-                        guard !Task.isCancelled, pressStartedAt != nil, boost == nil else { return }
+                        // ⛔ 这里不能写 `boost == nil`：`boost` 是 @State，
+                        //    闭包捕获的是**创建时刻的值**（那时一定为 nil），
+                        //    条件永远成立。要判断的是「现在还能不能加速」，
+                        //    用 `canHoldSpeed` 现算。
+                        guard !Task.isCancelled,
+                              gestureState.pressStartedAt != nil,
+                              canHoldSpeed else { return }
                         beginHold()
                     }
                     return
@@ -1352,13 +1358,14 @@ struct OneSkinChrome: View {
                 }
             }
             .onEnded { value in
-                holdTask?.cancel()
-                holdTask = nil
-                let held = pressStartedAt != nil ? Date().timeIntervalSince(pressStartedAt!) : 0
+                gestureState.holdTask?.cancel()
+                gestureState.holdTask = nil
+                let held = gestureState.pressStartedAt != nil ? Date().timeIntervalSince(gestureState.pressStartedAt!) : 0
                 let moved = hypot(value.translation.width, value.translation.height)
-                pressStartedAt = nil
+                gestureState.pressStartedAt = nil
 
-                if boost != nil {
+                if gestureState.isBoosting {
+                    gestureState.isBoosting = false
                     endedHold()
                     return
                 }
@@ -1379,25 +1386,43 @@ struct OneSkinChrome: View {
     /// 而且双击的第二下会被 pressGesture 自己也收到一次。这里自己数时间间隔。
     private func handleTap(at location: CGPoint) {
         let now = Date()
-        if let last = lastTapAt, now.timeIntervalSince(last) < 0.30 {
-            lastTapAt = nil
+        if let last = gestureState.lastTapAt, now.timeIntervalSince(last) < 0.30 {
+            gestureState.lastTapAt = nil
             tapTask?.cancel(); tapTask = nil
             doubleTap(at: location)
             return
         }
-        lastTapAt = now
+        gestureState.lastTapAt = now
         tapTask?.cancel()
         tapTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            lastTapAt = nil
+            gestureState.lastTapAt = nil
             singleTap()
         }
     }
 
-    @State private var pressStartedAt: Date?
-    @State private var holdTask: Task<Void, Never>?
-    @State private var lastTapAt: Date?
+    /// 手势的瞬时状态放在**引用类型**里，不直接用 @State 存 Date/Task。
+    ///
+    /// ⛔ 这是本次「长按仍然变单击」的真正原因：
+    ///    `gestureState.pressStartedAt` / `gestureState.holdTask` 若直接用 @State，每次写入都会触发
+    ///    视图重建 —— 而 `pressGesture` 是计算属性，重建时会产生一个新的
+    ///    手势实例，旧的 `gestureState.holdTask` 随之被丢弃，450ms 后那个 `beginHold()`
+    ///    永远等不到。表现为「按住不动、松手仍是单击」。
+    ///
+    ///    改成 `@State` 持有一个 class 实例：视图重建不会换掉这个对象，
+    ///    内部的 Date/Task 也就不会丢。
+    @State private var gestureState = GestureState()
+
+    final class GestureState {
+        var pressStartedAt: Date?
+        var holdTask: Task<Void, Never>?
+        var lastTapAt: Date?
+        /// 是否已进入长按加速。放在引用类型里而不是读 @State 的 `boost`：
+        /// 手势闭包捕获的 @State 是**创建时刻的值**，`onChanged` 里读到的
+        /// `boost` 永远是 nil，横滑改档 / 松手恢复都不会生效。
+        var isBoosting = false
+    }
 
     /// 能不能加速：要真的在播、有时间轴、且没有别处占用（画中画 / 锁屏）。
     private var canHoldSpeed: Bool {
@@ -1413,6 +1438,7 @@ struct OneSkinChrome: View {
 
     private func beginHold() {
         guard canHoldSpeed else { return }
+        gestureState.isBoosting = true
         // 新手势接管上一次「下滑保持」的档位：除非再滑一次下去，否则松手就恢复。
         let started = SpeedBoost(rate: holdSpeed)
         boost = started
@@ -1434,6 +1460,7 @@ struct OneSkinChrome: View {
     }
 
     private func endHold() {
+        gestureState.isBoosting = false
         boost = nil
         session?.setBoost(nil)
     }
