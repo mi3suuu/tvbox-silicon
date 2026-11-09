@@ -1297,7 +1297,14 @@ struct OneSkinChrome: View {
 
     /// 能不能加速：要真的在播、有时间轴、且没有别处占用（画中画 / 锁屏）。
     private var canHoldSpeed: Bool {
-        !locked && seekable && showsTransport && session?.paused == false && !kit.pip.active
+        // ⛔ 去掉 `showsTransport`：它等价于「会话已就绪且不在加载/报错」，
+        //    与「控件栏此刻画没画出来」是两件事。原来带它，导致
+        //    **全屏收起控件后长按完全没反应**（既不加档、也不快进）——
+        //    而收起控件恰恰是最想长按加速看剧的时刻。
+        //
+        //    真正该拦的只有：锁了控件（用户明确要求别响应手势）、
+        //    没有时间轴（直播）、暂停中（加速没意义）、画中画在跑（抢同一个 player）。
+        !locked && seekable && session?.paused == false && !kit.pip.active
     }
 
     private func beginHold() {

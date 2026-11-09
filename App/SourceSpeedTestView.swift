@@ -1,30 +1,25 @@
 import SwiftUI
 import TVCore
 
-/// Measures sources the way the phone will use them, and files them where the reading says they
-/// belong: one shot for a whole group, one button to move the survivors into "可用" and the silent
-/// ones into "不通", and a way to move any selection anywhere else.
+/// Measures every listed source the way the phone will use it, shows what each one actually delivers,
+/// and lets the viewer act on the reading: switch one source between direct and proxy, or drag the
+/// list into the order they want to keep.
 ///
-/// What was already here
-/// ---------------------
+/// Why this page exists
+/// -------------------
 /// The probe engine (`SourceProbeRunner`), the reading cache (`SourceProbeStore`), the sweep
-/// (`Store.startProbing`), the per-source route (`SourceRouting`), the viewer's order (`SourceOrder`)
-/// and the move store behind "drag onto a group's header" (`SourceReassignment`) all existed with no
-/// door. This page is the door: it reads and writes those stores and adds only one thing they lacked,
-/// the viewer's own groups (`SourceGroupBook`).
-///
-/// Why a batch is just a drag
-/// --------------------------
-/// Filing many sources calls `reassignSource`, the same function a drag calls, once per source. So
-/// "Put Every Source Back" on the Moved Sources page undoes a sweep's filing as easily as it undoes a
-/// drag, and a subscription refresh cannot lose either.
+/// (`Store.startProbingAllSources`), the per-source route (`SourceRouting`) and the viewer's own
+/// order (`SourceOrder`) were all already here, and none of them had a door: a sweep could only be
+/// started from code, a route could only be set from a test, and the drag order lived on a page
+/// about ranking attributes. This page is that door, and nothing more — it reads and writes those
+/// stores rather than inventing a parallel set.
 ///
 /// What "route" means here
 /// -----------------------
-/// A route changes the address a source's *API* is fetched from: direct is its own `api` as imported,
-/// proxy rewrites it through the relay. Media segments come from the source's own CDN and are not
-/// rewritten, so a source whose API answers but whose segments are blocked needs hiding or filing,
-/// not routing. The footer says so rather than implying more.
+/// A route changes the address the app fetches a source's *API* from: direct is its own `api` as
+/// imported, proxy rewrites it through the built-in relay. Media segments come from whatever CDN the
+/// source hands back and are not rewritten, so a source whose API answers but whose segments are
+/// blocked still needs hiding, not routing. The footer says so rather than implying more.
 struct SourceSpeedTestView: View {
     @Environment(Store.self) private var store
 
@@ -33,14 +28,6 @@ struct SourceSpeedTestView: View {
     /// numbers from before the sweep.
     @State private var readings = 0
     @State private var filter: Filter = .all
-    /// "" is the whole list; otherwise a group id (`group:<uuid>`) or a subscription address.
-    @State private var scopeID = ""
-    @State private var picked: Set<String> = []
-    @State private var notice: String?
-    @State private var naming = false
-    @State private var draftName = ""
-    /// Set when the name sheet was opened from the move menu: the new group is filled straight away.
-    @State private var fileAfterNaming = false
 
     private enum Filter: String, CaseIterable, Identifiable {
         case all, measured, unreachable
@@ -54,19 +41,11 @@ struct SourceSpeedTestView: View {
         }
     }
 
-    /// One scope the sweep and the filing act on.
-    private struct Scope: Identifiable {
-        let id: String
-        let title: String
-        let sites: [Site]
-    }
-
     /// One line on the page. The id is subscription-qualified: two feeds may carry the same key, and
     /// `Site.id` alone would make SwiftUI draw one of them twice.
     private struct Row: Identifiable {
         let site: Site
         let feed: String
-        let group: String?
         let address: String
         let probe: SourceProbeResult?
         let route: SourceRoute
@@ -76,25 +55,11 @@ struct SourceSpeedTestView: View {
     var body: some View {
         Form {
             Section {
-                scopePicker
-                measureButton
-                partitionButton
-                newGroupButton
-                if let notice {
-                    Text(notice).font(.caption).foregroundStyle(.secondary)
-                }
+                sweep
             } header: {
-                Text(L10n.text("Group"))
+                Text(L10n.text("Measurement"))
             } footer: {
-                Text(L10n.text("A sweep asks each source for its newest video and reads a few hundred kilobytes of its first playable line; that is where the speed and the resolution come from. One request per source, so run it on the network you care about. Filing keeps what the sweep found: answered sources into one group, silent ones into another, unmeasured ones left alone."))
-            }
-
-            Section {
-                moveControls
-            } header: {
-                Text(L10n.text("Move"))
-            } footer: {
-                Text(L10n.text("Tick sources to move just those; with nothing ticked the move applies to everything in the scope above. A move only changes which group lists a source — it still plays through its own subscription, and it survives a refresh."))
+                Text(L10n.text("Each source is asked for its newest video, then its first playable line is read through for a few hundred kilobytes: that gives the speed and the resolution shown below. A sweep costs one request per source, so run it when the network is the one you care about."))
             }
 
             Section {
@@ -110,69 +75,27 @@ struct SourceSpeedTestView: View {
                 ForEach(rows) { row in
                     line(row)
                 }
+                .onMove(perform: move)
             } header: {
                 Text(L10n.text("Sources"))
             } footer: {
-                Text(L10n.text("The route menu pins one source to Direct or Proxy; Auto follows what the last requests managed to reach. Ordering by measured speed bakes the sweep into your own order, which the Sources page then follows."))
+                Text(L10n.text("Drag to set your own order — it is saved and survives a refresh. The route menu pins one source to Direct or Proxy; Auto follows what the last requests managed to reach."))
             }
         }
         .settingsPage()
         .settingsForm(L10n.text("Source Speed Test"))
+        #if os(iOS)
+        .environment(\.editMode, .constant(.active))
+        #endif
         // `probeRun` is observable; the readings behind it are not. Re-reading on every progress tick
         // keeps the rows in step with the sweep instead of jumping only when it finishes.
         .onChange(of: store.probeRun) { _, _ in readings += 1 }
-        .onChange(of: scopeID) { _, _ in picked.removeAll() }
-        .sheet(isPresented: $naming) { namingSheet }
     }
 
-    // MARK: - Scope
-
-    /// Every listed source once, in the viewer's order — the scope the "全部源" row stands for.
-    private var allSites: [Site] {
-        guard let config = store.subscription else { return [] }
-        return store.orderedSites(config)
-    }
-
-    private var scopes: [Scope] {
-        var list = [Scope(id: "", title: L10n.text("All Sources"), sites: allSites)]
-        for group in store.sourceGroups(includeHidden: false) where group.kind != .hidden {
-            switch group.kind {
-            case .custom, .subscription:
-                list.append(Scope(id: group.id, title: group.title, sites: group.sites))
-            case .pinned, .builtIn, .other, .hidden:
-                continue
-            }
-        }
-        return list
-    }
-
-    private var scope: Scope {
-        scopes.first { $0.id == scopeID } ?? scopes[0]
-    }
-
-    private var scopePicker: some View {
-        Picker(L10n.text("Measure and file"), selection: $scopeID) {
-            ForEach(scopes) { scope in
-                Text(scope.title + " · " + String(scope.sites.count)).tag(scope.id)
-            }
-        }
-    }
-
-    /// What a move or a filing acts on: the ticked sources, or the whole scope when nothing is ticked.
-    private var targets: [Site] {
-        picked.isEmpty ? scope.sites : scope.sites.filter { picked.contains($0.id) }
-    }
-
-    private var scopeSummary: String {
-        picked.isEmpty
-            ? L10n.text("%lld sources in scope", scope.sites.count)
-            : L10n.text("%lld of %lld ticked", picked.count, scope.sites.count)
-    }
-
-    // MARK: - Actions
+    // MARK: - Sweep
 
     @ViewBuilder
-    private var measureButton: some View {
+    private var sweep: some View {
         if let run = store.probeRun {
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: Double(run.done), total: Double(max(run.total, 1)))
@@ -186,131 +109,26 @@ struct SourceSpeedTestView: View {
             }
         } else {
             Button {
-                store.startProbing(targets)
+                store.startProbingAllSources()
             } label: {
-                Label(picked.isEmpty ? L10n.text("Probe This Group") : L10n.text("Probe the Ticked Sources"),
-                      systemImage: "speedometer")
+                Label(L10n.text("Probe Every Source"), systemImage: "speedometer")
             }
-            .disabled(targets.isEmpty)
-
-            Button {
-                sortByMeasurement()
-            } label: {
-                Label(L10n.text("Order by Measured Speed"), systemImage: "arrow.up.arrow.down")
-            }
-            .disabled(measuredCount == 0)
-
-            if !allSites.isEmpty {
-                Text(tally).font(.caption).foregroundStyle(.secondary)
-            }
+            .disabled(sweepIsEmpty)
         }
-    }
 
-    private var partitionButton: some View {
         Button {
-            let result = store.fileByReachability(targets,
-                                                  reachableName: L10n.text("Reachable Group"),
-                                                  unreachableName: L10n.text("Unreachable Group"))
-            notice = L10n.text("Filed %lld answered and %lld silent sources; unmeasured ones were left where they were.",
-                               result.reachable, result.unreachable)
+            sortByMeasurement()
         } label: {
-            Label(L10n.text("File by Reachability"), systemImage: "square.split.2x1")
+            Label(L10n.text("Order by Measured Speed"), systemImage: "arrow.up.arrow.down")
         }
         .disabled(measuredCount == 0)
-    }
 
-    private var newGroupButton: some View {
-        Button {
-            fileAfterNaming = false
-            draftName = ""
-            naming = true
-        } label: {
-            Label(L10n.text("New Group"), systemImage: "folder.badge.plus")
+        if !sweepIsEmpty {
+            Text(tally)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
-
-    @ViewBuilder
-    private var moveControls: some View {
-        Text(scopeSummary).font(.caption).foregroundStyle(.secondary)
-
-        Menu {
-            if !store.sourceGroupBook.groups.isEmpty {
-                Section(L10n.text("Your Groups")) {
-                    ForEach(store.sourceGroupBook.groups) { group in
-                        Button(group.name) {
-                            let count = store.fileSources(targets, intoGroup: group.id)
-                            notice = L10n.text("Moved %lld sources into %@.", count, group.name)
-                        }
-                    }
-                }
-            }
-            Section(L10n.text("Subscriptions")) {
-                ForEach(store.environmentSubscriptions.filter(\.enabled)) { entry in
-                    Button(entry.title) {
-                        let count = store.fileSources(targets, underSubscription: entry.address)
-                        notice = L10n.text("Moved %lld sources into %@.", count, entry.title)
-                    }
-                }
-            }
-            Section {
-                Button {
-                    fileAfterNaming = true
-                    draftName = ""
-                    naming = true
-                } label: {
-                    Label(L10n.text("New Group…"), systemImage: "folder.badge.plus")
-                }
-                Button {
-                    let count = store.returnSourcesToTheirSubscription(targets)
-                    notice = L10n.text("Sent %lld sources back to their own subscription.", count)
-                } label: {
-                    Label(L10n.text("Back to Their Subscription"), systemImage: "arrow.uturn.backward")
-                }
-            }
-        } label: {
-            Label(L10n.text("Move to…"), systemImage: "arrow.right.square")
-        }
-        .disabled(targets.isEmpty)
-
-        HStack {
-            Button(picked.isEmpty ? L10n.text("Tick All in Scope") : L10n.text("Clear Ticks")) {
-                if picked.isEmpty { picked = Set(scope.sites.map(\.id)) } else { picked.removeAll() }
-            }
-            .buttonStyle(.plain)
-            .font(.caption)
-            Spacer()
-        }
-    }
-
-    private var namingSheet: some View {
-        Form {
-            Section {
-                TextField(L10n.text("Group name"), text: $draftName)
-            } header: {
-                Text(L10n.text("New Group"))
-            } footer: {
-                Text(L10n.text("A group of your own sits above the subscriptions. Sources filed into it stay playable through their own feed."))
-            }
-            Section {
-                Button(L10n.text("Create")) {
-                    guard let group = store.createSourceGroup(named: draftName) else { naming = false; return }
-                    if fileAfterNaming {
-                        let count = store.fileSources(targets, intoGroup: group.id)
-                        notice = L10n.text("Moved %lld sources into %@.", count, group.name)
-                    } else {
-                        notice = L10n.text("%@ is ready — move sources into it below.", group.name)
-                    }
-                    naming = false
-                }
-                .disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button(L10n.text("Cancel"), role: .cancel) { naming = false }
-            }
-        }
-        .settingsPage()
-        .settingsForm(L10n.text("New Group"))
-    }
-
-    // MARK: - Tally
 
     /// "28 of 353 measured · 6 unreachable · fastest 676 KB/s" — the one line that says whether the
     /// list below is worth reading.
@@ -324,34 +142,30 @@ struct SourceSpeedTestView: View {
     }
 
     private var measuredCount: Int { allRows.filter { $0.probe != nil }.count }
+    private var sweepIsEmpty: Bool { allRows.isEmpty }
 
     // MARK: - Rows
 
+    /// The page's list: the viewer's order, filtered, with the reading and the route attached.
     private var rows: [Row] {
         _ = readings  // re-read the probe cache whenever it may have changed
-        let list = allRows
         switch filter {
-        case .all: return list
-        case .measured: return list.filter { $0.probe != nil }
-        case .unreachable: return list.filter { $0.probe?.reachability == .unreachable }
+        case .all: return allRows
+        case .measured: return allRows.filter { $0.probe != nil }
+        case .unreachable: return allRows.filter { $0.probe?.reachability == .unreachable }
         }
     }
 
     private var allRows: [Row] {
         guard let config = store.subscription else { return [] }
         let probes = SourceProbeStore.shared
-        // Which of the viewer's groups each source is filed under, so a row says where it now lives.
-        let filedByTarget = store.sourceGroups(includeHidden: false).reduce(into: [String: String]()) { table, group in
-            for site in group.sites where !site.isBuiltIn { table[site.id] = group.title }
-        }
-        return scope.sites.map { site in
+        return store.orderedSites(config).map { site in
             let origin = site.origin(or: config.origin)
             let address = origin.absoluteString
             let entry = store.environmentSubscriptions.first { $0.address == address }
             let explicit = store.sourceRouting.route(site, origin: origin)
             return Row(site: site,
                        feed: site.isBuiltIn ? L10n.text("Built-in") : (entry?.title ?? address),
-                       group: filedByTarget[site.id],
                        address: address,
                        probe: probes.latest(sourceKey: site.sourceKey),
                        route: explicit ?? entry?.routing ?? .auto)
@@ -360,16 +174,6 @@ struct SourceSpeedTestView: View {
 
     private func line(_ row: Row) -> some View {
         HStack(alignment: .center, spacing: 8) {
-            Button {
-                if picked.contains(row.id) { picked.remove(row.id) } else { picked.insert(row.id) }
-            } label: {
-                Image(systemName: picked.contains(row.id) ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 17))
-                    .foregroundStyle(picked.contains(row.id) ? AnyShapeStyle(Brand.accent) : AnyShapeStyle(.tertiary))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(L10n.text("Tick %@", row.site.name))
-
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(row.site.name)
@@ -383,6 +187,18 @@ struct SourceSpeedTestView: View {
             }
             Spacer(minLength: 0)
             routeMenu(row)
+            #if os(macOS)
+            // A Mac has no edit mode, so the arrows are the reorder here — the same arrangement as
+            // the other drag pages in Settings.
+            HStack(spacing: 2) {
+                Button { nudge(row, by: -1) } label: { Image(systemName: "chevron.up") }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(L10n.text("Move %@ up", row.site.name))
+                Button { nudge(row, by: 1) } label: { Image(systemName: "chevron.down") }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(L10n.text("Move %@ down", row.site.name))
+            }
+            #endif
         }
     }
 
@@ -394,7 +210,6 @@ struct SourceSpeedTestView: View {
         } else {
             parts.append(L10n.text("Not measured"))
         }
-        if let group = row.group, group != row.feed { parts.append(group) }
         if !row.feed.isEmpty { parts.append(row.feed) }
         return parts.joined(separator: " · ")
     }
@@ -430,21 +245,6 @@ struct SourceSpeedTestView: View {
                     }
                 }
             }
-            Divider()
-            Section(L10n.text("Move")) {
-                ForEach(store.sourceGroupBook.groups) { group in
-                    Button(group.name) {
-                        store.fileSources([row.site], intoGroup: group.id)
-                        notice = L10n.text("Moved %lld sources into %@.", 1, group.name)
-                    }
-                }
-                Button {
-                    store.returnSourcesToTheirSubscription([row.site])
-                    notice = L10n.text("Sent %lld sources back to their own subscription.", 1)
-                } label: {
-                    Label(L10n.text("Back to Their Subscription"), systemImage: "arrow.uturn.backward")
-                }
-            }
         } label: {
             Image(systemName: "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 13, weight: .semibold))
@@ -460,8 +260,32 @@ struct SourceSpeedTestView: View {
 
     // MARK: - Order
 
+    /// Drag. Offsets are positions in the drawn list; saving the drawn list is only correct while it
+    /// is the whole list, so a filtered view is not draggable and says why.
+    private func move(from source: IndexSet, to destination: Int) {
+        guard filter == .all, let config = store.subscription else { return }
+        var sites = store.orderedSites(config)
+        sites.move(fromOffsets: source, toOffset: destination)
+        store.sourceOrder.save(sites, origin: config.origin)
+        store.sourceOrder.enabled = true
+    }
+
+    #if os(macOS)
+    private func nudge(_ row: Row, by offset: Int) {
+        guard let config = store.subscription else { return }
+        let sites = store.orderedSites(config)
+        guard let index = sites.firstIndex(where: { $0.sourceKey == row.site.sourceKey && $0.origin(or: config.origin) == row.site.origin(or: config.origin) }) else { return }
+        let target = index + offset
+        guard sites.indices.contains(target) else { return }
+        store.moveSource(row.site, to: offset > 0 ? target + 1 : target)
+    }
+    #endif
+
     /// Bakes the readings into the viewer's order: sharpest and fastest first, built-in sources left
     /// where they are, sources never measured after every one that was.
+    ///
+    /// Sorted on `sortScore` rather than on `ResourceRanking`: that page ranks by declared picture
+    /// height, and "which of these answers fastest" is a different question from "which looks best".
     private func sortByMeasurement() {
         guard let config = store.subscription else { return }
         let probes = SourceProbeStore.shared
@@ -477,6 +301,5 @@ struct SourceSpeedTestView: View {
             .map(\.element)
         store.sourceOrder.save(builtIn + ranked, origin: config.origin)
         store.sourceOrder.enabled = true
-        notice = L10n.text("The order is now the measured one; the Sources page follows it.")
     }
 }
