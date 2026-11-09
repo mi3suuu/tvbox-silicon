@@ -123,6 +123,17 @@ struct SourceSpeedTestView: View {
         }
         .disabled(measuredCount == 0)
 
+        // 融合期把本页从「源测速与线路」升级成「源测速与分组」：底层 `fileByReachability`
+        // 已在（Store+SourceGrouping.swift），把测过且能连的源归进「可连」组、连不上的归进
+        // 「不通」组，未测的原地不动。这里补上那个「门」——入口注释承诺过「按结果批量归组」，
+        // 但旧页面只有测速/路由/按速度排序，归组一直没接。
+        Button {
+            groupByReachability()
+        } label: {
+            Label(L10n.text("Group by Reachability"), systemImage: "square.grid.2x2")
+        }
+        .disabled(measuredCount == 0)
+
         if !sweepIsEmpty {
             Text(tally)
                 .font(.caption)
@@ -301,5 +312,19 @@ struct SourceSpeedTestView: View {
             .map(\.element)
         store.sourceOrder.save(builtIn + ranked, origin: config.origin)
         store.sourceOrder.enabled = true
+    }
+
+    /// 把测过的源按可达性批量归进两个组：能连的进「可连」，连不上的进「不通」。
+    /// 未测的源原地不动（把没读数的源当成死的归档是猜，比慢源更糟的是把能用的藏进「不通」）。
+    /// 复用融合期已就位的 `Store.fileByReachability`（Store+SourceGrouping.swift）。
+    private func groupByReachability() {
+        guard let config = store.subscription else { return }
+        let sites = store.orderedSites(config)
+        let (reachable, unreachable) = store.fileByReachability(
+            sites,
+            reachableName: L10n.text("Reachable"),
+            unreachableName: L10n.text("Unreachable")
+        )
+        store.notice = L10n.text("Filed %lld reachable and %lld unreachable sources into groups.", reachable, unreachable)
     }
 }

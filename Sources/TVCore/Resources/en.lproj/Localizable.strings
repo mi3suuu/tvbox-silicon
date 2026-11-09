@@ -1729,6 +1729,8 @@
 "Playback moved on, so the saved title was not resumed." = "Playback moved on, so the saved title was not resumed.";
 "Playing %@ in %d s" = "Playing %@ in %d s";
 "Reachable" = "Reachable";
+"Group by Reachability" = "Group by Reachability";
+"Filed %lld reachable and %lld unreachable sources into groups." = "Filed %lld reachable and %lld unreachable sources into groups.";
 "Related" = "Related";
 "Remove the passcode?" = "Remove the passcode?";
 "Replay" = "Replay";

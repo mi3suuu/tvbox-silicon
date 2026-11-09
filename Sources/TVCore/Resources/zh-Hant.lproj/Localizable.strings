@@ -1744,6 +1744,8 @@
 "Playback moved on, so the saved title was not resumed." = "播放已經繼續，因此沒有恢復儲存的標題。";
 "Playing %@ in %d s" = "%2$d 秒後播放 %1$@";
 "Reachable" = "可連線";
+"Group by Reachability" = "按可達性分組";
+"Filed %lld reachable and %lld unreachable sources into groups." = "已將 %lld 個可連線和 %lld 個無法連線的源歸入分組。";
 "Related" = "相關推薦";
 "Remove the passcode?" = "移除密碼？";
 "Replay" = "重新播放";

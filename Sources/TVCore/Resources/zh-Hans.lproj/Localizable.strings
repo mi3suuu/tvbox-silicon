@@ -1744,6 +1744,8 @@
 "Playback moved on, so the saved title was not resumed." = "播放已经继续，因此没有恢复保存的标题。";
 "Playing %@ in %d s" = "%2$d 秒后播放 %1$@";
 "Reachable" = "可连接";
+"Group by Reachability" = "按可达性分组";
+"Filed %lld reachable and %lld unreachable sources into groups." = "已将 %lld 个可连接和 %lld 个无法连接的源归入分组。";
 "Related" = "相关推荐";
 "Remove the passcode?" = "移除密码？";
 "Replay" = "重新播放";

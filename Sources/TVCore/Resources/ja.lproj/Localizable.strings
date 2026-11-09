@@ -1744,6 +1744,8 @@
 "Playback moved on, so the saved title was not resumed." = "再生が進んだため、保存したタイトルは再開されませんでした。";
 "Playing %@ in %d s" = "%2$d 秒後に %1$@ を再生します";
 "Reachable" = "接続可能";
+"Group by Reachability" = "到達性でグループ化";
+"Filed %lld reachable and %lld unreachable sources into groups." = "%lld 個の接続可能なソースと %lld 個の接続不可のソースをグループに振り分けました。";
 "Related" = "関連作品";
 "Remove the passcode?" = "パスコードを削除しますか？";
 "Replay" = "もう一度再生";
