@@ -248,13 +248,23 @@ public struct CloudBackupPayload: Codable, Equatable, Sendable {
     public var proxies: ProxySnapshot?
     /// Whitelisted preference keys → raw blob.
     public var preferences: [String: Data]
+    /// 广告指纹库（`AdSignatureLibrary.Snapshot` 的 JSON）。
+    ///
+    /// 单独一个字段而不是塞进 `preferences`：后者是 UserDefaults 的键值通道，
+    /// 而广告库是 Application Support 下的文件，两者读写路径不同。
+    /// 体积很小（100 支广告约 24KB），放 iCloud KV 没压力。
+    public var adSignatures: Data?
 
     public init(accounts: [String: Data] = [:], vault: PrivacyVault? = nil,
-                proxies: ProxySnapshot? = nil, preferences: [String: Data] = [:]) {
+                proxies: ProxySnapshot? = nil, preferences: [String: Data] = [:],
+                adSignatures: Data? = nil) {
         self.accounts = accounts; self.vault = vault; self.proxies = proxies; self.preferences = preferences
+        self.adSignatures = adSignatures
     }
 
-    public var isEmpty: Bool { accounts.isEmpty && vault == nil && proxies == nil && preferences.isEmpty }
+    public var isEmpty: Bool {
+        accounts.isEmpty && vault == nil && proxies == nil && preferences.isEmpty && adSignatures == nil
+    }
 }
 
 /// Reads and writes the sign-in files a full backup carries. Lives in TVCore so it can reach the

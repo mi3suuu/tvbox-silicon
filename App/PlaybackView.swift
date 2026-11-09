@@ -725,6 +725,17 @@ import TVCore
         player.allowsExternalPlayback = !Remux.isRemuxed(url)
         player.preventsDisplaySleepDuringVideoPlayback = true
         player.replaceCurrentItem(with: item)
+        // 广告识别：换集后重新挂采样。
+        //
+        // ⛔ 这一行是必需的 —— `startAdDetection` 之前只在定义处存在、
+        //    没有任何调用点，整套识别实际从未运行过。
+        //    换集时旧的 item 已经被替换，`AVPlayerItemVideoOutput` 挂在旧 item 上，
+        //    不重挂就再也拿不到新帧。
+        Task { [weak self] in
+            guard let self else { return }
+            await self.reloadAdLibrary()
+            self.startAdDetection(for: item)
+        }
         #if DEBUG
         // `-qaSpeed <rate>` plays at that speed, as picking it in the speed menu does.
         let qaSpeed = UserDefaults.standard.float(forKey: "qaSpeed")
@@ -1112,6 +1123,11 @@ import TVCore
         resumePausedAfterQualitySwitch = false
         requestedResumePosition = nil; restoredPosition = nil
         skipScope = nil; skipSettings = EpisodeSkipSettings(); skipPass = EpisodeSkipPass()
+        // 广告采样必须在这里停：`AdFrameSampler` 的 Timer 挂在 RunLoop.main 上，
+        // 不 invalidate 它会一直每 250ms 醒一次，并且通过 `attachedItem`
+        // 强持有那条 AVPlayerItem（连带它的 asset）——退出播放页后内存不释放。
+        stopAdDetection()
+        lastSkippedAd = nil
         position = 0; duration = 0; editingSkip = false; resumeAfterEditing = false; seekingSegment = false
         onPlaybackEnded = nil; onUnplayableFile = nil
         if player.currentItem != nil {

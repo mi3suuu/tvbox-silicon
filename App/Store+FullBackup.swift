@@ -159,13 +159,31 @@ extension Store {
         return CloudBackupPayload(accounts: FullBackupAccountStore.collect(),
                                   vault: vaultValue,
                                   proxies: proxies,
-                                  preferences: prefs)
+                                  preferences: prefs,
+                                  adSignatures: Self.adSignatureSnapshot())
+    }
+
+    /// 广告库的当前快照（同步读文件，供同步载荷组装）。
+    ///
+    /// `AdSignatureLibrary` 是 actor，但在主线程上做一次几 KB 的同步读完全可接受，
+    /// 而且这个函数在 `@MainActor` 的 Store 里被同步调用 —— 用 `await` 会把
+    /// 整个 payload 组装变成 async，牵动一大片调用方，不值得。
+    static func adSignatureSnapshot() -> Data? {
+        guard let data = try? Data(contentsOf: AdSignatureLibrary.defaultURL),
+              !data.isEmpty else { return nil }
+        return data
     }
 
     /// Applies a payload pulled from another device. Returns the slices that changed, so the caller
     /// can bump the relevant revision/touch.
     func applyCloudBackupPayload(_ payload: CloudBackupPayload) {
         if !payload.accounts.isEmpty { FullBackupAccountStore.restore(payload.accounts) }
+        // 广告库走 **merge** 而不是覆盖：两台设备各自标过不同的广告，
+        // 直接覆盖会把对端学到的丢掉。merge 内部按 id + 哈希双重去重。
+        if let data = payload.adSignatures,
+           let remote = try? JSONDecoder().decode(AdSignatureLibrary.Snapshot.self, from: data) {
+            Task { await AdSignatureLibrary.shared.merge(remote) }
+        }
         if let vaultValue = payload.vault {
             if let data = try? JSONEncoder().encode(vaultValue) {
                 playbackDefaults.set(data, forKey: "privacyVault")

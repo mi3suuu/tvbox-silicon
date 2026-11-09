@@ -20,7 +20,13 @@ struct DownloadsView: View {
     /// Downloads the Privacy Vault may show. A hidden source's episodes vanish from this list entirely,
     /// like its history and favourites do. A download saved before its source carried an origin stays
     /// visible: the vault can only hide what it can name.
-    private var visibleItems: [DownloadItem] { store.vault.visibleDownloads(library.items) }
+    private var visibleItems: [DownloadItem] {
+        // 隐私保险库过滤（隐藏源的剧集不显示）+ 多环境隔离过滤（只看当前环境）。
+        let vaulted = store.vault.visibleDownloads(library.items)
+        let active = store.environments.activeID
+        let defaultID = store.environments.all.first?.id ?? active
+        return vaulted.filter { ($0.environmentID ?? defaultID) == active }
+    }
 
     var body: some View {
         let pending = visibleItems.filter(\.isPending)
@@ -659,6 +665,7 @@ struct DownloadPicker: View {
     /// 宽屏（Duo 展开 / iPad）直接满高，与选集抽屉一致；窄屏先半屏。
     var startsLarge: Bool = false
     var added: (Int) -> Void = { _ in }
+    @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var selection: Set<String> = []
@@ -743,7 +750,7 @@ struct DownloadPicker: View {
     private var downloadButton: some View {
         Button {
             let chosen = episodes.filter { selection.contains($0.id) }
-            for episode in chosen { library.download(source(episode), title: video.name, poster: video.poster, posterHeaders: video.posterHeaders) }
+            for episode in chosen { library.download(source(episode), title: video.name, poster: video.poster, posterHeaders: video.posterHeaders, environmentID: store.environments.activeID) }
             added(chosen.count)
             dismiss()
         } label: {
