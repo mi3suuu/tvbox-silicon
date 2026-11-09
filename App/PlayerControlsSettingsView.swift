@@ -66,7 +66,9 @@ private struct PlayerControlsPreview: View {
     }
 
     @ViewBuilder private func previewSlot(_ control: PlayerControl?) -> some View {
-        if let control {
+        // 只在「选集页直接显示」里勾过的才画：预览要和播放器一致，否则勾选框一动、上面的
+        // 小播放器照旧画满一排，勾选看起来就没生效。
+        if let control, layout.watchSurfaced.contains(control) {
             Image(systemName: control.symbol)
                 .font(.system(size: 11, weight: .semibold))
                 .frame(width: 22, height: 22)
@@ -117,37 +119,56 @@ private struct PlayerControlsEditor: View {
     ///
     /// 同一个控件可以两边都勾 —— 用户明确要求「这两个可以都显示，不冲突」。
     /// 没勾的控件仍在「更多」菜单里，不丢功能。
+    ///
+    /// 列表里放的是 `PlayerControl.barControls`（所有能进顶栏的控件），而不是
+    /// `layout.top`（当前顶栏里的那几个）：后者只有在用户先把控件拖到顶栏之后才会列出来，
+    /// 于是「新加的按钮」永远没有勾选项 —— 用户看到的是一张缺项的表。勾上时由
+    /// `surfaceInTopRow` 顺手补一个顶栏空位，所以「勾了就能看见」。
     private var surfacingSections: some View {
         VStack(alignment: .leading, spacing: 16) {
+            Text(L10n.text("Ticking a control puts it in the first free slot of the top row. A bar too narrow to hold them all leaves the last ones out — drag those earlier, or untick a few."))
+                .font(.caption).foregroundStyle(.tertiary)
             surfacingSection(
                 title: L10n.text("Shown While Watching"),
                 symbol: "rectangle.on.rectangle",
                 hint: L10n.text("Buttons that sit in the control bar on the episode page."),
-                controls: layout.top.filter { $0 != .fullScreen && $0 != .rotate && $0 != .lock },
-                isOn: { layout.watchSurfaced.contains($0) },
-                toggle: { control, on in
-                    var set = layout.watchSurfaced
-                    if on { if !set.contains(control) { set.append(control) } }
-                    else { set.removeAll { $0 == control } }
-                    layout.watchSurfaced = set
-                    stored = layout.stored
-                }
+                controls: PlayerControl.barControls,
+                isOn: { isShownInBar($0, whileWatching: true) },
+                toggle: { control, on in setSurfaced(control, on: on, whileWatching: true) }
             )
             surfacingSection(
                 title: L10n.text("Shown in Full Screen"),
                 symbol: "arrow.up.left.and.arrow.down.right",
                 hint: L10n.text("Buttons that sit in the control bar in full-screen playback."),
-                controls: layout.top.filter { $0 != .fullScreen && $0 != .rotate && $0 != .lock },
-                isOn: { layout.fullSurfaced.contains($0) },
-                toggle: { control, on in
-                    var set = layout.fullSurfaced
-                    if on { if !set.contains(control) { set.append(control) } }
-                    else { set.removeAll { $0 == control } }
-                    layout.fullSurfaced = set
-                    stored = layout.stored
-                }
+                controls: PlayerControl.barControls,
+                isOn: { isShownInBar($0, whileWatching: false) },
+                toggle: { control, on in setSurfaced(control, on: on, whileWatching: false) }
             )
         }
+    }
+
+    /// 勾选框读的是「现在真的会画出来吗」，而不是「集合里有没有它」。
+    ///
+    /// 一个控件要出现在控制栏里，必须**同时在顶栏槽位里、又在可见集合里**。只看集合的话，
+    /// 一条不在顶栏的旧记录会显示成「已勾选」而屏幕上没有那颗按钮 —— 勾选框就成了谎话。
+    private func isShownInBar(_ control: PlayerControl, whileWatching: Bool) -> Bool {
+        let set = whileWatching ? layout.watchSurfaced : layout.fullSurfaced
+        return set.contains(control) && layout.top.contains(control)
+    }
+
+    /// 勾选／取消一个控件在某种状态下的可见性。
+    /// 勾上时同时把它补进顶栏（见 `surfaceInTopRow`）：勾选集合只决定「可见」，
+    /// 位置由槽位决定，两者缺一按钮就不出现 —— 「勾了没反应」的根因就在这里。
+    private func setSurfaced(_ control: PlayerControl, on: Bool, whileWatching: Bool) {
+        var set = whileWatching ? layout.watchSurfaced : layout.fullSurfaced
+        if on {
+            if !set.contains(control) { set.append(control) }
+            layout.surfaceInTopRow(control)
+        } else {
+            set.removeAll { $0 == control }
+        }
+        if whileWatching { layout.watchSurfaced = set } else { layout.fullSurfaced = set }
+        stored = layout.stored
     }
 
     private func surfacingSection(title: String, symbol: String, hint: String,

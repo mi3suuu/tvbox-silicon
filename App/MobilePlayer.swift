@@ -1028,6 +1028,8 @@ struct MobilePlayerView: View {
         case .videoInfo: true
         case .speechSubtitles: speechLanguage != nil
         case .anotherPlayer: true
+        // 广告标注是 One 页的东西；这条播放器路径没有抓帧链路，列出来只会是死键。
+        case .markAd: false
         case .backTen: seekable && !inline
         case .forwardTen: seekable && !inline
         case .playPause: true
@@ -1073,7 +1075,7 @@ struct MobilePlayerView: View {
     @ViewBuilder private func topControlButton(_ control: PlayerControl) -> some View {
         switch control {
         // 上游播放器的这套行不承载 One 页新增的四个菜单项。
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: EmptyView()
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .markAd: EmptyView()
         case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
@@ -1269,7 +1271,7 @@ struct MobilePlayerView: View {
     @ViewBuilder private func topControlMenuEntry(_ control: PlayerControl) -> some View {
         switch control {
         // 上游播放器的这套行不承载 One 页新增的四个菜单项。
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: EmptyView()
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .markAd: EmptyView()
         case .airPlay:
             // AirPlay is represented by the system button; in a menu it has no equivalent, so it
             // stays out of More.
@@ -1514,7 +1516,7 @@ struct MobilePlayerView: View {
     /// A top-row control rendered as a compact transport button (36 pt circle) for the bottom row.
     @ViewBuilder private func compactButton(_ control: PlayerControl) -> some View {
         switch control {
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: EmptyView()
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .markAd: EmptyView()
         case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()

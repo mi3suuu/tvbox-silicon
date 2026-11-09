@@ -99,55 +99,110 @@ import TVCore
         guard let hit = adMatcher.feed(hash, library: adLibrary) else { return }
         adMatcher.reset()
 
-        // 命中：静默跳到这支广告的结尾。
+        // 命中：先**找这支广告真正的结尾**，再跳。
         //
-        // 用「命中时刻 + 剩余时长」而不是「广告起点 + 时长」——
-        // 同一支广告在不同视频里的位置不同，我们只知道现在正处在广告里，
-        // 不知道这段是从第几秒开始的。保守做法是跳到「当前 + 时长」，
-        // 最坏情况是少跳一点（用户多看一两秒），不会误剪正片。
-        let target = min(seconds + hit.duration, max(duration - 1, seconds + 1))
-        guard target > seconds + 1 else { return }
-
+        // ⛔ 不能简单地跳「当前 + 广告总时长」：
+        //   我们在广告中段才命中（前面几秒已经看过了），按总时长跳会
+        //   越过广告结尾、把正片开头几秒也切掉。广告 30 秒，命中时已播 10 秒，
+        //   按总时长跳到 +30 就多跳了 10 秒。
+        //
+        // 正确做法与标注时同一套：从命中点往后取候选哈希，
+        // 用 `AdBoundary.locate` 找相似度掉下去的位置 —— 那就是广告真正的尾。
+        // 找不到（比如后面还没缓冲出来）才退回保守的「当前 + 剩余时长」。
         lastSkippedAd = hit
+        skipHit = hit
+        skipHitAt = seconds
+        Task { [weak self] in
+            await self?.resolveAndSkip(onHit: hit, at: seconds)
+        }
+    }
+
+    private var skipHit: AdSignature?
+    private var skipHitAt: Double = 0
+
+    /// 命中后确定真实尾边界，然后跳过去。
+    private func resolveAndSkip(onHit hit: AdSignature, at seconds: Double) async {
+        // 从命中点往后扫一段（最多到这支广告剩余长度 + 8 秒余量）。
+        let lookAhead = min(hit.duration + 8, 90)
+        let to = min(duration > 0 ? duration : seconds + lookAhead, seconds + lookAhead)
+        guard to - seconds >= 3 else { return }
+
+        var target: Double = min(seconds + hit.duration, max(duration - 1, seconds + 1))
+
+        if let item = player.currentItem {
+            let hashes = await AdFrameSampler.hashes(for: item.asset,
+                                                     from: seconds, to: to, interval: 1.0)
+            // 候选序列第 0 格就是命中点，锚点固定为 0。
+            if hashes.count >= AdBoundary.minimumSpan,
+               let range = AdBoundary.locate(in: hashes, anchor: 0) {
+                // 广告尾 = 区间末格的**下一格起点**（区间含端点）。
+                target = seconds + Double(range.upperBound + 1)
+            }
+        }
+
+        guard target > seconds + 1 else { return }
+        let finalTarget = min(target, max(duration - 1, seconds + 1))
+
         Diagnostics.shared.record(.info, "ads",
-            "skip ad \(hit.title.isEmpty ? hit.id.uuidString.prefix(8).description : hit.title) from=\(Int(seconds)) to=\(Int(target))")
+            "skip ad \(hit.title.isEmpty ? hit.id.uuidString.prefix(8).description : hit.title) from=\(Int(seconds)) to=\(Int(finalTarget))")
         seekingSegment = true
         let activeGeneration = generation
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+        player.seek(to: CMTime(seconds: finalTarget, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == activeGeneration else { return }
                 self.seekingSegment = false
+                self.skipHit = nil
             }
         }
     }
 
-    /// 把「刚刚这段」存成一支新广告。
+    /// 把「标记点附近这段」存成一支新广告，**边界自动找**。
     ///
-    /// 调用方（「标记为广告」按钮）负责给出这段的起点与终点。
-    /// 采样器已经攒了哈希，但那些哈希在 `AdFrameSampler` 内部没有留存 ——
-    /// 设计上采样器只负责「当前帧 → 哈希」，不保存历史。
-    /// 所以标注走另一条路：用 `AVAssetImageGenerator` 离线补抓这段的帧，
-    /// 因为这时候不需要和播放抢解码器（可以暂停后抓，或接受短暂掉帧）。
-    func markAd(from start: Double, to end: Double) async {
+    /// 用户只能指出「现在这里是广告」，说不准它从哪秒开始、到哪秒结束。
+    /// 所以流程是：
+    ///   1. 以标记点为锚，抓前后各 `searchRadius` 秒的候选哈希；
+    ///   2. 用 `AdBoundary.locate` 从锚点向两侧扩，相似度掉下去的位置就是边界；
+    ///   3. 只把**找到的那段**入库，长度由广告自己决定 —— 多长剪多长。
+    ///
+    /// 这样 8 秒贴片和 90 秒口播都能正确处理，不需要用户先告诉系统广告多长。
+    ///
+    /// - Parameters:
+    ///   - marker: 用户按下「标记」时的播放位置（秒）
+    ///   - searchRadius: 往两侧各找多远（秒）。默认 30 秒：
+    ///     绝大多数前贴片在 90 秒内，30 秒半径配 4 格模板足够定位。
+    func markAd(at marker: Double, searchRadius: Double = 30) async {
         guard let item = player.currentItem else { return }
-        let length = end - start
-        guard length >= 3 else { return }
+        let from = max(0, marker - searchRadius)
+        let to = min(duration > 0 ? duration : marker + searchRadius, marker + searchRadius)
+        guard to - from >= 6 else { return }
 
         let hashes = await AdFrameSampler.hashes(for: item.asset,
-                                                 from: start, to: end, interval: 1.0)
-        guard hashes.count >= 3 else { return }
+                                                 from: from, to: to, interval: 1.0)
+        guard hashes.count >= AdBoundary.minimumSpan else { return }
+
+        // 锚点在候选序列里的下标。
+        let anchor = Int((marker - from).rounded())
+        let clamped = min(max(anchor, 0), hashes.count - 1)
+
+        guard let range = AdBoundary.locate(in: hashes, anchor: clamped) else { return }
+
+        let slice = Array(hashes[range])
+        let startSeconds = from + Double(range.lowerBound)
+        let length = Double(slice.count)
 
         let ad = AdSignature(title: "", duration: length,
-                             hashes: hashes, sampleInterval: 1.0)
+                             hashes: slice, sampleInterval: 1.0)
         let added = await AdSignatureLibrary.shared.add(ad)
         guard added else { return }
         await reloadAdLibrary()
 
         // 新标注的这段本集就生效：加进当前 skipSettings，并清掉已跳记录。
         var settings = skipSettings
-        settings.ads.append(AdRange(start: start, length: length))
+        settings.ads.append(AdRange(start: startSeconds, length: length))
         applySkipSettings(settings)
+        Diagnostics.shared.record(.info, "ads",
+            "marked ad anchor=\(Int(marker)) found=\(Int(startSeconds))..\(Int(startSeconds + length)) (\(slice.count) frames)")
     }
 
     private func updateSkipping(_ item: AVPlayerItem) {

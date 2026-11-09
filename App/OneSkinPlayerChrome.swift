@@ -535,6 +535,8 @@ struct OneSkinChrome: View {
         case .episodes: return channel?.historyContext != nil
         case .pictureInPicture: return kit.pip.supported
         case .miniPlayer, .pictureSize, .videoInfo, .anotherPlayer: return true
+        // 广告标注：得真的在播（抓得到帧）、有时间轴、不是直播。
+        case .markAd: return canMarkAd
         case .lock, .rotate: return true
         case .danmaku: return !session.danmaku.isEmpty
         case .quality: return session.qualities.count > 1
@@ -724,6 +726,7 @@ struct OneSkinChrome: View {
             (L10n.text("Picture"), [.quality, .pictureSize]),
             (L10n.text("Sound"), [.audio, .subtitles, .speed, .danmaku, .speechSubtitles]),
             (L10n.text("Series"), [.autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]),
+            (L10n.text("Ads"), [.markAd]),
             (L10n.text("Info"), [.videoInfo, .airPlay])
         ]
         // 只有进了 `layout.more` 的才出现；组内顺序跟随 `more` 的数组顺序。
@@ -788,6 +791,7 @@ struct OneSkinChrome: View {
                     Label(L10n.text("Open in Another Player"), systemImage: "play.rectangle.on.rectangle")
                 }
             }
+        case .markAd:
             // ── 广告标注 ──
             //
             // 只在**真的在播**时给入口：标注要抓这前后若干秒的画面算指纹，
@@ -796,11 +800,14 @@ struct OneSkinChrome: View {
             // 交互刻意做成「从这里往回标 30 秒」而不是让用户拖区间：
             // 典型用法是「广告出现了 → 我发现了 → 往回标」，此时广告正好
             // 在身后这段。30 秒覆盖绝大多数贴片广告，太短抓不全、太长会带进正片。
+            //
+            // 它现在是枚举里的一项（`PlayerControl.markAd`），所以设置页里能隐藏、
+            // 也能拖到控制栏 —— 原先写死在这个分支里，两头都做不到。
             if canMarkAd {
                 Button {
                     Task { await markAdHere() }
                 } label: {
-                    Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark Last 30s as Ad"),
+                    Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark This as an Ad"),
                           systemImage: "megaphone.badge.xmark")
                 }
                 .disabled(markingAd)
@@ -1589,18 +1596,16 @@ struct OneSkinChrome: View {
         return session.player.rate > 0 && session.duration > 60
     }
 
-    /// 把「当前时间往回 30 秒」标成广告。
+    /// 把「当前播放位置」标成广告，边界由算法自己找。
     ///
-    /// 为什么是往回而不是往前：用户发现广告时，广告已经在播了。
-    /// 往前标会把还没播的正片吃掉，往回标最坏只是多标几秒广告本身。
+    /// 用户只要在广告播放期间点一下，前后各 30 秒都会被扫一遍，
+    /// `AdBoundary` 从标记点往两侧扩，相似度掉下去的位置就是广告真正的起止。
+    /// 短广告只吃到它自己那几秒，长广告能扩到几十秒 —— 不用用户量长度。
     private func markAdHere() async {
         guard let session, !markingAd else { return }
         markingAd = true
         defer { markingAd = false }
-        let end = session.position
-        let start = max(0, end - 30)
-        guard end - start >= 5 else { return }
-        await session.markAd(from: start, to: end)
+        await session.markAd(at: session.position)
         showedAdMarked = true
     }
 
@@ -1729,6 +1734,13 @@ struct OneSkinChrome: View {
             iconButton("play.rectangle.on.rectangle", label: L10n.text("Open in Another Player")) {
                 if let channel { externalStream = OneSkinHandoff(url: channel.url) }
             }
+        case .markAd:
+            // 顶栏形态：一下就把刚才那 30 秒标成广告。菜单里是带文字的那条（见 `moreItem`），
+            // 同一件事两个形态，和别的一样 —— 摆到顶栏就该有按钮，而不是空占位。
+            iconButton("megaphone.badge.xmark", label: L10n.text("Mark Ad")) {
+                Task { await markAdHere() }
+            }
+            .disabled(markingAd)
         case .lock:
             iconButton(locked ? "lock.fill" : "lock.open",
                        label: L10n.text(locked ? "Unlock Controls" : "Lock Controls")) {

@@ -2022,3 +2022,28 @@
 "Move Group Up" = "分组上移";
 "Move Group Down" = "分组下移";
 "Drag a group's title onto another to change the order they are listed in; the menu on a title does the same two moves. Pinned and built-in groups keep the top." = "把分组标题拖到另一个标题上就能改它们的显示顺序，标题的菜单里也有同样的上移／下移。置顶与内置分组始终排在最前。";
+
+/* 广告跳过：播放器标注入口 + 设置里的库管理页 */
+"Ads" = "广告";
+"Mark Ad" = "标注广告";
+"Mark Last 30s as Ad" = "把刚才 30 秒标为广告";
+"Marking…" = "标注中…";
+"Ad Skipping" = "广告跳过";
+"Skip Ads Automatically" = "自动跳过广告";
+"Learned Ads" = "已学会的广告";
+"None yet. Use “Mark Ad” while watching." = "还没有。看的时候用「标注广告」。";
+"%d ads, about %@ in total" = "共 %d 条，约 %@";
+"Ad %@" = "广告 %@";
+"%@ · %d samples" = "%@ · %d 个样本";
+"The file holds only picture fingerprints — no video, no audio." = "文件里只有画面指纹，不含视频和音频。";
+"Export Fingerprints" = "导出指纹";
+"Import Fingerprints" = "导入指纹";
+"Clear All Ads" = "清空全部广告";
+"Clear all ads?" = "清空全部广告？";
+"Cleared." = "已清空。";
+"Imported %d new ads." = "导入了 %d 条新广告。";
+"That file is not an ad fingerprint export." = "这个文件不是广告指纹导出。";
+"Could not write the file." = "写不出文件。";
+"Ads are recognised by what they look like, not where they sit, so a marked ad is skipped in every video afterwards." = "广告按画面认，不按位置认，所以标过一次，之后的每个视频里它都会被跳过。";
+"Mark an ad while watching, then it plays no more. Marked ads are shared across your devices." = "看的时候标一条广告，它就不会再播。标过的广告会在你的设备之间同步。";
+"Ticking a control puts it in the first free slot of the top row. A bar too narrow to hold them all leaves the last ones out — drag those earlier, or untick a few." = "勾上一个控件会把它放进顶栏第一个空位；顶栏宽度装不下时，排在后面的不会画出来——把要的拖到前面，或少勾几个。";

@@ -26,6 +26,12 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     case videoInfo = "videoInfo"
     case speechSubtitles = "speechSubtitles"
     case anotherPlayer = "anotherPlayer"
+    /// 广告标注。
+    ///
+    /// 它原先直接写死在「更多」菜单的 `.anotherPlayer` 分支里 —— 那样新加的按钮既不进
+    /// `PlayerControl` 这张表，也就**既不能隐藏、也不能摆位置**（设置页只认这张表）。
+    /// 新按钮一律走同一张表：默认落在「更多」，用户想摆到控制栏就拖上去。
+    case markAd = "markAd"
 
     // Transport controls (historically the bottom row).
     case backTen = "backTen"
@@ -62,6 +68,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .videoInfo: L10n.text("Show Video Info")
         case .speechSubtitles: L10n.text("Write Subtitles From the Sound")
         case .anotherPlayer: L10n.text("Open in Another Player")
+        case .markAd: L10n.text("Mark Ad")
         case .backTen: L10n.text("Back 10 seconds")
         case .playPause: L10n.text("Play / Pause")
         case .forwardTen: L10n.text("Forward 10 seconds")
@@ -92,6 +99,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .videoInfo: "info.circle"
         case .speechSubtitles: "waveform.badge.plus"
         case .anotherPlayer: "play.rectangle.on.rectangle"
+        case .markAd: "megaphone.badge.xmark"
         case .backTen: "gobackward.10"
         case .playPause: "play.fill"
         case .forwardTen: "goforward.10"
@@ -125,8 +133,16 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     static var standardBottom: [PlayerControl] { [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode, .fullScreen] }
     static var standardMore: [PlayerControl] {
         [.quality, .audio, .subtitles, .speed, .pictureSize, .pictureInPicture, .miniPlayer,
-         .lock, .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer,
+         .lock, .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer, .markAd,
          .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]
+    }
+
+    /// 能摆进顶栏的那些控件 —— 设置页的两个「直接显示」勾选表就是它。
+    ///
+    /// 转屏与锁定是顶栏的**结构位**（一直在，不归布局管），transport 那几个属于底栏，
+    /// 因此不在这张表里：把它们勾上不会有任何可见变化，那就是在骗人。
+    static var barControls: [PlayerControl] {
+        allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }
     }
 
     var tint: Color {
@@ -146,6 +162,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .videoInfo: .blue
         case .speechSubtitles: .pink
         case .anotherPlayer: .indigo
+        case .markAd: .pink
         case .backTen: .gray
         case .playPause: .white
         case .forwardTen: .gray
@@ -207,8 +224,12 @@ struct PlayerControlsLayout: Equatable {
         self.fullSurfaced = fullSurfaced ?? Self.defaultFullSurfaced
     }
 
-    /// 选集页默认直接显示：画中画、小窗、外播、视频信息、选集。
-    static let defaultWatchSurfaced: [PlayerControl] = [.episodes, .pictureInPicture, .miniPlayer, .anotherPlayer, .videoInfo]
+    /// 选集页默认直接显示：顶栏标配的那两颗（AirPlay、选集）。
+    ///
+    /// 这里曾经写着「画中画、小窗、外播、视频信息、选集」，但那四项并不在顶栏槽位里 ——
+    /// 可见性集合与槽位必须同时成立才会画出来，于是默认值里有四项**永远画不出来**，
+    /// 而设置页却把它们显示成「已勾选」。默认值只列真能出现的，其余由用户勾（勾上即补位）。
+    static let defaultWatchSurfaced: [PlayerControl] = [.airPlay, .episodes]
     /// 全屏默认只显示 playback 类（其余全屏里没意义，或会盖住画面）。
     static let defaultFullSurfaced: [PlayerControl] = []
 
@@ -253,12 +274,20 @@ struct PlayerControlsLayout: Equatable {
         }
         // Any control a newer build added lands in its standard home; a control that vanished is
         // dropped. This keeps every control present exactly once.
+        //
+        // 注意把两个「直接显示」集合原样带回：这一段补的是槽位，不是可见性。
+        // （曾经在这里用不带集合的 init 重建，五段串里刚解析出来的
+        //  watchSurfaced / fullSurfaced 被默认值覆盖 —— 设置页勾完、播放器不认、
+        //  重启后勾选框还退回默认，也就是「显示/隐藏 不起作用」。）
+        let surfacedWatch = self.watchSurfaced
+        let surfacedFull = self.fullSurfaced
         var top = self.top, bottom = self.bottom, more = self.more
         let placed = Set(top + bottom + more)
         for control in PlayerControl.standardTop where !placed.contains(control) { top.append(control) }
         for control in PlayerControl.standardBottom where !placed.contains(control) { bottom.append(control) }
         for control in PlayerControl.standardMore where !placed.contains(control) { more.append(control) }
-        self.init(topSlots: top.map(Optional.some), bottomSlots: bottom.map(Optional.some), more: more)
+        self.init(topSlots: top.map(Optional.some), bottomSlots: bottom.map(Optional.some), more: more,
+                  watchSurfaced: surfacedWatch, fullSurfaced: surfacedFull)
     }
 
     var stored: String {
@@ -296,6 +325,17 @@ struct PlayerControlsLayout: Equatable {
         topSlots = topSlots.map { $0 == control ? nil : $0 }
         bottomSlots = bottomSlots.map { $0 == control ? nil : $0 }
         more.removeAll { $0 == control }
+    }
+
+    /// 勾上「直接显示」时把控件摆进顶栏第一个空位。
+    ///
+    /// 顶栏槽位决定位置、勾选集合决定可见性，两者**必须同时成立**控件才画出来。只勾不摆，
+    /// 就是「设置里勾了、播放器里没有」—— 所以勾选顺手补位，摆在哪里之后再拖。顶栏满了、
+    /// 或它本来就在顶栏，就原地不动（不挤掉别人）。
+    mutating func surfaceInTopRow(_ control: PlayerControl) {
+        guard !top.contains(control), let free = topSlots.firstIndex(where: { $0 == nil }) else { return }
+        remove(control)
+        topSlots[free] = control
     }
 }
 #endif

@@ -244,3 +244,92 @@ public actor AdSignatureLibrary {
         }
     }
 }
+
+// MARK: - 边界自适应
+
+/// 从一串哈希里找出「同一支广告」的连续区间。
+///
+/// 用户只能告诉我们「现在这里在放广告」，无法精确说出它从哪一秒开始、
+/// 到哪一秒结束。所以边界必须**自己找**：
+///
+///   1. 以标记点为锚，向两侧扩；
+///   2. 每次往外看一格，与锚点附近已确认的区间做「整体相似度」比较
+///      （不是比单帧 —— 单帧偶然相似太常见）；
+///   3. 相似度掉下阈值就停，交界处就是广告边界。
+///
+/// 为什么用「整体相似度」而不是「相邻帧连续性」：
+/// 广告内部常有转场、纯色卡、品牌动画收尾，相邻两帧可能毫不相干，
+/// 但它们与广告开头那几帧的整体距离仍然很远（说明还在同一支广告里）。
+/// 用相邻帧连续性会把这类广告从中间切断。
+public enum AdBoundary {
+
+    /// 判定「这一格还属于这支广告」的相似度下限（0…1，1 = 完全一致）。
+    ///
+    /// 取 0.55：同源广告转码后逐帧汉明距离通常在 0…8（64 bit 下约 0.125），
+    /// 而不同内容之间普遍 ≥20（约 0.31）——但**整体相似度**是平均值，
+    /// 转场帧会拉低它，所以阈值要比单帧宽松得多。
+    public static let similarityFloor = 0.55
+
+    /// 至少要连续这么多格才算一段，太短的认为是误标。
+    public static let minimumSpan = 3
+
+    /// 单帧汉明距离 → 相似度（0…1）。
+    public static func similarity(_ distance: Int) -> Double {
+        max(0, 1 - Double(distance) / 64.0)
+    }
+
+    /// 一组待判定哈希 vs 一支已确认广告的**平均相似度**。
+    ///
+    /// 对 `probe` 里每一帧，在 `template` 里找最像的那一帧，取平均。
+    /// 这样广告内部换镜头也不会被判成「不像」——只要每一帧都能在模板里
+    /// 找到对应的位置。
+    public static func similarity(of probe: [UInt64], against template: [UInt64]) -> Double {
+        guard !probe.isEmpty, !template.isEmpty else { return 0 }
+        var total = 0.0
+        for hash in probe {
+            var best = 64
+            for stored in template {
+                let d = AdHash.hamming(hash, stored)
+                if d < best { best = d }
+                if best == 0 { break }
+            }
+            total += similarity(best)
+        }
+        return total / Double(probe.count)
+    }
+
+    /// 从标记点向两侧扩，返回这支广告在**所有抓到的哈希**里的区间。
+    ///
+    /// - Parameters:
+    ///   - hashes: 整段待分析内容的哈希（按时间顺序，等间隔）
+    ///   - anchor: 用户标记的那一格下标（通常是"当前播放位置"换算来的）
+    ///   - window: 锚点附近取多少格当模板
+    /// - Returns: 闭区间 `(start, end)`，下标含端点；找不到时返回 `nil`。
+    public static func locate(in hashes: [UInt64], anchor: Int, window: Int = 4) -> ClosedRange<Int>? {
+        guard !hashes.isEmpty, hashes.indices.contains(anchor) else { return nil }
+        let left = max(0, anchor - window + 1)
+        let template = Array(hashes[left...anchor])
+        guard template.count >= 2 else { return nil }
+
+        // 向右扩
+        var end = anchor
+        while end + 1 < hashes.count {
+            let next = hashes[end + 1]
+            let sim = similarity(of: [next], against: template)
+            if sim < similarityFloor { break }
+            end += 1
+        }
+
+        // 向左扩（用同一份模板，保证两边判据一致）
+        var start = left
+        while start - 1 >= 0 {
+            let prev = hashes[start - 1]
+            let sim = similarity(of: [prev], against: template)
+            if sim < similarityFloor { break }
+            start -= 1
+        }
+
+        guard end - start + 1 >= minimumSpan else { return nil }
+        return start...end
+    }
+}
