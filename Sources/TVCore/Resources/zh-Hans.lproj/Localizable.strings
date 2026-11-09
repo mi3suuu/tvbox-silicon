@@ -2047,3 +2047,15 @@
 "Ads are recognised by what they look like, not where they sit, so a marked ad is skipped in every video afterwards." = "广告按画面认，不按位置认，所以标过一次，之后的每个视频里它都会被跳过。";
 "Mark an ad while watching, then it plays no more. Marked ads are shared across your devices." = "看的时候标一条广告，它就不会再播。标过的广告会在你的设备之间同步。";
 "Ticking a control puts it in the first free slot of the top row. A bar too narrow to hold them all leaves the last ones out — drag those earlier, or untick a few." = "勾上一个控件会把它放进顶栏第一个空位；顶栏宽度装不下时，排在后面的不会画出来——把要的拖到前面，或少勾几个。";
+
+/* 源测速：结果详情 + 长期复用 */
+"Measurement Details" = "测速详情";
+"Latency" = "延迟";
+"Speed" = "速度";
+"Just now" = "刚刚";
+"Forget Readings" = "清空读数";
+"Last measured %@" = "最近测于 %@";
+"%lld minutes ago" = "%lld 分钟前";
+"Not measured yet. Open a video in this source, or run a sweep, and its reading shows here." = "还没测过。在这个源里打开一个视频，或跑一次测速，读数就会显示在这里。";
+"A reading is one ranged request for the first 256 KB of the line — the same thing the player does before it commits. The result is kept and reused until the source is measured again." = "一次读数是对线路前 256 KB 做一次分段请求——和播放器开播前做的事一样。结果会被保留复用，直到这个源再次被测。";
+"Details for %@" = "%@ 的详情";

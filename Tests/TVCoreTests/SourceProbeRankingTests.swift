@@ -89,4 +89,49 @@ import Testing
                       sourceKey: "alpha", videoID: "v1", lineFlag: "l1")
         #expect(probes.unreadableLines().isEmpty)
     }
+
+    // MARK: - The source-level archive that makes readings survive a restart
+
+    @MainActor
+    @Test func aReadingSurvivesARestartThroughTheSummaryTable() throws {
+        let suite = "probe-archive-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let now = Date()
+        let first = SourceProbeStore(defaults: defaults)
+        first.record(SourceProbeResult(reachability: .reachable, resolutionHeight: 1080, measuredAt: now),
+                     sourceKey: "alpha", videoID: "v1", lineFlag: "l1")
+        #expect(first.latest(sourceKey: "alpha")?.resolutionHeight == 1080)
+
+        // A brand-new store reading the same defaults still sees the reading — no sweep needed.
+        let reopened = SourceProbeStore(defaults: defaults)
+        #expect(reopened.latest(sourceKey: "alpha")?.resolutionHeight == 1080)
+        #expect(reopened.measuredSourceCount == 1)
+    }
+
+    @MainActor
+    @Test func aSourceIsJudgedByItsBestLineNotItsAverage() {
+        let probes = store()
+        let now = Date()
+        // Three dead lines and one good one: the source is working, not slow.
+        probes.record([(SourceProbeResult(reachability: .unreachable, measuredAt: now), "l1"),
+                       (SourceProbeResult(reachability: .unreachable, measuredAt: now), "l2"),
+                       (SourceProbeResult(reachability: .unreachable, measuredAt: now), "l3"),
+                       (SourceProbeResult(reachability: .reachable, kilobytesPerSecond: 800, measuredAt: now), "l4")],
+                      sourceKey: "alpha", videoID: "v1")
+        #expect(probes.latest(sourceKey: "alpha")?.reachability == .reachable)
+    }
+
+    @MainActor
+    @Test func aCancelledBatchDoesNotEraseAPreviousReading() {
+        let probes = store()
+        let now = Date()
+        probes.record(SourceProbeResult(reachability: .reachable, measuredAt: now),
+                      sourceKey: "alpha", videoID: "v1", lineFlag: "l1")
+        // A batch that only produced cancellations says nothing; the old reading stands.
+        probes.record([(SourceProbeResult(reachability: .unknown, measuredAt: now.addingTimeInterval(1)), "l2")],
+                      sourceKey: "alpha", videoID: "v2")
+        #expect(probes.latest(sourceKey: "alpha")?.reachability == .reachable)
+    }
 }

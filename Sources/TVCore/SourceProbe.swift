@@ -118,6 +118,14 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
 public final class SourceProbeStore {
     public static let shared = SourceProbeStore()
 
+    /// Bumped every time a reading lands, so a view can re-read the (non-observable) tables.
+    ///
+    /// The sweep already drives the page through `Store.probeRun`, but a reading can also land
+    /// without a sweep: the episode picker probes a line when the viewer opens it, and that should
+    /// refresh the speed page too, not wait for the next full probe. A view reads this with
+    /// `.onChange` and re-renders, the same way it does for the sweep's progress.
+    public private(set) var revision = 0
+
     private static let probeKey = "player.playLine.probes"
     private static let orderKey = "player.playLine.probes.order"
     /// One reading per source, kept apart from the per-line detail.
@@ -334,6 +342,7 @@ public final class SourceProbeStore {
         order.removeAll()
         health.removeAll()
         persist()
+        revision += 1
     }
 
     /// Every reading known for one video, keyed by line flag.
@@ -386,6 +395,7 @@ public final class SourceProbeStore {
         }
         note(result, for: sourceKey)
         persist()
+        revision += 1
     }
 
     /// Records a whole source's lines in one go.
@@ -417,6 +427,7 @@ public final class SourceProbeStore {
             }
         if let verdict { note(verdict.result, for: sourceKey) }
         persist()
+        revision += 1
     }
 
     /// Files one reading as a source's standing reading, keeping the newer of the two.

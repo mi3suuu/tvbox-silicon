@@ -28,6 +28,7 @@ struct SourceSpeedTestView: View {
     /// numbers from before the sweep.
     @State private var readings = 0
     @State private var filter: Filter = .all
+    @State private var detail: Row?
 
     private enum Filter: String, CaseIterable, Identifiable {
         case all, measured, unreachable
@@ -59,7 +60,7 @@ struct SourceSpeedTestView: View {
             } header: {
                 Text(L10n.text("Measurement"))
             } footer: {
-                Text(L10n.text("Each source is asked for its newest video, then its first playable line is read through for a few hundred kilobytes: that gives the speed and the resolution shown below. A sweep costs one request per source, so run it when the network is the one you care about."))
+                Text(L10n.text("Each source is asked for its newest video, then its first playable line is read through for a few hundred kilobytes: that gives the speed and the resolution shown below. A sweep costs one request per source, so run it when the network is the one you care about. Opening a video in a source counts as a measurement too, and every reading is kept until the source is measured again."))
             }
 
             Section {
@@ -90,6 +91,10 @@ struct SourceSpeedTestView: View {
         // `probeRun` is observable; the readings behind it are not. Re-reading on every progress tick
         // keeps the rows in step with the sweep instead of jumping only when it finishes.
         .onChange(of: store.probeRun) { _, _ in readings += 1 }
+        // A reading can also land without a sweep — the episode picker probes a line the moment the
+        // viewer opens it — and that must refresh these rows too, not wait for a full probe.
+        .onChange(of: SourceProbeStore.shared.revision) { _, _ in readings += 1 }
+        .sheet(item: $detail) { row in probeDetail(row) }
     }
 
     // MARK: - Sweep
@@ -147,6 +152,20 @@ struct SourceSpeedTestView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+
+        if !measuredSources.isEmpty {
+            HStack {
+                Text(lastSwept)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(L10n.text("Forget Readings")) {
+                    SourceProbeStore.shared.forgetEverything()
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Brand.rose)
+            }
+        }
     }
 
     /// "28 of 353 measured · 6 unreachable · fastest 676 KB/s" — the one line that says whether the
@@ -162,6 +181,18 @@ struct SourceSpeedTestView: View {
 
     private var measuredCount: Int { allRows.filter { $0.probe != nil }.count }
     private var sweepIsEmpty: Bool { allRows.isEmpty }
+
+    /// How many of the library's current sources have a reading, and when they were last measured.
+    private var measuredSources: [(sourceKey: String, reading: SourceProbeResult)] {
+        SourceProbeStore.shared.measuredSources()
+    }
+
+    private var lastSwept: String {
+        guard let newest = SourceProbeStore.shared.measurementWindow?.newest else {
+            return L10n.text("Not measured")
+        }
+        return L10n.text("Last measured %@", measuredText(newest))
+    }
 
     // MARK: - Rows
 
@@ -193,18 +224,35 @@ struct SourceSpeedTestView: View {
 
     private func line(_ row: Row) -> some View {
         HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(row.site.name)
+            Button { detail = row } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(row.site.name)
+                            .lineLimit(1)
+                        routeChip(row.route)
+                    }
+                    Text(subtitle(row))
+                        .font(.caption2)
+                        .foregroundStyle(row.probe?.reachability == .unreachable ? AnyShapeStyle(Brand.rose) : AnyShapeStyle(.secondary))
                         .lineLimit(1)
-                    routeChip(row.route)
                 }
-                Text(subtitle(row))
-                    .font(.caption2)
-                    .foregroundStyle(row.probe?.reachability == .unreachable ? AnyShapeStyle(Brand.rose) : AnyShapeStyle(.secondary))
-                    .lineLimit(1)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             Spacer(minLength: 0)
+            if row.probe != nil {
+                Button { detail = row } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                #if os(iOS)
+                .accessibilityLabel(L10n.text("Details for %@", row.site.name))
+                #endif
+            }
             routeMenu(row)
             #if os(macOS)
             // A Mac has no edit mode, so the arrows are the reorder here — the same arrangement as
@@ -334,5 +382,96 @@ struct SourceSpeedTestView: View {
             unreachableName: L10n.text("Unreachable")
         )
         store.notice = L10n.text("Filed %lld reachable and %lld unreachable sources into groups.", reachable, unreachable)
+    }
+
+    // MARK: - Detail
+
+    /// Everything one reading recorded, laid out as rows rather than the one-line summary on the
+    /// list. A "detail" that only repeats the subtitle is not a detail, so it also says *how* the
+    /// number was taken: a ranged read of the first 256 KB of the line, which is the same thing the
+    /// player's picker does when it decides whether a line is worth trying.
+    @ViewBuilder
+    private func probeDetail(_ row: Row) -> some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Text(row.site.name).font(.headline)
+                        Spacer()
+                        routeChip(row.route)
+                    }
+                    if !row.feed.isEmpty {
+                        Text(row.feed).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Section {
+                    if let probe = row.probe {
+                        detailRow(L10n.text("Status"), value: status(probe), tint: statusTint(probe))
+                        if let latency = probe.latencyMilliseconds, probe.reachability != .unreachable {
+                            detailRow(L10n.text("Latency"), value: String(format: "%d ms", latency))
+                        }
+                        if let speed = probe.kilobytesPerSecond, probe.reachability != .unreachable {
+                            detailRow(L10n.text("Speed"), value: String(format: "%.1f MB/s", Double(speed) / 1024))
+                        }
+                        if let height = probe.resolutionHeight {
+                            detailRow(L10n.text("Resolution"), value: "\(height)P")
+                        }
+                        detailRow(L10n.text("Measured"), value: measuredText(probe.measuredAt))
+                    } else {
+                        Text(L10n.text("Not measured yet. Open a video in this source, or run a sweep, and its reading shows here."))
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text(L10n.text("Reading"))
+                } footer: {
+                    Text(L10n.text("A reading is one ranged request for the first 256 KB of the line — the same thing the player does before it commits. The result is kept and reused until the source is measured again."))
+                }
+            }
+            .navigationTitle(L10n.text("Measurement Details"))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.text("Done")) { detail = nil }
+                }
+            }
+            #endif
+        }
+    }
+
+    private func detailRow(_ label: String, value: String, tint: Color = .primary) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value)
+                .monospacedDigit()
+                .foregroundStyle(tint)
+        }
+    }
+
+    private func status(_ probe: SourceProbeResult) -> String {
+        switch probe.reachability {
+        case .reachable: return L10n.text("Reachable")
+        case .slow: return L10n.text("Slow")
+        case .unreachable: return L10n.text("Unreachable")
+        case .unknown: return L10n.text("Not checked")
+        }
+    }
+
+    private func statusTint(_ probe: SourceProbeResult) -> Color {
+        switch probe.reachability {
+        case .reachable: return Brand.teal
+        case .slow: return Brand.amber
+        case .unreachable: return Brand.rose
+        case .unknown: return .secondary
+        }
+    }
+
+    /// "Just now", "5 minutes ago", or a clock time for readings older than an hour.
+    private func measuredText(_ date: Date) -> String {
+        let ago = Date().timeIntervalSince(date)
+        if ago < 60 { return L10n.text("Just now") }
+        if ago < 3600 { return L10n.text("%lld minutes ago", Int(ago / 60)) }
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 }

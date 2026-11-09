@@ -1611,11 +1611,23 @@ struct OneSkinChrome: View {
 
     @State private var markingAd = false
 
-    /// 能不能标注：要真的在播、有时间轴、不是直播。
-    /// 不要求控件可见 —— 收起控件时也能从菜单标注（菜单本来就是点开的）。
+    /// 能不能标注。
+    ///
+    /// ⛔ 这里**绝不能读 `session.position`**。
+    ///
+    /// `canMarkAd` 决定菜单条目出不出现，而 `position` 每秒都被
+    /// `updateSkipping` 改写 —— 一旦把它读进来，SwiftUI 就认为
+    /// 「更多」菜单的内容每帧都变了，列表会持续重绘：
+    /// 用户看到的是「菜单一直在刷新、点不中、下拉选不了」。
+    /// 这是菜单抖动的根因。
+    ///
+    /// ⛔ 也不能要求 `player.rate > 0`：
+    /// 暂停时用户最想标注（正好停在那支广告上），
+    /// 而 `AVAssetImageGenerator` 离线抓帧本来就不需要正在播放。
     private var canMarkAd: Bool {
         guard let session, session.hasTimeline, !session.isLive else { return false }
-        return session.player.rate > 0 && session.duration > 60
+        // 只读时长（离散、加载后不再变），不读逐秒变化的 position / rate。
+        return session.duration > 60
     }
 
     /// 把「当前播放位置」标成广告，边界由算法自己找。
