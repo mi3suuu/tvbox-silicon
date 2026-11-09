@@ -43,7 +43,13 @@ struct AdSkipSettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(ad.title.isEmpty ? L10n.text("Ad %@", shortID(ad)) : ad.title)
                                     .font(.subheadline)
-                                Text(L10n.text("%@ · %d samples", durationText(ad.duration), ad.hashes.count))
+                                // 显示算法**实际找到**的区间长度与采样数。
+                                // 用户需要这个来确认「多长剪多长」有没有生效 ——
+                                // 如果每次都恰好 30 秒，说明自适应没起作用。
+                                Text(L10n.text("%@ · %d frames · covers %@",
+                                               durationText(ad.duration),
+                                               ad.hashes.count,
+                                               durationText(ad.span)))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()

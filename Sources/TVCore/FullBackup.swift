@@ -138,6 +138,7 @@ public enum FullBackupDefaults {
         "skipSegmentSources",
         "resourceRanking",
         "player.playLine.probes",     // [String: SourceProbeResult]
+        "player.playLine.sourceHealth", // [String: SourceProbeResult] — one reading per source
         "player.playLine.rotation",   // HostRotation
         "player.playLine.learning",   // HostLearning
     ]

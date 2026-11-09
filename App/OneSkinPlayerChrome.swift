@@ -376,6 +376,15 @@ struct OneSkinChrome: View {
         // `initial: true` 覆盖「进页面时就已经在播」这一常见情形。
         .onAppear { attachClock(); if let session { nowPlaying.start(session) } }
         // 会话是异步来的（先有 channel，再有 player），两个时刻都要重新挂看门狗。
+        // 广告被自动跳过时弹一下提示。
+        //
+        // `lastSkippedAd` 在 `PlaybackSession` 里只赋值、界面从来没读过，
+        // 所以用户完全不知道刚才那一下卡顿是「跳过广告」而不是播放故障。
+        // 这里把它接成 HUD，跳完给 2 秒反馈再自己消失。
+        .onChange(of: session?.lastSkippedAd?.id) { _, newID in
+            guard newID != nil, let ad = session?.lastSkippedAd else { return }
+            showAdHUD(.skipped(seconds: ad.duration))
+        }
         .onChange(of: session != nil) { _, ready in if ready { attachClock() } }
         .onChange(of: channel?.url) { _, _ in attachClock() }
         .onChange(of: nowPlayingState, initial: true) { _, _ in
@@ -1475,6 +1484,19 @@ struct OneSkinChrome: View {
                             .opacity(0.75)
                     }
                 }
+            } else if let adHUD {
+                hudPill {
+                    VStack(spacing: 3) {
+                        Image(systemName: adHUD == .marked(seconds: 0) || isMarked(adHUD)
+                              ? "megaphone.fill" : "megaphone.slash.fill")
+                            .font(.system(size: opticalSize("megaphone", base: m.glyph * 1.6)))
+                        Text(adHUDText(adHUD))
+                            .font(.system(size: m.caption))
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, winH * 0.12)
             } else if let skipped {
                 hudPill {
                     VStack(spacing: 3) {
@@ -1605,11 +1627,50 @@ struct OneSkinChrome: View {
         guard let session, !markingAd else { return }
         markingAd = true
         defer { markingAd = false }
-        await session.markAd(at: session.position)
-        showedAdMarked = true
+        let marker = session.position
+        await session.markAd(at: marker)
+        // 用实际入库的长度回报，而不是候选窗口的 30 秒 ——
+        // 用户看到的就是「这支广告有多长」。
+        let learned = await AdSignatureLibrary.shared.all().max { $0.createdAt < $1.createdAt }
+        showAdHUD(.marked(seconds: learned?.duration ?? 0))
     }
 
-    @State private var showedAdMarked = false
+    /// 广告提示的两种状态：刚标记成功 / 刚自动跳过。
+    ///
+    /// 这两种反馈以前只赋值不渲染（`showedAdMarked` 写完就没人读），
+    /// 用户点完「标记为广告」看不到任何确认，也不知道广告真的被跳过了。
+    @State private var adHUD: AdHUD?
+    @State private var adHUDTask: Task<Void, Never>?
+
+    enum AdHUD: Equatable {
+        case marked(seconds: Double)
+        case skipped(seconds: Double)
+    }
+
+    private func isMarked(_ hud: AdHUD) -> Bool {
+        if case .marked = hud { return true }
+        return false
+    }
+
+    private func adHUDText(_ hud: AdHUD) -> String {
+        switch hud {
+        case .marked(let seconds):
+            return L10n.text("Ad marked (%@)", EpisodeSkipSettings.formatTime(seconds))
+        case .skipped(let seconds):
+            return L10n.text("Ad skipped (%@)", EpisodeSkipSettings.formatTime(seconds))
+        }
+    }
+
+    /// 弹一下广告提示，2.2 秒后自动消失。
+    private func showAdHUD(_ state: AdHUD) {
+        adHUDTask?.cancel()
+        withAnimation(.snappy(duration: 0.18)) { adHUD = state }
+        adHUDTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.2))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) { adHUD = nil }
+        }
+    }
 
     private static let speeds: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
     private func speedLabel(_ speed: Float) -> String {

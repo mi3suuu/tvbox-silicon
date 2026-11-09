@@ -120,7 +120,16 @@ public final class SourceProbeStore {
 
     private static let probeKey = "player.playLine.probes"
     private static let orderKey = "player.playLine.probes.order"
-    private static let limit = 800
+    /// One reading per source, kept apart from the per-line detail.
+    ///
+    /// The detail table is bounded (a sweep of a few hundred sources produces a few thousand rows,
+    /// four lines each) and evicts least-recently-measured rows first, so the first sources a long
+    /// sweep touched were being thrown away before the sweep even finished: the page then said
+    /// "not measured" about sources it had just measured. This table has one row per source and no
+    /// eviction, so a reading survives a restart, another sweep, and a library ten times this size.
+    private static let healthKey = "player.playLine.sourceHealth"
+    /// Detail rows kept for the per-line view. Only this half is bounded.
+    private static let limit = 4_000
 
     private static let rotationKey = "player.playLine.rotation"
     private static let learningKey = "player.playLine.learning"
@@ -128,6 +137,9 @@ public final class SourceProbeStore {
     private let defaults: UserDefaults
     private var probes: [String: SourceProbeResult]
     private var order: [String]
+    /// The newest reading per source. `latest(sourceKey:)` answers from here, so a page that lists
+    /// three hundred sources does not walk three hundred thousand detail rows to fill itself in.
+    private var health: [String: SourceProbeResult]
     /// Per-base backoff and concurrency, keyed by base rather than by the full URL: a line that
     /// failed once will fail for every episode on that host, so the avoidance belongs to the host.
     /// This mirrors what One keeps as `avoidUntil` / `inflight` / `lastHeal`.
@@ -145,6 +157,20 @@ public final class SourceProbeStore {
         }
         self.order = defaults.stringArray(forKey: Self.orderKey) ?? []
         for key in probes.keys where !order.contains(key) { order.append(key) }
+        if let blob = defaults.data(forKey: Self.healthKey),
+           let decoded = try? JSONDecoder().decode([String: SourceProbeResult].self, from: blob) {
+            self.health = decoded
+        } else {
+            self.health = [:]
+        }
+        // Readings written before this table existed still answer `latest`: fold the newest detail
+        // row of each source in once, so an upgrade does not look like a library nobody measured.
+        for (key, value) in probes {
+            guard let bar = key.firstIndex(of: "|") else { continue }
+            let sourceKey = String(key[key.startIndex..<bar])
+            guard let seen = health[sourceKey] else { health[sourceKey] = value; continue }
+            if value.measuredAt > seen.measuredAt { health[sourceKey] = value }
+        }
         if let blob = defaults.data(forKey: Self.rotationKey),
            let decoded = try? JSONDecoder().decode(HostRotation.self, from: blob) {
             self.rotation = decoded
@@ -269,6 +295,9 @@ public final class SourceProbeStore {
     /// source: the newest reading is the best guess at what that source serves now. A source that
     /// has never been probed answers nil, which ranks it as unknown rather than as bad.
     public func latest(sourceKey: String) -> SourceProbeResult? {
+        if let entry = health[sourceKey] { return entry }
+        // Readings recorded before the summary table existed (or by a store that was opened before
+        // one of them landed) are still readable, just slower to find.
         let prefix = sourceKey + "|"
         var newest: SourceProbeResult?
         for (key, value) in probes where key.hasPrefix(prefix) {
@@ -276,6 +305,35 @@ public final class SourceProbeStore {
             if value.measuredAt > found.measuredAt { newest = value }
         }
         return newest
+    }
+
+    /// Every source that has a reading, newest first. The speed page draws from this and then asks
+    /// the library which of those sources still exist, rather than the other way round.
+    public func measuredSources() -> [(sourceKey: String, reading: SourceProbeResult)] {
+        health
+            .map { (sourceKey: $0.key, reading: $0.value) }
+            .sorted { $0.reading.measuredAt > $1.reading.measuredAt }
+    }
+
+    /// How many sources have a reading. Used by the summary line, so it agrees with the page.
+    public var measuredSourceCount: Int { health.count }
+
+    /// When the oldest and newest readings were taken. A single "last swept" line is drawn from the
+    /// newer one, and the spread tells the reader whether one sweep covered the library or the
+    /// numbers are a mixture of yesterday and today.
+    public var measurementWindow: (oldest: Date, newest: Date)? {
+        guard let first = health.values.map(\.measuredAt).min(),
+              let last = health.values.map(\.measuredAt).max() else { return nil }
+        return (first, last)
+    }
+
+    /// Forgets every reading, detail and summary alike. Offered as one button, so a viewer who
+    /// measured on a bad network can start over instead of guessing which rows to distrust.
+    public func forgetEverything() {
+        probes.removeAll()
+        order.removeAll()
+        health.removeAll()
+        persist()
     }
 
     /// Every reading known for one video, keyed by line flag.
@@ -326,10 +384,8 @@ public final class SourceProbeStore {
         while order.count > Self.limit {
             probes.removeValue(forKey: order.removeFirst())
         }
-        if let encoded = try? JSONEncoder().encode(probes) {
-            defaults.set(encoded, forKey: Self.probeKey)
-        }
-        defaults.set(order, forKey: Self.orderKey)
+        note(result, for: sourceKey)
+        persist()
     }
 
     /// Records a whole source's lines in one go.
@@ -348,7 +404,25 @@ public final class SourceProbeStore {
         while order.count > Self.limit {
             probes.removeValue(forKey: order.removeFirst())
         }
+        // The source is judged by its best line in this batch — a source that answered on one of
+        // its four lines is a working source, and averaging that with three dead ones would call it
+        // slow. A batch of nothing but cancellations (`unknown`) says nothing, so it leaves the
+        // previous reading standing instead of marking the source unmeasured.
+        let verdict = rows
+            .filter { $0.result.reachability != .unknown }
+            .max { lhs, rhs in
+                lhs.result.sortScore == rhs.result.sortScore
+                    ? lhs.result.measuredAt < rhs.result.measuredAt
+                    : lhs.result.sortScore < rhs.result.sortScore
+            }
+        if let verdict { note(verdict.result, for: sourceKey) }
         persist()
+    }
+
+    /// Files one reading as a source's standing reading, keeping the newer of the two.
+    private func note(_ result: SourceProbeResult, for sourceKey: String) {
+        guard let seen = health[sourceKey] else { health[sourceKey] = result; return }
+        if result.measuredAt >= seen.measuredAt { health[sourceKey] = result }
     }
 
     /// Writes the readings once, after a batch.
@@ -357,18 +431,21 @@ public final class SourceProbeStore {
             defaults.set(encoded, forKey: Self.probeKey)
         }
         defaults.set(order, forKey: Self.orderKey)
+        if let encoded = try? JSONEncoder().encode(health) {
+            defaults.set(encoded, forKey: Self.healthKey)
+        }
     }
 
+    /// Drops the detail rows for one video. The source's standing reading stays: "forget this
+    /// video's lines" is not "forget what this source answers", and the sweep's verdict is the
+    /// thing the speed page exists to keep.
     public func clear(sourceKey: String, videoID: String) {
         let prefix = "\(sourceKey)|\(videoID)|"
         for key in probes.keys where key.hasPrefix(prefix) {
             probes.removeValue(forKey: key)
             order.removeAll { $0 == key }
         }
-        if let encoded = try? JSONEncoder().encode(probes) {
-            defaults.set(encoded, forKey: Self.probeKey)
-        }
-        defaults.set(order, forKey: Self.orderKey)
+        persist()
     }
 }
 
