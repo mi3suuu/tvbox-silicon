@@ -71,16 +71,19 @@ extension Store {
         return sourceReassignment.moves.map { move in
             let own = subscriptions.first { $0.address == move.address }
             let target = subscriptions.first { $0.address == move.target }
+            // A move can name one of the viewer's own groups instead of a subscription.
+            let custom = sourceGroupBook.group(forTarget: move.target)
             let sourceStillThere = sites.contains { $0.sourceKey == move.sourceKey && entryAddress(of: $0) == move.address }
             let state: SourceMoveEntry.State
             if own == nil || !sourceStillThere { state = .missingSource }
+            else if custom != nil { state = .applied }
             else if target == nil { state = .missingTarget }
             else if target?.enabled == false { state = .targetOff }
             else { state = .applied }
             return SourceMoveEntry(move: move,
                                    state: state,
                                    ownTitle: own?.title ?? (move.address.isEmpty ? move.origin : move.address),
-                                   targetTitle: target?.title ?? (move.targetName.isEmpty ? move.target : move.targetName))
+                                   targetTitle: custom?.name ?? target?.title ?? (move.targetName.isEmpty ? move.target : move.targetName))
         }
     }
 

@@ -187,3 +187,40 @@ private func document(_ origin: String, sites: [(key: String, api: String)]) thr
     #expect(open[0].sites.map(\.key) == ["vault"])
     #expect(open[1].sites.map(\.key) == ["plain"])
 }
+
+// [mi3s] 二开：自建分组的落位规则（空组也列出、移进去就离开原订阅、删组后回到原订阅）
+@Test func customGroupsHoldMovedSourcesAndEmptyOnesStillList() throws {
+    let first = try document("https://one.example/a.json", keys: ["show", "moved"])
+    let entries = [entry("https://one.example/a.json", name: "One", enabled: true)]
+    let merged = try #require(Subscription.merge([first]))
+    let documents = ["https://one.example/a.json": first]
+    let group = CustomSourceGroup(id: "g1", name: "可用")
+
+    // An empty group is still listed, above the subscription it sits above.
+    let empty = SourceGroups.make(entries: entries, documents: documents, builtIns: [], builtInOrigin: first.origin,
+                                  mergedSites: merged.sites, pinOrder: [], userHidden: { _ in false },
+                                  includeHidden: false, jarURL: nil, customGroups: [group])
+    #expect(empty.map(\.id) == ["group:g1", "https://one.example/a.json"])
+    #expect(empty[0].sites.isEmpty)
+    #expect(empty[0].title == "可用")
+    #expect(empty[1].sites.map(\.key) == ["show", "moved"])
+
+    // Filed into the group: it leaves its subscription, and nothing else moves.
+    let filed = SourceGroups.make(entries: entries, documents: documents, builtIns: [], builtInOrigin: first.origin,
+                                  mergedSites: merged.sites, pinOrder: [], userHidden: { _ in false },
+                                  includeHidden: false, jarURL: nil,
+                                  reassign: { site, _ in site.key == "moved" ? group.target : nil },
+                                  customGroups: [group])
+    #expect(filed[0].sites.map(\.key) == ["moved"])
+    #expect(filed[1].sites.map(\.key) == ["show"])
+
+    // The group deleted: the move names a group that is gone, so the source goes back to its feed
+    // rather than being stranded in "Other Sources".
+    let removed = SourceGroups.make(entries: entries, documents: documents, builtIns: [], builtInOrigin: first.origin,
+                                    mergedSites: merged.sites, pinOrder: [], userHidden: { _ in false },
+                                    includeHidden: false, jarURL: nil,
+                                    reassign: { site, _ in site.key == "moved" ? group.target : nil },
+                                    customGroups: [])
+    #expect(removed.map(\.id) == ["https://one.example/a.json"])
+    #expect(removed[0].sites.map(\.key) == ["show", "moved"])
+}

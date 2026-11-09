@@ -1318,8 +1318,11 @@ import TVCore
         let origin = site.origin(or: config.origin)
         let own = entryAddress(of: site) ?? origin.absoluteString
         let target = environmentSubscriptions.first { $0.address == address }
+        // A move can also name one of the viewer's own groups; the maintenance list shows its name
+        // rather than the raw `group:<id>` target it is stored as.
+        let targetName = target?.title ?? address.flatMap { sourceGroupBook.group(forTarget: $0)?.name } ?? ""
         sourceReassignment.reassign(site, address: own, origin: origin,
-                                    to: address, targetName: target?.title ?? "")
+                                    to: address, targetName: targetName)
         rebuildSubscription()
     }
 
@@ -1389,7 +1392,7 @@ import TVCore
     /// reader can stop it, and the progress is visible while it runs.
     func startProbingAllSources() {
         guard let config = subscription else { return }
-        startProbing(probeTargets(config))
+        runProbe(probeTargets(config))
     }
 
     /// Measures just these sources — the ones in one group, or the ones the reader ticked. A full

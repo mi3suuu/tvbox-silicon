@@ -187,10 +187,18 @@ struct FormSettingsView: View {
     @AppStorage("refreshSubscriptionsOnLaunch") private var refreshesOnLaunch = false
 
     /// The ranking in one line — what the Sources page's sort will do — for the row that opens it.
-    private var rankingSummary: String {
-        let keys = store.resourceRanking.keys
+    private var rankingSummary: String {        let keys = store.resourceRanking.keys
         guard !keys.isEmpty else { return L10n.text("Default") }
         return keys.map { Self.rankingName($0.attribute) + ($0.descending ? " \u{2193}" : " \u{2191}") }.joined(separator: " ")
+    }
+    /// "3 groups · 28 measured" — enough to tell the page has something in it without opening it.
+    private var speedTestSummary: String {
+        let groups = store.sourceGroupBook.groups.count
+        let measured = store.subscription.map { config in
+            config.sites.filter { SourceProbeStore.shared.latest(sourceKey: $0.sourceKey) != nil }.count
+        } ?? 0
+        guard groups > 0 || measured > 0 else { return L10n.text("Default") }
+        return L10n.text("%lld groups · %lld measured", groups, measured)
     }
     private static func rankingName(_ attribute: ResourceRanking.Key.Attribute) -> String {
         switch attribute {
@@ -404,6 +412,9 @@ struct FormSettingsView: View {
             Section {
                 FormLink(symbol: "arrow.up.arrow.down.square.fill", tint: .teal, title: L10n.text("Resource Order"),
                          value: rankingSummary) { ResourceRankingView() }
+                // 测速 + 分组：把「哪些源还能连通」测出来，并且按结果批量归到自己的分组里。
+                FormLink(symbol: "speedometer", tint: .pink, title: L10n.text("Source Speed Test"),
+                         value: speedTestSummary) { SourceSpeedTestView() }
                 FormLink(symbol: "forward.end.alt.fill", tint: .cyan, title: L10n.text("Segment Sources")) { SkipSourceSettingsView() }
                 // 上游 1.8.11 的 #547 字幕外观页（`SubtitleStyleView`）在融合后的设置页里没有入口：
                 // 上游把它挂在 `SettingsView.swift`（iPhone/iPad/Mac 三处 + tvOS 一处），而融合版的

@@ -814,10 +814,27 @@ struct OneSkinChrome: View {
         case .speed:
             if let session, !session.isLive {
                 Menu {
+                    // ── 常驻播放倍速：选了就一直生效，直到改回来 ──
                     Picker(L10n.text("Playback Speed"), selection: Binding(
                         get: { session.speed },
                         set: { session.setSpeed($0); persistedSpeed = Double($0) })) {
                         ForEach(Self.speeds, id: \.self) { Text(speedLabel($0)).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+
+                    Divider()
+
+                    // ── 长按加速倍率：只在按住期间生效，松手复原 ──
+                    //
+                    // 与上面那项是**两套独立设置**，写不同的键：
+                    //   · 播放倍速 → session.setSpeed，跟着会话走
+                    //   · 长按倍率 → `SpeedBoost.key`，跟手势走
+                    // 之前长按倍率只能去「设置 → 播放 → Touch and Hold Speed」改，
+                    // 播到一半想调档要退出播放页，这里补上就地入口。
+                    Picker(L10n.text("Touch and Hold Speed"), selection: $holdSpeed) {
+                        ForEach(SpeedBoost.startRates, id: \.self) { rate in
+                            Text(speedLabel(Float(rate))).tag(rate)
+                        }
                     }
                     .pickerStyle(.inline)
                 } label: { Label(L10n.text("Playback Speed"), systemImage: "gauge.with.needle") }

@@ -277,6 +277,10 @@ enum QALaunch {
             CloudDriveView()
         } else if section == self.section, page == "subtitle-style" {
             SubtitleStyleView()
+        } else if section == self.section, page == "speed-test" {
+            // `-qaPage speed-test`: opens the speed / grouping page straight away, so a build can be
+            // checked for opening it without driving the settings list.
+            SourceSpeedTestView()
         } else if section == self.section, let page, let config = store.subscription {
             let parts = page.split(separator: ":", maxSplits: 2).map(String.init)
             switch parts.first {
@@ -391,7 +395,7 @@ enum QALaunch {
 
     static func overrides(_ section: AppSection) -> Bool {
         guard section == self.section, let page else { return false }
-        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add"].contains(page.split(separator: ":").first.map(String.init) ?? "")
+        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add"].contains(page.split(separator: ":").first.map(String.init) ?? "")
     }
 }
 

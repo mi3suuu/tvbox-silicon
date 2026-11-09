@@ -61,7 +61,12 @@ public enum SourceGroups {
         /// The address a source belongs under: the one the viewer moved it to, else its own.
         func home(_ site: Site) -> String {
             let own = ownAddress(site)
-            return reassign(site, own) ?? own
+            guard let destination = reassign(site, own) else { return own }
+            // A move that names a group the viewer has since deleted files the source back where it
+            // came from; letting it fall through would strand it in "Other Sources" for good.
+            if CustomSourceGroup.id(inTarget: destination) != nil,
+               !customGroups.contains(where: { $0.target == destination }) { return own }
+            return destination
         }
         func isPinned(_ site: Site, fallback: URL) -> Bool {
             let origin = site.origin(or: fallback)

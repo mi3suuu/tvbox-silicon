@@ -207,6 +207,14 @@ struct SitesView: View {
                     store.reassignSourceByKey(drag.key, origin: drag.origin, to: address)
                     return true
                 }
+        } else if case .custom = group.kind, query.isEmpty {
+            // Dropping onto one of the viewer's own groups files the source there — the same move the
+            // speed page's "移动到…" makes, done one card at a time.
+            header.dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
+                guard query.isEmpty, let drag = items.first else { return false }
+                store.reassignSourceByKey(drag.key, origin: drag.origin, to: group.id)
+                return true
+            }
         } else if group.kind == .other, query.isEmpty {
             // Dropping into "Other Sources" is the way back: the source returns to its own subscription.
             header.dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in

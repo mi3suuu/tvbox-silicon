@@ -28,6 +28,13 @@ extension Store {
         return sites.count
     }
 
+    /// Files `sites` under another subscription — the batch form of dragging them onto its header.
+    @discardableResult
+    func fileSources(_ sites: [Site], underSubscription address: String) -> Int {
+        for site in sites { reassignSource(site, to: address) }
+        return sites.count
+    }
+
     /// Sends `sites` back to the subscription they came from — the move is deleted, not rewritten.
     @discardableResult
     func returnSourcesToTheirSubscription(_ sites: [Site]) -> Int {
