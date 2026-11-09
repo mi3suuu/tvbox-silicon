@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-public enum FavoriteKind: String, Codable, Sendable {
+public enum FavoriteKind: String, Codable, Sendable, CaseIterable {
     case live, video, episode, music, cloud
 }
 
@@ -309,15 +309,21 @@ struct FavoriteRecord: Codable, Hashable, Sendable {
 
     public func items(_ kind: FavoriteKind) -> [FavoriteItem] { items.filter { $0.kind == kind } }
 
+    /// The kinds that have favorites, in the Favorites page's section order: what its filter offers.
+    public var kinds: [FavoriteKind] {
+        let present = Set(items.map(\.kind))
+        return FavoriteKind.allCases.filter(present.contains)
+    }
+
+    public var liveChannels: [Channel] {
+        items.compactMap { if case .live(let channel) = $0 { channel } else { nil } }
+    }
+
     // [mi3s] 二开融合：上游 1.8.11 (#523 Liked Songs) 新增。我方记录式收藏模型里 items 已是「当前环境」的列表，
     // 语义一致，直接沿用上游实现。
     /// The songs saved with Like, newest first, which Liked Songs plays as one list.
     public var musicTracks: [MusicTrack] {
         items.compactMap { if case .music(let track) = $0 { track } else { nil } }
-    }
-
-    public var liveChannels: [Channel] {
-        items.compactMap { if case .live(let channel) = $0 { channel } else { nil } }
     }
 
     private func persist() {

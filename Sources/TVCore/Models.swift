@@ -116,6 +116,17 @@ public enum JSONValue: Codable, Equatable, Sendable {
 }
 
 public enum WebAddress {
+    /// An address a person typed or pasted: full-width `：／` become ASCII, and a bare host such as
+    /// `example.com/config.json` or `192.168.1.5:8080/a` gets `http://` (as browsers do). Text with a
+    /// space, another scheme, or no dot in the host is left for `resolve` to reject.
+    public static func resolve(typed text: String) throws -> URL {
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "：", with: ":").replacingOccurrences(of: "／", with: "/")
+        if value.range(of: "^[^\\s/?#:]+\\.[^\\s/?#:]+(:[0-9]+)?([/?#]\\S*)?$", options: .regularExpression) != nil {
+            value = "http://" + value
+        }
+        return try resolve(value)
+    }
     public static func resolve(_ text: String, relativeTo base: URL? = nil) throws -> URL {
         var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // As browsers do (WHATWG URL), an absolute http(s) address ignores missing or extra slashes:
@@ -185,17 +196,19 @@ public struct Site: Identifiable, Codable, Hashable, Sendable {
         }
         return try raw["ext"].map(resolve)
     }
+    /// A CatPawOpen bundle (see CatPawOpen), whose config center signs in to drives with its own codes (`CatPawSignIn`).
+    public var isCatPawOpen: Bool { raw["catPawOpen"] != nil }
     /// Classified like TVBox: a `.js` api runs in the JavaScript host, a `.py` api (or a legacy
     /// `py_` key whose ext is the script) in the Python host, and any other type 3 api is a JAR class,
     /// unless its download showed otherwise.
     public var runtime: SourceRuntime {
         if native { return .api }
         guard type == 3, !missingAPI else { return .unsupported }
-        // A CatPawOpen bundle is a Node server (see CatPawOpen), which only the Mac can run.
+        // A CatPawOpen bundle is a Node server (see CatPawOpen): the Mac's Node, or nodejs-mobile in the app.
         if raw["catPawOpen"] != nil {
             #if os(macOS)
             return .javascript
-            #elseif os(iOS)
+            #elseif os(iOS) || os(tvOS)
             return EmbeddedNodeHost.available ? .javascript : .unsupported
             #else
             return .unsupported
@@ -314,12 +327,18 @@ public struct Channel: Identifiable, Codable, Hashable, Sendable {
     public let resumePosition: Double?
     /// Subtitle files the source offers beside the video. Not saved: a plugin's addresses last one session.
     public var subtitles: [ExternalSubtitle] = []
+    /// Stretches the source marks as opening or ending credits. Not saved either.
+    public var skips: [PlaybackSkip] = []
+    /// The Bilibili part playing, for its chapters, subtitles and the account's watch progress. Not saved.
+    public var bilibiliPart: BilibiliAPI.Part? = nil
     public var displayGroup: String { group.isEmpty ? L10n.text("Ungrouped") : group }
     public var id: String { group + "|" + name + "|" + url.absoluteString }
     public init(name: String, group: String = "", url: URL, logo: URL? = nil, headers: [String: String] = [:], skipScope: String? = nil,
-                historyContext: PlaybackHistoryContext? = nil, resumePosition: Double? = nil, subtitles: [ExternalSubtitle] = []) {
+                historyContext: PlaybackHistoryContext? = nil, resumePosition: Double? = nil, subtitles: [ExternalSubtitle] = [],
+                skips: [PlaybackSkip] = [], bilibiliPart: BilibiliAPI.Part? = nil) {
         self.name = name; self.group = group; self.url = url; self.logo = logo; self.headers = headers; self.skipScope = skipScope
         self.historyContext = historyContext; self.resumePosition = resumePosition; self.subtitles = subtitles
+        self.skips = skips; self.bilibiliPart = bilibiliPart
     }
     private enum CodingKeys: String, CodingKey { case name, group, url, logo, headers, skipScope, historyContext, resumePosition }
 }

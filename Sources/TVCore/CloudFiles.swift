@@ -22,7 +22,7 @@ public struct CloudFile: Identifiable, Hashable, Codable, Sendable {
     public static func kind(of name: String) -> Kind {
         switch (name as NSString).pathExtension.lowercased() {
         case "mp4", "m4v", "mov", "mkv", "ts", "m2ts", "mts", "avi", "flv", "f4v", "wmv", "webm", "rmvb", "rm",
-             "mpg", "mpeg", "3gp", "vob", "m3u8": .video
+             "mpg", "mpeg", "3gp", "vob", "m3u8", "iso": .video
         case "mp3", "m4a", "aac", "flac", "wav", "aif", "aiff", "ape", "ogg", "opus", "wma": .audio
         case "jpg", "jpeg", "png", "gif", "webp", "heic", "bmp": .image
         case "srt", "ass", "ssa", "vtt", "sub": .subtitle
@@ -30,7 +30,7 @@ public struct CloudFile: Identifiable, Hashable, Codable, Sendable {
         }
     }
     /// Containers that play as the drive stores them: those AVPlayer opens, and those `Remux` repackages for it.
-    static func playsOriginal(_ name: String) -> Bool { playsNatively(name) || Remux.handles(name: name) }
+    static func playsOriginal(_ name: String) -> Bool { playsNatively(name) || Remux.handles(name: name) || DiscImage.handles(name: name) }
 
     /// Containers Apple devices open as they are.
     static func playsNatively(_ name: String) -> Bool {
@@ -149,11 +149,13 @@ public enum CloudFiles {
     /// The channel that plays `file`. Its history entry is the folder's, as a series is one entry
     /// with an episode, so Continue Watching picks the folder up at the file last played.
     public static func channel(_ file: CloudFile, in drive: CloudFilesDrive, folder: String, folderName: String,
-                               resumePosition: Double? = nil) -> Channel {
+                               resumePosition: Double? = nil, subtitles: [ExternalSubtitle] = []) -> Channel {
         let context = PlaybackHistoryContext(origin: URL(string: "\(scheme)://\(drive.key)")!, sourceKey: sourceKey, sourceName: drive.name,
                                              videoID: folder, videoName: folderName, episodeID: file.id, episodeName: file.name,
                                              episodeFlag: drive.key)
-        return channel(context, resumePosition: resumePosition)
+        var channel = channel(context, resumePosition: resumePosition)
+        channel.subtitles = subtitles
+        return channel
     }
 
     /// The channel a history entry of a Cloud Files folder resumes.
@@ -167,6 +169,49 @@ public enum CloudFiles {
     }
 
     public static func isFile(_ url: URL) -> Bool { url.scheme == scheme }
+
+    /// The subtitle files among a folder's (#576): SRT, WebVTT, ASS and SSA files and ZIP archives, as subtitles
+    /// the player fetches from the drive itself (`SubtitleFile.download`). Which belong to the video playing, and
+    /// which comes on, is `SubtitleMatch`'s choice, as with a drive plugin's `subs`.
+    public static func subtitles(_ files: [CloudFile], in drive: CloudFilesDrive) -> [ExternalSubtitle] {
+        files.filter { file in
+            !file.isFolder && (SubtitleArchive.subtitleExtensions.contains((file.name as NSString).pathExtension.lowercased())
+                               || SubtitleArchive.isArchive(name: file.name))
+        }.compactMap { file in
+            var address = URLComponents()
+            address.scheme = scheme; address.host = "file"
+            address.queryItems = [URLQueryItem(name: "drive", value: drive.key), URLQueryItem(name: "id", value: file.id),
+                                  URLQueryItem(name: "name", value: file.name)]
+            return address.url.map { ExternalSubtitle(name: file.name, url: $0) }
+        }
+    }
+
+    /// The subtitle files in the folder of a Cloud Files channel, listed now: Continue Watching starts a file before
+    /// its folder is listed. Empty for any other channel.
+    public static func subtitles(beside channel: Channel) async -> [ExternalSubtitle] {
+        guard let context = channel.historyContext, context.sourceKey == sourceKey, let drive = drive(key: context.episodeFlag),
+              let files = try? await list(drive, folder: context.videoID) else { return [] }
+        return subtitles(files, in: drive)
+    }
+
+    /// Where a `tvbox-files:` file's bytes are: the drive's own link for it and the headers that link wants. Unlike
+    /// `prepare`, any kind of file, for subtitles beside a video.
+    static func source(_ url: URL) async throws -> CloudStreams.Source {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        guard let key = value("drive"), let id = value("id"), let name = value("name") else { throw TVError.invalidURL }
+        guard let drive = drive(key: key) else {
+            throw TVError.unsupported(L10n.text("This file's drive is no longer in Cloud Files."))
+        }
+        switch drive {
+        case .quark: return try await QuarkFiles.quark.original(id, name: name)
+        case .uc: return try await QuarkFiles.uc.original(id, name: name)
+        case .pan115: return try await Pan115Files.shared.link(id, name: name)
+        case .alist(let server) where server.isWebDAV: return try await WebDAV.shared.source(server, path: id, name: name)
+        case .alist(let server) where server.isEmby: return try await Emby.shared.source(server, id: id, name: name)
+        case .alist(let server): return try await AList.shared.link(server, path: id, name: name)
+        }
+    }
 
     /// The address AVPlayer opens for a `tvbox-files:` address: the file streamed from its drive.
     public static func prepare(_ url: URL) async throws -> URL {

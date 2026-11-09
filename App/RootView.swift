@@ -34,6 +34,27 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
 
 struct RootView: View {
     @Environment(Store.self) private var store
+    /// iPhone（含 Duo 展开态）常驻 `.tabBarOnly`，iPad 常驻 `.sidebarAdaptable`。
+    ///
+    /// ⛔ 这里**绝不能随「播放页是否打开」切换**。2026-11-09 设备日志实测：
+    /// `VideoDetailView.onAppear` 把 `store.watchPageOpen=true` → `onChange` 把
+    /// TabView 从 `.sidebarAdaptable` 分支切到 `.tabBarOnly` 分支 —— 两个分支
+    /// 是**不同的视图身份**，SwiftUI 会销毁并重建整个 TabView，连带它内部
+    /// 的 NavigationStack；刚 push 进来的选集页被立刻 pop，用户的观感就是
+    /// 「点开闪一下进双屏又退回来」。页面 `onDisappear` 又把标记置回 false，
+    /// 于是再切一次，形成振荡（日志里 `platformTabs onAppear` 会重复打印）。
+    ///
+    /// 原来切样式的目的是避开 regular width 下 `.sidebarAdaptable` 自动展开的
+    /// 侧栏压住右栏；iPhone 常驻 `.tabBarOnly` 后侧栏根本不存在，问题同样解决，
+    /// 而且不再有重建。侧栏的隐藏交给详情页自己的
+    /// `.setBarVisibility(.hidden, for: .tabBar)`。
+    private var phoneTabsWithoutSidebar: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .phone
+        #else
+        return false
+        #endif
+    }
     @Environment(Updates.self) private var updates
     @Environment(Announcements.self) private var announcements
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -201,6 +222,9 @@ struct RootView: View {
     #endif
     private var platformTabs: some View {
         tabView
+            .onAppear { OneSkinProbe.log("platformTabs onAppear noSidebar=\(phoneTabsWithoutSidebar)") }
+            // ⛔ 不要再在这里加 `onChange(of: store.watchPageOpen)` 去切 TabView 样式。
+            // 详见 `phoneTabsWithoutSidebar` 的注释：那会把刚 push 进来的选集页直接 pop 掉。
             #if os(tvOS)
             .musicSidebarHeader()
             // Now Playing is not a page: choosing it opens the full-screen player over the section
@@ -219,6 +243,9 @@ struct RootView: View {
             #endif
             #if os(iOS)
             .minimizesTabBarOnScroll()
+            // 页面标题上的「查看更多 ›」要知道哪些分区被折进了 More：
+            // 有独立标签的直接切过去，没有的 push 到本页栈上（Back 才回得来）。
+            .environment(\.sectionsInMore, phoneTabs ? inMore : [])
             .musicAccessory(enabled: store.music.showsStrip(videoPlaying: store.playing != nil) && phoneTabs)
             // Opened from the mini player; swiping down closes it, as in Music.
             .sheet(isPresented: Binding(get: { store.music.presentsPlayer }, set: { store.music.presentsPlayer = $0 })) { MusicNowPlayingScreen() }
@@ -263,7 +290,9 @@ struct RootView: View {
     /// viewer can still get back to it. Tap to reopen full screen; ✕ stops playback. Leaving the app
     /// here carries on in Picture in Picture (the inline layer's controller starts it automatically).
     @ViewBuilder private var videoMiniPlayer: some View {
-        if let channel = store.playing, !store.playsInWatchPage(channel), !store.presentingPlayer {
+        // [mi3s] 二开：只认「用户在视频控件里按了缩成小窗」。原来只判断「不在观看页」，
+        // 于是折叠 / 展开 / 换向 / 切页面都会把小窗拱出来。
+        if let channel = store.playing, store.floatsInMiniPlayer(channel), !store.presentingPlayer {
             GeometryReader { geo in
                 // YouTube-style in-app player: sized to the screen, pinch-to-resize and draggable to
                 // any corner. Landscape gets a wider picture; portrait a bit over half the width.
@@ -335,7 +364,19 @@ struct RootView: View {
                 .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.1)) }
                 .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .onTapGesture { store.presentingPlayer = true }
+                .onTapGesture {
+                    // [mi3s] 二开：点小窗回到 **One 选集页**，而不是旧全屏播放器。
+                    // 原来无条件 `presentingPlayer = true`，于是从皮肤页缩成小窗再点回来，
+                    // 皮肤就丢了（换成了上游播放器）。现在按目录把那一页重新压进当前分区栈；
+                    // 目录里查不到（云文件 / 直播之类没有详情页）时才退回旧播放器。
+                    if let catalog = store.catalog(for: channel) {
+                        store.pendingRoute = Route {
+                            AnyView(VideoDetailView(video: catalog.video, client: catalog.client))
+                        }
+                    } else {
+                        store.presentingPlayer = true
+                    }
+                }
                 .offset(miniDrag)
                 // Drag moves it by the *delta* each frame (跟手), not the cumulative translation, which
                 // made a slow finger send it flying. Pinch resizes around 1.0.
@@ -381,15 +422,37 @@ struct RootView: View {
     @ViewBuilder private var tabView: some View {
         @Bindable var store = store
         if #available(iOS 18, tvOS 18, *) {
-            TabView(selection: $store.section) {
-                ForEach(tabs) { item in
-                    Tab(value: item) { tabPage(item) } label: { tabLabel(item) }
-                        #if os(iOS)
-                        .badge(tabBadge(item))
-                        #endif
+            // iPhone（含 Duo 展开）固定 `.tabBarOnly`，iPad 固定 `.sidebarAdaptable`。
+            //
+            // ⛔ 分支条件必须是**设备形态常量**，不能是「播放页是否打开」。
+            // 之前按 `sidebarCollapsed` 切：页面 onAppear 置 true 的瞬间 TabView
+            // 被销毁重建，内部 NavigationStack 一起没，刚 push 的选集页被 pop，
+            // onDisappear 又置回 false 再重建一次 —— 就是「闪一下又退回来」。
+            //
+            // 两种样式类型不同，不能写三元；分支本身留着，但条件永不变，
+            // SwiftUI 就不会重新生成视图身份，导航栈得以保住。
+            let _ = OneSkinProbe.log("tabView branch noSidebar=\(phoneTabsWithoutSidebar)")
+            if phoneTabsWithoutSidebar {
+                TabView(selection: $store.section) {
+                    ForEach(tabs) { item in
+                        Tab(value: item) { tabPage(item) } label: { tabLabel(item) }
+                            #if os(iOS)
+                            .badge(tabBadge(item))
+                            #endif
+                    }
                 }
+                .tabViewStyle(.tabBarOnly)
+            } else {
+                TabView(selection: $store.section) {
+                    ForEach(tabs) { item in
+                        Tab(value: item) { tabPage(item) } label: { tabLabel(item) }
+                            #if os(iOS)
+                            .badge(tabBadge(item))
+                            #endif
+                    }
+                }
+                .tabViewStyle(.sidebarAdaptable)
             }
-            .tabViewStyle(.sidebarAdaptable)
         } else {
             // tvOS 17 and iOS 17 have no Tab or sidebar: the classic tab bar, along the top on Apple TV and at the
             // bottom on iPad too.
@@ -414,7 +477,7 @@ struct RootView: View {
             }
             .environment(\.openRoute, RouteOpener { morePath.append($0) })
         } else {
-            RouteStack { content(item).tvDefaultControls().tabSafeArea(sizeClass, vertical: verticalSizeClass) }
+            RouteStack(item) { content(item).tvDefaultControls().tabSafeArea(sizeClass, vertical: verticalSizeClass) }
         }
     }
 
@@ -691,20 +754,55 @@ extension EnvironmentValues {
 
 /// A tab's stack, with its own path so pages can be pushed from code (`openRoute`).
 private struct RouteStack<Root: View>: View {
+    @Environment(Store.self) private var store
+    /// 这个栈属于哪个分区。全局请求（`store.pendingRoute`，如小窗点回来）只交给
+    /// **当前分区**的栈，否则每个分区的栈都会压一页。
+    let section: AppSection
     @State private var stack = RoutePath()
     private let root: Root
-    init(@ViewBuilder root: () -> Root) { self.root = root() }
+    init(_ section: AppSection, @ViewBuilder root: () -> Root) {
+        self.section = section
+        self.root = root()
+    }
     var body: some View {
         @Bindable var stack = stack
         NavigationStack(path: $stack.path) { root.routeDestinations() }
             .environment(\.openRoute, stack.opener)
+            .onChange(of: store.pendingRoute) { _, route in
+                guard let route, store.section == section else { return }
+                stack.opener(route)
+                store.pendingRoute = nil
+            }
     }
 }
 
 /// A stack's path, and the one `openRoute` that pushes onto it for the stack's whole life.
 @MainActor @Observable private final class RoutePath {
     var path = NavigationPath()
-    @ObservationIgnored private(set) lazy var opener = RouteOpener { [weak self] in self?.path.append($0) }
+    /// 已经在栈上的页数。用来**防止同一页被压两次**。
+    ///
+    /// 现象：详情页的控制栏在画面上出现两遍（两行「倍速 1x / 循环 / 适应 / 自动·线路1」），
+    /// 而且两套里的数据源不一致 —— 日志 `detail loaded: eps=1` 之后，
+    /// `detailColumn ... eps=0` 交替出现，右栏的「合集」行因此时有时无、
+    /// 选集按钮点不到。原因就是 `NavigationLink` 被触发两次（连点 / 手势重复识别），
+    /// 同一条路径上压了两个 `VideoDetailView`：上层那份的 `detail` 还是 nil，
+    /// 渲染出空壳；下层那份才有数据。两份叠在一起，视觉上就是控件画了两遍。
+    ///
+    /// `Route` 每次构造都带新的 UUID，`==` 判不出来，所以只能在压栈这一层按
+    /// 「是否已有压栈页」拦住第二次。
+    @ObservationIgnored private(set) lazy var opener = RouteOpener { [weak self] route in
+        guard let self else { return }
+        // 已经有页在栈上就不再压：翻页一律走 path 自身的替换语义，
+        // 而不是把新页盖在旧页上面（那会留下一个数据未加载的空壳）。
+        //
+        // ⛔ 用 `path.count` 判，**不要自己维护计数器**。
+        // 曾经写过 `var depth = 0` + `depth += 1`，配一个 `popped()` 打算在出栈时减回去 ——
+        // 但 `popped()` 没有任何调用点（忘了接），`depth` 一旦变 1 就永不归零，
+        // 后果比原 bug 更重：**从详情页退回列表后，再也打不开任何详情页**。
+        // `NavigationPath` 自己就知道栈里有几页，直接读它，天然自洽、不会漏减。
+        guard path.count == 0 else { return }
+        path.append(route)
+    }
 }
 
 /// Pushes a page onto a stack's path (`openRoute`). An object rather than a closure: SwiftUI can't compare closures,
@@ -756,14 +854,30 @@ extension View {
                 // ScrollView's last row scrolls clear of the capsule; the reserve is transparent, so the
                 // content still slides under the glass and reads through it rather than stopping at a hard
                 // edge.
-                safeAreaPadding(.bottom, 40)
-                .overlay(alignment: .bottom) {
-                    LinearGradient(stops: [.init(color: .clear, location: 0),
-                                           .init(color: Color(.systemBackground), location: 1)],
-                                   startPoint: .top, endPoint: .bottom)
-                        .frame(height: 80)
-                        .allowsHitTesting(false)
-                        .ignoresSafeArea(edges: .bottom)
+                //
+                // [mi3s] 二开：OneSkin 皮肤开着时**不要**这条白色渐隐。渐隐用的是
+                // `Color(.systemBackground)`（浅色模式 RGB 240），竖屏播放页底部 80pt
+                // 的系统白渐变压在 One 的深色海报底上 —— 用户报的「竖屏底部白色
+                // 渐隐图层」。皮肤自带整页海报取色底（OneSkinBackdropLayer），
+                // 它需要的正是「底部渐近黑」，这条浅色渐变与它直接冲突。
+                // 皮肤状态是全局 UserDefaults 开关，这里直读即可（不引入环境依赖）。
+                // ⛔ 默认值语义：AppStorage(wrappedValue: true) 在键**从未写过**时也是
+                // true，而 UserDefaults.bool(forKey:) 读未写入键返回 false —— 两个
+                // 默认值不一致会让「全新安装 + 从没进过设置页」的用户读出 false，
+                // 白渐隐照样挂回来。必须用 object(forKey:) 判「写过没」。
+                let skinOn = (UserDefaults.standard.object(forKey: "oneSkinEnabled") as? Bool) ?? true
+                if skinOn {
+                    safeAreaPadding(.bottom, 40)
+                } else {
+                    safeAreaPadding(.bottom, 40)
+                    .overlay(alignment: .bottom) {
+                        LinearGradient(stops: [.init(color: .clear, location: 0),
+                                               .init(color: Color(.systemBackground), location: 1)],
+                                       startPoint: .top, endPoint: .bottom)
+                            .frame(height: 80)
+                            .allowsHitTesting(false)
+                            .ignoresSafeArea(edges: .bottom)
+                    }
                 }
             } else {
                 // compact × compact (the iPhone Duo's folded *outer* display held sideways) is left alone:
@@ -827,3 +941,46 @@ private struct MacRouteDestinations: ViewModifier {
 }
 #endif
 
+// ===== 上游 225 提交新增：从页面标题打开分区的三个符号 =====
+struct SectionPage: View {
+    let section: AppSection
+    var body: some View {
+        switch section {
+        case .home: HomeView()
+        case .discover: DiscoverView()
+        case .search: GlobalSearchView()
+        case .live: LiveView()
+        case .music: MusicView()
+        case .manga: MangaView()
+        case .sites: SitesView()
+        case .files: CloudFilesView()
+        case .favorites: FavoritesView()
+        case .downloads: DownloadsView()
+        case .history: PlaybackHistoryView()
+        case .settings: SettingsView()
+        case .messages: MessagesView()
+        case .nowPlaying, .more: EmptyView()
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// The sections the phone's tab bar leaves to More. Empty where every section has a tab or a sidebar row.
+    @Entry var sectionsInMore: [AppSection] = []
+}
+
+/// Opens a section from a heading on a page, such as Watch Now's "Continue Watching ›". A section with a tab of its own is
+/// selected. One the phone keeps in More is pushed onto the page's own stack, so Back returns to the page: selecting it
+/// moved the app to the More tab with the section on top, and Back from there landed on More's list (#700).
+@MainActor struct SectionOpener: DynamicProperty {
+    @Environment(Store.self) private var store
+    @Environment(\.openRoute) private var openRoute
+    @Environment(\.sectionsInMore) private var inMore
+    func callAsFunction(_ section: AppSection) {
+        if inMore.contains(section), let openRoute {
+            openRoute(Route { AnyView(SectionPage(section: section).tvDefaultControls()) })
+        } else {
+            store.section = section
+        }
+    }
+}

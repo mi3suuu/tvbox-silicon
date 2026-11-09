@@ -1973,3 +1973,8 @@
 "This source is hidden. Unlock the Privacy Vault to browse it." = "This source is hidden. Unlock the Privacy Vault to browse it.";
 "This source is hidden. Unlock the Privacy Vault to use it." = "This source is hidden. Unlock the Privacy Vault to use it.";
 "This title is hidden. Unlock the Privacy Vault to play it." = "This title is hidden. Unlock the Privacy Vault to play it.";
+
+// MARK: - App Language
+"App Language" = "App Language";
+"Follow System" = "Follow System";
+"The app language is independent of your device language and applies immediately." = "The app language is independent of your device language and applies immediately.";

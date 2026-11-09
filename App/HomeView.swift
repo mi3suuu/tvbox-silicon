@@ -3,6 +3,7 @@ import TVCore
 
 struct HomeView: View {
     @Environment(Store.self) private var store
+    private var openSection = SectionOpener()
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
@@ -153,14 +154,11 @@ struct HomeView: View {
 
     private func placeholders(_ config: Subscription) -> some View {
         VStack(alignment: .leading, spacing: Layout.sectionSpacing) {
-            if showsUpNext, !upNextEntries.isEmpty {
-                loadingSection(HomeSection.upNext.title, action: { store.section = .history }) { cardRow }
-            }
-            if showsContinueWatching, !store.visibleHistory.isEmpty {
-                loadingSection(HomeSection.continueWatching.title, action: { store.section = .history }) { cardRow }
+            if showsContinueWatching, !store.playbackHistory.entries.isEmpty {
+                loadingSection(HomeSection.continueWatching.title, action: { openSection(.history) }) { cardRow }
             }
             if showsPinnedSources, !store.pinnedSources.isEmpty {
-                loadingSection(HomeSection.pinnedSources.title, action: { store.section = .sites }) { cardRow }
+                loadingSection(HomeSection.pinnedSources.title, action: { openSection(.sites) }) { cardRow }
             }
             if showsRecommendations {
                 VStack(alignment: .leading, spacing: 16) {
@@ -170,11 +168,11 @@ struct HomeView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(L10n.text("Loading…"))
             }
-            if showsFavorites, !store.visibleFavorites.isEmpty {
-                loadingSection(HomeSection.favorites.title, action: { store.section = .favorites }) { cardRow }
+            if showsFavorites, !store.favorites.items.isEmpty {
+                loadingSection(HomeSection.favorites.title, action: { openSection(.favorites) }) { cardRow }
             }
             if showsLiveTV, !config.lives.isEmpty {
-                loadingSection(HomeSection.liveTV.title, action: { store.section = .live }) { ChannelSkeletonGrid(count: 3) }
+                loadingSection(HomeSection.liveTV.title, action: { openSection(.live) }) { ChannelSkeletonGrid(count: 3) }
             }
         }
     }
@@ -261,7 +259,7 @@ struct HomeView: View {
                 }
                 #endif
             }
-            .controlSize(.large)
+            .appControlSize(.large)
             if store.importing {
                 LoadingCard { .server(URL(string: store.subscriptionAddress)?.host(),
                     title: store.importTotal > 1 ? L10n.text("Importing… %lld of %lld", store.importDone, store.importTotal) : L10n.text("Importing…")) }
@@ -311,7 +309,7 @@ struct HomeView: View {
 
     private func pinnedSources(_ config: Subscription) -> some View {
         VStack(alignment: .leading, spacing: Layout.headerSpacing) {
-            SectionHeader(title: L10n.text("Pinned Sources")) { store.section = .sites }
+            SectionHeader(title: L10n.text("Pinned Sources")) { openSection(.sites) }
             LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
                 ForEach(store.orderedSites(config).filter { store.pinnedSources.contains($0, origin: config.origin) }) { site in
                     RouteLink { SiteView(site: site, origin: config.origin, jarURL: config.spiderURL) } label: { SiteCard(site: site, marksPinned: false) }
@@ -324,7 +322,7 @@ struct HomeView: View {
 
     private var continueWatching: some View {
         VStack(alignment: .leading, spacing: Layout.headerSpacing) {
-            SectionHeader(title: L10n.text("Continue Watching")) { store.section = .history }
+            SectionHeader(title: L10n.text("Continue Watching")) { openSection(.history) }
             ChipRow {
                 HStack(spacing: Layout.cardSpacing) {
                     ForEach(store.visibleHistory.prefix(12)) { HistoryCard(entry: $0) }
@@ -335,7 +333,7 @@ struct HomeView: View {
 
     private var favorites: some View {
         VStack(alignment: .leading, spacing: Layout.headerSpacing) {
-            SectionHeader(title: L10n.text("Favorites")) { store.section = .favorites }
+            SectionHeader(title: L10n.text("Favorites")) { openSection(.favorites) }
             ChipRow {
                 HStack(spacing: Layout.cardSpacing) {
                     ForEach(Array(store.visibleFavorites.prefix(12))) { item in
@@ -348,7 +346,7 @@ struct HomeView: View {
 
     private func playlists(_ config: Subscription) -> some View {
         VStack(alignment: .leading, spacing: Layout.headerSpacing) {
-            SectionHeader(title: L10n.text("Live TV")) { store.section = .live }
+            SectionHeader(title: L10n.text("Live TV")) { openSection(.live) }
             // Every platform, then one row of playlists.
             LiveSourceGrid(sources: config.lives.filter(\.isBuiltIn) + config.lives.filter { !$0.isBuiltIn }.prefix(3), titled: false)
         }
@@ -636,13 +634,25 @@ enum HomeSection: String, CaseIterable, Identifiable {
     }
 }
 
-/// Settings → Watch Now: which sections the page shows.
+/// Settings → Watch Now: which sections the page shows, and whether history names a file's size and quality.
 struct WatchNowSettingsView: View {
+    @AppStorage(HistoryFileDetails.key) private var showsFileDetails = false
     var body: some View {
         SettingsPage(title: L10n.text("Watch Now"), symbol: AppSection.home.icon) {
             SettingsGroup(title: L10n.text("Show on Watch Now"),
                           footer: L10n.text("A section you switch off only leaves Watch Now: Playback History, Favorites, Sources and Live TV still have everything.")) {
                 ForEach(HomeSection.available) { HomeSectionToggle(section: $0) }
+            }
+            SettingsGroup(title: L10n.text("Playback History"),
+                          footer: L10n.text("Playback History and Continue Watching show the file's size and picture quality beside the episode number, read from the file's name. A name without them shows the episode alone.")) {
+                #if os(tvOS)
+                TVSettingsToggle(title: L10n.text("Show File Size and Quality"), isOn: $showsFileDetails)
+                #else
+                Toggle(isOn: $showsFileDetails) {
+                    FormLabel(symbol: "doc.text.fill", tint: .blue, title: L10n.text("Show File Size and Quality"))
+                }
+                .settingsSwitch()
+                #endif
             }
         }
     }

@@ -107,7 +107,7 @@ import VideoToolbox
             Stream(index: 0, kind: .video, codec: "h264", width: 1920, height: 1080, frameRate: 23.976),
             Stream(index: 1, kind: .audio, codec: "aac", profile: 1, channels: 2, language: "chi", isDefault: true),
             Stream(index: 2, kind: .audio, codec: "eac3", channels: 6, language: "eng", title: "English"),
-            Stream(index: 3, kind: .audio, codec: "eac3", channels: 6, language: "eng", title: "English"),
+            Stream(index: 3, kind: .audio, codec: "eac3", profile: 30, channels: 6, language: "eng", title: "English"),
             Stream(index: 4, kind: .subtitle, codec: "ass", language: "chi", title: "简体", isForced: true, isText: true),
         ]
         let plan = try #require(RemuxPlan.make(streams: streams, keyframes: [0, 5_000_000, 10_000_000], start: 0, duration: 12_000_000, size: 9_000_000, device: .init()))
@@ -116,6 +116,10 @@ import VideoToolbox
         #expect(master.contains(#"LANGUAGE="zh",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2",URI="1.m3u8""#))
         #expect(master.contains(#"NAME="English",LANGUAGE="en",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6",URI="2.m3u8""#))
         #expect(master.contains(#"NAME="English (2)""#))
+        // Dolby Atmos (E-AC-3 JOC) is "16/JOC", as Apple's HLS authoring spec has it.
+        #expect(master.contains(#"DEFAULT=NO,AUTOSELECT=YES,CHANNELS="16/JOC",URI="3.m3u8""#))
+        #expect(RemuxPlan.displayName(.init(stream: Stream(index: 3, kind: .audio, codec: "eac3", profile: 30, channels: 6))) == "E-AC-3 5.1 Atmos")
+        #expect(RemuxPlan.displayName(.init(stream: Stream(index: 2, kind: .audio, codec: "eac3", channels: 6))) == "E-AC-3 5.1")
         #expect(master.contains(#"TYPE=SUBTITLES,GROUP-ID="subtitles",NAME="简体",LANGUAGE="zh",DEFAULT=NO,AUTOSELECT=YES,FORCED=YES,URI="4.m3u8""#))
         #expect(master.contains(#"CODECS="avc1.640028,mp4a.40.2,ec-3",RESOLUTION=1920x1080,FRAME-RATE=23.976,VIDEO-RANGE=SDR,AUDIO="audio",SUBTITLES="subtitles""#))
         #expect(master.contains("AVERAGE-BANDWIDTH=6000000"))
@@ -201,12 +205,18 @@ import VideoToolbox
         #expect(master.contains(#"TYPE=SUBTITLES,GROUP-ID="subtitles",NAME="末世行者.chs.srt",LANGUAGE="zh-Hans",DEFAULT=YES"#))
         #expect(master.contains(#"NAME="末世行者.英文.srt",DEFAULT=NO"#) && master.contains(#"SUBTITLES="subtitles""#))
         #expect(plan.mediaPlaylist(track: 2).contains("2-0.vtt"))
-        // Each cue goes to the segment it starts in; the first and last take what lies outside the picture.
+        // Each cue goes to every segment it shows in (3.9 s runs into the second); the first and last take what lies
+        // outside the picture.
         let cues = [cue(-2_000_000), cue(3_900_000), cue(4_000_000), cue(11_000_000), cue(20_000_000)]
         #expect(plan.segments == 3)
         #expect(plan.cues(cues, segment: 0).map(\.start) == [-2_000_000, 3_900_000])
-        #expect(plan.cues(cues, segment: 1).map(\.start) == [4_000_000])
+        #expect(plan.cues(cues, segment: 1).map(\.start) == [3_900_000, 4_000_000])
         #expect(plan.cues(cues, segment: 2).map(\.start) == [11_000_000, 20_000_000])
+        // A long line from 2 s to 13 s shows in all three, whole.
+        let long = RemuxPlan.Cue(start: 2_000_000, end: 13_000_000, text: "long")
+        #expect((0..<3).allSatisfy { plan.cues([long], segment: $0) == [long] })
+        // One ending exactly where a segment begins isn't in it.
+        #expect(plan.cues([RemuxPlan.Cue(start: 3_000_000, end: 4_000_000, text: "x")], segment: 1).isEmpty)
     }
 
     // MARK: - Playing through FFmpeg
@@ -253,6 +263,31 @@ import VideoToolbox
         #expect(later.contains("Second") && !later.contains("Hello"))
         let played = await ready(url)
         #expect(played.status == .readyToPlay && abs(played.duration - 8) < 0.2)
+    }
+
+    /// A line of the file's own subtitles that runs from one segment into the next (0.5 s to 6 s here) shows after a
+    /// seek straight into the second: the segment carries it with its whole timing (#576).
+    @Test func embeddedLinesCrossingSegmentsSurviveASeek() async throws {
+        let url = try await Remux.open(try Remux.fileSource(fixture("remux-crossing.mkv")))
+        defer { Remux.stop(url) }
+        let folder = url.deletingLastPathComponent()
+        // The second segment first, as a seek asks for it: the first was never made.
+        let later = String(decoding: try await fetch(folder.appending(path: "3-1.vtt")), as: UTF8.self)
+        #expect(later.contains("00:00:00.500 --> 00:00:06.000\n<i>Hello</i> &amp; welcome"), "\(later)")
+        #expect(later.contains("Second"))
+        let first = String(decoding: try await fetch(folder.appending(path: "3-0.vtt")), as: UTF8.self)
+        #expect(first.contains("00:00:00.500 --> 00:00:06.000") && !first.contains("Second"))
+        // The picture is untouched by the look back.
+        for file in ["0-1.m4s", "0-0.m4s"] {
+            let segment = try await fetch(folder.appending(path: file))
+            #expect(segment.count > 500 && segment.subdata(in: 4..<8) == Data("moof".utf8), "\(file)")
+        }
+    }
+
+    @Test func cuesReadTwiceCountOnce() {
+        let a = RemuxPlan.Cue(start: 1, end: 2, text: "a"), b = RemuxPlan.Cue(start: 3, end: 9, text: "b")
+        #expect(RemuxPlan.merged([b], [a, b]) == [a, b])
+        #expect(RemuxPlan.merged([a], []) == [a])
     }
 
     /// iOS and tvOS take back a suspended app's listening sockets, and the address AVPlayer holds then refuses.
@@ -578,6 +613,15 @@ import VideoToolbox
         let played = await picture(master)
         #expect(played.status == .readyToPlay && abs(played.duration - 4) < 0.2)
         #expect(played.size == CGSize(width: 320, height: 180) && played.video)
+    }
+
+    /// 4:2:2 HEVC in MPEG-TS decodes on a Mac but not on an iPhone; copied as it is, the iPhone would play its sound
+    /// alone (#585). It is converted to 4:2:0 Main10 (`RemuxPlan.videoTrack`), which every device decodes.
+    @Test func hevcTheDeviceCantDecodeIsConverted() async throws {
+        let master = try await HLSRemux.open(try hevcTransportStream(named: "remux-hevc-422"), headers: [:], network: RangeServer.session)
+        defer { Remux.stop(master) }
+        let text = String(decoding: try await fetch(master), as: UTF8.self)
+        #expect(text.contains("CODECS=\"hvc1.2.") && text.contains("RESOLUTION=320x180"), "\(text)")
     }
 
     /// A live channel's HEVC in MPEG-TS (an IPTV channel in 4K, #361). The repackaged playlist stays live and follows

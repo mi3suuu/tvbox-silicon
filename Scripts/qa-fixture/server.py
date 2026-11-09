@@ -1,6 +1,9 @@
 import http.server, socketserver, json, os, re
-PORT=8899; BASE=f"http://127.0.0.1:{PORT}"
-SUB={"sites":[{"key":"qa","name":"QA Fixture","type":1,"api":f"{BASE}/api","searchable":1,"quickSearch":1}],
+PORT=8899; BASE=f"http://192.168.64.1:{PORT}"
+SUB={"sites":[{"key":"qa","name":"QA Fixture","type":1,"api":f"{BASE}/api","searchable":1,"quickSearch":1},
+                # 24 集 × 2 线路：选集抽屉要能看出分页、筛选与高度档位是否正常，
+                # 单集片源（上面的 `qa`）根本撑不开列表。
+                {"key":"qa2","name":"QA Many","type":1,"api":f"{BASE}/api2","searchable":1,"quickSearch":1}],
      "lives":[{"name":"QA Live","type":0,"url":f"{BASE}/lives.json","playerType":1}]}
 LIVES={"lives":[{"name":"QA Channel","group":"QA","urls":[{"name":"HD","url":f"{BASE}/clip.mp4"}]}]}
 HOME={"class":[{"type_id":"movie","type_name":"Movies"}],
@@ -11,11 +14,21 @@ LIST={"page":1,"pagecount":1,"list":[{"vod_id":"1","vod_name":"QA Fixture Movie"
 DETAIL={"list":[{
   "vod_id":"1","vod_name":"QA Fixture Movie",
   "vod_pic":f"{BASE}/poster.jpg","vod_year":"2024","vod_content":"Fixture.",
-  # 两条线路：qa 是 16:9，wide 是 2.35:1 —— 验证「按真实比例定高」
-  "vod_play_from":"qa$$$wide",
-  "vod_play_url":f"第1集${BASE}/clip.mp4#第2集${BASE}/clip.mp4$$$第1集${BASE}/wide.mp4",
-  # 字幕（TVBox 用 vod_sub / 或 ext 里的 sub）
-  
+  # 单集竖屏(9:16)：activeEpisodes.count==1 触发 VideoDetailView 自动播放，
+  # 直接验证 aspectRatio 修复后「竖屏片源默认铺满、无需点填充」。
+  # 三条线路：验证「多线路各自测延迟 + 切换」。
+  # 三条都用同一个文件，延迟差异来自线路名与串行/并发顺序，不伪造毫秒数。
+  "vod_play_from":"lineA$$$lineB$$$lineC",
+  "vod_play_url":f"第1集${BASE}/portrait.mp4$$$第1集${BASE}/portrait.mp4$$$第1集${BASE}/clip.mp4",
+}]}
+
+DETAIL_MANY={"list":[{
+  "vod_id":"1","vod_name":"QA Many Episodes",
+  "vod_pic":f"{BASE}/poster.jpg","vod_year":"2024","vod_content":"Fixture: 24 集，用于选集抽屉回归。",
+  "vod_play_from":"lineA$$$lineB",
+  # TVBox 规则：源与源之间用 $$$，同一个源里的集用 # 分隔。
+  "vod_play_url":"#".join(f"第{n}集${BASE}/clip.mp4" for n in range(1,25)) + "$$$"
+                 + "#".join(f"第{n}集${BASE}/clip.mp4" for n in range(1,25)),
 }]}
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -53,6 +66,13 @@ class H(http.server.BaseHTTPRequestHandler):
             body=b"var rule={};"
             self.send_response(200); self.send_header("Content-Type","application/javascript")
             self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if p.rstrip("/")=="/api2":
+            q=self.path.partition("?")[2]
+            if "ac=detail" in q: return self._j(DETAIL_MANY)
+            if "ac=list" in q or "t=" in q: return self._j(LIST)
+            if "play=" in q:
+                return self._j({"parse":0,"playUrl":"","url":f"{BASE}/clip.mp4"})
+            return self._j(HOME)
         if p.rstrip("/")=="/api":
             q=self.path.partition("?")[2]
             if "ac=detail" in q: return self._j(DETAIL)
@@ -66,4 +86,4 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
 socketserver.TCPServer.allow_reuse_address=True
-socketserver.ThreadingTCPServer(("127.0.0.1",PORT),H).serve_forever()
+socketserver.ThreadingTCPServer(("0.0.0.0",PORT),H).serve_forever()

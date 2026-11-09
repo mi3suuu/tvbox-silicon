@@ -288,6 +288,8 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         applying = Task { [weak self] in
             var criteria = wanted
             if let asset { criteria = try? await asset.load(.preferredDisplayCriteria) }
+            // The HDR mode the player switched to before the item opened (`HDRDisplay`) stays until it stops.
+            if criteria == nil, HDRDisplay.requested != nil { return }
             // The controller joins its window a moment after it is made.
             for _ in 0..<20 {
                 guard !Task.isCancelled, let self else { return }
@@ -1008,13 +1010,20 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
     /// OS 27 reports the interpolator's size limit. OS 26 has no query, and above 1280×720 its sessions
     /// start and then fail every frame (reported by other developers), so stay within that there.
     private static func interpolationFits(width: Int, height: Int) -> Bool {
-        if #available(macOS 27, iOS 27, tvOS 27, *) {
-            guard let side = VTLowLatencyFrameInterpolationConfiguration.maximumDimension(forSpatialScaleFactor: 1),
-                  let pixels = VTLowLatencyFrameInterpolationConfiguration.maximumPixelCount(forSpatialScaleFactor: 1) else { return false }
-            return max(width, height) <= side && width * height <= pixels
-        }
-        return max(width, height) <= 1280 && width * height <= 1280 * 720
+        guard let limit = interpolationLimit else { return max(width, height) <= 1280 && width * height <= 1280 * 720 }
+        return max(width, height) <= limit.side && width * height <= limit.pixels
     }
+
+    /// The SDK marks the size query 27.0, but iOS 27.0 lacks its Swift wrappers: calling them jumped to address 0
+    /// (crash report e8d4f2a2b133). The Objective-C methods are asked for by selector instead, once; 0 means unsupported.
+    private static let interpolationLimit: (side: Int, pixels: Int)? = {
+        guard #available(macOS 27, iOS 27, tvOS 27, *) else { return nil }
+        let type = VTLowLatencyFrameInterpolationConfiguration.self
+        guard type.responds(to: #selector(VTLowLatencyFrameInterpolationConfiguration.__maximumDimension(forSpatialScaleFactor:))),
+              type.responds(to: #selector(VTLowLatencyFrameInterpolationConfiguration.__maximumPixelCount(forSpatialScaleFactor:)))
+        else { return nil }
+        return (type.__maximumDimension(forSpatialScaleFactor: 1), type.__maximumPixelCount(forSpatialScaleFactor: 1))
+    }()
 
     private static func isHDR(_ buffer: CVPixelBuffer) -> Bool {
         let attachments = CVBufferCopyAttachments(buffer, .shouldPropagate) as? [String: Any]

@@ -43,7 +43,11 @@ struct GlobalSearchView: View {
         let shown = model.matches.filter { model.selectedSource == nil || $0.id == model.selectedSource }
         let sites = Dictionary(shown.map { ($0.id, $0.site) }) { first, _ in first }
         var seen = Set<String>()
-        let first = shown.flatMap { result in (result.page?.videos ?? []).map { SearchPoster(site: result.site, video: $0) } }
+        // The titles that are what was searched for lead (#374); the rest follow, none hidden. Later pages still only
+        // add at the end, so the grid doesn't move under a scrolling thumb.
+        let first = TitleMatch.ordered(
+            shown.flatMap { result in (result.page?.videos ?? []).map { SearchPoster(site: result.site, video: $0) } },
+            keyword: model.keyword, title: { $0.video.name })
         let later = model.batches.flatMap { batch in sites[batch.source].map { site in batch.videos.map { SearchPoster(site: site, video: $0) } } ?? [] }
         return (first + later).filter { seen.insert($0.id).inserted }
     }
@@ -327,7 +331,7 @@ struct GlobalSearchView: View {
         // A spinner has no text baseline, so it centers on the row; only the two labels share a baseline.
         HStack(alignment: .center, spacing: 12) {
             #if !os(iOS)
-            if model.busy { ProgressView().controlSize(.small) }
+            if model.busy { ProgressView().appControlSize(.small) }
             #endif
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(L10n.text("%lld results", model.videoCount)).font(.headline)
@@ -891,7 +895,7 @@ struct RecommendationsView: View {
                 Button { forceRefresh = true; revision += 1 } label: {
                     ZStack {
                         if model.busy {
-                            ProgressView().controlSize(.small)
+                            ProgressView().appControlSize(.small)
                         } else {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 15, weight: .medium))
@@ -1291,7 +1295,7 @@ struct RecommendationsView: View {
                     }
                     .frame(maxWidth: .infinity).padding(.vertical, 16)
                 } else if browser.loadingMore {
-                    ProgressView().controlSize(.large)
+                    ProgressView().appControlSize(.large)
                         .frame(maxWidth: .infinity).padding(.vertical, 24)
                         .accessibilityLabel(L10n.text("Loading…"))
                 } else if browser.hasMore {

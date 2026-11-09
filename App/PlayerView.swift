@@ -4,6 +4,21 @@ import TVCore
 
 struct PlaybackView: View {
     let channel: Channel
+    /// ⛔ 选集页（One 皮肤）专用：只要 `onAppear` 产生并启动 session，
+    /// **不渲染任何画面层**。画面由 `OneSkinFixedPicture` 的 AVPlayerLayer 自绘。
+    ///
+    /// 挂完整播放层会在离屏 8×8 视图里再创建一个 AVPlayerViewController
+    /// （通用播放器样式改动后的载体），和选集页的 AVPlayerLayer 抢同一个
+    /// AVPlayer；竖屏片源还会被 `pictureBox` 按片源比例压成极窄一条，
+    /// AVKit 随即停掉视频输出 —— 表现就是「有些资源点进去看不了」。
+    var stageOnly: Bool = false
+    /// 选集页（One 皮肤）用：把本视图**实际持有的**会话交回调用方。
+    /// 换集时 `PlaybackView` 的 `@State session` 不会跟着 init 参数更新
+    ///（SwiftUI 在视图身份不变时保留 @State），而是由 `.onChange(of: channel)`
+    /// 在同一个 AVPlayer 上换掉 currentItem。画面层必须绑到这个交回的会话，
+    /// 否则每集重新问 `Store` 取会拿到一个从未加载过的新 player —— 有声音没画面。
+    /// 纯回调，不参与任何画面渲染，也不改播放器样式。
+    var onStageSession: ((PlaybackSession) -> Void)? = nil
     #if os(iOS)
     /// Set when the player is the top of an iPhone watch page rather than a screen of its own.
     var watch: WatchPlayback? = nil
@@ -40,9 +55,12 @@ struct PlaybackView: View {
     #endif
 
     #if os(iOS)
-    init(channel: Channel, session: PlaybackSession? = nil, watch: WatchPlayback? = nil) {
+    init(channel: Channel, session: PlaybackSession? = nil, watch: WatchPlayback? = nil, stageOnly: Bool = false,
+         onStageSession: ((PlaybackSession) -> Void)? = nil) {
         self.channel = channel
         self.watch = watch
+        self.stageOnly = stageOnly
+        self.onStageSession = onStageSession
         if let session {
             _session = State(initialValue: session)
             _ownsSession = State(initialValue: false)
@@ -52,8 +70,11 @@ struct PlaybackView: View {
         }
     }
     #else
-    init(channel: Channel, session: PlaybackSession? = nil) {
+    init(channel: Channel, session: PlaybackSession? = nil, stageOnly: Bool = false,
+         onStageSession: ((PlaybackSession) -> Void)? = nil) {
         self.channel = channel
+        self.stageOnly = stageOnly
+        self.onStageSession = onStageSession
         if let session {
             _session = State(initialValue: session)
             _ownsSession = State(initialValue: false)
@@ -106,6 +127,8 @@ struct PlaybackView: View {
                     .transition(.opacity)
             }
             #elseif os(iOS)
+            // 选集页只借 onAppear 启动 session，画面不在这里画。
+            if !stageOnly {
             MobilePlayerView(channel: channel, session: session, showsDanmaku: $showsDanmaku, upscalesVideo: $upscalesVideo, smoothsVideo: $smoothsVideo,
                              waiting: waitContent, chromeVisible: chromeVisible, toggleChrome: toggleChrome, poke: poke, hold: holdChrome,
                              close: exit, layout: playerLayout, immersive: watch?.immersive ?? false,
@@ -113,6 +136,7 @@ struct PlaybackView: View {
                              openEpisodes: { watch?.openEpisodes() ?? { store.showsEpisodes = true }() },
                              miniplayer: miniplayer,
                              aspect: { watch?.aspect($0) })
+            }
             #else
             NativePlayerView(player: session.player, comments: session.danmaku, showsDanmaku: $showsDanmaku, opacity: session.danmakuOpacity, revision: session.danmakuRevision).ignoresSafeArea()
             chrome.opacity(chromeVisible ? 1 : 0).allowsHitTesting(chromeVisible)
@@ -178,6 +202,8 @@ struct PlaybackView: View {
             // don't start it again, which would drop back to the beginning.
             if !session.isPlaying(channel) { startCatalogPlayback(session, channel: channel, store: store) }
             showOnStart()
+            // 把真正持有并播放的会话交给选集页画面层（见 onStageSession 注释）。
+            onStageSession?(session)
             #if os(iOS)
             ExternalDisplay.shared.attach(session.player, store: store)
             #endif
@@ -451,6 +477,9 @@ struct PlaybackView: View {
     /// Unlike `exit`, this leaves the watch page even from Full Screen (its own toggle button still
     /// shrinks back to the page), and closes the full-screen cover when there is no watch page.
     private func miniplayer() {
+        // [mi3s] 二开：这是小窗**唯一**的正当入口 —— 置了手动开关，小窗才允许浮出来。
+        // 折叠 / 旋转 / 切页面都不写这个值，所以它们不会触发小窗。
+        store.miniPlayerActive = true
         guard let watch else { return dismiss() }
         watch.leave()
     }
@@ -766,15 +795,45 @@ private struct PlayerSurface: NSViewRepresentable {
         }
     }
 
-    static func set(landscape: Bool) {
+    /// 进出全屏。**全屏的方向只由它决定**，不再掺杂页面习惯（`holdsPortrait`）。
+    ///
+    /// 这是「全屏机制没有独立做好」的正面修法：
+    ///   · 进全屏 → 打开 `fullScreenOwnsOrientation`，此后一切 `holdPortrait` 写入被丢弃；
+    ///     mask 直接取请求的方向，`holdsPortrait` 不参与计算。
+    ///   · 退全屏 → 关掉闸门，并把方向交还给页面习惯（`holdsPortrait` 此刻反映
+    ///     的仍是进全屏之前的页面规则，因为全屏期间没人能改写它）。
+    static func set(landscape: Bool, fullScreen: Bool? = nil) {
         guard let scene = UIApplication.shared.appWindowScene else { return }
+        // 调用方显式告知这是全屏切换时，先同步闸门状态。
+        if let fullScreen { fullScreenOwnsOrientation = fullScreen }
+
         // A locked player stays put whatever the rotate button or a full-screen toggle asks.
-        if !isLocked { mask = landscape ? .landscape : holdsPortrait ? .portrait : .allButUpsideDown }
+        if !isLocked {
+            // ★ 全屏态：**不看 `holdsPortrait`**。
+            // 之前这里写的是 `landscape ? .landscape : holdsPortrait ? .portrait : .allButUpsideDown`
+            // —— 于是「竖屏点全屏」会先请求横屏，然后被 holdsPortrait 拉回竖屏。
+            if fullScreenOwnsOrientation {
+                mask = landscape ? .landscape : .allButUpsideDown
+            } else {
+                mask = landscape ? .landscape : holdsPortrait ? .portrait : .allButUpsideDown
+            }
+        }
         // A lock must also stop the geometry request that actually turns the screen: `requestGeometryUpdate`
         // asks the scene to rotate to a specific orientation and does not consult `mask`, so passing the
         // requested `landscape` here turned the phone even while locked (the gyroscope "lock" that let the
         // film flip when the viewer changed their grip). While locked, keep the orientation it was pinned in.
-        apply(mask, scene: scene, geometry: isLocked ? mask : (landscape ? .landscape : .portrait))
+        //
+        // 全屏态下即使 `landscape == false` 也不强制回到 `.portrait`：
+        // 退全屏时页面自己会按 `holdsPortrait` 重新决定，这里强行 portrait 会跟它打架。
+        let geometry: UIInterfaceOrientationMask
+        if isLocked {
+            geometry = mask
+        } else if fullScreenOwnsOrientation {
+            geometry = landscape ? .landscape : .allButUpsideDown
+        } else {
+            geometry = landscape ? .landscape : .portrait
+        }
+        apply(mask, scene: scene, geometry: geometry)
     }
 
     /// Pins the app to the viewer's current orientation; the gyroscope can no longer turn the picture.
@@ -883,8 +942,30 @@ private struct PlayerSurface: NSViewRepresentable {
         }
     }
 
+    /// Full Screen 进行中：**任何人都不得改写方向锁**。
+    ///
+    /// 这一步修的是「竖屏点全屏 → 试一下横屏 → 又弹回竖屏」。
+    /// 链条：全屏按钮 → `set(landscape: true)` → `apply(.landscape)` 开始转 →
+    /// 转屏过程中 `duoExpanded` / sizeClass 变化 → `VideoDetailView` 的
+    /// `.onChange(of: duoExpanded)` 里又调 `holdPortrait(!expanded)` →
+    /// 它内部 `apply(geometry: .portrait)` 把界面**转回去**。
+    ///
+    /// 全屏是用户显式点的，它的方向必须只由全屏按钮自己决定；
+    /// 页面「习惯竖屏」这条规则只在**非全屏**时才有意义。
+    /// 退出全屏后 `setFullScreen` 会重新走一次 `set(landscape:)`，
+    /// 那时再按页面习惯恢复，不会留下错误的锁。
+    static private(set) var fullScreenOwnsOrientation = false
+    /// 进入/退出全屏时同步闸门。退出时**不做任何方向请求** ——
+    /// 页面自己的 `holdPortrait` / `set(landscape:)` 会在下一帧按需恢复，
+    /// 这里多插一手只会又变成两套状态打架。
+    static func setFullScreenHeld(_ held: Bool) {
+        fullScreenOwnsOrientation = held
+    }
+
     /// While a watch page shows, the app stays upright (the page turns to landscape for Full Screen only).
     static func holdPortrait(_ hold: Bool) {
+        // ★ 全屏期间忽略一切「页面习惯方向」的写入（见 `fullScreenOwnsOrientation`）。
+        guard !fullScreenOwnsOrientation else { return }
         guard holdsPortrait != hold else { return }
         holdsPortrait = hold
         guard !isLocked else { return }
@@ -972,6 +1053,11 @@ private struct NativePlayerView: UIViewControllerRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = TitleSafePlayerController()
+        // [mi3s] One 皮肤把播放器塞进一个小窗口（不是全屏），
+        // 但 AVPlayerViewController 会自己接管布局、忽略父级 frame，
+        // 导致视频铺满整屏、小窗口约束失效。必须让宿主裁剪。
+        controller.view.clipsToBounds = true
+        controller.view.backgroundColor = .black
         // Decided before the controller is presented: AVKit refuses the change during playback.
         if VideoEnhancement.canSmooth, let enhancer { context.coordinator.criteria = DisplayCriteriaKeeper(controller: controller, player: player, enhancer: enhancer) }
         controller.player = player

@@ -41,7 +41,9 @@ public final class PluginSession {
             long deadline = System.currentTimeMillis() + seconds * 1000;
             stopAt.accumulateAndGet(deadline, (current, next) -> current == 0 ? next : Math.min(current, next));
         }
-        String kind = params.has("play") ? "play flag=" + params.optString("flag") : params.has("ids") ? "detail"
+        String kind = params.has("spiderAction") ? "action " + params.optString("spiderAction")
+            : params.has("spiderUI") ? "window"
+            : params.has("play") ? "play flag=" + params.optString("flag") : params.has("ids") ? "detail"
             : params.has("wd") ? "search" : params.has("t") ? "category" : "home";
         System.err.println("PLUGIN_REQUEST " + java.time.LocalTime.now().withNano(0) + " " + kind + " deadline=" + seconds + "s");
         HttpDiagnostics.beginRequest(params.has("play"), stopAt, params.optString("_folder", null));
@@ -51,6 +53,9 @@ public final class PluginSession {
     }
 
     private String performRequest(JSONObject params) throws Exception {
+        if (params.has("spiderAction")) return action(params.getString("spiderAction"));
+        // The app sends string parameters, so the event arrives as JSON text.
+        if (params.has("spiderUI")) return window(params.get("spiderUI") instanceof JSONObject event ? event : new JSONObject(params.getString("spiderUI")));
         if (params.has("play")) {
             String required = params.optString("detailID", "");
             if (!required.isEmpty() && !required.equals(detailID) && !required.equals(detailVideoID)) {
@@ -86,6 +91,44 @@ public final class PluginSession {
         return home.toString();
     }
 
+    /**
+     * Runs one of the plugin's settings (a list item with "action", as TVBox calls Spider.action). Most
+     * open the plugin's own window on the Activity; its state comes back as "ui" (PluginWindows) with the
+     * plugin's toasts as "notices", and the viewer's input goes back as spiderUI requests. When the setting
+     * shows nothing because the plugin's thread failed, "error" says why.
+     */
+    private String action(String name) throws Exception {
+        PluginErrors.install();
+        long started = System.currentTimeMillis();
+        PluginWindows.closeAll();
+        PluginWindows.settingOpen(true);
+        PluginNotices.take(); // toasts from browsing are not this setting's
+        PluginWindows.activity();
+        String result = content(() -> spider.action(name), true, false);
+        // The window often follows from the plugin's own thread (reading its settings, a request).
+        PluginWindows.await(2_500);
+        JSONObject answer;
+        try { answer = new JSONObject(result); } catch (org.json.JSONException notAnObject) { answer = new JSONObject().put("msg", result); }
+        org.json.JSONArray notices = new org.json.JSONArray(PluginNotices.take());
+        JSONObject ui = PluginWindows.state();
+        boolean silent = answer.optString("msg", "").isBlank() && notices.length() == 0 && ui.getJSONArray("windows").length() == 0 && ui.getJSONArray("links").length() == 0;
+        String error = silent ? PluginErrors.since(started) : null;
+        if (error != null) answer.put("error", error);
+        return answer.put("notices", notices).put("ui", ui).toString();
+    }
+
+    /** The viewer's input to the plugin's window ({"kind": "poll"} only reads it again), then its new state. */
+    private String window(JSONObject event) throws Exception {
+        if ("closeAll".equals(event.optString("kind"))) { PluginWindows.closeAll(); PluginWindows.settingOpen(false); }
+        else PluginWindows.handle(event);
+        if (!"poll".equals(event.optString("kind"))) {
+            // What the tap started on the plugin's threads gets a moment to show (a toast, the next window).
+            PluginWindows.settle();
+            Thread.sleep(300);
+        }
+        return new JSONObject().put("notices", new org.json.JSONArray(PluginNotices.take())).put("ui", PluginWindows.state()).toString();
+    }
+
     /** The category's filter choices (`filters`, JSON text) as the spider's `extend` map. */
     static java.util.HashMap<String, String> extend(JSONObject params) throws org.json.JSONException {
         var extend = new java.util.HashMap<String, String>();
@@ -101,12 +144,12 @@ public final class PluginSession {
 
     /** Releases this source only; a shared plugin runtime and its native guard stay loaded. */
     public void closeSource() throws Exception {
-        try { spider.destroy(); }
+        try { spider.destroy(); spider.closeHostResources(); }
         finally { if (bridge != null) bridge.close(); }
     }
 
     public void close() throws Exception {
-        try { spider.destroy(); }
+        try { spider.destroy(); spider.closeHostResources(); }
         finally {
             android.os.Looper.shutdown();
             if (bridge != null) bridge.close();

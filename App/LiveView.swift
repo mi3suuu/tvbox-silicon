@@ -24,7 +24,7 @@ struct LiveView: View {
                 #endif
             } else {
                 EmptyPage(symbol: AppSection.live.icon, title: L10n.text("Connect a Live Subscription"),
-                          message: L10n.text("Import a TVBox configuration containing live playlists in Settings first."),
+                          message: L10n.text("In Settings, add a TVBox subscription with live playlists, or an M3U or TXT live playlist by its address or from a file."),
                           action: AppSection.settings.title, actionSymbol: AppSection.settings.icon, perform: { store.section = .settings })
             }
         }
@@ -412,13 +412,20 @@ private struct TVGuideCategoryStyle: ButtonStyle {
 
 struct FavoritesView: View {
     @Environment(Store.self) private var store
-    /// Only what the viewer may see right now: vault-hidden sources are gone (and, once favourites
-    /// carry an environment, so is any other environment's). The raw `store.favorites.items` list
-    /// must never be read directly here — that is how a hidden source stayed on screen.
+    /// The kind the chips show alone, e.g. only live channels (#480); empty shows every kind.
+    @AppStorage("favoritesFilter") private var filterKind = ""
+    /// The chosen kind while there are favorites of it; else everything, so the page is never empty.
+    private var filter: FavoriteKind? {
+        FavoriteKind(rawValue: filterKind).flatMap { store.favorites.kinds.contains($0) ? $0 : nil }
+    }
+    private func shows(_ kind: FavoriteKind) -> Bool {
+        (filter == nil || filter == kind) && !store.favorites.items(kind).isEmpty
+    }
+    // [mi3s] 二开：多环境隔离下的可见收藏。上游直接用 `store.favorites.items`，
+    // 看不到「隐私保险库」与当前环境的过滤；这三个属性是本页的取数入口。
     private var visible: [FavoriteItem] { store.visibleFavorites }
     private func visible(_ kind: FavoriteKind) -> [FavoriteItem] { visible.filter { $0.kind == kind } }
     private var visibleLive: [Channel] { visible.compactMap { if case .live(let c) = $0 { c } else { nil } } }
-
     var body: some View {
         Group {
             if visible.isEmpty {
@@ -431,11 +438,12 @@ struct FavoritesView: View {
                         if let error = store.favorites.persistenceError {
                             StatusNotice(text: L10n.text("Unable to save favorites: %@", error))
                         }
-                        if !visible(.live).isEmpty { liveSection }
-                        if !visible(.video).isEmpty { filmSection }
-                        if !visible(.episode).isEmpty { episodeSection }
-                        if !visible(.music).isEmpty { musicSection }
-                        if !visible(.cloud).isEmpty { cloudSection }
+                        if store.favorites.kinds.count > 1 { filterBar }
+                        if shows(.live) { liveSection }
+                        if shows(.video) { filmSection }
+                        if shows(.episode) { episodeSection }
+                        if shows(.music) { musicSection }
+                        if shows(.cloud) { cloudSection }
                     }
                     .pageContainer()
                 }
@@ -443,6 +451,32 @@ struct FavoritesView: View {
         }
         .screenBackdrop()
         .tabTitle(L10n.text("Favorites"))
+    }
+
+    /// One chip per kind that has favorites, with the sections' own names.
+    private var filterBar: some View {
+        ChipRow {
+            GlassGroup(spacing: 8) {
+                HStack(spacing: 8) {
+                    Chip(title: L10n.text("All"), selected: filter == nil) { filterKind = "" }
+                    ForEach(store.favorites.kinds, id: \.self) { kind in
+                        Chip(title: title(kind), selected: filter == kind) { filterKind = kind.rawValue }
+                            .accessibilityIdentifier("favorites.filter.\(kind.rawValue)")
+                    }
+                }
+            }.padding(.vertical, 4)
+        }
+        .tvFocusSection()
+    }
+
+    private func title(_ kind: FavoriteKind) -> String {
+        switch kind {
+        case .live: L10n.text("Live TV")
+        case .video: L10n.text("Films")
+        case .episode: L10n.text("Saved Episodes")
+        case .music: L10n.text("Liked Songs")
+        case .cloud: L10n.text("Cloud Files")
+        }
     }
 
     private var liveSection: some View {

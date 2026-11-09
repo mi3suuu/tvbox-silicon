@@ -1974,3 +1974,8 @@
 "This source is hidden. Unlock the Privacy Vault to browse it." = "このソースは非表示です。プライバシー保管庫をロック解除して閲覧してください。";
 "This source is hidden. Unlock the Privacy Vault to use it." = "このソースは非表示です。プライバシー保管庫をロック解除して使用してください。";
 "This title is hidden. Unlock the Privacy Vault to play it." = "この項目は非表示です。プライバシー保管庫をロック解除して再生してください。";
+
+// MARK: - App Language
+"App Language" = "アプリの言語";
+"Follow System" = "システムに従う";
+"The app language is independent of your device language and applies immediately." = "アプリの言語は端末の言語設定とは独立しており、すぐに反映されます。";

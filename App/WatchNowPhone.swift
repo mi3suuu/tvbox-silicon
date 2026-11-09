@@ -6,6 +6,7 @@ import TVCore
 /// own cover, which tints the page, and every section below is a row of covers under a heading that opens all of it.
 struct WatchNowPhonePage: View {
     @Environment(Store.self) private var store
+    private var openSection = SectionOpener()
     let config: Subscription
     let sections: Set<HomeSection>
     @State private var hero = WatchNowHeroState()
@@ -50,6 +51,10 @@ struct WatchNowPhonePage: View {
                 })))
                 .scrollIndicators(.hidden)
             }
+            #if os(macOS)
+            // As Discover: the hero from the window's top edge, not from below the toolbar.
+            .ignoresSafeArea(edges: entries.isEmpty ? [] : .top)
+            #endif
             .task(id: entries.map(\.id)) { await hero.load(entries) }
         }
         // Over the hero the page has no title, as Discover; without one it keeps its name.
@@ -61,12 +66,15 @@ struct WatchNowPhonePage: View {
         .toolbarColorScheme(entries.isEmpty || pastHero || hero.paint == nil ? nil : hero.paint?.isDark == false ? .light : .dark, for: .navigationBar)
         #endif
         .ignoresSafeArea(edges: entries.isEmpty ? [] : .top)
+        #if os(macOS)
+        .heroUnderToolbar(!entries.isEmpty && !pastHero)
+        #endif
     }
 
     @ViewBuilder private var rows: some View {
-        if sections.contains(.continueWatching), !store.visibleHistory.isEmpty {
-            WatchNowPhoneShelf(title: L10n.text("Continue Watching"), action: { store.section = .history }) {
-                ForEach(store.visibleHistory.prefix(12)) { HistoryCard(entry: $0) }
+        if sections.contains(.continueWatching), !store.playbackHistory.entries.isEmpty {
+            WatchNowPhoneShelf(title: L10n.text("Continue Watching"), action: { openSection(.history) }) {
+                ForEach(store.playbackHistory.entries.prefix(12)) { HistoryCard(entry: $0) }
             }
             .accessibilityIdentifier("home.continueWatching")
         }
@@ -74,7 +82,7 @@ struct WatchNowPhonePage: View {
             let pinned = store.orderedSites(config).filter { store.pinnedSources.contains($0, origin: config.origin) }
             if !pinned.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
-                    WatchNowPhoneHeading(title: L10n.text("Pinned Sources"), action: { store.section = .sites })
+                    WatchNowPhoneHeading(title: L10n.text("Pinned Sources"), action: { openSection(.sites) })
                     LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
                         ForEach(pinned) { site in
                             RouteLink { SiteView(site: site, origin: config.origin, jarURL: config.spiderURL) } label: { SiteCard(site: site, marksPinned: false) }
@@ -88,14 +96,14 @@ struct WatchNowPhonePage: View {
             }
         }
         if sections.contains(.recommendations) { RecommendationsView(config: config, rails: true) }
-        if sections.contains(.favorites), !store.visibleFavorites.isEmpty {
-            WatchNowPhoneShelf(title: L10n.text("Favorites"), action: { store.section = .favorites }) {
-                ForEach(Array(store.visibleFavorites.prefix(20))) { WatchNowPhoneFavorite(item: $0) }
+        if sections.contains(.favorites), !store.favorites.items.isEmpty {
+            WatchNowPhoneShelf(title: L10n.text("Favorites"), action: { openSection(.favorites) }) {
+                ForEach(Array(store.favorites.items.prefix(20))) { WatchNowPhoneFavorite(item: $0) }
             }
         }
         if sections.contains(.liveTV), !config.lives.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                WatchNowPhoneHeading(title: L10n.text("Live TV"), action: { store.section = .live })
+                WatchNowPhoneHeading(title: L10n.text("Live TV"), action: { openSection(.live) })
                 // Every platform, then one row of playlists.
                 LiveSourceGrid(sources: config.lives.filter(\.isBuiltIn) + config.lives.filter { !$0.isBuiltIn }.prefix(3), titled: false)
                     .padding(.horizontal, DiscoverLayout.gutter)
@@ -183,6 +191,7 @@ private struct WatchNowPhoneHero: View {
     @State private var hovering = false
     #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(HistoryFileDetails.key) private var showsFileDetails = false
     let entries: [PlaybackHistoryEntry]
     let state: WatchNowHeroState
     let width: CGFloat
@@ -248,7 +257,7 @@ private struct WatchNowPhoneHero: View {
             }
             .frame(width: width * 0.8, height: 120, alignment: .bottom)
             .accessibilityAddTraits(.isHeader)
-            Text([entry.context.episodeName, SourceLabel(entry.context.sourceName).text].filter { !$0.isEmpty }.joined(separator: " · "))
+            Text([EpisodeLabels.historyLabel(entry.context.episodeName, showsDetails: showsFileDetails), SourceLabel(entry.context.sourceName).text].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.system(size: 14)).lineLimit(1).padding(.top, 14)
             if entry.duration > 0 {
                 HStack(spacing: 8) {
@@ -258,15 +267,15 @@ private struct WatchNowPhoneHero: View {
                 }
                 .padding(.top, 8)
             }
+            // The detail page's Continue button, in Liquid Glass as it sits on the cover: tinted white over a dark cover,
+            // black over a light one (a flat plate before OS 26).
             Button { resume(entry) } label: {
                 Label(L10n.text("Resume"), systemImage: store.resumingHistoryID == entry.id ? "hourglass" : "play.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .padding(.horizontal, 28).frame(height: 44)
-                    .foregroundStyle(dark ? Color.black : Color.white)
-                    .background(dark ? Color.white : Color.black, in: Capsule())
-                    .contentShape(Capsule())
+                    .font(.headline).lineLimit(1).fixedSize().padding(.horizontal, 8)
             }
-            .buttonStyle(.plain)
+            .controlButton(prominent: true).tint(Brand.accent).appControlSize(.large)
+            .environment(\.colorScheme, dark ? .dark : .light)
+            .environment(\.glassControls, true)
             .padding(.top, 18)
             .accessibilityIdentifier("home.upNext.resume")
         }
@@ -523,6 +532,27 @@ struct WatchNowPhoneCategoryRail: View {
             }
         }
         .task(id: key) { WatchNowRows.shared.load(category: category, client: client) }
+    }
+}
+
+/// An action on a title's page as a round glass plate with a word or count under it, as the Apple TV page's plates:
+/// one quiet row instead of buttons of every size. `on` fills the symbol in `tint` (liked, favorited, saved).
+struct WatchPlateLabel: View {
+    let symbol: String
+    let caption: String
+    var on = false
+    var tint: Color = Brand.rose
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: on ? symbol + ".fill" : symbol)
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(on ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
+                .frame(width: 48, height: 48)
+                .glassOrFill(.regular.interactive(), Color.primary.opacity(0.07), in: Circle())
+            Text(caption).font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+        }
+        .frame(minWidth: 62)
+        .contentShape(Rectangle())
     }
 }
 #endif

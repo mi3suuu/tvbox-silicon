@@ -1,5 +1,6 @@
 package tvbox.runtime;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.json.*;
 import org.objectweb.asm.ClassReader;
@@ -49,14 +50,57 @@ public final class CloudDriveBridge implements AutoCloseable {
     private HttpServer listen(int port) throws IOException {
         HttpServer listener = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 16);
         listener.setExecutor(workers);
-        listener.createContext("/", exchange -> {
+        listener.createContext("/", this::serve);
+        listener.start();
+        ports.add(listener.getAddress().getPort());
+        return listener;
+    }
+
+    /**
+     * A plugin setting's page for another device (TVBox's "remote input": a QR code with this device's network
+     * address, where a phone types a cookie): plugins build it from {@link #getUrl()} with the Wi-Fi address in place
+     * of 127.0.0.1, and it answers through TVBox's {@code /proxy}. Served on the network only while a setting is open
+     * (TVBox serves it always), GET only, the same requests as on loopback.
+     */
+    public static synchronized void openToNetwork(boolean open) {
+        CloudDriveBridge bridge = current;
+        if (network != null && (!open || bridge == null || network.getAddress().getPort() != bridge.server.getAddress().getPort())) {
+            network.stop(0); network = null;
+        }
+        if (!open || bridge == null || network != null) return;
+        byte[] address = android.net.wifi.WifiInfo.lanAddress();
+        if (address == null || address[0] == 127) return;
+        try {
+            HttpServer listener = HttpServer.create(new InetSocketAddress(java.net.InetAddress.getByAddress(address), bridge.server.getAddress().getPort()), 16);
+            listener.setExecutor(bridge.workers);
+            listener.createContext("/", bridge::serve);
+            Thread starter = new Thread(listener::start, "tvbox-proxy-network");
+            starter.setDaemon(true); starter.start(); starter.join();
+            network = listener;
+        } catch (Exception unavailable) {
+            System.err.println("CLOUD_PROXY_NETWORK_UNAVAILABLE " + unavailable.getClass().getSimpleName());
+        }
+    }
+    private static HttpServer network;
+
+    /** An {@code Origin} the page's own requests carry: the address it was served from. */
+    private static boolean sameOrigin(HttpExchange exchange) {
+        String origin = exchange.getRequestHeaders().getFirst("Origin"), host = exchange.getRequestHeaders().getFirst("Host");
+        return origin == null || (host != null && origin.equals("http://" + host));
+    }
+
+    private void serve(HttpExchange exchange) {
             try {
                 String path = exchange.getRequestURI().getPath();
-                if (!path.startsWith("/" + capability + "/") || exchange.getRequestHeaders().containsKey("Origin")) {
+                // A setting's page answers through TVBox's /proxy path, on the port it was served from.
+                boolean settingPage = path.equals("/proxy") && PluginWindows.settingOpen();
+                if (!(settingPage || path.startsWith("/" + capability + "/")) || !sameOrigin(exchange)
+                        || (!PluginWindows.settingOpen() && exchange.getRequestHeaders().containsKey("Origin"))) {
                     exchange.sendResponseHeaders(403, -1); return;
                 }
                 String method = exchange.getRequestMethod();
                 if (!method.equals("GET") && !method.equals("HEAD")) { exchange.sendResponseHeaders(405, -1); return; }
+                if (settingPage) { relay(exchange, "media", method); return; }
                 String resource = path.substring(capability.length() + 2);
                 if (resource.equals("health")) { exchange.sendResponseHeaders(204, -1); return; }
                 if (files.containsKey(resource)) {
@@ -74,10 +118,6 @@ public final class CloudDriveBridge implements AutoCloseable {
                 System.err.println("CLOUD_PROXY_ERROR " + error.getClass().getSimpleName());
                 try { exchange.sendResponseHeaders(502, -1); } catch (IOException ignored) { }
             } finally { exchange.close(); }
-        });
-        listener.start();
-        ports.add(listener.getAddress().getPort());
-        return listener;
     }
 
     /** Apple can invalidate sockets while the app is suspended without destroying its JVM. */
@@ -353,7 +393,6 @@ public final class CloudDriveBridge implements AutoCloseable {
         appAccounts = Map.copyOf(held);
         context = value;
     }
-    boolean hasAppAccount(String field) { return appAccounts.containsKey(field); }
     /** The digest of the app's sign-in in this field, or "" without one. */
     String appAccountDigest(String field) { return appAccounts.getOrDefault(field, ""); }
     android.content.Context context() { return context; }
@@ -476,6 +515,36 @@ public final class CloudDriveBridge implements AutoCloseable {
             changed = true;
         }
         if (changed && !editor.commit()) System.err.println("CLOUD_ACCOUNT_SEED_FAILED " + WEX_PREFERENCES);
+    }
+
+    /**
+     * FongMi's new-SDK pan spiders (the 前瞻版 subscription, #500) keep drive sign-ins in the Local store
+     * {@code com.github.catvod.pan.accounts.v1}: SharedPreferences {@code spider_local_<sha256 of that name>}, with
+     * {@code {"cookie": …}} under {@code quark}, {@code baidu} and {@code 115}. Without one they refuse to play
+     * and point at their own QR sign-in, which needs FongMi's dialogs. Each app sign-in goes there once (a digest
+     * in the host's own preferences marks what was given), so the plugin's own cookie refreshes stay.
+     */
+    static final String FONGMI_PAN_ACCOUNTS = "com.github.catvod.pan.accounts.v1";
+    static final Map<String, String> FONGMI_PAN_KEYS = Map.of("quark", "quarkCookie", "baidu", "baiduCookie", "115", "pan115Cookie");
+
+    public static void seedFongMiPanCookies(JSONObject accounts, android.content.Context context) {
+        if (accounts == null) return;
+        var preferences = context.getSharedPreferences("spider_local_" + digest(FONGMI_PAN_ACCOUNTS), 0);
+        var given = context.getSharedPreferences("yingxia_fongmi_pan_accounts", 0);
+        var editor = preferences.edit();
+        var marks = given.edit();
+        boolean changed = false;
+        for (var entry : new java.util.TreeMap<>(FONGMI_PAN_KEYS).entrySet()) {
+            String cookie = accounts.optString(entry.getValue()).trim();
+            if (cookie.isEmpty()) continue;
+            String digest = digest(cookie);
+            if (digest.equals(given.getString(entry.getKey(), ""))) continue;
+            try { editor.putString(entry.getKey(), new JSONObject().put("cookie", cookie).toString()); }
+            catch (JSONException impossible) { continue; }
+            marks.putString(entry.getKey(), digest);
+            changed = true;
+        }
+        if (changed && !(editor.commit() && marks.commit())) System.err.println("CLOUD_ACCOUNT_SEED_FAILED " + FONGMI_PAN_ACCOUNTS);
     }
 
     /** In {@link #WEX_PREFERENCES}: how Wex drive lines fetch in parallel, {@code go} (the plugin's default) or {@code java}. */

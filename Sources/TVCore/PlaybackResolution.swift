@@ -8,6 +8,19 @@ public struct PlaybackChoice: Identifiable, Sendable {
         if let text = value?.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return [PlaybackChoice(id: 0, name: fallbackName, address: prefix + text)]
         }
+        if let values = value?.object?["values"]?.array {
+            // FongMi's Url: {"values": [{"n": name, "v": address}], "position": the one it plays}; the others are
+            // the same episode in other qualities. FongMi's new-SDK spiders answer this (#500).
+            let position = value?.object?["position"]?.int ?? 0
+            let order = values.indices.contains(position) ? [position] + values.indices.filter { $0 != position } : Array(values.indices)
+            var choices: [PlaybackChoice] = []
+            for index in order {
+                guard let address = values[index].object?["v"]?.string, !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                let name = values[index].object?["n"]?.string ?? ""
+                choices.append(PlaybackChoice(id: choices.count, name: name.isEmpty ? fallbackName : name, address: prefix + address))
+            }
+            return choices
+        }
         guard let values = value?.array else { return [] }
         var choices: [PlaybackChoice] = []
         for index in stride(from: 0, to: values.count - values.count % 2, by: 2) {
@@ -30,8 +43,11 @@ public struct PlaybackPlan: Sendable {
     public let webPlayURL: String
     /// The play result's subtitle files (`subs`).
     public let subtitles: [ExternalSubtitle]
+    /// The play result's opening and ending credits (`skips`).
+    public let skips: [PlaybackSkip]
     public init(choices: [PlaybackChoice], headers: [String: String], group: String, requiresWebDetection: Bool, click: String = "", webPlayURL: String = "",
-                subtitles: [ExternalSubtitle] = []) {
+                subtitles: [ExternalSubtitle] = [], skips: [PlaybackSkip] = []) {
+        self.skips = skips
         self.choices = choices
         self.headers = headers
         self.group = group

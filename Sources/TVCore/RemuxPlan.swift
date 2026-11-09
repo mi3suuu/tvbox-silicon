@@ -25,6 +25,9 @@ struct RemuxPlan: Sendable, Equatable {
         var bitRate: Int64 = 0
         var language = "", title = ""
         var isDefault = false, isForced = false, isText = false
+        /// Dolby Atmos in E-AC-3 (JOC): FFmpeg's decoder names it with profile 30 (AV_PROFILE_EAC3_DDP_ATMOS) while
+        /// it probes. The track is copied as is; FFmpeg's muxer writes the JOC flag into its dec3 box itself.
+        var isAtmos: Bool { kind == .audio && codec == "eac3" && profile == 30 }
     }
     enum Mode: Int32, Sendable { case copy = 0, aac = 1, h264 = 2, hevc = 3 }
     /// How copied HEVC keeps its Dolby Vision configuration.
@@ -49,6 +52,8 @@ struct RemuxPlan: Sendable, Equatable {
         var hdr = true
         /// The largest picture tone mapping makes, which costs the CPU by the pixel; 0 for no limit.
         var toneMapWidth = 0, toneMapHeight = 0
+        /// Whether the player draws bitmap subtitles (PGS, VobSub) itself, so they are offered as (empty) renditions.
+        var bitmapSubtitles = false
     }
 
     /// The video track first, then the audio, then the text subtitles.
@@ -59,6 +64,8 @@ struct RemuxPlan: Sendable, Equatable {
     var size: Int64 = 0
     var segments: Int { bounds.count - 1 }
 
+    /// Bitmap subtitles the player draws itself (#576 M3): Blu-ray PGS and DVD VobSub, by FFmpeg's names.
+    static let bitmapCodecs: Set<String> = ["hdmv_pgs_subtitle", "dvd_subtitle"]
     /// Copied audio: what every Apple device decodes inside fragmented MP4. MP3 and Opus are not among them.
     static let copiedAudio: Set<String> = ["aac", "ac3", "eac3", "flac", "alac"]
     /// AAC profiles AVPlayer decodes (LC, HE, HE v2; FFmpeg's numbers), and unknown.
@@ -89,19 +96,34 @@ struct RemuxPlan: Sendable, Equatable {
         return Array(first..<tracks.count)
     }
 
-    /// The cues of a subtitle file that segment `index` carries: those starting within it, as FFmpeg places
-    /// the file's own. The first and last segments take those before and after the picture too.
+    /// The cues of a subtitle file that segment `index` carries: every cue on screen at some time within it, with its
+    /// whole timing (RFC 8216 §3.5), so a seek into the middle of a long line still shows it. A cue crossing a
+    /// boundary is in both segments; AVPlayer shows it once. The first and last segments take those before and after
+    /// the picture too.
     func cues(_ cues: [Cue], segment index: Int) -> [Cue] {
         cues.filter { cue in
-            (index == 0 || cue.start >= bounds[index]) && (index == segments - 1 || cue.start < bounds[index + 1])
+            let end = max(cue.end, cue.start + 1_000)
+            return (index == 0 || end > bounds[index]) && (index == segments - 1 || cue.start < bounds[index + 1])
         }
+    }
+
+    /// Cues read so far joined by more: the same packet read twice (a segment made again, a look back before a seek)
+    /// counts once. In order of start.
+    static func merged(_ known: [Cue], _ more: [Cue]) -> [Cue] {
+        guard !more.isEmpty else { return known }
+        struct Key: Hashable { let start: Int64, text: String }
+        var seen = Set(known.map { Key(start: $0.start, text: $0.text) })
+        var all = known
+        for cue in more where seen.insert(Key(start: cue.start, text: cue.text)).inserted { all.append(cue) }
+        return all.sorted { $0.start < $1.start }
     }
 
     static func make(streams: [Stream], keyframes: [Int64], start: Int64, duration: Int64, size: Int64, device: Device) -> RemuxPlan? {
         guard duration > 0, let video = streams.first(where: { $0.kind == .video && $0.width > 0 && $0.height > 0 }) else { return nil }
         var tracks = [videoTrack(video, device: device)]
         tracks += streams.filter { $0.kind == .audio && $0.channels > 0 }.prefix(8).map(audioTrack)
-        tracks += streams.filter { $0.kind == .subtitle && $0.isText }.prefix(16).map { Track(stream: $0) }
+        tracks += streams.filter { $0.kind == .subtitle && ($0.isText || device.bitmapSubtitles && bitmapCodecs.contains($0.codec)) }
+            .prefix(16).map { Track(stream: $0) }
         let bounds = segmentBounds(keyframes: keyframes, start: start, duration: duration, copied: tracks[0].mode == .copy)
         return RemuxPlan(tracks: tracks, bounds: bounds, size: size)
     }
@@ -199,7 +221,7 @@ struct RemuxPlan: Sendable, Equatable {
             var attributes = ["TYPE=AUDIO", "GROUP-ID=\"audio\"", "NAME=\"\(quoted(unique(Self.displayName(track))))\""]
             if let language = Self.languageTag(track.stream.language) { attributes.append("LANGUAGE=\"\(language)\"") }
             attributes += ["DEFAULT=\(index == defaultAudio ? "YES" : "NO")", "AUTOSELECT=YES",
-                           "CHANNELS=\"\(track.mode == .copy ? track.stream.channels : track.channels)\"", "URI=\"\(index).m3u8\""]
+                           "CHANNELS=\"\(Self.channels(track))\"", "URI=\"\(index).m3u8\""]
             lines.append("#EXT-X-MEDIA:" + attributes.joined(separator: ","))
         }
         names.removeAll()
@@ -231,6 +253,20 @@ struct RemuxPlan: Sendable, Equatable {
         lines.append("#EXT-X-STREAM-INF:" + attributes.joined(separator: ","))
         lines.append("0.m3u8")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// The NAME each subtitle track has in the master playlist, by track: what AVPlayer's option for it shows as its
+    /// `displayName`. Named as `masterPlaylist` names them.
+    func subtitleNames() -> [Int: String] {
+        var names = Set<String>(), result: [Int: String] = [:]
+        for index in tracks.indices where tracks[index].kind == .subtitle {
+            let name = Self.displayName(tracks[index])
+            var value = name, number = 2
+            while names.contains(value) { value = "\(name) (\(number))"; number += 1 }
+            names.insert(value)
+            result[index] = quoted(value)
+        }
+        return result
     }
 
     /// A track's media playlist: fragmented MP4 after its initialization segment, or WebVTT for subtitles.
@@ -273,6 +309,12 @@ struct RemuxPlan: Sendable, Equatable {
     private func quoted(_ text: String) -> String { text.replacingOccurrences(of: "\"", with: "'").replacingOccurrences(of: "\n", with: " ") }
 
     /// The stream's title, or its language, or its format.
+    /// The HLS CHANNELS attribute: Apple's authoring spec names Dolby Atmos in E-AC-3 "16/JOC".
+    static func channels(_ track: Track) -> String {
+        guard track.mode == .copy else { return "\(track.channels)" }
+        return track.stream.isAtmos ? "16/JOC" : "\(track.stream.channels)"
+    }
+
     static func displayName(_ track: Track) -> String {
         let stream = track.stream
         let title = stream.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -282,7 +324,7 @@ struct RemuxPlan: Sendable, Equatable {
         let format = names[stream.codec] ?? stream.codec.uppercased()
         guard stream.kind == .audio else { return format }
         let layout = [1: "1.0", 2: "2.0", 6: "5.1", 8: "7.1"][stream.channels] ?? "\(stream.channels)ch"
-        return "\(format) \(layout)"
+        return "\(format) \(layout)" + (stream.isAtmos && track.mode == .copy ? " Atmos" : "")
     }
 
     /// The BCP 47 tag HLS wants for a Matroska (ISO 639-2) language code; nil when it names none.

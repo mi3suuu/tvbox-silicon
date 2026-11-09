@@ -35,6 +35,14 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     case nextEpisode = "nextEpisode"
     case fullScreen = "fullScreen"
 
+    // 这四项原先只在 `CatalogPlaybackActions`（上游那套菜单）里有，
+    // One 页另起一个「更多」菜单时它们没有对应 case —— 于是两套菜单重复且功能不等。
+    // 收进枚举后只有一套，用户可以在设置页里决定它们出不出现。
+    case autoPlayNext = "autoPlayNext"
+    case moreInSeries = "moreInSeries"
+    case skipIntroAuto = "skipIntroAuto"
+    case skipIntroManual = "skipIntroManual"
+
     var id: String { rawValue }
 
     var title: String {
@@ -60,6 +68,10 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .previousEpisode: L10n.text("Previous Episode")
         case .nextEpisode: L10n.text("Next Episode")
         case .fullScreen: L10n.text("Full Screen")
+        case .autoPlayNext: L10n.text("Auto-play next episode")
+        case .moreInSeries: L10n.text("More in This Series")
+        case .skipIntroAuto: L10n.text("Automatically skip intro and outro")
+        case .skipIntroManual: L10n.text("Skip intro / outro")
         }
     }
 
@@ -86,6 +98,10 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .previousEpisode: "backward.end.fill"
         case .nextEpisode: "forward.end.fill"
         case .fullScreen: "arrow.up.left.and.arrow.down.right"
+        case .autoPlayNext: "play.circle"
+        case .moreInSeries: "rectangle.stack"
+        case .skipIntroAuto: "forward.to.end.alt"
+        case .skipIntroManual: "forward.end"
         }
     }
 
@@ -109,7 +125,8 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     static var standardBottom: [PlayerControl] { [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode, .fullScreen] }
     static var standardMore: [PlayerControl] {
         [.quality, .audio, .subtitles, .speed, .pictureSize, .pictureInPicture, .miniPlayer,
-         .lock, .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer]
+         .lock, .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer,
+         .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]
     }
 
     var tint: Color {
@@ -135,6 +152,10 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .previousEpisode: .gray
         case .nextEpisode: .gray
         case .fullScreen: .gray
+        case .autoPlayNext: Brand.teal
+        case .moreInSeries: .purple
+        case .skipIntroAuto: Brand.amber
+        case .skipIntroManual: Brand.amber
         }
     }
 }

@@ -383,9 +383,20 @@ struct MobilePlayerView: View {
             // own shape and this black sits behind the bands that leaves. Every other mode fills the box
             // and the black never shows, which is also what a letterboxed picture needs.
             Color.black.playerBleed(!inline)
-            PlayerLayerView(player: session.player, gravity: pictureGravity, pip: pip)
-                .pictureBox(scaling, aspect: pictureAspect)
-                .playerBleed(!inline)
+            // [mi3s] 二开：画面载体按 One 的做法换成 `AVPlayerViewController`。
+            //
+            // 上游用 `AVPlayerLayer` + 自建 `AVPictureInPictureController`。那条路的代价写在
+            // `PictureInPicture.makeController` 的注释里：折叠、转向、切页都会换一次 layer，
+            // AVKit 每次都当成「用户离开 App」，于是自动 PiP 只能关掉（`= false`），
+            // 悬浮窗也就只有手动点一下才有。
+            //
+            // One 用 `AVPlayerViewController`，PiP 由 AVKit 托管，不存在换 layer 的误判，
+            // 所以它能开自动 PiP。这里照它的机制走：iOS 上用 AVKit 的控制器承载画面，
+            // 其余平台（Mac/tvOS）仍用原来的 `PlayerLayerView`。
+            //
+            // 悬浮窗的**样子**不受影响：浮起来的是系统 PiP 窗口，里面画的是同一个
+            // `AVPlayer`，字幕仍按 `pip.active` 交还给 AVPlayer 自绘（见下面的 onChange）。
+            pictureCarrier
                 // [mi3s] 与上游一致：Picture in Picture 只显示 player layer，自绘的
                 // Mi3sSubtitleOverlay 进不去那个窗口。进 PiP 时把字幕交还给 AVPlayer 自己画
                 // （`native = true`），退出时收回自绘层。不这样 PiP 里就没有字幕。
@@ -998,9 +1009,13 @@ struct MobilePlayerView: View {
     /// danmaku) drop out when there is nothing to choose, and a few depend on the device or shape.
     private func available(_ control: PlayerControl) -> Bool {
         switch control {
+        // 上游播放器的这套行不承载 One 页新增的四个菜单项。
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: false
         case .airPlay: true
         case .episodes: !inline && channel.historyContext != nil
-        case .pictureInPicture: pip.supported
+        // 设备支持 ≠ 按钮能用：AVKit 承载画面的那条路上我们没有 controller，
+        // 自动浮起又已经关掉，按钮会变成死键 —— 这种情况直接不列出来。
+        case .pictureInPicture: pip.canToggle
         case .miniPlayer: true
         case .lock: !inline
         case .rotate: !inline && PlayerOrientation.available && (horizontalSizeClass == .compact || verticalSizeClass == .compact)
@@ -1057,6 +1072,8 @@ struct MobilePlayerView: View {
     /// The round glass button for one top control drawn in the bar.
     @ViewBuilder private func topControlButton(_ control: PlayerControl) -> some View {
         switch control {
+        // 上游播放器的这套行不承载 One 页新增的四个菜单项。
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: EmptyView()
         case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
@@ -1077,7 +1094,7 @@ struct MobilePlayerView: View {
                 Image(systemName: pip.active ? "pip.exit" : "pip.enter").font(.headline).frame(width: 22, height: 22)
             }
             .chromeButton()
-            .disabled(!pip.possible && !pip.active)
+            .disabled(!pip.canToggle)
             .accessibilityLabel(L10n.text("Picture in Picture"))
         case .miniPlayer:
             Button { miniplayer() } label: {
@@ -1251,6 +1268,8 @@ struct MobilePlayerView: View {
     /// The menu entry for one top control collapsed into More.
     @ViewBuilder private func topControlMenuEntry(_ control: PlayerControl) -> some View {
         switch control {
+        // 上游播放器的这套行不承载 One 页新增的四个菜单项。
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: EmptyView()
         case .airPlay:
             // AirPlay is represented by the system button; in a menu it has no equivalent, so it
             // stays out of More.
@@ -1265,7 +1284,7 @@ struct MobilePlayerView: View {
             Button { pip.toggle() } label: {
                 Label(L10n.text("Picture in Picture"), systemImage: pip.active ? "pip.exit" : "pip.enter")
             }
-            .disabled(!pip.possible && !pip.active)
+            .disabled(!pip.canToggle)
         case .miniPlayer:
             Button { miniplayer() } label: {
                 Label(L10n.text("Mini Player"), systemImage: "rectangle.inset.bottomright.filled")
@@ -1495,6 +1514,7 @@ struct MobilePlayerView: View {
     /// A top-row control rendered as a compact transport button (36 pt circle) for the bottom row.
     @ViewBuilder private func compactButton(_ control: PlayerControl) -> some View {
         switch control {
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: EmptyView()
         case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
@@ -1514,7 +1534,7 @@ struct MobilePlayerView: View {
                 Image(systemName: pip.active ? "pip.exit" : "pip.enter")
             }
             .buttonStyle(PlayerCircleStyle(size: 36))
-            .disabled(!pip.possible && !pip.active)
+            .disabled(!pip.canToggle)
             .accessibilityLabel(L10n.text("Picture in Picture"))
         case .miniPlayer:
             Button { miniplayer() } label: { Image(systemName: "rectangle.inset.bottomright.filled") }
@@ -1658,6 +1678,31 @@ struct MobilePlayerView: View {
         }
         PlayerOrientation.rotate(to: next)
         poke()
+    }
+
+    /// [mi3s] 二开：画面载体。iOS 按 One 的做法用 `AVPlayerViewController`；
+    /// 其余平台保持上游的 `AVPlayerLayer`。单独抽出来，免得 `ZStack` 里的表达式
+    /// 大到编译器推不出类型（实测会 "unable to type-check in reasonable time"）。
+    @ViewBuilder private var pictureCarrier: some View {
+        #if os(iOS)
+        OneStylePlayerSurface(
+            player: session.player,
+            gravity: pictureGravity,
+            // [mi3s] 二开：关掉 AVKit 的「离开 App 自动浮起」。
+            //
+            // 它的语义是「inline 图层离开屏幕」，而我们的图层在折叠、转向、进出全屏、切页面时
+            // 都会被重挂一次，AVKit 每次都当成「用户离开 App」→ 转个屏就飞出一个小窗。
+            // 现在只在视频控件里按画中画按钮才起（One 皮肤走自建 controller 的 `toggle()`）。
+            automaticPiP: false,
+            pip: pip
+        )
+        .pictureBox(scaling, aspect: pictureAspect)
+        .playerBleed(!inline)
+        #else
+        PlayerLayerView(player: session.player, gravity: pictureGravity, pip: pip)
+            .pictureBox(scaling, aspect: pictureAspect)
+            .playerBleed(!inline)
+        #endif
     }
 
     private var pipPlaceholder: some View {
@@ -2041,14 +2086,24 @@ private struct PlayerCircleStyle: ButtonStyle {
 }
 
 /// The system's AirPlay button, which presents the route picker itself.
-private struct AirPlayButton: UIViewRepresentable {
+struct AirPlayButton: UIViewRepresentable {
+    /// 清空 tint：只留可点区域，字形由调用方自己盖一颗 SF Symbol。
+    ///
+    /// One 皮肤必须这么做 —— `AVRoutePickerView` 自带一圈内边距，字形尺寸也不跟
+    /// 外层 frame 走，塞进和邻居一样大的框里永远小一圈（看着就是「就它一个特别小」）。
+    /// 清掉 tint 后路由选择器照常弹，视觉交给同尺寸的 `Image(systemName: "airplayvideo")`，
+    /// 且那颗图标 `allowsHitTesting(false)`，点击仍然落在系统按钮上。
+    var transparent = false
+
     func makeUIView(context: Context) -> AVRoutePickerView {
         let view = AVRoutePickerView()
         view.prioritizesVideoDevices = true
-        view.tintColor = .white
+        view.tintColor = transparent ? .clear : .white
         return view
     }
-    func updateUIView(_ view: AVRoutePickerView, context: Context) {}
+    func updateUIView(_ view: AVRoutePickerView, context: Context) {
+        view.tintColor = transparent ? .clear : .white
+    }
 }
 
 /// The picture's own gestures, in UIKit: taps, a touch and hold followed while the finger moves, slides and a pinch.
@@ -2173,6 +2228,16 @@ struct PlayerLayerView: UIViewRepresentable {
     let supported = AVPictureInPictureController.isPictureInPictureSupported()
     private(set) var possible = false
     private(set) var active = false
+    /// [mi3s] 二开：按钮是否可点。iOS 上画面归 `AVPlayerViewController`，
+    /// PiP 能不能起由 AVKit 报；其余平台仍看自建 controller 的 `possible`。
+    var canToggle: Bool {
+        #if os(iOS)
+        // AVKit 不暴露 `isPictureInPicturePossible`，也起不了 PiP；
+        // 有 AVKit 载体时按钮交给它自己（离开 App 自动浮起），不再由我们代劳。
+        if Self.avkitHost != nil { return !supported }
+        #endif
+        return possible || active
+    }
     /// Whether Picture in Picture is running, kept apart from the instance so it survives the iPhone Duo
     /// fold/unfold that tears the player view down and rebuilds it with a fresh `active = false`.
     private(set) static var isActive = false
@@ -2234,9 +2299,67 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func toggle() {
+        // [mi3s] 二开：iOS 上画面由 `AVPlayerViewController` 承载。
+        // AVKit 只给了 `canStartPictureInPictureAutomaticallyFromInline` 这一个开关，
+        // 没有 `startPictureInPicture()`，所以手动按钮这条路上没有 AVKit 的入口。
+        // 自动浮起已经由 carrier 打开（离开 App 就起），这里保持老通道给非 iOS 用。
+        #if os(iOS)
+        // AVKit 承载画面时我们代劳不了 PiP（AVKit 只暴露「离开 App 自动浮起」）。
+        // 但 One 皮肤是自建 `AVPlayerLayer` + 自己的 controller：只要本实例**已经有**
+        // controller，就必须让它走下面那条真开关，不能被别处（小窗 / 通用播放器）
+        // 创建的 `avkitHost` 一并挡死 —— 那会让 One 页的画中画按钮变成死键。
+        if Self.avkitHost != nil, controller == nil { return }
+        #endif
         guard let controller = controller ?? Self.current else { return }
         if controller.isPictureInPictureActive { controller.stopPictureInPicture() } else { fitContent(); controller.startPictureInPicture() }
     }
+
+    /// [mi3s] 二开：「应用外悬浮小窗」。离开 App 时把画面交给系统 PiP 窗口。
+    ///
+    /// 为什么不打开 AVKit 那个 `canStartPictureInPictureAutomaticallyFromInline`：
+    /// 它的语义是「inline 图层离开屏幕」，而本 App 的图层在折叠、转向、进出全屏、
+    /// 切页面时都会被重挂一次，AVKit 每次都当成「用户离开 App」，于是页面和悬浮窗
+    /// 同时放同一集（见 `makeController` 里的注释）。这里改成显式、有时机的一次调用：
+    /// 只在我们自己判定「用户在播放中离开了 App」时浮起，回来时收回。
+    /// [mi3s] 二开：显式把画面交给系统 PiP 窗口。
+    ///
+    /// ⚠️ **现在没有自动调用点**：`scenePhase == .background` 时自动浮起已经关掉
+    /// （见 `OneSkinPlayerChrome`），AVKit 的 `canStartPictureInPictureAutomaticallyFromInline`
+    /// 也关着（见 `makeController` 与 `OneStylePlayerSurface(automaticPiP:)`）。
+    /// 用户只在视频控件里手动起停，走 `toggle()`。
+    /// 保留这两个方法是为了「手动按钮之外还需要一次显式起浮」的场景（例如自动化脚本）。
+    func startFloating() {
+        guard supported else { return }
+        guard let controller = controller ?? Self.current else { return }
+        guard !controller.isPictureInPictureActive else { return }
+        guard controller.isPictureInPicturePossible else { return }
+        fitContent()
+        controller.startPictureInPicture()
+    }
+
+    /// 回到 App：悬浮窗收回，画面回到内嵌层。
+    func stopFloating() {
+        guard let controller = controller ?? Self.current, controller.isPictureInPictureActive else { return }
+        controller.stopPictureInPicture()
+    }
+
+    #if os(iOS)
+    /// 当前承载画面的 `AVPlayerViewController`。AVKit 自己管 PiP，这里是唯一的入口。
+    private(set) static weak var avkitHost: AVPlayerViewController?
+
+    /// `AVPlayerViewController` 出现/消失时登记，PiP 按钮与状态都读它。
+    func register(host: AVPlayerViewController?) {
+        Self.avkitHost = host
+    }
+
+    /// `AVPlayerViewControllerDelegate` 的 PiP 回调转进来：页面据此显示/撤掉占位。
+    func report(active now: Bool) {
+        guard active != now else { return }
+        active = now
+        Self.isActive = now
+        onActiveChange?(now)
+    }
+    #endif
 
     /// Fits the floating window to the video's own shape before it opens. The window follows the source
     /// layer's `videoGravity`; the inline landscape bleed leaves it `.resizeAspectFill`, which sizes the

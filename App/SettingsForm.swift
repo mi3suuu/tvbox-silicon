@@ -110,15 +110,6 @@ struct SettingsWebRow: View {
 }
 
 extension View {
-    /// A button that fills its row: tinted text on iPhone, a plain clickable row on the Mac, where a
-    /// form would otherwise draw a push button around the whole label.
-    @ViewBuilder func formRowButton() -> some View {
-        #if os(macOS)
-        buttonStyle(.plain).contentShape(Rectangle())
-        #else
-        self
-        #endif
-    }
     /// Settings as the system draws them, like System Settings and the Settings app: the system's
     /// grouped background and row fills, and the system accent on switches and buttons instead of
     /// the app's neutral one. The scroll view spans the page and margins centre the rows; a narrowed
@@ -217,14 +208,18 @@ struct FormSettingsView: View {
     @State private var showsFeedback = false
     @State private var choosesConfig = false
     @State private var exportsConfig = false
-    @State private var pendingConfig: SubscriptionConfig?
+    /// The file the picker returned, or why it could not be read, waiting for a decision. Both the
+    /// configuration and the full-backup import share it, because SwiftUI keeps one confirmation
+    /// dialog per view: the second one used to swallow the first, so picking a configuration file
+    /// asked nothing and looked like it had done nothing at all.
+    @State private var pendingImport: PendingImport?
+    @State private var showsImportDialog = false
     @State private var choosesFullBackup = false
     @State private var exportsFullBackup = false
     /// Built only when the exporter opens, so the body never runs the disk reads and JSON encoding on every render.
     @State private var exportConfigDocument: ConfigDocument?
     @State private var exportFullBackupDocument: FullBackupDocument?
     @State private var picksBackupCategories = false
-    @State private var pendingFullBackup: FullBackup?
     @State private var backupCategories: BackupCategory = .all
     @State private var cloudBackupMode: CloudBackupSheet.Mode?
     @Environment(\.openURL) private var openURL
@@ -540,6 +535,9 @@ struct FormSettingsView: View {
                 #endif
             }
 
+            // 语言：跟「高级」放在一起。它属于低频设置，不该占 App 卡片下方的黄金位置。
+            languageRow
+
             if store.extrasUnlocked { ContributorsSection() }
 
             #if os(iOS)
@@ -640,7 +638,12 @@ struct FormSettingsView: View {
         .sheet(isPresented: $addingSubscription) { AddSubscriptionSheet() }
         .navigationDestination(isPresented: $showsFeedback) { FeedbackView() }
         .fileImporter(isPresented: $choosesConfig, allowedContentTypes: [.json]) { result in
-            if case .success(let file) = result { importConfig(from: file) }
+            switch result {
+            case .success(let file): importConfig(from: file)
+            case .failure(let error) where !isCancellation(error):
+                presentImport(.failure(title: L10n.text("Import Configuration"), message: error.localizedDescription))
+            case .failure: break
+            }
         }
         .fileExporter(isPresented: $exportsConfig, document: exportConfigDocument,
                       contentType: .json, defaultFilename: "mi3s-config") { result in
@@ -649,14 +652,6 @@ struct FormSettingsView: View {
         }
         .onChange(of: exportsConfig) { _, exporting in
             exportConfigDocument = exporting ? ConfigDocument(store.exportConfig()) : nil
-        }
-        .confirmationDialog(L10n.text("Import Configuration"), isPresented: Binding(
-            get: { pendingConfig != nil }, set: { if !$0 { pendingConfig = nil } })) {
-            Button(L10n.text("Merge (keep current, add missing)")) { applyPendingConfig(overwrite: false) }
-            Button(L10n.text("Restore (overwrite with backup)")) { applyPendingConfig(overwrite: true) }
-            Button(L10n.text("Cancel"), role: .cancel) { pendingConfig = nil }
-        } message: {
-            Text(L10n.text("Merge adds only subscriptions you don't have yet. Restore overwrites names, switches and order to match the backup."))
         }
         // Full backup: pick slices, then export to a file or a cloud drive.
         .sheet(isPresented: $picksBackupCategories) {
@@ -670,7 +665,12 @@ struct FormSettingsView: View {
             CloudBackupSheet(mode: mode, categories: backupCategories)
         }
         .fileImporter(isPresented: $choosesFullBackup, allowedContentTypes: [.json]) { result in
-            if case .success(let file) = result { importFullBackup(from: file) }
+            switch result {
+            case .success(let file): importFullBackup(from: file)
+            case .failure(let error) where !isCancellation(error):
+                presentImport(.failure(title: L10n.text("Restore Full Backup"), message: error.localizedDescription))
+            case .failure: break
+            }
         }
         .fileExporter(isPresented: $exportsFullBackup, document: exportFullBackupDocument,
                       contentType: .json, defaultFilename: "mi3s-full-backup") { result in
@@ -680,12 +680,21 @@ struct FormSettingsView: View {
         .onChange(of: exportsFullBackup) { _, exporting in
             exportFullBackupDocument = exporting ? FullBackupDocument(store.exportFullBackup(categories: backupCategories)) : nil
         }
-        .confirmationDialog(L10n.text("Restore Full Backup"), isPresented: Binding(
-            get: { pendingFullBackup != nil }, set: { if !$0 { pendingFullBackup = nil } })) {
-            Button(L10n.text("Restore everything")) { applyPendingFullBackup() }
-            Button(L10n.text("Cancel"), role: .cancel) { pendingFullBackup = nil }
+        // The one dialog both imports share.
+        .confirmationDialog(pendingImportTitle, isPresented: $showsImportDialog, titleVisibility: .visible) {
+            switch pendingImport {
+            case .config:
+                Button(L10n.text("Merge (keep current, add missing)")) { applyPendingConfig(overwrite: false) }
+                Button(L10n.text("Restore (overwrite with backup)")) { applyPendingConfig(overwrite: true) }
+                Button(L10n.text("Cancel"), role: .cancel) { pendingImport = nil }
+            case .backup:
+                Button(L10n.text("Restore everything")) { applyPendingFullBackup() }
+                Button(L10n.text("Cancel"), role: .cancel) { pendingImport = nil }
+            case .failure, .none:
+                Button(L10n.text("OK"), role: .cancel) { pendingImport = nil }
+            }
         } message: {
-            Text(L10n.text("This overwrites the matching data on this device with the backup. Sign-in state, history, favourites, settings and proxies are all included."))
+            Text(pendingImportMessage)
         }
         #if DEBUG
         // `-qaAddSubscription 1` opens the sheet for screenshots.
@@ -695,6 +704,18 @@ struct FormSettingsView: View {
         // Refreshed whenever Settings reappears, so a sign-in on the account page shows here.
         .onAppear { bilibiliSummary = BilibiliAccount.load().summary; douyinSummary = DouyinAccount.load().summary; cloudSummary = CloudProvider.summary() }
         .task(id: store.extrasUnlocked) { if store.extrasUnlocked { await ContributorList.shared.check() } }
+    }
+
+    /// 语言：和其他设置项一样是**一行跳转**，不在主页展开一整组。
+    /// 拆成独立属性，避免 body 里那串表达式过长把类型推断拖超时。
+    private var languageRow: some View {
+        SettingsGroup(footer: L10n.text("The app language is independent of your device language and applies immediately.")) {
+            SettingsLinkRow(symbol: "globe",
+                            tint: .blue,
+                            title: L10n.text("App Language"),
+                            subtitle: L10n.currentSelectionName,
+                            destination: { LanguageSettingsView() })
+        }
     }
 
     @ViewBuilder private var heroSection: some View {
@@ -774,6 +795,47 @@ struct FormSettingsView: View {
 
     #if os(iOS)
     /// Reads a chosen configuration file, then asks whether to merge or restore-overwrite before applying it.
+    /// A file a picker returned, or the reason it could not be read. One dialog covers every case.
+    private enum PendingImport {
+        case config(SubscriptionConfig)
+        case backup(FullBackup)
+        case failure(title: String, message: String)
+    }
+
+    private var pendingImportTitle: String {
+        switch pendingImport {
+        case .config, .none: return L10n.text("Import Configuration")
+        case .backup: return L10n.text("Restore Full Backup")
+        case .failure(let title, _): return title
+        }
+    }
+
+    private var pendingImportMessage: String {
+        switch pendingImport {
+        case .config:
+            return L10n.text("Merge adds only subscriptions you don't have yet. Restore overwrites names, switches and order to match the backup.")
+        case .backup:
+            return L10n.text("This overwrites the matching data on this device with the backup. Sign-in state, history, favourites, settings and proxies are all included.")
+        case .failure(_, let message): return message
+        case .none: return ""
+        }
+    }
+
+    /// Shows the decision dialog once the document picker has finished dismissing. Asking while the
+    /// picker's sheet is still on screen makes SwiftUI drop the dialog, which read as "nothing happened".
+    private func presentImport(_ item: PendingImport) {
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            pendingImport = item
+            showsImportDialog = true
+        }
+    }
+
+    /// Dismissing a picker hands back a cancellation error, which is not worth a dialog.
+    private func isCancellation(_ error: Error) -> Bool {
+        (error as NSError).domain == NSCocoaErrorDomain && (error as NSError).code == NSUserCancelledError
+    }
+
     private func importConfig(from file: URL) {
         Task {
             let scoped = file.startAccessingSecurityScopedResource()
@@ -781,21 +843,28 @@ struct FormSettingsView: View {
             // A backup file can be large; read it off the main thread instead of blocking the picker's
             // dismiss on a synchronous `Data(contentsOf:)`.
             let data = await Task.detached(priority: .userInitiated) { try? Data(contentsOf: file) }.value
-            guard let data, let config = SubscriptionConfig.decode(data) else {
+            guard let data else {
+                presentImport(.failure(title: L10n.text("Import Configuration"),
+                                       message: L10n.text("The file couldn't be opened. Copy it into the Files app and pick it again.")))
+                return
+            }
+            guard let config = SubscriptionConfig.decode(data) else {
                 store.importError = L10n.text("This isn't a Mi3s configuration file.")
+                presentImport(.failure(title: L10n.text("Import Configuration"), message: store.importError ?? ""))
                 return
             }
             if config.version != SubscriptionConfig.version {
                 store.importError = L10n.text("This configuration file is from a newer version and can't be imported.")
+                presentImport(.failure(title: L10n.text("Import Configuration"), message: store.importError ?? ""))
                 return
             }
-            pendingConfig = config
+            presentImport(.config(config))
         }
     }
 
     private func applyPendingConfig(overwrite: Bool) {
-        guard let config = pendingConfig else { return }
-        pendingConfig = nil
+        guard case .config(let config) = pendingImport else { return }
+        pendingImport = nil
         store.importConfig(config, overwrite: overwrite)
     }
 
@@ -807,19 +876,21 @@ struct FormSettingsView: View {
             let data = await Task.detached(priority: .userInitiated) { try? Data(contentsOf: file) }.value
             guard let data, let backup = try? JSONDecoder().decode(FullBackup.self, from: data) else {
                 store.importError = L10n.text("This isn't a Mi3s backup file.")
+                presentImport(.failure(title: L10n.text("Restore Full Backup"), message: store.importError ?? ""))
                 return
             }
             if backup.schemaVersion != FullBackup.version {
                 store.importError = L10n.text("This backup is from a newer version and can't be restored.")
+                presentImport(.failure(title: L10n.text("Restore Full Backup"), message: store.importError ?? ""))
                 return
             }
-            pendingFullBackup = backup
+            presentImport(.backup(backup))
         }
     }
 
     private func applyPendingFullBackup() {
-        guard let backup = pendingFullBackup else { return }
-        pendingFullBackup = nil
+        guard case .backup(let backup) = pendingImport else { return }
+        pendingImport = nil
         let result = store.importFullBackup(backup, categories: .all)
         let restored = result.restored.count
         let missing = result.skippedMissing.count

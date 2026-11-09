@@ -63,18 +63,74 @@ public struct SpeechSubtitles: Sendable {
 
     public init() {}
 
+    /// Per-language result cache for `canRecogniseOnDevice`.
+    ///
+    /// Why it exists: `SFSpeechRecognizer(locale:)` synchronously connects to the Speech XPC
+    /// service. `speechLanguage` is a **computed property** on the player, so without this cache
+    /// every body re-render re-created the recogniser and re-blocked on the XPC connection — a few
+    /// languages × a few renders quickly stalls startup. On hosts with no Speech service (a virtual
+    /// device without the assistant stack, say) that stall turns into a `mach_msg` hang that the
+    /// system kills with SIGKILL / FRONTBOARD. Caching makes the probe run once per language, on a
+    /// background queue, so the main thread never waits on the XPC connect.
+    private static let cache = SpeechAvailabilityCache()
+
     /// Whether this device can recognise `language` without a network.
     ///
     /// Checked before starting, because the difference between "on-device" and "sent to a server"
     /// is the whole point of the feature and a silent upgrade to the latter would be a bug.
     public static func canRecogniseOnDevice(_ language: String) -> Bool {
-        guard let recogniser = SFSpeechRecognizer(locale: Locale(identifier: language)) else { return false }
-        return recogniser.supportsOnDeviceRecognition
+        if let cached = cache.value(for: language) { return cached }
+        let result = probeOnDeviceRecognition(language)
+        cache.set(result, for: language)
+        return result
     }
 
     /// The languages this device can handle on device.
     public static func availableLanguages(from candidates: [String]) -> [String] {
         candidates.filter { canRecogniseOnDevice($0) }
+    }
+
+    /// The actual `SFSpeechRecognizer` probe, run off the caller's thread. The XPC connect inside
+    /// `SFSpeechRecognizer(locale:)` can block indefinitely on a host without the Speech service, so
+    /// a generous timeout is enforced with a semaphore: the probe runs on a detached task and, when
+    /// it does not answer in time, the caller returns `false` instead of hanging the render loop.
+    private static func probeOnDeviceRecognition(_ language: String) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = AtomicBool()
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.value = SFSpeechRecognizer(locale: Locale(identifier: language))?.supportsOnDeviceRecognition ?? false
+            semaphore.signal()
+        }
+        // Speech availability is a feature gate, not a correctness path: two seconds is more than
+        // enough on a real device, and on a host where the service is absent we simply treat the
+        // language as unavailable rather than stalling.
+        if semaphore.wait(timeout: .now() + 2.0) == .timedOut {
+            return false
+        }
+        return box.value
+    }
+
+    /// Thread-safe Bool carrier, so the probe's result can cross the queue boundary into `Sendable`
+    /// code without a data race.
+    private final class AtomicBool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = false
+        var value: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _value }
+            set { lock.lock(); defer { lock.unlock() }; _value = newValue }
+        }
+    }
+
+    /// Per-language memoisation of `canRecogniseOnDevice`, guarded for concurrent reads.
+    private final class SpeechAvailabilityCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [String: Bool] = [:]
+        func value(for language: String) -> Bool? {
+            lock.lock(); defer { lock.unlock() }; return storage[language]
+        }
+        func set(_ value: Bool, for language: String) {
+            lock.lock(); defer { lock.unlock() }; storage[language] = value
+        }
     }
 
     /// Where the viewer's chosen recognition language is stored.

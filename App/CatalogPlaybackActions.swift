@@ -71,7 +71,13 @@ struct CatalogPlaybackActions: View {
             .glassSurface(.regular.interactive(), in: Circle())
             .help(L10n.text("Episodes"))
             #else
-            .chromeButton()
+            // ⛔ 这里不用 `.chromeButton()`。
+            //
+            // 那个样式会套 `.glassSurface(.regular.interactive(), in: Circle())` ——
+            // 在图标外面画一圈 44pt 的液态玻璃圆底。One 的这颗「•••」是**纯图标**，
+            // 没有圆底；套上去在深色画面上像多了一颗悬浮按钮。
+            // 只保留按压反馈与 44pt 命中区，不画背景。
+            .buttonStyle(PlainChromeButtonStyle())
             #endif
             .accessibilityLabel(L10n.text("Playback Options"))
             .accessibilityIdentifier("player.catalogOptions")
@@ -108,3 +114,20 @@ extension View {
     }
 }
 #endif
+
+/// 与 `ChromeButtonStyle` 同样的尺寸与按压行为，但**不画圆底**。
+///
+/// One 的「•••」/选集入口是裸图标，没有液态玻璃底座。
+/// 直接改全局的 `ChromeButtonStyle` 会把上游播放器那一整排控件一起改掉，
+/// 所以单独做一个只给这里用的样式。
+private struct PlainChromeButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(.white)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .opacity(enabled ? (configuration.isPressed ? 0.72 : 1) : 0.38)
+    }
+}

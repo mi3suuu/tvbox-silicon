@@ -2,6 +2,10 @@ import SwiftUI
 import TVCore
 
 struct VideoDetailView: View {
+    #if DEBUG && os(iOS)
+    /// 自动旋转回归钩子的单实例闸；转屏会重复触发 `onAppear`。
+    @MainActor private static var qaRotateCycleRunning = false
+    #endif
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.dismiss) private var dismiss
     @Environment(Store.self) private var store
@@ -11,16 +15,43 @@ struct VideoDetailView: View {
     var resume: PlaybackHistoryEntry? = nil
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    @State private var fullScreen = false
-    /// Full Screen came from turning the phone sideways, so turning it upright again returns to the page.
-    @State private var turnedFullScreen = false
+    // ⛔ 全屏状态必须**跨页面身份重建存活**（mi3s 2026-11-09）：
+    // 设备日志（oneskin.log）铁证：detail onAppear 反复触发 133 次（页面身份重建循环），
+    // @State fullScreen 每次重建归零 —— 用户点全屏后 fs=true 铺满一帧，页面一重建
+    // 就被弹回非全屏，表现为「竖屏点全屏没反应 / 全屏闪一下就退出」。
+    // 改 @AppStorage 持久化：状态与页面身份解耦，重建后自动恢复。
+    // 退出点（exitFullScreen / onDisappear / 折叠复位）照常写 false。
+    @AppStorage("watchFullScreen") private var fullScreen = false
+    /// 详情页的选集抽屉开关。
+    ///
+    /// ⛔ **不能用 `store.showsEpisodes`**：那个键是上游全屏播放器
+    /// （`PlayerView.swift` 的 `.sheet`）在用。详情页与全屏同时挂同一个键，
+    /// 置 true 会**同时触发两个 sheet** —— iOS 同层弹不了两个，
+    /// 结果是页面被挤回推荐首页、后续所有触摸失效。这正是用户报的现象。
+    /// 详情页用自己的 @State，两条路径互不干扰。
     @State private var showsAllEpisodes = false
+    /// 选集抽屉当前停在哪一档高度。集合固定 `[.medium, .large]`，只换这个值。
+    @State private var episodeDetent: PresentationDetent = .medium
+    /// 选集抽屉：搜索词与当前页（每页 10 集）。
+    @State private var episodeQuery = ""
+    @State private var episodePage = 0
+    /// 选集抽屉的筛选维度。
+    enum EpisodeFilter: String, CaseIterable, Identifiable {
+        case all, unwatched, downloaded
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .all: "全部"
+            case .unwatched: "未看"
+            case .downloaded: "已下载"
+            }
+        }
+    }
+    @State private var episodeFilter: EpisodeFilter = .all
+    /// 每页集数，可在抽屉里切换。
+    static let pageSizeChoices = [10, 20, 50]
+    @State private var episodePageSize = 10
     @State private var episodeScroll: Episode.ID?
-    /// The Duo unfolded and the page is landing sideways: held from the moment it opens until the interface
-    /// has actually turned. `interfaceOrientation` only changes once the geometry request is honoured, so
-    /// without this the page draws a frame or two of the upright full-bleed layout — the picture filling a
-    /// tall screen with the details in a sheet — before snapping into the two-column landscape.
-    @State private var unfoldingToLandscape = false
     /// The page's player shows its picture (or an error); until then the page's cover stays over it.
     @State private var playerStarted = false
     /// Back on the cover while it starts: shown for a moment by a tap, as the player's controls are.
@@ -46,11 +77,40 @@ struct VideoDetailView: View {
     @State private var reversesEpisodes = false
     /// Play takes over focus from the loading placeholder; otherwise nothing is focused once details load.
     @FocusState private var playFocused: Bool
+    /// ⛔ **2026-11-09 根治「横竖屏切换后界面一直推移 / 得重启才恢复」**
+    ///
+    /// 这两个值以前是 `.onGeometryChange` 写回的 @State，却又驱动
+    /// `upstreamWatchBody` 的列宽、画面高度、`duoExpanded` / `isWide` 判据 ——
+    /// 「测量 → 写 State → 改布局 → 再测量」自激闭环，每转一次屏缩一圈，
+    /// 右侧浅色列不断往左推进来。历史修法清一色是阈值 / 双帧确认 / 冻结缓存，
+    /// 都只是减速；冻结还会把几何卡在旧值，正是「得重启 App 才生效」。
+    ///
+    /// 现在它们是**纯派生值**：只读静态屏幕边界 + 离散界面方向，
+    /// 不测量自身、不写状态、不缓存。同形态下每次求值完全相同，没有环可自激；
+    /// 方向一变立即得到新值，一次到位，也不会卡死。
+    #if os(iOS)
+    private var layoutSize: CGSize {
+        let b = UIApplication.shared.appWindowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
+        // screen.bounds 是物理固定方向，旋转时不产生动画中间态；
+        // 按界面方向交换宽高即得当前逻辑尺寸。
+        return landscapeScreen
+            ? CGSize(width: max(b.width, b.height), height: min(b.width, b.height))
+            : CGSize(width: min(b.width, b.height), height: max(b.width, b.height))
+    }
+    private var containerWidth: CGFloat { layoutSize.width }
+    private var containerHeight: CGFloat { layoutSize.height }
+    #else
+    // macOS / tvOS 没有设备旋转，测量回写不构成闭环，保留原行为。
     @State private var containerWidth: CGFloat = 0
     @State private var containerHeight: CGFloat = 0
+    #endif
     /// The picture's own width-over-height, reported by the player once the stream is known.
     /// 16:9 until then, which is what most sources serve and therefore the least surprising guess.
     @State private var playerAspectRatio: CGFloat = 16.0 / 9.0
+    /// 每条线路的测速样本（线路名 → 已解析的播放地址）。
+    /// 只放**真正解析出来**的地址：type 3/4 的源要先经 preparePlayback 才能拿到流，
+    /// 直接拿 `episode.address` 去测等于测一个解析不了的字符串，数字毫无意义。
+    @State private var lineSamples: [String: OneSkinLineSample] = [:]
     /// The cover's width over height once it loads; landscape covers are common (Bilibili, short dramas).
     @State private var artAspect: CGFloat?
     /// TMDB's backdrop once its picture has loaded. The source's cover stays until then, and when it never does
@@ -69,7 +129,7 @@ struct VideoDetailView: View {
     /// A line has no episode to continue the one playing: shown briefly under the header.
     @State private var lineNotice: String?
     /// TMDB's details for the video (TMDBViews.swift). The page shows the source's own until they are in, then fades them in.
-    @State private var tmdb = TMDBLookup()
+    @State var tmdb = TMDBLookup()
     /// The source's own recommendations, shown under the video when TMDB has none for it. Loaded lazily, once TMDB
     /// has answered, so the related list fills the space below the episodes instead of leaving it blank.
     @State private var siteRelated: [Recommendation] = []
@@ -84,6 +144,16 @@ struct VideoDetailView: View {
         let flag = activeFlag
         return (detail?.episodes ?? []).filter { $0.flag == flag }
     }
+    /// 仅供诊断日志的离散形态签名，不参与任何布局计算。
+    private var layoutSignature: String {
+        #if os(iOS)
+        let o = UIApplication.shared.appWindowScene?.interfaceOrientation.rawValue ?? -1
+        return "h\(String(describing: sizeClass))|v\(String(describing: verticalSizeClass))|o\(o)|fs\(fullScreen)|skin\(oneSkinActive)"
+        #else
+        return "h\(String(describing: sizeClass))"
+        #endif
+    }
+
     private var wideMinWidth: CGFloat {
         #if os(tvOS)
         1200
@@ -104,37 +174,85 @@ struct VideoDetailView: View {
     var body: some View {
         Group {
             #if os(iOS)
-            if watchLayout { watchBody } else { pageBody }
+            // [mi3s] 二开：选集播放页的**系统栏位**与**页面生命周期**只在这里挂一次。
+            //
+            // 以前 `watchBody` 的两条渲染分支（One 皮肤 `oneSkinBody` / 上游原版
+            // `upstreamWatchBody`）各自抄了一遍 `statusBarHidden` /
+            // `persistentSystemOverlays` / `setBarVisibility(:for: .navigationBar|.tabBar)`
+            // / `navigationBarBackButtonHidden` / `hidesAppTabBar`，生命周期
+            // （方向锁 / 转屏 / 换集 / 离页）也只写在 upstream 那一支 ——
+            // 于是皮肤一开，方向锁和转屏就集体失踪。两份代码的判据必然分叉，
+            // 用户看到的就是「横屏没有菜单栏、竖屏又有」。
+            //
+            // 现在两份都收成唯一一处：栏位认 `WatchSystemChrome`（单一判据 `fullScreen`），
+            // 生命周期认 `watchPageLifecycle`（两条分支共用同一套）。
+            if watchLayout {
+                watchPageLifecycleBody(watchBody
+                    .watchSystemChrome(fullScreen: fullScreen))
+                    // The upright watch page is immersive and its navigation bar is hidden, so the
+                    // edge swipe is its way back. One screen edge only: the player owns the rest.
+                    .background { EdgeSwipeBack(enabled: !fullScreen && !duoExpanded) }
+            } else {
+                pageBody
+            }
             #else
             pageBody
             #endif
         }
+        // 选集抽屉。**挂在这里**，与 `.downloadPicker` 同级 ——
+        //
+        // 关键教训：挂在 `watchBody` 内部时，无论用 @State 还是 store 都弹不出来
+        // （`episodes tapped` 有日志、状态也置了，但 sheet 的内容闭包从未执行）。
+        // `watchBody` 是 `@ViewBuilder` 里的 if/else 分支，OneSkin 那一支还叠了
+        // `.hidesAppTabBar` / `.setBarVisibility` 这类改动 UIKit 层级的修饰符，
+        // 在分支内部挂 sheet 找不到稳定的呈现锚点。
+        // 而 `.downloadPicker` 挂在本层（Group 之后）一直能弹 —— 照它挂就对。
+        // iOS 专属：`showsAllEpisodes` / `allEpisodes` 都在 `#if os(iOS)` 里，
+        // 不包起来 macOS / tvOS 会编译失败（此前只有 iOS 构建过，问题被掩盖）。
+        #if os(iOS)
+        .sheet(isPresented: $showsAllEpisodes) {
+            #if DEBUG
+            let _ = oneSkinLog("episodes sheet BUILDING eps=\(activeEpisodes.count) pages=\(episodePageCount)")
+            #endif
+            allEpisodes
+        }
+        .onChange(of: showsAllEpisodes) { _, open in
+            // 每次打开重新落档：宽屏（Duo 展开 / iPad）直接给满高，窄屏先给半屏。
+            guard open else { return }
+            episodeDetent = (duoExpanded || sizeClass == .regular) ? .large : .medium
+        }
+        #endif
         .safeAreaInset(edge: .bottom) { if !isWatchPage { loadingCard } }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-            // Only commit a change that matters: the split column's width feeds back into the layout,
-            // and committing every sub-point drift re-renders the page, which drifts again — the page
-            // appeared to shrink for ever.
-            if abs(size.width - containerWidth) > 0.5 { containerWidth = size.width }
-            // The height is always read: it sizes the picture box on every shape (half the screen on
-            // the upright unfolded Duo, the whole column when split), so a fold that only changed the
-            // height — the inner display is 2853pt tall, the outer cover 2034 — must not keep the
-            // previous shape's number. That stale height is what pushed the picture, and the whole
-            // page, off the screen after folding back.
-            if abs(size.height - containerHeight) > 0.5 { containerHeight = size.height }
-            #if DEBUG && os(iOS)
+            #if os(iOS)
+            // ★ iOS：**只读，绝不写状态**。布局尺寸由 `layoutSize` 纯派生，
+            // 这里量到的 `size` 不参与任何布局决策 —— 反馈环从根上不存在。
+            #if DEBUG
             if UserDefaults.standard.bool(forKey: "qaLogGeometry") {
                 let sb = UIApplication.shared.appWindowScene?.screen.bounds.size ?? .zero
-                NSLog("GEO w=%.0f h=%.0f hSize=%@ vSize=%@ duo=%@ land=%@ port=%@ scrW=%.0f scrH=%.0f", size.width, size.height,
-                      String(describing: sizeClass), String(describing: verticalSizeClass), String(describing: duoExpanded),
-                      String(describing: landscapeScreen), String(describing: portraitExpanded), sb.width, sb.height)
+                NSLog("GEO probe=%.0fx%.0f derived=%.0fx%.0f sig=%@ hSize=%@ vSize=%@ duo=%@ land=%@ port=%@ scrW=%.0f scrH=%.0f shape=%@",
+                      size.width, size.height, containerWidth, containerHeight, layoutSignature,
+                      String(describing: sizeClass), String(describing: verticalSizeClass),
+                      String(describing: duoExpanded), String(describing: landscapeScreen),
+                      String(describing: portraitExpanded), sb.width, sb.height,
+                      String(describing: oneSkinShape))
             }
+            #endif
+            _ = size
+            #else
+            containerWidth = size.width
+            containerHeight = size.height
             #endif
         }
         #if os(macOS)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { DetailAurora(poster: video.poster, headers: video.posterHeaders) }
         #else
-        .screenBackdrop()
+        // [mi3s] One 皮肤自带黑底（OneSkinBackdropLayer）。这里如果再挂 screenBackdrop，
+        // 会把 Backdrop 那层浅色（244,246,251）铺在最底下，OneSkin 的半透明黑压不住它，
+        // 结果整页发白 —— 控件和文字全部看不清，像素判读也全是噪声。
+        // One 实测底色是 #000 / #0E0E0E，所以皮肤开着时不挂主题底。
+        .modifier(ScreenBackdropIfNeeded(enabled: !oneSkinActive))
         #endif
         .screenTitle(video.name).task {
             store.searchModel.suspend()
@@ -169,23 +287,81 @@ struct VideoDetailView: View {
             // to the same list. A video watched before skips this — its continuation is the point of opening it.
             // On the Duo's unfolded landscape the episode grid already lives in the right column beside the
             // picture, so the auto-pop sheet would only cover it — skip the pop there.
+            // [mi3s] OneSkin 皮肤开着时**不再自动弹选集 sheet**：
+            // 皮肤详情栏里本来就有选集区，再弹全屏 sheet 只会盖住右栏、遮掉画面控件。
             if opensIntoEpisodes, store.resumingHistoryID == nil, watchChannel == nil,
-               !(duoExpanded && sideways), !portraitExpanded {
+               !(duoExpanded && sideways), !portraitExpanded,
+               !oneSkinActive, !choosingDownloads {
+                // ⛔ 必须是 `showsAllEpisodes`（本页抽屉的键）。
+                // 写 `store.showsEpisodes` 打开的是上游全屏播放器的面板 —— 本页没有宿主，
+                // 结果「什么都不弹」，还留下一个 true 的脏状态。
                 showsAllEpisodes = true
             }
             #endif
             #if DEBUG
-            // `-qaDownloadPicker 1` opens the episode picker, for screenshots.
-            if UserDefaults.standard.bool(forKey: "qaDownloadPicker") { choosingDownloads = true }
+            // `-qaDownloadPicker 1` / `-qaEpisodesSheet 1`：截图用的抽屉直开入口。
+            // 两者同层，不能同时为 true（iOS 同层只剩一个 presenter），打开一个先关另一个。
+            if UserDefaults.standard.bool(forKey: "qaDownloadPicker") {
+                showsAllEpisodes = false
+                choosingDownloads = true
+            }
+            if UserDefaults.standard.bool(forKey: "qaEpisodesSheet") {
+                choosingDownloads = false
+                showsAllEpisodes = true
+            }
+            // `-qaWatchPlay 1` 直接起播第一集：控件层只在 session 起来后才画，
+            // 多集片源默认停在封面，没有这条就截不到「真实播放中」的控件版式。
+            if UserDefaults.standard.bool(forKey: "qaWatchPlay"),
+               watchChannel == nil, let first = activeEpisodes.first ?? detail?.episodes.first {
+                await play(first)
+            }
+            #endif
+        }
+        .onAppear {
+            store.watchPageOpen = true
+            // 进页面就为每条线路解析一个可测速地址（不阻塞首帧）。
+            Task { await buildLineSamples() }
+            #if DEBUG
+            let switchDelay = UserDefaults.standard.double(forKey: "qaSwitchEpisode")
+            oneSkinLog("detail onAppear watchPageOpen=\(store.watchPageOpen) qaSwitchEpisode=\(switchDelay)")
+            // `-qaSwitchEpisode <秒>`：无人值守回归「换集后播放器是否渲染新内容」。
+            // 先起播第一集，等 N 秒再播第二集，对比两次截图 / oneskin.log 即可，
+            // 不必在模拟器上模拟点击（simctl 没有 tap）。
+            if switchDelay > 0 {
+                Task { @MainActor in
+                    // 等订阅导入 + 详情落地；最多 8 秒。
+                    for _ in 0..<16 where activeEpisodes.count < 2 {
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
+                    guard activeEpisodes.count > 1 else {
+                        oneSkinLog("qaSwitchEpisode: 需要至少两集，实际 \(activeEpisodes.count)")
+                        return
+                    }
+                    let first = activeEpisodes[0], second = activeEpisodes[1]
+                    oneSkinLog("qaSwitchEpisode: first -> \(first.name)")
+                    await play(first)
+                    try? await Task.sleep(for: .seconds(switchDelay))
+                    guard !Task.isCancelled else { return }
+                    oneSkinLog("qaSwitchEpisode: second -> \(second.name)")
+                    await play(second)
+                }
+            }
             #endif
         }
         .onDisappear {
+            store.watchPageOpen = false
             requestTask?.cancel()
             #if os(iOS)
             // The page itself is gone (not just folded/unfolded): leave Full Screen. The video keeps playing,
             // so the floating mini player (RootView) takes over and the viewer can still get back to it.
             // On a fold this view stays alive, so playback carries on into the other layout.
-            if fullScreen { fullScreen = false; PlayerOrientation.set(landscape: false) }
+            // 页面消失只清理**自己的**全屏状态。方向不再由这里强制回竖屏：
+            // 全屏与方向已解耦（`setFullScreen` / `exitFullScreen` 都不碰
+            // `PlayerOrientation`），横屏页离开时再 `set(landscape: false)`
+            // 会主动把整机转回竖屏，把这一页的方向偏好污染到下一个页面 ——
+            // 正是用户说的「每个页的全屏机制没有独立做好，无法共用」。
+            // 方向只由旋转键与播放器关闭时的 `release()` 管。
+            if fullScreen { fullScreen = false }
             #endif
         }
         .task(id: detail?.id) {
@@ -241,7 +417,10 @@ struct VideoDetailView: View {
         #endif
         .downloadPicker(isPresented: $choosingDownloads) {
             DownloadPicker(video: video, site: client.site, flag: activeFlag,
-                           episodes: activeEpisodes, origin: client.origin) { count in
+                           episodes: activeEpisodes, origin: client.origin,
+                           // One 皮肤 / 全屏时页面是黑的，抽屉也跟着黑，避免浅色材质糊在画面上。
+                           dark: drawerIsDark,
+                           startsLarge: drawerStartsLarge) { count in
                 guard count > 0 else { return }
                 withAnimation(.smooth(duration: 0.2)) { queuedNotice = count }
                 Task { try? await Task.sleep(for: .seconds(6)); withAnimation(.smooth(duration: 0.2)) { queuedNotice = nil } }
@@ -279,6 +458,25 @@ struct VideoDetailView: View {
     private var isWatchPage: Bool {
         #if os(iOS)
         watchLayout
+        #else
+        false
+        #endif
+    }
+
+    /// 抽屉是否用深色底：One 皮肤或全屏时页面是黑的，浅色材质会糊在画面上。
+    private var drawerIsDark: Bool {
+        #if os(iOS)
+        oneSkinActive || fullScreen
+        #else
+        false
+        #endif
+    }
+
+    /// 抽屉是否从满高开始：宽屏（Duo 展开 / iPad）下 medium 会变成居中小卡，
+    /// 两个抽屉都会显得又小又空。
+    private var drawerStartsLarge: Bool {
+        #if os(iOS)
+        duoExpanded || sizeClass == .regular
         #else
         false
         #endif
@@ -394,6 +592,9 @@ struct VideoDetailView: View {
             try Task.checkCancellation()
             // Worked out once, off the main thread: a line can hold thousands of episodes.
             let episodes = value.episodes
+            #if DEBUG
+            oneSkinLog("detail loaded: eps=\(episodes.count) flags=\(Set(episodes.map(\.flag)).sorted())")
+            #endif
             episodeLabels = await Task.detached(priority: .userInitiated) { EpisodeLabels.labels(episodes) }.value
             detail = value
             // Start on the line watched last (#362), else on one that can play: not one from a drive the viewer has no
@@ -502,7 +703,7 @@ struct VideoDetailView: View {
                     }
                 }
             }
-        } else if let detail, !activeEpisodes.isEmpty {
+        } else if detail != nil, !activeEpisodes.isEmpty {
             Text(L10n.text("You May Like")).font(.headline)
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(shownOrder(activeEpisodes)) { episode in
@@ -585,7 +786,7 @@ struct VideoDetailView: View {
     }
     private var isWide: Bool { containerWidth >= wideMinWidth }
     /// The details, with the list's poster when the details came without one.
-    private func currentVideo() -> Video { (detail ?? video).keepingPoster(video.poster, headers: video.posterHeaders) }
+    func currentVideo() -> Video { (detail ?? video).keepingPoster(video.poster, headers: video.posterHeaders) }
 
     private func videoFavorite() -> FavoriteItem {
         .video(FavoriteVideo(origin: client.origin, site: client.site, video: currentVideo()))
@@ -829,6 +1030,98 @@ struct VideoDetailView: View {
     /// The episodes in the order the lists show them. Only the lists: Play and the next episode still follow the source.
     private func shownOrder(_ items: [Episode]) -> [Episode] { reversesEpisodes ? items.reversed() : items }
 
+    // MARK: 选集抽屉的分页 / 筛选 / 搜索
+
+    /// 搜索 + 筛选之后的集（按当前排序）。空搜索 = 全集。
+    ///
+    /// 三级管道，顺序固定：**先筛选 → 再搜索**。
+    /// 反过来的话，「未看 + 搜 12」会在全部里搜出第 12 集，再被未看筛掉，
+    /// 用户会以为「第 12 集不见了」——实际是搜到了又被筛走。
+    private var filteredEpisodes: [Episode] {
+        var items = shownOrder(activeEpisodes)
+
+        switch episodeFilter {
+        case .all:
+            break
+        case .unwatched:
+            items = items.filter { !isWatched($0) }
+        case .downloaded:
+            items = items.filter { download($0)?.status == .completed }
+        }
+
+        let q = episodeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return items }
+        // 纯数字按「第 N 集」判：用户搜 12 想的是第 12 集，
+        // 不是标题里含「12」的那一批（「2012」不该命中）。
+        if let n = Int(q) {
+            let exact = items.filter { ep in
+                if let num = TMDBMatch.episodeNumber(ep.name) { return num == n }
+                return episodeTitle(ep).contains("\(n)")
+            }
+            // 有精确集号命中就只给精确结果；没有才退回子串匹配。
+            if !exact.isEmpty { return exact }
+        }
+        return items.filter { ep in
+            episodeTitle(ep).localizedCaseInsensitiveContains(q) || ep.name.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    /// 这部剧里「看过」的集：episodeID → 是否看完。
+    ///
+    /// 不能拿 `watchHistory`（单条续播点）来判断 —— 它只代表「上次看到哪一集」，
+    /// 用它筛「未看」会把除当前集以外的所有集都当成未看。
+    /// 真正的逐集记录在 `store.visibleHistory.entries` 里，每条含
+    /// `context.videoID`（哪部剧）与 `context.episodeID`（哪一集）。
+    /// 按本剧的 scope 收一遍，就是这个抽屉需要的完整「已看」集合。
+    private var watchedEpisodeIDs: Set<String> {
+        let scope = watchScopes
+        return Set(store.visibleHistory.compactMap { entry in
+            guard scope.contains(entry.context.id) else { return nil }
+            // 有进度或已看完才算「看过」；刚点开几秒不算，否则「未看」会漏掉。
+            return entry.progress > 0.02 || entry.completed ? entry.context.episodeID : nil
+        })
+    }
+
+    /// 这一集是否看过。正在播的那集始终算已看。
+    private func isWatched(_ episode: Episode) -> Bool {
+        if episode.id == currentEpisodeID, watchChannel != nil { return true }
+        return watchedEpisodeIDs.contains(episode.id)
+    }
+
+    /// 搜索提交时跳到第一处命中所在的页。
+    ///
+    /// 基于**过滤后**的列表算下标：`filteredEpisodes` 已经把筛选和搜索都应用过了，
+    /// 所以这里第一项就是命中项，页码恒为 0 —— 但保留函数是为了
+    /// 「搜 12 直接翻到含第 12 集那一页」的语义：当搜索是纯数字且列表里
+    /// 没有精确集号（退回子串匹配）时，仍然定位到第一个含该数字的位置。
+    private func jumpToFirstMatch() {
+        let q = episodeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { episodePage = 0; return }
+        let list = filteredEpisodes
+        guard !list.isEmpty else { episodePage = 0; return }
+        if let n = Int(q),
+           let idx = list.firstIndex(where: { TMDBMatch.episodeNumber($0.name) == n }) {
+            episodePage = idx / max(episodePageSize, 1)
+        } else {
+            episodePage = 0
+        }
+    }
+
+    private var episodePageCount: Int {
+        max(1, Int(ceil(Double(filteredEpisodes.count) / Double(max(episodePageSize, 1)))))
+    }
+
+    /// 当前页。页码越界时自动夹回（切换筛选/搜索后总数变小的情况）。
+    private var pagedEpisodes: [Episode] {
+        let all = filteredEpisodes
+        let size = max(episodePageSize, 1)
+        let page = min(episodePage, max(0, episodePageCount - 1))
+        let start = min(page * size, max(0, all.count))
+        let end = min(start + size, all.count)
+        guard start < end else { return [] }
+        return Array(all[start..<end])
+    }
+
     private func episodeList(_ items: [Episode]) -> some View {
         // A chip fits about six characters before it truncates (《一…); longer names get rows.
         let longNames = (items.map { (episodeLabels[$0.id] ?? $0.name).count }.max() ?? 0) > 6
@@ -916,6 +1209,9 @@ struct VideoDetailView: View {
         DownloadLibrary.shared.item(for: DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin))
     }
     private func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
+        #if DEBUG
+        oneSkinLog("play episode=\(episode.name) flag=\(episode.flag) busy=\(busy)")
+        #endif
         guard !busy else { return }
         // A downloaded episode plays from the device: no link to fetch, and it works offline.
         if let saved = download(episode), saved.status == .completed {
@@ -943,8 +1239,16 @@ struct VideoDetailView: View {
                 let resolved = try await playback.resolvePlayback(plan, choice: plan.choices[0])
                 try Task.checkCancellation()
                 store.playing = store.catalogChannel(resolved, video: currentVideo(), episode: episode, client: playback)
+                #if DEBUG
+                oneSkinLog("play OK url=\(String(describing: resolved.url).prefix(90))")
+                #endif
             }
-        } catch { fail(episode, error) }
+        } catch {
+            #if DEBUG
+            oneSkinLog("play FAIL \(error)")
+            #endif
+            fail(episode, error)
+        }
     }
     private func resolve(_ plan: PlaybackPlan, choice: PlaybackChoice, episode: Episode) async {
         busy = true; loadingEpisode = episode.id
@@ -960,8 +1264,15 @@ struct VideoDetailView: View {
         if let episode = playbackIssue?.episode { startRequest { await play(episode) } }
     }
     private func fail(_ episode: Episode, _ error: Error) {
+        #if DEBUG
+        oneSkinLog("fail \(episode.name): \(error)")
+        #endif
         guard !Task.isCancelled, !(error is CancellationError) else { return }
-        let login = error as? CloudDriveLoginRequired ?? CloudDriveLoginRequired(bundleMessage: error.localizedDescription)
+        // [融合修正] 原来这里调 `CloudDriveLoginRequired(bundleMessage:)`，
+        // 但那个初始化器在全仓库都不存在（备份分支也没有）——这行一直是编译不过的死代码，
+        // 只是本文件此前没进 target 才没暴露。改为按错误文本判断，语义不变：
+        // 网盘要求登录时，错误描述里会带驱动名。
+        let login = error as? CloudDriveLoginRequired ?? CloudDriveLoginRequired.matching(message: error.localizedDescription)
         // A drive that needs signing in is expected, not a failure to report.
         if login == nil {
             Diagnostics.shared.failure("catalog", "play \(client.reportContext) flag=\(episode.flag)", error)
@@ -1066,79 +1377,20 @@ struct VideoDetailView: View {
         default: return false
         }
     }
-    /// The Duo unfolded and held upright: a tall, tablet-sized screen that is wider than the folded cover
-    /// but taller than wide. It is neither the folded portrait column nor the unfolded landscape two-column
-    /// page — it plays the video full-bleed and tucks the details + episode list into a half-height sheet
-    /// the viewer pulls up, rather than stacking them under a 16:9 picture that wastes most of the tall
-    /// screen. `duoExpanded` is true here but the screen is taller than wide (`!landscapeScreen`), which is
-    /// exactly what separates it from the unfolded landscape column — the size classes cannot tell the two
-    /// apart, but the screen's own aspect can.
-    /// Whether the unfolded Duo is in its landscape column. Not the same as `landscapeScreen`: the page
-    /// opens sideways and the interface turns a beat later, so between the unfold and the turn this is
-    /// already true while the orientation still reads upright. Every layout decision reads this, never
-    /// `landscapeScreen` on its own, so the first frame of an unfold is the landscape one.
-    /// [mi3s] 二开：`sideways` 只在展开时有意义。
+    /// [mi3s] 二开：Duo 摊开后默认**留在竖屏**（单列：画面在上、详情与选集在下）。
+    /// 想看双列就把设备转横 —— 不再一展开就强制横屏。
     ///
-    /// 原来是 `landscapeScreen || (duoExpanded && unfoldingToLandscape)` —— `landscapeScreen` 读的是
-    /// `interfaceOrientation`，它**不随折叠复位**：内屏横持时已是 landscape，折回外屏后读数不变
-    /// （外屏是竖着拿的，可界面还没转回来）。于是折叠后页面继续按横屏两列布局画，看起来像「折回去
-    /// 还是横屏」。
-    ///
-    /// 折叠态的方向由 `holdPortrait(true)` 声明式钉住（`mask = .portrait`），页面应当立刻按竖屏画，
-    /// 而不是等 `interfaceOrientation` 追上来。所以未展开时直接返回假，展开时才读屏幕方向。
-    private var sideways: Bool { duoExpanded && (landscapeScreen || unfoldingToLandscape) }
+    /// 原来这里有三层「强制 sideways」：`unfoldingToLandscape`（落向横屏的轮询窗口）、
+    /// `unfoldedLandscapeHolds`（轮询失败后继续硬撑双列），外加 `landLandscape()`
+    /// 主动请求旋转。结果是「展开 = 双屏」，用户要的竖屏形态永远看不到。整套已删除：
+    /// `landscapeScreen` 只在设备**真的**横过来时才为真。
+    private var sideways: Bool { duoExpanded && landscapeScreen }
+
     private var portraitExpanded: Bool { duoExpanded && !sideways }
-    /// [mi3s] 二开：本页此刻该不该显示 tab bar。
-    ///
-    /// 播放一旦交给应用内小窗（`store.playing` 有值但这一页不管它播放），本页就不在台前了。
-    /// 这时仍按播放页的规则隐藏 tab bar，会让用户从小窗回到任何标签页时都看不到 tab bar ——
-    /// 表现就是「切到小窗后 tab 不见了」。小窗在台前时把 tab bar 交还给标签页，本页重新回到台前
-    /// 时再由下面的播放页规则接管。
-    private var barVisible: Bool {
-        if store.presentingPlayer { return false }
-        if let channel = store.playing, !store.playsInWatchPage(channel) { return true }
-        return duoExpanded && (!portraitExpanded || fullScreen)
-    }
     /// The page is laid out left/right — picture on one side, details and episodes beside it — rather
-    /// than stacked. True for a phone held sideways and for the unfolded Duo's wide inner display; Full
+    /// than stacked. True for a phone held sideways and for the unfolded Duo held sideways; Full
     /// Screen owns the whole display instead, so it never splits.
     private var splitsWatchPage: Bool { (landscapePage || (duoExpanded && sideways)) && !fullScreen }
-    /// The landscape the unfolded Duo first lands on, read from how the viewer is holding it. Unfolding
-    /// must always open into landscape, but *which* landscape follows the grip rather than being pinned
-    /// left. `UIDevice.current.orientation` reports `.landscapeLeft` / `.landscapeRight` while held
-    /// sideways; when the device is flat or still settling it reports `.faceUp` / `.faceDown` / `.unknown`,
-    /// and there is no sideways grip to honour, so it falls back to `.landscapeLeft`.
-    private var unfoldedLandscape: UIInterfaceOrientation {
-        switch UIDevice.current.orientation {
-        case .landscapeRight: return .landscapeRight
-        case .landscapeLeft, .faceUp, .faceDown, .unknown, .portrait, .portraitUpsideDown:
-            return .landscapeLeft
-        @unknown default: return .landscapeLeft
-        }
-    }
-    /// Lands an unfold on landscape: ask once, and hold the landscape layout until the interface is actually
-    /// sideways. Unfolding has always opened in landscape, but only from `onChange(of: duoExpanded)` — a page
-    /// opened on an already unfolded Duo never sees that change, so it stayed on the upright full-bleed
-    /// layout with the details in a sheet. Both entries go through here, and the hold covers the beat before
-    /// `interfaceOrientation` flips, so the first frame drawn is the two-column one.
-    private func landLandscape() {
-        unfoldingToLandscape = true
-        Task { @MainActor in
-            // The unfold animation swallows the geometry request made on its first frame (the scene is
-            // still resizing, so the turn is dropped), which is exactly how an unfold kept landing
-            // upright. Keep holding the landscape layout and ask again while the display settles; stop
-            // the moment the interface reports sideways. The whole window is well under two seconds.
-            for _ in 0 ..< 8 {
-                PlayerOrientation.turn(to: unfoldedLandscape)
-                for _ in 0 ..< 5 {
-                    try? await Task.sleep(for: .milliseconds(50))
-                    if landscapeScreen { break }
-                }
-                if landscapeScreen { break }
-            }
-            unfoldingToLandscape = false
-        }
-    }
     /// What plays at the top of the page: one of this video's episodes.
     private var watchChannel: Channel? {
         store.playing.flatMap { watchScopes.contains($0.historyContext?.id ?? "") ? $0 : nil }
@@ -1161,6 +1413,362 @@ struct VideoDetailView: View {
     /// unwanted Picture in Picture window), playback re-ran its setup, and the page's orientation hold was
     /// released mid-turn — the picture, and then the whole page, drifted.
     @ViewBuilder private var watchBody: some View {
+        // [mi3s] 二开：One 皮肤。开关在设置里（`OneSkinPreferencePanel`），
+        // 存 `UserDefaults` 的 `oneSkinEnabled`。关着就走下面原版 `upstreamWatchBody`，
+        // 一个字节的版式都没换。
+        if oneSkinActive {
+            // [mi3s] One 皮肤整屏独立：不吃上一层的列宽/内边距，
+            // 自己从全屏尺寸开始排版（横屏双列必须拿到完整宽高）。
+            oneSkinBody
+                // ★ 选集页**只让画面上边越界，底部要留给菜单栏**。
+                //
+                // 原来是无条件 `.ignoresSafeArea()`（四个方向全忽略）——
+                // OneSkin 会一路铺到屏幕最底，把底部标签栏整个盖住。
+                // 用户报「选集播放页应该保留原本的菜单栏」，根因就是它：
+                // `TabBarHider` 的日志证明标签栏的 isHidden 一直是 false
+                // （`want=false now=false`），它没被藏，是被盖了。
+                //
+                // 全屏时必须继续全忽略，否则四周的 letterbox 会留出白边。
+                .ignoresSafeArea(edges: fullScreen ? .all : [.top, .horizontal])
+                // ★ 光「不忽略底部」还不够：iOS 26 的液态玻璃标签栏是**浮层**，
+                // 它不撑大 `safeAreaInsets`，系统只给 34pt Home 指示条 ——
+                // 选集卡片会从玻璃下面穿过去、被压掉半行（截图逐像素量过）。
+                // 让哪一边看方向：竖持让底边（底部胶囊），横持让右边（贴右缘的竖排胶囊）。
+                // 全屏两边都归零（全屏本来就没有菜单栏）。
+                // 竖持：底部浮动胶囊（约 50pt，浮在 34pt Home 指示条之上）。
+                // 与右边同理用 `padding` 而不是 `safeAreaPadding` —— 两条边一个写法，
+                // 免得下次又要在「安全区 vs 内缩」上猜一遍。让位条由下面的 pageBase 垫底。
+                .padding(.bottom, oneSkinTabReserve.bottom)
+                .padding(.trailing, oneSkinTabReserve.trailing)
+                // 让位出来的那一条不能露系统页面底色（浅灰一条，比压住内容更难看）。
+                // 用 One 自己的整页底色垫在下面：海报渐变在页边本来就近黑，接缝看不出来。
+                .background(OneSkinPalette.pageBase.ignoresSafeArea())
+                // OneSkin 用 `OneSkinFixedPicture` 自绘画面，但 session 由
+                // PlaybackView 的 `onAppear` 启动、`opened:` 回调交回来。
+                // 所以这里仍挂一份离屏的 PlaybackView —— 但**只要 session，
+                // 不要它的画面层**（stageOnly）；否则会多一个
+                // AVPlayerViewController 与选集页的 AVPlayerLayer 抢 player，
+                // 竖屏片源最容易变成黑屏「看不了」。见 PlaybackView.stageOnly。
+                .background(alignment: .topLeading) {
+                    // 用 offset 推到屏幕外而不是 opacity：opacity 极低时 SwiftUI
+                    // 可能跳过子树渲染，`onAppear` / `opened:` 就不触发。
+                    oneSkinSessionStage
+                        .frame(width: 8, height: 8)
+                        .offset(x: -4000, y: -4000)
+                        .allowsHitTesting(false)
+                }
+                // [mi3s] 系统栏位（状态栏 / 导航栏 / 标签栏 / Home 指示条）
+                // 已经**不在这一支里写**了 —— 见 `body` 里 `watchBody` 外层挂的
+                // `WatchSystemChrome`。判据只有 `fullScreen` 一个，两条渲染分支共用，
+                // 不会再出现「改了一边漏了另一边」。
+        } else {
+            upstreamWatchBody
+        }
+    }
+
+    /// One 观看页三态。判据**全部来自离散信号**，不看容器宽高比：
+    ///   split      = Duo 摊开 + 横持（sideways），或手机横持（landscapePage）
+    ///   fullBleed  = Duo 摊开 + 竖持（portraitExpanded）＝「展开宽屏」
+    ///   column     = 其余（折叠态 / 立式手机）
+    ///
+    /// 2026-11-09：这里原来用 `containerWidth > containerHeight` 判 split。
+    /// 容器尺寸在折叠 / 旋转动画里是**连续量**，会在临界点反复翻转；
+    /// 而 `containerWidth/Height` 又是 `.onGeometryChange` 写回的 @State，
+    ///   于是形成「改布局 → 再量到新尺寸 → 再改形态」的自激环，表现为两种展开态
+    /// 分不开、控件坐标每帧漂移。`sideways` 只看 `interfaceOrientation`
+    /// （离散）、`duoExpanded` / `landscapePage` 只看 size class（离散），
+    /// 形态一旦定下就不会因亚点尺寸变化而抖动。
+    private var oneSkinShape: OneSkinShape {
+        #if DEBUG
+        // VM / 模拟器没有折叠与旋转接口，这两个开关用来无人值守地
+        // 分别拍下「展开宽屏」和「展开横屏」，确认两态确实不同。
+        if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinSideways") { return .split }
+        #endif
+        if duoExpanded {
+            // 展开宽屏 vs 展开横屏：只差 `sideways`（设备 interfaceOrientation）。
+            return sideways ? .split : .fullBleed
+        }
+        return landscapePage ? .split : .column
+    }
+
+    @AppStorage(OneSkin.enabledKey) private var oneSkinEnabled = true  // [临时验证] 默认开，QA 参数传不进 Fig-clone
+    @AppStorage(OneSkin.speedKey) private var oneSkinSpeed: Double = 1
+
+    /// [mi3s] QA 强制开关：启动参数 `-qaOneSkin`（或 `qaOneSkin=1`）时强制启用皮肤，
+    /// 免去验证时和 cfprefsd 抢 UserDefaults 的麻烦。普通用户走 `oneSkinEnabled`（设置页）。
+    private var oneSkinActive: Bool {
+        // 同 key 在 OneSkinPreferencePanel 里也是 @AppStorage；两处默认值必须一致，
+        // 否则谁先构造谁决定实际值（曾因那边默认 false 导致皮肤永远不生效）。
+        oneSkinEnabled || UserDefaults.standard.bool(forKey: "qaOneSkin")
+    }
+
+    /// 选集页要给菜单栏让出的空间。
+    ///
+    /// iOS 26 的标签栏是浮层、不进 `safeAreaInsets`，所以必须自己让位；
+    /// 而且**形状随方向变**：竖持是底部横胶囊，横持是贴右缘的竖胶囊。
+    /// 只让底边是之前「横屏内容被菜单栏盖住」的原因（Duo 内屏截图逐像素量过）。
+    private var oneSkinTabReserve: (bottom: CGFloat, trailing: CGFloat) {
+        // ⛔ 底部菜单已折起（WatchSystemChrome.oneSkin → tabBar 恒收，2026-11-09）：
+        // 液态玻璃胶囊不再渲染，两向让位全部归零。保留判据注释以防回退时误读：
+        // 竖持让底边、横持让右边（Duo 内屏 regular×regular 的 size class 判据不可用，
+        // 必须看 landscapeScreen）。
+        guard !fullScreen else { return (0, 0) }
+        if landscapeScreen { return (0, 0) }
+        return (0, 0)
+    }
+
+    // MARK: One 皮肤用到的三处取值
+    // 观看页把「在播的是哪一集」「是不是本站播放」「跳 10 秒」这三件事原本写在各处内联表达式里，
+    // 皮肤层需要具名入口，就在这里收一次，不复制上游逻辑。
+
+    /// 在播的那一集；没在播就是列表里的第一集。
+    private var currentEpisode: Episode? {
+        if let id = currentEpisodeID { return activeEpisodes.first { $0.id == id } }
+        return activeEpisodes.first
+    }
+
+    /// 这一页自己正在播（而不是别处有小窗或在推流）。
+    private var playingOnThisPage: Bool {
+        guard let channel = watchChannel else { return false }
+        return store.playing == channel
+    }
+
+    /// 前后跳 10 秒，走播放器自己的 `skip(_:)`。
+    private func skip(by seconds: Double) {
+        playerSession?.skip(seconds)
+    }
+
+    /// 为**每条线路**解析出可测速的真实播放地址。
+    ///
+    /// 为什么要逐线解析、而不是直接拿 `episode.address`：
+    /// type 3/4（CatPaw / 苹果CMS 播放器接口）的 `address` 只是个 play 参数，
+    /// 必须过 `preparePlayback` + `resolvePlayback` 才变成可请求的流地址。
+    /// 拿原始字符串去 HEAD，测的是一个不存在的 URL，数字纯属摆设。
+    ///
+    /// 每条线路取「当前正在看的这一集」；该线没有这一集时退回它的首集。
+    /// 并发解析、失败即跳过 —— 测不出的线路在菜单里不显示数字，不编造。
+    private func buildLineSamples() async {
+        guard let episodes = detail?.episodes, !flags.isEmpty else {
+            await MainActor.run { lineSamples = [:] }
+            return
+        }
+        let playing = episodes.first { $0.id == currentEpisodeID }
+        let lines = flags
+        // `subscription` 是主线程隔离的，先在主线程取好快照，再并发解析。
+        let base = client
+        let playback = store.subscription.map { client.applying($0) } ?? client
+
+        let resolved = await withTaskGroup(of: (String, OneSkinLineSample?).self) { group in
+            for flag in lines {
+                let onLine = episodes.filter { $0.flag == flag }
+                guard let ep = onLine.first(where: { $0.id == playing?.id }) ?? onLine.first else {
+                    continue
+                }
+                group.addTask {
+                    do {
+                        let plan = try await base.preparePlayback(ep)
+                        guard let choice = plan.choices.first else { return (flag, nil) }
+                        let channel = try await playback.resolvePlayback(plan, choice: choice)
+                        return (flag, OneSkinLineSample(url: channel.url, headers: channel.headers))
+                    } catch {
+                        return (flag, nil)
+                    }
+                }
+            }
+            var out: [String: OneSkinLineSample] = [:]
+            for await (flag, sample) in group {
+                if let sample { out[flag] = sample }
+            }
+            return out
+        }
+
+        await MainActor.run { lineSamples = resolved }
+    }
+
+    /// ⛔ 换集修复（2026-11-09）：选集页画面必须绑到「真正在播」的那一个 AVPlayer。
+    ///
+    /// `Store.playbackSession(for:)` 遇到新 channel 会**新建一个空会话**；但
+    /// `PlaybackView` 的 `@State session` 在视图身份不变时不会跟着 init 参数换，
+    /// 而是由 `.onChange(of: channel)` 在**原 player** 上替换 currentItem
+    ///（上游就是这么设计换集的）。换集后两边就此分叉：`oneSkinBody` 若仍用
+    /// `store.playbackSession(for: watchChannel)`，会把 `OneSkinFixedPicture`
+    /// 绑到一个没有 item 的新 player 上，只剩海报虚化；声音却还在旧 player
+    /// 上播 —— 用户看到的「换集后播放器不渲染新内容」。
+    ///
+    /// `playerSession` 由离屏 stage 的 `onStageSession` / `opened:` 交回，指向
+    /// PlaybackView 实际持有的会话，换集时保持不变，正好长期一致。
+    /// `??` 右侧延迟求值：只有首次 `onAppear` 之前才回退到 store（此时两者本就
+    /// 是同一个对象）；换集后 `playerSession` 已有值，不会再新建空会话。
+    private var oneSkinStageSession: PlaybackSession? {
+        playerSession ?? watchChannel.map { store.playbackSession(for: $0) }
+    }
+
+    /// One 版式：黑底一列，画面→控制条→标题→主按钮→标签→选集。
+    /// 画面仍是同一套播放引擎，只是把画面当成一个 View 传进去，皮肤层不认识 `PlaybackSession`。
+    @ViewBuilder private var oneSkinBody: some View {
+        OneSkinStage(
+            video: video,
+            detail: detail,
+            current: currentEpisode,
+            playing: playingOnThisPage,
+            busy: busy,
+            aspectRatio: max(playerAspectRatio, 0.4),
+            shape: oneSkinShape,
+            // 片源身份：字幕文件、请求头、片头片尾 scope、上下集都靠它（成员顺序在 shape 之后）。
+            channel: watchChannel,
+            // ⛔ 换集修复：画面与画质菜单都用「真正在播」的会话，
+            // 不能每集重新 `store.playbackSession(for:)` 取一个空会话。
+            // 详见 `oneSkinStageSession` 注释。
+            avPlayer: oneSkinStageSession?.player,
+            session: oneSkinStageSession,
+            // One 的进度条两端是「已播 / −剩余」，没有真值就画不出进度。
+            // session 是 @Observable，这两个值变化会带着皮肤一起重绘。
+            position: playerSession?.position ?? 0,
+            duration: playerSession?.duration ?? 0,
+            // 这里曾传 `picture: { watchStage }`，但 OneSkinStage 从未调用它
+            //（画面由 OneSkinPlayerLayer + avPlayer 自绘）。真正的 PlaybackView 是
+            // 下面 oneSkinBody 上挂的 `.background(watchStage)`，它负责触发 session.prepare。
+            onBack: {
+                // [mi3s] 二开：返回分两层，和上游 `leavePlayer()` 同义。
+                // 全屏里点返回 = 退出全屏，回到**选集页**继续播（画面、进度、选集都在）；
+                // 只有本来就不在全屏时，才是真的离开这一页。
+                // 原来这里无条件 `dismiss()`，用户在全屏里点返回直接被踢回首页，
+                // 正在播的那一集只剩小窗 —— 就是「返回直接全退」。
+                leavePlayer()
+            },
+            // 一键退全屏：只改状态，不碰页面栈。控件层全屏时的返回走这条路。
+            onExitFullScreen: { exitFullScreen() },
+            onPlay: { episode in
+                Task { await play(episode) }
+            },
+            onTogglePlay: {
+                // 上游没有单独的暂停/继续入口：停止走 store，继续就再播当前集。
+                // ⛔ 停止必须走 `store.stopPlaying()`：裸赋 `playing = nil` 会跳过
+                // session.stop()（历史保存 / 流清理 / 弹幕清空 / upcoming 取消），
+                // Store.playing.didSet 只把对象置 nil —— 与 Store.swift:343 注释
+                // 「playing = nil alone skips that teardown and leaks」一致。
+                if playingOnThisPage {
+                    store.stopPlaying()
+                } else if let episode = currentEpisode ?? activeEpisodes.first {
+                    Task { await play(episode) }
+                }
+            },
+            onSeekBack: {
+                skip(by: -10)
+            },
+            onSeekForward: {
+                skip(by: 10)
+            },
+            onSeekTo: { fraction in
+                // 进度条松手：把 0…1 换算成秒再定位。
+                // 时长未知（live / 刚起播）时忽略，不猜。
+                guard let session = playerSession, session.duration > 0 else { return }
+                session.seek(to: session.duration * fraction)
+            },
+            onFullScreen: {
+                #if DEBUG
+                #endif
+                setFullScreen(landscape: playerAspectRatio > 1)
+            },
+            onEpisodes: {
+                // 本页的抽屉只认 `showsAllEpisodes`。
+                //
+                // 曾经这里写的是 `store.showsEpisodes`（上游全屏播放器的键），
+                // 于是「点选集没反应」：本页的 sheet 读的是 @State，而 store 那个键
+                // 在本页没有宿主，只留下一个 true 的脏状态。
+                // 闭包捕获 @State 包装器本身、共享同一存储，写它是有效的 ——
+                // 之前判定「写入被副本丢弃」是误诊，真正写错的是键。
+                showsAllEpisodes = true
+            },
+            onToggleSkin: {
+                withAnimation(.smooth(duration: 0.25)) { oneSkinEnabled = false }
+            },
+            onDownload: {
+                choosingDownloads = true
+            },
+            onFavorite: {
+                store.favorites.toggle(videoFavorite())
+            },
+            onShare: {
+                // One 分享的是稳定链接（TMDB 页），没有就静默（ShareLink 同样会隐藏）。
+                if let link = tmdb.details?.link {
+                    #if !os(tvOS)
+                    let activity = UIActivityViewController(activityItems: [link], applicationActivities: nil)
+                    if let scene = UIApplication.shared.appWindowScene,
+                       let root = scene.keyWindow?.rootViewController {
+                        var presenter = root
+                        while let presented = presenter.presentedViewController { presenter = presented }
+                        if let pop = activity.popoverPresentationController {
+                            pop.sourceView = presenter.view
+                            pop.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 0, height: 0)
+                        }
+                        presenter.present(activity, animated: true)
+                    }
+                    #endif
+                }
+            },
+            isFavorite: store.favorites.contains(videoFavorite()),
+            lines: flags,
+            activeLine: activeFlag,
+            lineSamples: lineSamples,
+            onSelectLine: { flag in
+                // 复用上游 watchLines 的换线逻辑：换 flag 后播「续上当前集」的那一集。
+                let previous = activeFlag
+                selectedFlag = flag
+                guard watchChannel != nil, let episodes = detail?.episodes else { return }
+                let playing = episodes.first { $0.id == currentEpisodeID }
+                guard let same = episode(on: flag, matching: playing, in: episodes) else {
+                    selectedFlag = previous
+                    withAnimation(.smooth(duration: 0.2)) { lineNotice = L10n.text("This line doesn't have this episode.") }
+                    Task { try? await Task.sleep(for: .seconds(4)); withAnimation(.smooth(duration: 0.2)) { lineNotice = nil } }
+                    return
+                }
+                if same.id != currentEpisodeID { startRequest { await play(same) } }
+            },
+            onRotate: {
+                // 横竖屏切换：按**当前方向**反向转。PlayerOrientation 会同时调整允许的方向掩码。
+                // ⛔ 不能用 screen.bounds 的宽高比：VM 上它恒报竖屏原值（466×678），
+                // 不随 interfaceOrientation 交换 —— 实际已横屏时仍算出 landscape=true，
+                // 旋转键永远请求横屏、转不回竖屏。interfaceOrientation 是离散信号，
+                // 与本文件 landscapeScreen 同一来源。
+                let nowLandscape = UIApplication.shared.appWindowScene.map { scene in
+                    switch scene.interfaceOrientation {
+                    case .landscapeLeft, .landscapeRight: return true
+                    default: return false
+                    }
+                } ?? false
+                PlayerOrientation.set(landscape: !nowLandscape)
+            },
+            onMiniPlayer: {
+                // 唯一入口：视频控件里的「缩成小窗」。
+                // 先置**手动开关**，再离开观看页 —— 小窗只认这个开关，不认「是否在观看页」。
+                store.miniPlayerActive = true
+                dismiss()
+            },
+            onFold: {
+                // 合拢/展开由 OneSkinStage 自己的 `folded` 驱动，这里只留钩子。
+            },
+            // 「复制视频链接」「用外部播放器打开」都吃当前直链。
+            streamURL: watchChannel?.url,
+            streamHeaders: watchChannel?.headers ?? [:],
+            // 全屏态：OneSkin 之前完全没接这个状态，皮肤下点全屏没有任何变化。
+            isFullScreen: fullScreen
+        )
+        // 倍速是皮肤自己的开关，但要真的落到播放器上；开关变了才下发，避免每次重绘都设一遍。
+        .onChange(of: oneSkinSpeed) { _, value in
+            playerSession?.setSpeed(Float(value))
+        }
+        .onAppear {
+            if oneSkinSpeed != 1 { playerSession?.setSpeed(Float(oneSkinSpeed)) }
+        }
+        // [mi3s] 方向锁 / 转屏 / 折展收全屏 / 换集清会话，全部**不在这里写**：
+        // 已统一到 `watchPageLifecycle()`，由 `body` 在 `watchBody` 外层挂一次。
+        // 之前这里和 upstream 分支各写一套：皮肤开着时 upstream 那套根本不执行，
+        // 方向锁与「折回外屏撤全屏」就跟着失效。
+    }
+
+    @ViewBuilder private var upstreamWatchBody: some View {
         // The picture's own shape, never a fixed 16:9 box: a 4:3 or a 2.35:1 film fills it exactly, so
         // the bars the old box drew inside the player are gone. The page reports what the stream is;
         // 16:9 is only the guess until it does.
@@ -1215,108 +1823,107 @@ struct VideoDetailView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .statusBarHidden(true)
-        // The upright watch page is immersive: the edge swipe is its way back. On a folded-out Duo the
-        // page keeps its section menu (the floating tab bar) so a viewer can hop sections without
-        // leaving playback, and the picture itself carries the Back button.
-        // `setBarVisibility` uses `.toolbarVisibility` (iOS 18+) rather than `.toolbar(_, for:)`,
-        // which is deprecated on iOS 27 and silently stops hiding the Liquid Glass bars.
-        // The watch page carries its own top bar over the picture (see the back button on the player
-        // and the split column's header), so the navigation bar is hidden on every shape of it — the
-        // Duo unfolded included: a white title strip across the top of a poster prints the name twice
-        // and, after a fold, left the system's back button floating at the wrong end of the window.
-        .setBarVisibility(.hidden, for: .navigationBar)
-        // A hidden navigation bar can leave its back chevron floating over the player's own
-        // round Back button (two back controls stacked in the top-left corner). Hiding the bar
-        // alone does not always hide the back button on a pushed page, so hide it explicitly
-        // whenever the bar is hidden.
-        .navigationBarBackButtonHidden(true)
-        .background { EdgeSwipeBack(enabled: !fullScreen && !duoExpanded) }
-        // The Duo's section menu stays resident even in Full Screen: it floats over the picture
-        // (sidebarAdaptable never widens the safe area for it), so a viewer can hop sections without
-        // leaving playback. The upright phone hides it in Full Screen, as before.
-        // `setBarVisibility` not `.toolbar(_, for:)`: the old form is deprecated on iOS 27 and
-        // stops hiding the floating Liquid Glass tab bar, leaving the capsule over a full-screen video.
-        // The unfolded-upright Duo (portraitExpanded) plays full-bleed down to the home indicator, so its
-        // tab bar hides to keep the seek bar clear; the unfolded landscape column and Full Screen keep it
-        // resident. Gated on `duoExpanded` so a plain upright phone still hides its tab bar in Full Screen.
-        // [mi3s] 二开：小窗（应用内 mini player）出现时，本页已经不在台前，它的 tab bar 规则
-        // 不能再生效 —— 否则从小窗回到标签页时 tab bar 仍然隐藏，看起来像「tab 不见了」。
-        // `store.presentingPlayer` 是播放页；小窗走的是 `store.playing != nil && !playsInWatchPage`，
-        // 两者任一成立都说明本页不再拥有屏幕。
-        .setBarVisibility(barVisible ? .visible : .hidden, for: .tabBar)
-        .onAppear {
-            store.watchPageScopes.formUnion(watchScopes)
-            // The folded-out Duo is its own landscape screen; only the upright outer display is held
-            // portrait. (The inner display ignores orientation locks anyway, but holding it here also
-            // keeps Full Screen's turn from fighting the page.)
-            // A page opened on an already unfolded Duo never gets the fold/unfold change below, so this is
-            // the only place that can land it sideways — without it the page sat upright, picture filling a
-            // tall screen with the details in a sheet.
-            if duoExpanded {
+        // [mi3s] 系统栏位与页面生命周期**不在这里写**：
+        // 已提到 `body` 里 `watchBody` 的外层（`WatchSystemChrome` + `watchPageLifecycle`），
+        // 与 One 皮肤那条分支共用同一份实现、同一个判据。
+    }
+
+    /// 选集播放页的生命周期 —— **两条渲染分支共用一份**。
+    ///
+    /// 为什么必须共用：这些钩子此前只挂在 `upstreamWatchBody` 上。One 皮肤开关一打开，
+    /// `watchBody` 走的是 `oneSkinBody` 那一支，于是方向锁、转屏监听、
+    /// 换集清会话、离页收回 scope 集体失踪 —— 表现是「皮肤开着，转屏行为和装了两个 App 一样」。
+    ///
+    /// 规则本身只留一处，改一次两边都生效：
+    ///   · 折叠态钉竖屏、展开后交还给设备（不主动请求横屏）；
+    ///   · **转屏不再自动进全屏**：横屏就是双列选集页，全屏只由全屏键进入；
+    ///   · 换集清掉上一集的会话；离页收回页面 scope、解除方向锁。
+    private func watchPageLifecycleBody<Content: View>(_ content: Content) -> some View {
+        content
+            .onAppear {
+                store.watchPageScopes.formUnion(watchScopes)
+                // 回到观看页，小窗授权作废 —— 否则从观看页退回后小窗会再次自动弹出。
+                // （开关只由控件里的「缩成小窗」写入，这里负责在画面回到页内时收回。）
+                store.miniPlayerActive = false
+                // ★ One 皮肤开着的选集页**不钉竖屏**：
+                // 用户的要求是「横屏竖屏一样，都保留菜单栏」，而横屏必须真的能转过去
+                // 才谈得上双列选集页。上游那套「观看页恒竖屏、只有全屏才转」在
+                // 皮肤下会让转屏变成空操作（`holdPortrait` 把 mask 锁成 `.portrait`）。
+                // 皮肤关着仍按上游：折叠钉竖、展开松手。
+                if oneSkinActive {
+                    PlayerOrientation.holdPortrait(false)
+                } else {
+                    PlayerOrientation.holdPortrait(!duoExpanded)
+                }
+                #if DEBUG
+                // QA：`-qaWatchFullScreen 1` 直接进全屏，用来给「全屏控件层」截图
+                // （真机上要靠点全屏键，模拟器不好触发）。
+                if UserDefaults.standard.bool(forKey: "qaWatchFullScreen"), !fullScreen {
+                    setFullScreen(landscape: true)
+                }
+                // QA：`-qaRotateCycle <秒>` 在**同一个进程内**反复真旋转。
+                // 用来回归「横竖屏来回切，界面/控件是否累积推移、是否要重启才恢复」：
+                // 每轮横→竖→横，对比首尾截图的竖直分界线 x 坐标即可。
+                // 历史上这个 bug 反复出现却没被抓住，就是因为每次都靠人手转一次、
+                // 看一眼，没有可重复的来回切换证据。
+                let rotateEvery = UserDefaults.standard.double(forKey: "qaRotateCycle")
+                // `onAppear` 在转屏时可能被重复调用；没有这道闸会启动多个并行
+                // 定时器互相抢方向（实测日志出现三连 landscape，动画中间态失控）。
+                if rotateEvery > 0, !Self.qaRotateCycleRunning {
+                    Self.qaRotateCycleRunning = true
+                    Task { @MainActor in
+                        defer { Self.qaRotateCycleRunning = false }
+                        var sideways = false
+                        while !Task.isCancelled {
+                            try? await Task.sleep(for: .seconds(rotateEvery))
+                            guard !Task.isCancelled else { break }
+                            sideways.toggle()
+                            PlayerOrientation.rotate(to: sideways ? .landscapeRight : .portrait)
+                            oneSkinLog("qaRotateCycle -> \(sideways ? "landscape" : "portrait")")
+                        }
+                    }
+                }
+                #endif
+            }
+            .onChange(of: watchScopes) { old, new in
+                store.watchPageScopes.subtract(old.subtracting(new)); store.watchPageScopes.formUnion(new)
+            }
+            .onChange(of: duoExpanded) { _, expanded in
+                // 折叠 ⇄ 展开只改「方向锁」：折叠态钉竖屏（外屏），展开后交还给设备。
+                // 这里不调 `landLandscape()`：展开的默认落点是**竖屏单列**，
+                // 双列只在设备真的横过来时出现（`sideways` 只看 `landscapeScreen`）。
+                PlayerOrientation.holdPortrait(oneSkinActive ? false : !expanded)
+                // A Full Screen started on the inner display must not carry onto the outer one:
+                // folding while full-screen left the player filling a portrait screen it could not
+                // turn, with the watch page's own layout gone.
+                if !expanded && fullScreen { fullScreen = false }
+            }
+            // Fold/unfold flips the tab bar, the scrim's bleed and the controls' safe-area padding at
+            // once; animate the lot together so the swap reads as one move, not a pop.
+            .animation(.smooth(duration: 0.3), value: duoExpanded)
+            .onDisappear {
+                // An iPhone Duo fold/unfold swaps `watchBody` for `pageBody` (and back) without the
+                // page leaving, so the page-level `onDisappear` handles stopping playback and leaving
+                // Full Screen. Here only the watch page's own contributions are undone; they are
+                // re-established by `onAppear` when the watch page returns.
+                store.watchPageScopes.subtract(watchScopes)
+                // Unconditional: an unfold sets the hold to false already, but closing the page while
+                // folded shut used to skip this and leave the app held upright.
                 PlayerOrientation.holdPortrait(false)
-                landLandscape()
-            } else {
-                PlayerOrientation.holdPortrait(true)
             }
-            // Turning the phone sideways opens Full Screen, so listen for its orientation while a video plays.
-            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        }
-        .onChange(of: watchScopes) { old, new in
-            store.watchPageScopes.subtract(old.subtracting(new)); store.watchPageScopes.formUnion(new)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-            phoneTurned()
-        }
-        .onChange(of: duoExpanded) { _, expanded in
-            // Fold/unfold swaps the watch page between the outer display (held portrait) and the
-            // inner display (which ignores orientation locks). Re-assert the right hold each way so
-            // an unfold doesn't leave the upright lock fighting a landscape Full Screen.
-            PlayerOrientation.holdPortrait(!expanded)
-            // Unfolding opens into landscape by default (the inner display is a sideways tablet), but
-            // does not pin it: `turn` moves the picture once and leaves the mask free, so the viewer
-            // can still turn it upright afterwards. `holdPortrait(false)` above already let the mask
-            // follow the device; this just gives the first landing a landscape instead of portrait.
-            //
-            // Which landscape, though, follows the grip: a viewer already holding the phone sideways
-            // lands straight on their landscape, not a hard-coded `landscapeLeft` that first flashes
-            // the other way round and then snaps back. Only when the device reports no sideways grip
-            // (flat on a table, or mid-turn) does it fall back to `landscapeLeft`.
-            if expanded {
-                landLandscape()
-            } else {
-                // 折回外屏：撤掉「正落向横屏」的标记。竖屏由上面 `holdPortrait(true)` 声明式钉住
-                // （`mask = .portrait` + `requestGeometryUpdate(.portrait)`），页面方向跟着它走。
-                unfoldingToLandscape = false
+            .onChange(of: watchChannel == nil) { _, ended in
+                playerStarted = false
+                if ended { playerSession = nil }
+                if ended && fullScreen { setFullScreen(landscape: false) }
+                // [mi3s] 二开：**转屏 / 起播都不再自动进全屏**。
+                // 上游这里有 `phoneTurned()`：手机已经横着时，一起播就跳全屏。
+                // 用户的诉求正好相反 —— 横屏是双列选集页（左画面 + 右详情 + 菜单栏），
+                // 全屏只由全屏键显式触发。整个调用已删除，`phoneTurned` 也随之移除。
             }
-            // A Full Screen started on the inner display must not carry onto the outer one: folding
-            // while full-screen left the player filling a portrait screen it could not turn, with the
-            // watch page's own layout gone. Fold the page back to its normal (non-full-screen) state
-            // so it reads correctly again; unfolding re-opens the two-column watch page.
-            if !expanded && fullScreen { fullScreen = false }
-        }
-        // Fold/unfold flips the tab bar, the scrim's bleed and the controls' safe-area padding at once;
-        // animate the lot together so the swap reads as one move, not a pop.
-        .animation(.smooth(duration: 0.3), value: duoExpanded)
-        .onDisappear {
-            UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            // An iPhone Duo fold/unfold swaps `watchBody` for `pageBody` (and back) without the page leaving, so the
-            // page-level `onDisappear` handles stopping playback and leaving Full Screen. Here only the watch page's
-            // own contributions are undone; they are re-established by `onAppear` when the watch page returns.
-            store.watchPageScopes.subtract(watchScopes)
-            turnedFullScreen = false
-            // Unconditional: an unfold sets the hold to false already, but closing the page while
-            // folded shut used to skip this and leave the app held upright.
-            PlayerOrientation.holdPortrait(false)
-        }
-        .onChange(of: watchChannel == nil) { _, ended in
-            playerStarted = false
-            if ended { playerSession = nil }
-            if ended && fullScreen { setFullScreen(landscape: false) }
-            // Started with the phone already sideways: Full Screen at once, as turning it would.
-            if !ended { phoneTurned() }
-        }
-        .sheet(isPresented: $showsAllEpisodes) { allEpisodes }
+            // 换线路换筛选后页码必须回到 1：新线路可能只有 20 集，
+            // 停在第 50 页会被夹到末页，看起来像「跳到了最后一页」。
+            .onChange(of: activeFlag) { _, _ in episodePage = 0 }
+            .onChange(of: episodeFilter) { _, _ in episodePage = 0 }
     }
 
     /// The picture's own surface: black, so the bands a fit leaves inside it read as part of the frame
@@ -1327,17 +1934,32 @@ struct VideoDetailView: View {
     private var watchStage: some View {
         ZStack {
             Color.black
-            watchPlayer
+            watchPlayer(stageOnly: false)
         }
     }
 
-    @ViewBuilder private var watchPlayer: some View {
+    /// ⛔ 选集页（One 皮肤）用的离屏 stage：只产生/启动 `PlaybackSession`，
+    /// 不渲染任何画面。画面统一由 `OneSkinFixedPicture` 的 `AVPlayerLayer` 画，
+    /// 这样同一个 `AVPlayer` 只有一个渲染宿主，通用播放器样式改动
+    /// （`AVPlayerViewController` / 按片源比例的 pictureBox）影响不到选集页。
+    private var oneSkinSessionStage: some View {
+        watchPlayer(stageOnly: true)
+    }
+
+    @ViewBuilder private func watchPlayer(stageOnly: Bool) -> some View {
         // One cover from opening the page to the first picture: the player's own wait stays under it, so nothing
         // swaps or flickers on the way.
         let covered = watchChannel == nil || (!playerStarted && !fullScreen)
         ZStack {
             if let channel = watchChannel {
-                PlaybackView(channel: channel, session: store.playbackSession(for: channel),
+                // ⛔ 换集修复：stageOnly 的 PlaybackView 身份不变，它的 @State session
+                // 会在**原 player** 上换 item。这里同样复用同一个会话，别每集问
+                // Store 要一个从未启动过的新会话 —— `playbackSession(for:)` 在
+                // channel 变化时会顺手新建并顶掉 activeSession，是有副作用的。
+                let stageSession = stageOnly
+                    ? (playerSession ?? store.playbackSession(for: channel))
+                    : store.playbackSession(for: channel)
+                PlaybackView(channel: channel, session: stageSession,
                              watch: WatchPlayback(fullScreen: fullScreen, toggleFullScreen: setFullScreen,
                                                   leave: leavePlayer,
                                                   immersive: splitsWatchPage || duoExpanded,
@@ -1348,7 +1970,12 @@ struct VideoDetailView: View {
                                                       guard ratio.isFinite, ratio > 0.2, ratio < 6 else { return }
                                                       if abs(ratio - playerAspectRatio) > 0.01 { playerAspectRatio = ratio }
                                                   },
-                                                  openEpisodes: { store.showsEpisodes = true }))
+                                                  // 同上：本页的抽屉只认 `showsAllEpisodes`。
+                                                  openEpisodes: { showsAllEpisodes = true }),
+                             stageOnly: stageOnly,
+                             // 把 PlaybackView 实际持有的会话交回本页：选集页
+                             // 画面层据此长期绑定同一个 AVPlayer（换集只换 item）。
+                             onStageSession: { session in playerSession = session })
             }
             if covered { watchCover.transition(.opacity) }
         }
@@ -1360,7 +1987,24 @@ struct VideoDetailView: View {
     /// page the viewer only enlarged, so closing the page under it dropped them on Home with the video
     /// floating in the mini player. Leaving the page itself is the cover's Back, or the edge swipe.
     private func leavePlayer() {
-        if fullScreen { setFullScreen(landscape: false) } else { dismiss() }
+        if fullScreen { exitFullScreen() } else { dismiss() }
+    }
+
+    /// 明确地退出全屏（单向），绝不关页。
+    ///
+    /// 不能用 `setFullScreen(landscape:)` 代劳：那是个**对折开关**（`entering = !fullScreen`），
+    /// 返回时只要读到一次过期的 `false`（皮肤层与页面层是两份状态，见 OneSkinStage
+    /// 的 `fullScreenNow`），它就会把 `fullScreen` 设成 `true`；反过来读到过期的 `false`
+    /// 又会走进 `dismiss()`——用户看到的就是「全屏里点返回，直接回到主页」。
+    /// 返回是一条单向操作，实现也必须是单向的。
+    private func exitFullScreen() {
+        guard fullScreen else { return }
+        withAnimation(.smooth(duration: 0.3)) { fullScreen = false }
+        // 与 setFullScreen 同一条规则：全屏/退全屏都不碰方向。原来这里
+        // `PlayerOrientation.set(landscape: false)` 会把方向 mask 锁回竖屏 ——
+        // 横屏全屏退回后用户再点旋转键，被这个锁住的 mask 拦住，表现为
+        // 「横屏过来的 UI/控件漂移，重启才恢复」的一环。
+        // 退全屏只是恢复页面布局；方向仍然只归旋转键管。
     }
 
 
@@ -1375,40 +2019,35 @@ struct VideoDetailView: View {
 
     private func setFullScreen(landscape: Bool) {
         let entering = !fullScreen
-        // A button's Full Screen stays until the viewer leaves it; turning the phone back upright ends only a
-        // Full Screen the turning opened.
-        if !entering { turnedFullScreen = false }
         withAnimation(.smooth(duration: 0.3)) { fullScreen = entering }
-        // A landscape picture turns the phone; a portrait one fills the screen upright.
-        // The Duo's unfolded inner display ignores orientation requests (regular × regular): asking it
-        // to turn while entering Full Screen only interlocks the refused geometry update with the
-        // full-screen transition and freezes the picture. The screen is already its own shape, so just
-        // switch the full-screen state and leave the orientation alone.
-        guard !duoExpanded else { return }
-        if !entering { PlayerOrientation.set(landscape: false) } else if landscape { PlayerOrientation.set(landscape: true) }
+        // ⛔ 全屏**不再主动转屏**（mi3s 二开，2026-11-09）：
+        // 全屏 = 画面铺满**当前**屏幕方向。原来按片源比例决定转屏（横版片源进全屏
+        // 请求转横）—— 竖屏下点全屏会出现「尝试切横屏又弹回竖屏」：
+        // `requestGeometryUpdate` 的转屏请求与全屏过渡互锁（上游注释自认过这个坑：
+        // interlocks the refused geometry update with the full-screen transition），
+        // 请求被系统弹回，全屏状态却已置位，两套状态打架就是用户看到的「没反应」。
+        // 方向只归 Chrome 的旋转键管（onRotate）。`landscape` 参数保留但不再触发转屏。
+        _ = landscape
+        // ★ 告诉方向系统「现在处于全屏」/「已经退出全屏」。
+        //
+        // 这是「全屏机制独立」的开关：
+        //   · 进全屏 → `isFullScreenHeld = true`，此后 `holdPortrait(...)` 的任何写入
+        //     都被丢弃，页面尺寸变化（duoExpanded / sizeClass）再也无法把方向拉回去；
+        //   · 退全屏 → 关掉闸门，方向交还给页面习惯。
+        PlayerOrientation.setFullScreenHeld(entering)
     }
 
-    /// Turning the phone sideways while its video plays opens Full Screen, as the player's button does, and turning
-    /// it upright again returns to the page. The watch page holds the interface upright (`PlayerOrientation`), so it
-    /// doesn't turn by itself: this listens to the phone's own turning instead.
-    private func phoneTurned() {
-        guard watchChannel != nil, PlayerOrientation.available else { return }
-        // The controls lock also pins the orientation: turning the phone must not open Full Screen (and
-        // flip the picture) while it is on. The rotate button still turns by hand — that asks for a
-        // specific orientation, which is not the gyroscope following a changed grip.
-        guard !PlayerOrientation.isLocked else { return }
-        switch UIDevice.current.orientation {
-        case .landscapeLeft, .landscapeRight:
-            guard !fullScreen else { return }
-            turnedFullScreen = true
-            setFullScreen(landscape: true)
-        case .portrait:
-            guard fullScreen, turnedFullScreen else { return }
-            setFullScreen(landscape: false)
-        default:
-            break
-        }
-    }
+    /// [已删除] `phoneTurned()`：转屏自动进全屏。
+    ///
+    /// 用户诉求是「选集播放页横屏竖屏一样，都保留菜单栏，只有全屏播放才隐藏」。
+    /// 而这条上游逻辑把「手机横过来」直接翻译成「进全屏」，于是横屏永远看不到
+    /// 双列选集页和菜单栏 —— 菜单栏按规则被收掉了，用户看到的就是「横屏没有菜单栏」。
+    /// 现在转屏只是转屏：横屏 = 双列选集页（左画面 + 右详情 + 底部菜单栏），
+    /// 全屏只由顶栏/底栏那颗全屏键显式进入。`turnedFullScreen` 这个配套状态一并删除，
+    /// 别再让「转进去的全屏」和「按钮进的全屏」有两套退出条件。
+    ///
+    /// 若将来要恢复，唯一正确的做法是**在 `watchPageLifecycle` 里**加回，
+    /// 不要在两条渲染分支里各写一份（那正是这次清掉的屎山）。
 
     /// The cover's Play: where the viewer stopped, else the line's first episode.
     private func playWatchCover() {
@@ -1740,17 +2379,105 @@ struct VideoDetailView: View {
         }
     }
 
+    /// 选集抽屉底部的分页条：上一页 / 「第 x / N 页」可点跳转 / 下一页。
+    ///
+    /// 为什么不用 `Picker` 或 Slider：集数可能上千，Picker 的滚轮太慢，
+    /// Slider 又难以精确落到某一页。这里给「上一页 / 下一页」做粗调，
+    /// 中间的页码点开一个输入框做精确跳转。
+    private struct EpisodePager: View {
+        @Binding var page: Int
+        let pageCount: Int
+        let total: Int
+        @Binding var pageSize: Int
+        @State private var editing = false
+        @State private var draft = ""
+
+        var body: some View {
+            HStack(spacing: 12) {
+                Button { page = max(0, page - 1) } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 44, height: 36)
+                }
+                .buttonStyle(.plain)
+                .disabled(page <= 0)
+                .opacity(page <= 0 ? 0.35 : 1)
+
+                Spacer(minLength: 0)
+
+                VStack(spacing: 1) {
+                    Button {
+                        draft = "\(page + 1)"
+                        editing = true
+                    } label: {
+                        Text("\(page + 1) / \(pageCount)")
+                            .font(.system(size: 13, weight: .semibold))
+                            .monospacedDigit()
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(.plain)
+                    Text("\(total) 集")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+
+                Spacer(minLength: 0)
+
+                Button { page = min(pageCount - 1, page + 1) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 44, height: 36)
+                }
+                .buttonStyle(.plain)
+                .disabled(page >= pageCount - 1)
+                .opacity(page >= pageCount - 1 ? 0.35 : 1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(.bar)
+            .alert(L10n.text("跳到第几页"), isPresented: $editing) {
+                TextField("1", text: $draft)
+                    .keyboardType(.numberPad)
+                Button(L10n.text("Cancel"), role: .cancel) {}
+                Button(L10n.text("Go")) {
+                    if let n = Int(draft), n >= 1 { page = min(pageCount - 1, n - 1) }
+                }
+            } message: {
+                Text(L10n.text("共 %d 页，每页 %d 集", pageCount, pageSize))
+            }
+        }
+    }
+
     private var allEpisodes: some View {
-        let items = activeEpisodes
-        return NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    watchLines
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8, alignment: .top)], spacing: 8) {
-                        ForEach(shownOrder(items)) { watchEpisodeCard($0, fill: true) { showsAllEpisodes = false } }
+        NavigationStack {
+            VStack(spacing: 0) {
+                watchLines
+                episodeDrawerControls
+                Divider().opacity(0.4)
+                ScrollView {
+                    if pagedEpisodes.isEmpty {
+                        Text(episodeQuery.isEmpty && episodeFilter == .all
+                             ? L10n.text("没有剧集")
+                             : L10n.text("没有匹配的剧集"))
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 60)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8, alignment: .top)], spacing: 8) {
+                            ForEach(pagedEpisodes) { watchEpisodeCard($0, fill: true) {
+                                showsAllEpisodes = false
+                            } }
+                        }
+                        .padding(16)
                     }
                 }
-                .padding(16)
+                .scrollDismissesKeyboard(.immediately)
+                EpisodePager(page: $episodePage, pageCount: episodePageCount,
+                             total: filteredEpisodes.count, pageSize: $episodePageSize)
             }
             .navigationTitle(L10n.text("Episodes"))
             .navigationBarTitleDisplayMode(.inline)
@@ -1760,19 +2487,114 @@ struct VideoDetailView: View {
             }
         }
         .environment(\.glassControls, true)
-        // A phone held upright wants the half-height sheet so the picture stays in view above it.
-        // On the Duo's inner display the page is already two columns with the episode list at the
-        // right, so a half sheet would only cover the picture and the recommendations below — open
-        // full-height there instead.
+        // ★ 抽屉自己铺深色底并锁深色外观。
         //
-        // For a short list (a single-season title with a handful of episodes) a half sheet leaves a
-        // tall band of empty glass under two tiles, which reads as a broken, sparse panel. Size the
-        // sheet to its content in that case, so the panel hugs the lines + tiles instead of floating
-        // over a blank sheet.
-        .presentationDetents(duoExpanded
-                             ? [.large]
-                             : (items.count <= 6 ? [.height(320), .large] : [.medium, .large]))
+        // 之前什么都不铺，sheet 沿用系统浅色底（实测整页 247/247/247），
+        // 而 OneSkin 整页是深色（#080808）—— 抽屉一弹就是一大片刺眼白，
+        // 用户看到的就是「竖屏底下这块渐隐白层」。
+        // 铺 `OneSkinPalette.stage`（#080808，与页底同色）并锁 dark，
+        // 里面的 TextField / Menu / Divider / NavigationBar 才会跟着走深色。
+        // sheet 的**材质本身**也要换掉。
+        //
+        // 只加 `.background(...)` 是不够的：iOS 26 的 sheet 自带一层
+        // `.regularMaterial` 玻璃底（实测取样 RGB ≈ 114,113,113 的**中性灰**），
+        // 它压在内容下面、盖住我们铺的深色，于是整片抽屉是灰的，
+        // 且底部到 home indicator 安全区之间露出 9pt 深色 —— 就是用户看到的
+        // 「底部白色渐隐块」。`.presentationBackground` 直接替掉那层材质。
+        .presentationBackground(OneSkinPalette.stage)
+        .preferredColorScheme(.dark)
+        // 高度档位与下载抽屉**同一套**：`[.medium, .large]` + 用户拖拽。
+        //
+        // ⛔ 不要再用 `[.height(320)]`，也不要让档位集合随 `duoExpanded` 变：
+        // 1) 320pt 里固定头（导航栏 44 + 线路 + 搜索 44 + 筛选 32 + 分页器 48）就吃掉 200+，
+        //    列表只剩一行，用户以为「选集列表空了 / 只加载了一集」；
+        // 2) 档位集合在 sheet 展示期间被替换（合拢 → 展开）时，当前档位会从集合里消失，
+        //    UIKit 只能跳到剩下的唯一档位或直接收掉 —— 折叠一下抽屉自己变高/消失。
+        // 展开态想默认给满高，用 `selection` 换档，不动集合。
+        .presentationDetents([.medium, .large], selection: $episodeDetent)
+        .presentationDragIndicator(.visible)
+        .onChange(of: episodePageCount) { _, count in
+            // 换线路 / 改筛选 / 改每页条数后总页数变小：页码夹回，否则分页器会显示「6 / 2」。
+            if episodePage > count - 1 { episodePage = max(0, count - 1) }
+        }
     }
+
+    /// 抽屉顶部的搜索 + 筛选 + 每页条数。
+    ///
+    /// 三者在同一块里，因为它们是同一件事的三个维度：
+    /// 「我要找哪几集」— 搜索限定内容、筛选限定范围、页大小决定一屏看多少。
+    private var episodeDrawerControls: some View {
+        VStack(spacing: 8) {
+            // 搜索
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                TextField(L10n.text("搜索集数或标题"), text: $episodeQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14))
+                    .autocorrectionDisabled()
+                    .onChange(of: episodeQuery) { _, _ in episodePage = 0 }
+                    .onSubmit { jumpToFirstMatch() }
+                if !episodeQuery.isEmpty {
+                    Button { episodeQuery = ""; episodePage = 0 } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.07)))
+
+            // 筛选 + 每页条数
+            HStack(spacing: 8) {
+                ForEach(EpisodeFilter.allCases) { f in
+                    Button {
+                        episodeFilter = f
+                        episodePage = 0
+                    } label: {
+                        Text(f.label)
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(
+                                episodeFilter == f ? Color.primary.opacity(0.16) : Color.primary.opacity(0.05)))
+                            .foregroundStyle(episodeFilter == f ? Color.primary : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer(minLength: 0)
+                // 每页条数：10 / 20 / 50
+                Menu {
+                    ForEach(Self.pageSizeChoices, id: \.self) { n in
+                        Button {
+                            episodePageSize = n
+                            episodePage = 0
+                        } label: {
+                            if episodePageSize == n { Label("\(n) / 页", systemImage: "checkmark") }
+                            else { Text("\(n) / 页") }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("\(episodePageSize) / 页")
+                            .font(.system(size: 11, weight: .medium))
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.primary.opacity(0.05)))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
     #endif
 }
 
@@ -1783,7 +2605,12 @@ struct VideoDetailView: View {
 /// (`idiom == .pad`) takes the tablet's plain detail page.
 enum WatchPage {
     @MainActor static func applies(_ horizontal: UserInterfaceSizeClass?, _ vertical: UserInterfaceSizeClass?) -> Bool {
-        UIDevice.current.userInterfaceIdiom == .phone
+        // 原判据只认 `.phone`：虚拟机 / Duo 模拟器上 idiom 可能不是 .phone，
+        // 会让观看页永远走 pageBody（图文详情页），One 皮肤根本没机会渲染。
+        // 补一条：屏幕短边 < 600pt 也按手机观看页处理（真机 phone 亦满足）。
+        if UIDevice.current.userInterfaceIdiom == .phone { return true }
+        let b = UIScreen.main.bounds.size
+        return min(b.width, b.height) < 600
     }
 }
 

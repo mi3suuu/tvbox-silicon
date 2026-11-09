@@ -10,14 +10,14 @@ options:
 settings:
   base:
     SWIFT_VERSION: '6.0'
-    MARKETING_VERSION: '1.8.11'
-    CURRENT_PROJECT_VERSION: '49'
+    MARKETING_VERSION: '8.8.8'
+    CURRENT_PROJECT_VERSION: '888'
     GENERATE_INFOPLIST_FILE: YES
-    INFOPLIST_KEY_CFBundleDisplayName: Mi3s
+    INFOPLIST_KEY_CFBundleDisplayName: 顾及
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: ''
+    DEVELOPMENT_TEAM: U4TCPT39D5
     # Config/iCloud.entitlements once the App IDs and profiles have iCloud (Sources/TVCore/CloudSync.swift).
     ICLOUD_ENTITLEMENTS: ''
 packages:
@@ -46,7 +46,7 @@ targetTemplates:
     info:
       path: Config/Info-${target_name}.plist
       properties:
-        CFBundleDisplayName: Mi3s
+        CFBundleDisplayName: 顾及
         CFBundleDevelopmentRegion: en
         CFBundleLocalizations: [en, zh-Hans, zh-Hant, ja]
         NSAppTransportSecurity:
@@ -153,6 +153,11 @@ targets:
       # [mi3s] 二开：Web Cast（内嵌 Web 服务器 + 设置页）。关掉即整包不含该能力。
       # DEBUG 显式列出，否则 xcodegen 内建的 Debug 值会覆盖 target 级设置、把 WEBCAST 丢掉。
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) DEBUG WEBCAST
+      # [mi3s] 真机测试专用 bundle id 不要写死在这里 —— 写死会让 xcodegen generate 后
+      # 出来的「正式 / TestFlight」包也带测试 id。测试 id（wda.prdc.yingxia.guji）放到
+      # Config/DeviceTest.xcconfig，由 Scripts/install-duo-test.sh 用 -xcconfig 注入。
+      # 设备上已有的 wda.prdc.yingxia.dev 是另一 Team (G4XMHC9NWZ) 签的，application-identifier
+      # 不同，iOS 拒绝就地升级（MismatchedApplicationIdentifierEntitlement），所以测试必须换 id。
       PRODUCT_BUNDLE_IDENTIFIER: com.jo32.yingxia.ios
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

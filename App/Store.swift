@@ -285,13 +285,46 @@ import TVCore
     /// Whether the full-screen player is presented (vs. the floating mini player). Toggled by the
     /// mini player (tap to go full screen) and the full-screen cover (close to return to the mini player).
     var presentingPlayer = false
+    /// [mi3s] 二开：**从任意位置**把一页压进当前分区的导航栈。
+    ///
+    /// 应用内小窗是挂在 `RootView` 上的全局浮层，不在任何分区的 `NavigationStack` 里，
+    /// 拿不到那个分区的 `openRoute`。所以小窗点「回到播放」时只能置一个请求，
+    /// 由分区自己的栈（`RouteStack`）接住并压栈 —— 这样点回去落到的是 **One 选集页**，
+    /// 而不是旧的全屏播放器（皮肤在那一刻会「丢」）。
+    var pendingRoute: Route?
+    /// [mi3s] 二开：OneSkin 选集/播放页是否在前台。
+    ///
+    /// 播放页（`VideoDetailView`）是 push 进 NavigationStack 的，仍留在 TabView 里，
+    /// 于是 `.sidebarAdaptable` 在 regular width（Duo 横屏 678×466 就是）会**自动展开
+    /// 右侧边栏**，直接压住详情栏的按钮 —— 实测选集卡、「全部」、下载卡都被挡住。
+    /// 置位后 `RootView` 把 TabView 换成不带侧栏的样式，播放页独占全宽；
+    /// 页面消失时复位。
+    var watchPageOpen = false
+    /// 界面语言的「版本号」。改语言时 +1，任何读到 `L10n.text` 的视图都会重建。
+    ///
+    /// `L10n.text()` 读的是 `UserDefaults`，本身不是 SwiftUI 状态 ——
+    /// 光写偏好，界面要等下一次冷启动才会变。这里提供一个 `@Observable` 的计数器，
+    /// 设置页改语言时 +1，根视图读到它就会整棵重算，语言立刻生效。
+    var languageRevision = 0
+    /// [mi3s] 二开：应用内小窗的**显式**开关。
+    ///
+    /// 以前这里是 `floatRequested` + `floatsInMiniPlayer(channel)`：后者要读
+    /// `!playsInWatchPage(channel)`，而 `watchPageScopes` 在折叠/展开/换向时会被
+    /// 观看页的 `onDisappear` 清掉一帧再补回来 —— 小窗就是被这一帧拱出来的。
+    /// 「是否在观看页」是**推导**，推导在转场中间必然有一刻为空。
+    ///
+    /// 现在只认两个动作：
+    ///   - 视频控件里的「缩成小窗」→ `true`（`PlayerView.miniplayer()` / One 皮肤同名按钮）
+    ///   - 点小窗回全屏、停止播放、重新进观看页 → `false`
+    /// 折叠/旋转/切页面都不写这个值，所以它们不可能触发小窗。
+    var miniPlayerActive = false
     var playing: Channel? {
         // An episode of a listening source (audiobooks, radio, songs) plays in the music player instead (#289).
         didSet {
             if let channel = playing, let queue = listeningQueue(for: channel) { playing = nil; listen(queue, from: channel); return }
             // The session playing survives an iPhone Duo fold/unfold. It is dropped when playback stops, or when
             // a different channel starts playing.
-            if playing == nil { activeSession = nil; activeSessionChannel = nil; presentingPlayer = false }
+            if playing == nil { activeSession = nil; activeSessionChannel = nil; presentingPlayer = false; miniPlayerActive = false }
             // A queued advance already moved the session on to the new channel: keep that same session (and its
             // streams) instead of handing out a fresh, never-started one on the next fold/unfold or stop.
             else if let session = activeSession {
@@ -482,9 +515,19 @@ import TVCore
         // defaults, so this is the first moment it is known. `install()` has already set the
         // device's translator; a configured service replaces it, an unconfigured one leaves it.
         var loadedEnvironments = Environments()
-        if let blob = playbackDefaults.data(forKey: Self.environmentsKey),
-           let decoded = try? JSONDecoder().decode(Environments.self, from: blob) { loadedEnvironments = decoded }
+        let hadSavedEnvironments = playbackDefaults.data(forKey: Self.environmentsKey)
+            .flatMap { try? JSONDecoder().decode(Environments.self, from: $0) }
+        if let hadSavedEnvironments { loadedEnvironments = hadSavedEnvironments }
         environments = loadedEnvironments
+        // [mi3s] 二开：第一次运行时把默认环境立刻写到磁盘。
+        //
+        // 不写的话，`Environments()` 的默认参数 `[Environment(name:)]` 每次都会生成新的 UUID，
+        // 而订阅、历史、收藏都是用当时的 `environmentID` 盖戳的：下次启动 UUID 变了，
+        // `shows()` 一比不等，全部条目被过滤掉 —— 表现就是「导入的订阅重启就没了」，
+        // 而且每导一次都追加一条带新 UUID 的记录，越积越多但一条也看不见。
+        if hadSavedEnvironments == nil, let blob = try? JSONEncoder().encode(loadedEnvironments) {
+            playbackDefaults.set(blob, forKey: Self.environmentsKey)
+        }
         SubtitleTranslationSetup.installAI(configuration: loadedAI)
         // The default environment owns everything written before environments existed, so history
         // needs its id to filter those legacy rows correctly.
@@ -520,8 +563,44 @@ import TVCore
             entries = [SubscriptionEntry(address: legacyAddress)]
             copies[legacyAddress] = legacy.flatMap { try? JSONDecoder().decode(Subscription.self, from: $0) }
         }
+        // [mi3s] 二开：把「指向不存在环境」的订阅收回默认环境。
+        //
+        // 旧版本从没把 `environments` 写盘，每次启动都是新 UUID，于是每次导入都挂在一个
+        // 只存在于当次运行里的 UUID 上 —— 这些记录谁都看不见，还会越积越多（同一地址多条）。
+        // 归属不明的记录统一落到默认环境，并按地址去重，保留最新那条。
+        var rescuedAny = false
+        if !entries.isEmpty {
+            let known = Set(loadedEnvironments.all.map(\.id))
+            let fallback = loadedEnvironments.all[0].id
+            var seen = Set<String>()
+            var rescued: [SubscriptionEntry] = []
+            for entry in entries.reversed() {
+                guard !seen.contains(entry.address) else { continue }
+                var fixed = entry
+                if fixed.environmentID.map({ !known.contains($0) }) ?? true {
+                    fixed.environmentID = fallback
+                    rescuedAny = true
+                }
+                if fixed.address != entry.address { rescuedAny = true }
+                seen.insert(fixed.address)
+                rescued.append(fixed)
+            }
+            if rescued.count != entries.count { rescuedAny = true }
+            entries = rescued.reversed()
+        }
         subscriptions = entries
         documents = copies
+        // 迁移/去重改动过就必须落盘，否则下次启动读回的仍是那两个孤儿 UUID。
+        // init 里不能读 `self.persistsChanges`（还没初始化完），按同样条件就地判断。
+        #if DEBUG
+        let mayPersist = !defaults.bool(forKey: "qaIsolatedData")
+        #else
+        let mayPersist = true
+        #endif
+        if rescuedAny, mayPersist {
+            defaults.set(try? JSONEncoder().encode(entries), forKey: "subscriptions")
+        }
+
         let cloud = (try? Data(contentsOf: Self.cloudFile)).flatMap { try? JSONDecoder().decode(Subscription.self, from: $0) }.flatMap { CloudSources.accepts($0) ? $0 : nil }
         cloudDocument = cloud
         CloudSources.current = cloud
@@ -1894,16 +1973,18 @@ struct CloudFilesFolder {
     let id: String
     let name: String
     let files: [CloudFile]
+    /// 上游 #576：文件夹里自带的字幕文件与压缩包，供每个视频旁边的字幕菜单使用。
+    var subtitles: [ExternalSubtitle] = []
 }
 
 extension Store {
     /// Plays a file from Cloud Files, where it was left if it was being watched; the folder's other
     /// files follow it.
     func playFile(_ file: CloudFile, in folder: CloudFilesFolder) {
-        let channel = CloudFiles.channel(file, in: folder.drive, folder: folder.id, folderName: folder.name)
+        let channel = CloudFiles.channel(file, in: folder.drive, folder: folder.id, folderName: folder.name, subtitles: folder.subtitles)
         let saved = playbackHistory.entries(in: activeEnvironmentID).first { $0.id == channel.historyContext?.id && $0.context.episodeID == file.id && !$0.completed }
         filesFolder = folder
-        playing = saved.map { CloudFiles.channel(file, in: folder.drive, folder: folder.id, folderName: folder.name, resumePosition: $0.resumePosition) } ?? channel
+        playing = saved.map { CloudFiles.channel(file, in: folder.drive, folder: folder.id, folderName: folder.name, resumePosition: $0.resumePosition, subtitles: folder.subtitles) } ?? channel
     }
 
     func nextFile(after channel: Channel) -> Channel? { file(1, from: channel) }
@@ -1944,6 +2025,8 @@ struct PlaybackCatalog {
     let scope: String
     /// Short labels (第1集) for lines whose episode names are file names, by episode id.
     var labels: [Episode.ID: String] = [:]
+    /// 上游 #620：从文件名读出的清晰度与体积（4K · 5.2G），显示在选集格下面，按集 id 索引。
+    var details: [Episode.ID: String] = [:]
     var playlist: EpisodePlaylist { EpisodePlaylist(video.episodes) }
 }
 
@@ -1953,6 +2036,8 @@ struct PlaybackCatalog {
 /// by address — re-importing the same file never duplicates or overwrites what is already there.
 struct SubscriptionConfig: Codable, Sendable {
     static let format = "mi3s-config"
+    /// 旧版本（映匣时期）导出的格式名，兼容读取。
+    static let legacyFormats = ["yingxia-config"]
     static let version = 1
     var format: String
     var version: Int
@@ -1965,7 +2050,7 @@ struct SubscriptionConfig: Codable, Sendable {
         self.subscriptions = subscriptions
     }
 
-    var isValid: Bool { format == Self.format && version == Self.version }
+    var isValid: Bool { (format == Self.format || Self.legacyFormats.contains(format)) && version == Self.version }
 
     static func decode(_ data: Data) -> SubscriptionConfig? {
         try? JSONDecoder().decode(SubscriptionConfig.self, from: data)

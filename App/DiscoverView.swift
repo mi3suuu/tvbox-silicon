@@ -8,12 +8,14 @@ import TVCore
     private(set) var collections: TMDBCatalog.Collections?
     private(set) var collectionsFailed = false
     private(set) var loading = false
+    /// The featured charts answered once, with titles or not: until then the carousel doesn't fall back to trending.
+    private(set) var featuredAnswered = false
     /// Douban's hot lists, only fetched while their section is shown. A list that fails is just left out.
     private(set) var douban: [DoubanCatalog.Feed: [DoubanCatalog.Item]] = [:]
     private var doubanLoading = false
     /// This week's airing calendars (the Airing Today shelves). One that fails is just left out.
     private(set) var calendar: [TMDBCalendar.Kind: TMDBCalendar.Week] = [:]
-    static let feeds: [TMDBCatalog.Feed] = [.trending, .nowPlaying, .onTheAir, .variety, .chinese, .animation, .topMovies, .topTelevision, .family, .kids, .netflix, .disney, .appleTV, .hbo, .warner, .universal, .paramount, .sony]
+    static let feeds: [TMDBCatalog.Feed] = [.featured, .trending, .nowPlaying, .onTheAir, .variety, .chinese, .animation, .topMovies, .topTelevision, .family, .kids, .netflix, .disney, .appleTV, .hbo, .warner, .universal, .paramount, .sony]
     func items(_ feed: TMDBCatalog.Feed) -> [TMDBCatalog.Item] { pages[feed]?.items ?? [] }
 
     func load(refresh: Bool = false) async {
@@ -30,8 +32,10 @@ import TVCore
             }
             for await (feed, page) in group {
                 guard !Task.isCancelled else { continue }
+                if feed == .featured { featuredAnswered = true }
                 if let page { pages[feed] = page; failures.remove(feed) }
-                else { failures.insert(feed) }
+                // The carousel falls back to Trending This Week instead (and before the Worker serves `featured`).
+                else if feed != .featured { failures.insert(feed) }
             }
         }
         let fresh = await metadata
@@ -76,6 +80,8 @@ struct DiscoverView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var editing = false
     @State private var searchShown = false
+    /// Scrolled past the hero's foot: on the Mac the toolbar's scroll edge comes back.
+    @State private var pastHero = false
     @Environment(\.openRoute) private var openRoute
     #if os(tvOS)
     @FocusState private var tvFocus: DiscoverTVFocus?
@@ -83,7 +89,13 @@ struct DiscoverView: View {
     @AppStorage("discover.hiddenSections") private var hiddenSections = ""
     /// Douban's lists are in Chinese: shown by default only when the app is.
     @AppStorage("discover.doubanShown") private var doubanShown = TMDBMatch.language.hasPrefix("zh")
-    private var featured: [TMDBCatalog.Item] { Array(model.items(.trending).filter { $0.poster != nil }.prefix(8)) }
+    /// IMDb's and Douban's charts of the day (#631), or this week's TMDB trending titles when those didn't load.
+    /// Not trending while they still may: the carousel would change under the viewer.
+    private var featured: [TMDBCatalog.Item] {
+        let charts = model.items(.featured).filter { $0.poster != nil }
+        guard charts.isEmpty, model.featuredAnswered else { return Array(charts.prefix(10)) }
+        return Array(model.items(.trending).filter { $0.poster != nil }.prefix(8))
+    }
     var body: some View {
         // Turning Featured Titles off in Edit Layout also drops its backdrop, trailer and colours (#447).
         let heroShown = visible(.hero)
@@ -157,7 +169,12 @@ struct DiscoverView: View {
                     }
                 }
                 .coordinateSpace(name: "discoverScroll")
-                .modifier(DiscoverScrollObserver(offset: Binding(get: { heroState.scrollY }, set: { heroState.scrollY = $0 })))
+                .modifier(DiscoverScrollObserver(offset: Binding(get: { heroState.scrollY }, set: { value in
+                    heroState.scrollY = value
+                    // Only crossing the hero's foot changes the toolbar, so scrolling doesn't evaluate the page again.
+                    let past = value > heroHeight - 140
+                    if pastHero != past { pastHero = past }
+                })))
                 .scrollIndicators(.hidden)
                 .refreshable {
                     if doubanShown {
@@ -167,6 +184,11 @@ struct DiscoverView: View {
                     } else { await model.load(refresh: true) }
                 }
             }
+            #if os(macOS)
+            // The reader's own frame ignoring the safe area isn't enough on the Mac: what it holds still starts below the
+            // window toolbar, leaving a band over the hero.
+            .ignoresSafeArea(edges: heroShown ? .top : [])
+            #endif
         }
         .modifier(DiscoverHeroTheme(state: heroState, hero: heroShown))
         .navigationTitle("")
@@ -214,6 +236,9 @@ struct DiscoverView: View {
         #else
         // Only the hero runs under the status and navigation bars; without it the first shelf starts below them.
         .ignoresSafeArea(edges: heroShown ? .top : [])
+        #endif
+        #if os(macOS)
+        .heroUnderToolbar(heroShown && !pastHero)
         #endif
         .onAppear { onScreen = true }
         .onDisappear { onScreen = false }
@@ -1486,6 +1511,7 @@ private struct DiscoverListView: View {
 private extension TMDBCatalog.Feed {
     var title: String {
         switch self {
+        case .featured: DiscoverSection.hero.title
         case .trending: L10n.text("Trending This Week")
         case .nowPlaying: L10n.text("In Theaters")
         case .onTheAir: L10n.text("On the Air")

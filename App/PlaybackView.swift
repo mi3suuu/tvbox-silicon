@@ -136,6 +136,8 @@ import TVCore
     /// Mirrors the player, for play and mute buttons drawn outside AVKit's controls.
     private(set) var paused = false
     private(set) var muted = false
+    /// 当前倍速。`setSpeed` 写它，One 皮肤的倍速控件读它（以前只有写入方，读不回来）。
+    private(set) var speed: Float = 1
     private(set) var quality: Int?
     private var playing: Channel?
     /// The channel on screen now, so a caller reusing this session across an iPhone Duo fold/unfold can tell
@@ -212,6 +214,19 @@ import TVCore
         } else { player.pause() }
         // The button follows the tap at once; the player's status (observed below) confirms it a moment later.
         paused = player.rate == 0
+    }
+
+    /// 跳到绝对位置（秒）。进度条拖动用 —— `skip` 是相对量，表达不了「松手即定位」。
+    /// 与 `skip` 共用同一套可 seek 区间夹取，超出范围会被按到区间端点。
+    func seek(to seconds: Double) {
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
+        guard seconds.isFinite else { return }
+        let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
+        guard let range = ranges.first(where: { CMTimeRangeContainsTime($0, time: player.currentTime()) }) ?? ranges.last else { return }
+        let target = min(max(seconds, range.start.seconds), range.end.seconds)
+        guard target.isFinite else { return }
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     func skip(_ seconds: Double) {
@@ -442,6 +457,7 @@ import TVCore
 
     func setSpeed(_ speed: Float) {
         clearBoost()
+        self.speed = speed
         player.defaultRate = speed
         if player.rate != 0 { player.rate = speed }
     }

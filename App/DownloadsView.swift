@@ -653,9 +653,17 @@ struct DownloadPicker: View {
     let flag: String
     let episodes: [Episode]
     var origin: URL? = nil
+    /// 播放页是 One 皮肤（黑底）时传 true：抽屉也用深色，否则系统浅色材质会把
+    /// 文字和按钮压成一片灰（实测「可用 3.23 TB」几乎看不见）。
+    var dark: Bool = false
+    /// 宽屏（Duo 展开 / iPad）直接满高，与选集抽屉一致；窄屏先半屏。
+    var startsLarge: Bool = false
     var added: (Int) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var selection: Set<String> = []
+    /// 与选集抽屉同一套高度：窄屏先给半屏，宽屏（Duo 展开）直接给满高。
+    @State private var detent: PresentationDetent = .medium
     private var library: DownloadLibrary { .shared }
     private func source(_ episode: Episode) -> DownloadSource { DownloadSource(site: site, videoID: video.id, episode: episode, origin: origin) }
     private var available: [Episode] { episodes.filter { library.item(for: source($0)).map { $0.status == .failed } ?? true } }
@@ -715,7 +723,15 @@ struct DownloadPicker: View {
         }
         .padding(DownloadMetrics.thumb > 60 ? 60 : 22)
         #if os(iOS)
-        .presentationDetents([.medium, .large])
+        // 与选集抽屉一致：同一组档位、同样的拖拽指示条、同样的底色。
+        // 下载抽屉以前没有自己的底色，iOS 26 的液态玻璃会透出播放页的海报，
+        // 于是同一个页面里「选集是黑的、下载是浅灰的」，按钮也跟着发灰。
+        .presentationDetents([.medium, .large], selection: $detent)
+        .presentationDragIndicator(.visible)
+        .presentationBackground(dark ? AnyShapeStyle(Color(white: 0.07)) : AnyShapeStyle(.regularMaterial))
+        .preferredColorScheme(dark ? .dark : nil)
+        .environment(\.glassControls, true)
+        .onAppear { if startsLarge || sizeClass == .regular { detent = .large } }
         #else
         .frame(maxWidth: 1300).frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { Backdrop() }
@@ -1080,6 +1096,43 @@ extension View {
             return item.episode.isEmpty ? item.title : "\(item.title) · \(item.episode)"
         }
         return (songs.first(where: \.isActive) ?? songs.first(where: { $0.status == .queued }))?.track.title
+    }
+}
+#endif
+
+// [融合补入] 上游 225 提交新增：下载文件的分享/存到相册。
+// MusicDownloadsView 依赖它，缺了就编不过。
+
+
+// [融合补入] 上游 225 提交新增：把下载好的文件存到「文件」或相册、AirDrop 分享。
+// MusicDownloadsView 依赖它，缺了就编不过。
+#if os(iOS)
+/// Saves a finished download to Files or Photos, or sends it with AirDrop, through the share sheet. It hands over a
+/// renamed copy (`DownloadExport`), so deleting the saved file elsewhere leaves the download in the app.
+@MainActor enum DownloadSharing {
+    static func share(_ file: URL, named name: String) {
+        Task {
+            let copy = await Task.detached { () -> Result<URL, any Error> in Result { try DownloadExport.copy(file, named: name) } }.value
+            guard case .success(let copy) = copy else {
+                if case .failure(let error) = copy { Diagnostics.shared.failure("download", "share copy", error) }
+                // Deleted outside the app: stop listing it.
+                DownloadLibrary.shared.forgetMissing()
+                MusicDownloadLibrary.shared.forgetMissing()
+                return
+            }
+            guard let scene = UIApplication.shared.appWindowScene, let window = scene.keyWindow ?? scene.windows.first else { return }
+            var controller = window.rootViewController
+            while let next = controller?.presentedViewController, !next.isBeingDismissed { controller = next }
+            let sheet = UIActivityViewController(activityItems: [copy], applicationActivities: nil)
+            sheet.completionWithItemsHandler = { @Sendable _, _, _, _ in DownloadExport.clear() }
+            if let popover = sheet.popoverPresentationController {
+                // iPad: a sheet in the middle of the window, as the menu that opened it is gone.
+                popover.sourceView = window
+                popover.sourceRect = CGRect(x: window.bounds.midX, y: window.bounds.midY, width: 0, height: 0)
+                popover.permittedArrowDirections = []
+            }
+            controller?.present(sheet, animated: true)
+        }
     }
 }
 #endif

@@ -108,6 +108,26 @@ enum QALaunch {
             }
         }
         if UserDefaults.standard.bool(forKey: "qaResetCache") { MediaCache.shared.clear() }
+        // `-qaConfig <url-or-path>`: import a Mi3s config export (yingxia-config.json).
+        // Accepts an http(s) URL (fetched) or a file name / absolute path inside the app
+        // sandbox (pushed in via `devicectl device copy to --domain-type appDataContainer`).
+        // Restores every subscription plus its cached document, so sources come back even
+        // where the original address is unreachable.
+        if let configRef = UserDefaults.standard.string(forKey: "qaConfig") {
+            let data: Data?
+            if configRef.hasPrefix("http://") || configRef.hasPrefix("https://") {
+                data = try? await URLSession.shared.data(from: URL(string: configRef)!).0
+            } else {
+                let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let candidate = configRef.hasPrefix("/")
+                    ? URL(fileURLWithPath: configRef)
+                    : docURL.appendingPathComponent(configRef)
+                data = try? Data(contentsOf: candidate)
+            }
+            if let data, let config = SubscriptionConfig.decode(data) {
+                store.importConfig(config, overwrite: true)
+            }
+        }
         if let subscription = UserDefaults.standard.string(forKey: "qaSubscription") {
             // With isolated data the QA subscription is the only one, as before several subscriptions:
             // one left from an earlier run would come first and win the duplicate source keys.

@@ -174,6 +174,17 @@ extension View {
     }
     #endif
 
+    /// `controlSize` 的包装。上游 #634 里为此在 tvOS 上加了 `@inline(never) @_optimize(none)`：
+    /// 那版 SwiftUI 导出的函数在 tvOS 17 上会让 App 启动即崩，关掉内联与优化才稳。
+    /// 这段是上游 225 提交里新增的，我们原来的 GlassKit 没有 —— 融合时必须补上，
+    /// 否则 CloudFilesView / XunleiSignInView 等处编译不过。
+    #if os(tvOS)
+    @inline(never) @_optimize(none)
+    func appControlSize(_ size: ControlSize) -> some View { controlSize(size) }
+    #else
+    func appControlSize(_ size: ControlSize) -> some View { controlSize(size) }
+    #endif
+
     /// The breathing symbol effect; iOS 17 and tvOS 17 have no breathe, so the symbol pulses instead.
     @ViewBuilder func breathingSymbol() -> some View {
         if #available(iOS 18, tvOS 18, *) {
@@ -1145,3 +1156,84 @@ extension Color {
         #endif
     }
 }
+
+#if os(iOS)
+/// 直接把 App 的标签栏从 UIKit 层收掉。
+///
+/// 为什么不能只靠 `.toolbarVisibility(.hidden, for: .tabBar)`：
+/// iOS 26 的浮动标签栏会在**旋转 / 进全屏 / 系统栏显隐**这些时机被系统重新摆回来，
+/// 而 SwiftUI 的 toolbar 偏好不一定跟着重算 —— 实测同一个页面，刚进去是收掉的，
+/// 播起来或者转一次屏，那条液态玻璃胶囊又压回画面上（盖住选集卡与右栏文字）。
+///
+/// 所以再补一道 UIKit 层的硬开关：找到包住观看页的 `UITabBarController`，
+/// 直接改 `tabBar.isHidden`，并在每次布局时复核一遍（系统摆回来就再收掉）。
+///
+/// 只做「隐藏/恢复」这一件事，不碰选中项、不碰导航，页面退出时由 SwiftUI
+/// 把 `hidden` 置回 false 自动恢复。
+struct TabBarHider: UIViewRepresentable {
+    let hidesBar: Bool
+
+    func makeUIView(context: Context) -> TabBarHiderView {
+        let view = TabBarHiderView()
+        view.isUserInteractionEnabled = false
+        view.hidesBar = hidesBar
+        return view
+    }
+
+    func updateUIView(_ view: TabBarHiderView, context: Context) {
+        view.hidesBar = hidesBar
+    }
+}
+
+final class TabBarHiderView: UIView {
+    /// 记住我们动过的那根 tabBar：视图被移出 window 时响应链已断，
+    /// 沿 responder 找不回 controller，只能靠这个弱引用恢复。
+    private weak var touchedTabBar: UITabBar?
+
+    var hidesBar = false {
+        didSet { apply() }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil {
+            // 页面退出：不管当时是不是全屏，都把菜单栏还回去。
+            // 少了这一步，在全屏态直接返回会让标签栏永久消失 ——
+            // 用户要的是「只有全屏才隐藏」，不是「看完就再也不显示」。
+            touchedTabBar?.isHidden = false
+            touchedTabBar = nil
+        } else {
+            apply()
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        apply()
+    }
+
+    private func apply() {
+        guard let tab = enclosingTabBarController() else { return }
+        touchedTabBar = tab.tabBar
+        guard tab.tabBar.isHidden != hidesBar else { return }
+        tab.tabBar.isHidden = hidesBar
+    }
+
+    /// 沿响应链往上找 `UITabBarController`：视图 → 宿主控制器 → 导航控制器 → 标签控制器。
+    private func enclosingTabBarController() -> UITabBarController? {
+        var responder: UIResponder? = self
+        while let current = responder {
+            if let tab = current as? UITabBarController { return tab }
+            responder = current.next
+        }
+        return nil
+    }
+}
+
+extension View {
+    /// 收掉 App 的标签栏（见 `TabBarHider`）。挂在页面背景里，不占布局。
+    func hidesAppTabBar(_ hidden: Bool) -> some View {
+        background { TabBarHider(hidesBar: hidden) }
+    }
+}
+#endif

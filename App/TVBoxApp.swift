@@ -37,6 +37,7 @@ import TVCore
     }
     var body: some Scene {
         WindowGroup {
+            // Store, Updates and Announcements go in last, below: sheets attached here show outside RootView.
             RootView().environment(store).environment(updates).environment(announcements)
                 // [mi3s] 二开：App Switcher 缩略图遮罩。必须挂在根视图上并常驻视图树，
                 // 系统在进入后台的瞬间才截图，晚挂的 view 已经来不及进快照。
@@ -99,7 +100,11 @@ import TVCore
                         // 把手机递给别人时被隐藏的源/订阅不会被看到。没有密码时 lock() 是空操作。
                         store.relockVaultOnBackground()
                     }
-                    if phase == .active { Task { await ErrorReports.shared.sendIfDue() } }
+                    if phase == .active {
+                        Task { await ErrorReports.shared.sendIfDue() }
+                        // Another viewer may have taken over the Apple TV: ask iCloud for what changed (#584).
+                        store.cloudSync?.refresh()
+                    }
                     #if os(tvOS) || os(macOS)
                     // Phones only see the TV while the app is open.
                     if phase == .background { BilibiliCastController.shared.stop() }
@@ -123,6 +128,9 @@ import TVCore
                 #if os(macOS)
                 .frame(minWidth: 920, minHeight: 640)
                 #endif
+                // Outside every modifier above, so the import and Douyin sheets get them too: on RootView alone, a
+                // yingxia://import link stopped the app ("No Observable object of type Store found", TestFlight 49-51).
+                .environment(store).environment(updates).environment(announcements)
         }
         #if os(macOS)
         .defaultSize(width: 1240, height: 820)

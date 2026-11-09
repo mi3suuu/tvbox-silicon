@@ -14,7 +14,7 @@ struct SiteView: View {
     var preview: (videos: [Video], categories: [TVCore.Category])? = nil
     private var canLoad: Bool { site.canBrowse(jarURL: jarURL) }
     private var isIndex: Bool { (site.raw["indexs"]?.int ?? 0) == 1 }
-    @State private var browser = CatalogBrowser()
+    @State var browser = CatalogBrowser()
     @State private var query = ""
     /// The Bilibili login this page loaded with; signing in or out reloads it with the account's lists.
     @State private var bilibiliLogin = BilibiliAccount.load().cookie

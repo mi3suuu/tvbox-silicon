@@ -169,6 +169,34 @@ extension Store {
         if subscriptionErrors[entry.address] != nil { return L10n.text("Couldn't refresh") }
         if !entry.enabled { return L10n.text("Off") }
         guard let copy = documents[entry.address] else { return L10n.text("Not loaded yet") }
+        // A lone M3U / TXT playlist has no sources of its own; count what it brings instead.
+        if copy.sites.isEmpty, !copy.lives.isEmpty { return L10n.text("%lld live playlists", copy.lives.count) }
         return L10n.text("%lld sources", copy.sites.count)
     }
 }
+
+#if !os(tvOS)
+// MARK: Settings on iPhone, iPad and Mac
+// A native grouped form, as in the Settings app and System Settings: the app as the first card,
+// icon-led rows that show their current value, switches in place, and subpages for the rest.
+
+
+
+/// Icon tile, title and an optional second line.
+
+
+
+extension View {
+    /// A button that fills its row: tinted text on iPhone, a plain clickable row on the Mac, where a
+    /// form would otherwise draw a push button around the whole label.
+    @ViewBuilder func formRowButton() -> some View {
+        #if os(macOS)
+        buttonStyle(.plain).contentShape(Rectangle())
+        #else
+        self
+        #endif
+    }
+}
+
+
+#endif

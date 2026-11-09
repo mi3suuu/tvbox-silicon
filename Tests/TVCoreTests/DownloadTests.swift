@@ -214,25 +214,42 @@ import Testing
     library.pause(item.id)
 }
 
-@Test func downloadSourceDecodesLegacyJSONWithoutOrigin() throws {
-    // A download saved before `origin` and `sourceKey` existed must still decode, with the source key
-    // defaulting to the site key and no origin — so an old vault never silently hides a saved download.
-    let legacy = #"{"siteKey":"s","siteName":"S","videoID":"v","episodeID":"1","episodeName":"第 1 集","address":"https://example.com/1.mp4","flag":"line"}"#
-    let source = try JSONDecoder().decode(DownloadSource.self, from: Data(legacy.utf8))
-    #expect(source.siteKey == "s")
-    #expect(source.sourceKey == "s")
-    #expect(source.origin == nil)
-    #expect(source.videoID == "v")
-}
+@MainActor @Test func sharedDownloadsAreRenamedCopiesThatLeaveTheDownloadAlone() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "downloads-\(UUID().uuidString)")
+    let shared = FileManager.default.temporaryDirectory.appending(path: "shared-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: shared) }
+    let site = Site(key: "s", name: "S", type: 3, api: "csp_Test", raw: [:])
+    func item(_ id: String, _ episode: String, media: String) -> DownloadItem {
+        let source = Episode(id: id, name: episode, address: "https://example.com/\(id)", flag: "line")
+        return DownloadItem(id: id, title: "嫁金钗", episode: episode, poster: nil, posterHeaders: [:],
+                            source: DownloadSource(site: site, videoID: "v", episode: source), created: Date(), status: .completed, media: media)
+    }
+    let movie = item("e1", "第30集", media: "media.mp4"), hls = item("e2", "第31集", media: "index.m3u8")
+    for (entry, name) in [(movie, "media.mp4"), (hls, "index.m3u8")] {
+        try FileManager.default.createDirectory(at: root.appending(path: entry.id), withIntermediateDirectories: true)
+        try Data("mp4".utf8).write(to: root.appending(path: entry.id).appending(path: name))
+    }
+    try JSONEncoder().encode([movie, hls]).write(to: root.appending(path: "downloads.json"))
+    let library = DownloadLibrary(root: root, defaults: try #require(UserDefaults(suiteName: UUID().uuidString)))
 
-@Test func downloadSourceCarriesOriginAndOriginalKeyForTheVault() {
-    // A merged source carries its own subscription origin and original key, which the vault matches on.
-    let origin = URL(string: "https://sub.example/config.json")!
-    var site = Site(key: "renamed", name: "S", type: 3, api: "csp_Test", raw: ["key": .string("original")])
-    site.provenance = SourceProvenance(origin: origin, spider: nil)
-    let episode = Episode(id: "1", name: "第 1 集", address: "https://example.com/1.mp4", flag: "line")
-    let source = DownloadSource(site: site, videoID: "v", episode: episode)
-    #expect(source.siteKey == "renamed")
-    #expect(source.sourceKey == "original")
-    #expect(source.origin == origin)
+    // An HLS download is many files: nothing to hand over.
+    #expect(library.exportableFile(for: hls) == nil)
+    let file = try #require(library.exportableFile(for: movie))
+    let copy = try DownloadExport.copy(file, named: DownloadLibrary.exportName(for: movie), into: shared)
+    #expect(copy.lastPathComponent == "嫁金钗 · 第30集.mp4")
+    #expect(try Data(contentsOf: copy) == Data("mp4".utf8))
+    // Deleting what was saved elsewhere keeps the episode in the app.
+    try FileManager.default.removeItem(at: copy)
+    library.forgetMissing()
+    #expect(library.items.map(\.id) == ["e1", "e2"])
+    #expect(FileManager.default.fileExists(atPath: file.path))
+    // The next share replaces the last one's copy.
+    _ = try DownloadExport.copy(file, named: "Other", into: shared)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: shared.path) == ["Other.mp4"])
+    DownloadExport.clear(shared)
+    #expect(!FileManager.default.fileExists(atPath: shared.path))
+
+    #expect(DownloadExport.fileName("a/b:c?\n d", extension: "mkv") == "a b c d.mkv")
+    #expect(DownloadExport.fileName("..", extension: "mp4") == "Yingxia.mp4")
+    #expect(MusicDownloadLibrary.exportName(for: MusicTrack(platform: .qq, songID: "s", title: "Song", artists: ["A", "B"])) == "A, B - Song")
 }

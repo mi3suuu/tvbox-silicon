@@ -130,6 +130,28 @@ struct EpisodePicker: View {
     @Environment(Store.self) private var store
     @State private var state = EpisodeProbeController()
     @State private var activeLine: String
+    /// 选集面板的搜索 / 筛选 / 分页。
+    ///
+    /// 面板可能列上千集（1282 集的剧很常见），整段 LazyVGrid 一次性铺开
+    /// 既滑不准也找不到目标。这里做成「搜索 + 筛选 + 每页固定条数」。
+    @State private var query = ""
+    @State private var filter: PickerFilter = .all
+    @State private var page = 0
+    @State private var pageSize = 50
+    @State private var jumping = false
+    @State private var jumpDraft = ""
+
+    enum PickerFilter: String, CaseIterable, Identifiable {
+        case all, unwatched, watched
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .all: L10n.text("全部")
+            case .unwatched: L10n.text("未看")
+            case .watched: L10n.text("已看")
+            }
+        }
+    }
 
     private var playlist: EpisodePlaylist { EpisodePlaylist(video.episodes) }
     /// Lines the picker shows: the full flag list minus the viewer-hidden ones. A hidden line is
@@ -170,6 +192,59 @@ struct EpisodePicker: View {
     }
 
     private var episodesOnActiveLine: [Episode] { playlist.episodes(for: activeLine) }
+
+    /// 本剧「看过」的集：从逐集历史里按 scope 收一遍。
+    /// 不能用单条续播点判断 —— 那只代表「上次看到哪一集」。
+    private var watchedIDs: Set<String> {
+        let scope = EpisodeSkipSettings.scope(origin: origin, source: sourceKey, video: video.id)
+        return Set(PlaybackHistory.shared.entries.compactMap { entry in
+            guard entry.context.id == scope else { return nil }
+            return entry.progress > 0.02 || entry.completed ? entry.context.episodeID : nil
+        })
+    }
+
+    /// 筛选 + 搜索之后的集（顺序不变）。
+    ///
+    /// 顺序固定：**先筛选、再搜索**。反过来会出现「搜第 12 集，但它被筛掉了」，
+    /// 用户会以为集不见了。
+    private var visibleEpisodes: [Episode] {
+        var items = episodesOnActiveLine
+        switch filter {
+        case .all: break
+        case .unwatched:
+            let seen = watchedIDs
+            items = items.filter { !seen.contains($0.id) && $0.id != currentEpisodeID }
+        case .watched:
+            let seen = watchedIDs
+            items = items.filter { seen.contains($0.id) || $0.id == currentEpisodeID }
+        }
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return items }
+        if let n = Int(q) {
+            // 纯数字按集号精确匹配；没有精确命中才退回子串。
+            let exact = items.filter { TMDBMatch.episodeNumber($0.name) == n }
+            if !exact.isEmpty { return exact }
+        }
+        return items.filter {
+            $0.name.localizedCaseInsensitiveContains(q)
+                || EpisodeRow.title($0.name).localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    private var pageCount: Int {
+        max(1, Int(ceil(Double(visibleEpisodes.count) / Double(max(pageSize, 1)))))
+    }
+
+    /// 当前页。页码越界时夹回（换筛选/搜索后总数变小）。
+    private var pagedEpisodes: [Episode] {
+        let all = visibleEpisodes
+        let size = max(pageSize, 1)
+        let p = min(page, max(0, pageCount - 1))
+        let start = min(p * size, max(0, all.count))
+        let end = min(start + size, all.count)
+        guard start < end else { return [] }
+        return Array(all[start..<end])
+    }
 
     /// The episode the play button should resume: the saved one when it still
     /// exists on this line, else the first.
@@ -440,12 +515,136 @@ struct EpisodePicker: View {
 
     private var episodeGrid: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionHeader(L10n.text("Episodes"), count: episodesOnActiveLine.count)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
-                ForEach(episodesOnActiveLine) { episode in
-                    episodeCell(episode)
+            // 标题行带上总数与「当前显示」的数：筛选后一眼看清还剩多少。
+            sectionHeader(L10n.text("Episodes"),
+                          count: visibleEpisodes.count == episodesOnActiveLine.count
+                              ? episodesOnActiveLine.count
+                              : visibleEpisodes.count)
+            pickerControls
+
+            if pagedEpisodes.isEmpty {
+                Text(query.isEmpty && filter == .all
+                     ? L10n.text("No episodes")
+                     : L10n.text("No matching episodes"))
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 24)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+                    ForEach(pagedEpisodes) { episode in
+                        episodeCell(episode)
+                    }
                 }
             }
+            if pageCount > 1 { pager }
+        }
+    }
+
+    /// 搜索 + 筛选 + 每页条数。
+    ///
+    /// 上千集的面板只靠滚动基本找不到目标；这里给三件事：
+    /// 搜（集号或标题）、筛（全部/未看/已看）、每页条数。
+    private var pickerControls: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.footnote).foregroundStyle(.secondary)
+                TextField(L10n.text("Search episode number or title"), text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.footnote)
+                    .autocorrectionDisabled()
+                    .onChange(of: query) { _, _ in page = 0 }
+                if !query.isEmpty {
+                    Button { query = ""; page = 0 } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.07)))
+
+            HStack(spacing: 8) {
+                ForEach(PickerFilter.allCases) { f in
+                    Button {
+                        filter = f; page = 0
+                    } label: {
+                        Text(f.label)
+                            .font(.caption)
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                            .background(Capsule().fill(
+                                filter == f ? Color.primary.opacity(0.16) : Color.primary.opacity(0.05)))
+                            .foregroundStyle(filter == f ? Color.primary : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    ForEach([20, 50, 100], id: \.self) { n in
+                        Button {
+                            pageSize = n; page = 0
+                        } label: {
+                            if pageSize == n { Label("\(n) / " + L10n.text("page"), systemImage: "checkmark") }
+                            else { Text("\(n) / " + L10n.text("page")) }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("\(pageSize) / " + L10n.text("page")).font(.caption)
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 8))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule().fill(Color.primary.opacity(0.05)))
+                }
+            }
+        }
+    }
+
+    /// 分页条：‹ 页码 ›，点页码弹输入框直接跳。
+    private var pager: some View {
+        HStack(spacing: 12) {
+            Button { page = max(0, page - 1) } label: {
+                Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold))
+                    .frame(width: 40, height: 32)
+            }
+            .buttonStyle(.plain)
+            .disabled(page <= 0)
+            .opacity(page <= 0 ? 0.35 : 1)
+
+            Spacer(minLength: 0)
+
+            Button {
+                jumpDraft = "\(page + 1)"
+                jumping = true
+            } label: {
+                Text("\(min(page, pageCount - 1) + 1) / \(pageCount)")
+                    .font(.caption).monospacedDigit()
+                    .padding(.horizontal, 10).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+
+            Button { page = min(pageCount - 1, page + 1) } label: {
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
+                    .frame(width: 40, height: 32)
+            }
+            .buttonStyle(.plain)
+            .disabled(page >= pageCount - 1)
+            .opacity(page >= pageCount - 1 ? 0.35 : 1)
+        }
+        .alert(L10n.text("Jump to page"), isPresented: $jumping) {
+            TextField("1", text: $jumpDraft).keyboardType(.numberPad)
+            Button(L10n.text("Cancel"), role: .cancel) {}
+            Button(L10n.text("Go")) {
+                if let n = Int(jumpDraft), n >= 1 { page = min(pageCount - 1, n - 1) }
+            }
+        } message: {
+            Text(L10n.text("Page %d of %d", min(page, pageCount - 1) + 1, pageCount))
         }
     }
 

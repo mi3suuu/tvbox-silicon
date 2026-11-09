@@ -11,7 +11,10 @@ import TVCore
     private(set) var phase: Phase = .idle
     /// The latest step worth showing: "thinking" between steps keeps the one before.
     private(set) var step: TMDBMatch.Step = .starting
-    private(set) var details: TMDBMatch.Details?
+    private(set) var details: TMDBMatch.Details? { didSet { refreshDouban() } }
+    /// Douban's score for the matched work, when Wikidata links it to one (#505).
+    private(set) var douban: DoubanRating.Score?
+    private var doubanFor: String?
     private(set) var answer: TMDBMatch.Answer?
     /// The viewer chose the work (or "none of these") for this video.
     private(set) var chosen = false
@@ -21,6 +24,21 @@ import TVCore
     // fetch 并发，谁后返回谁覆盖；切换季时在途的响应还会覆盖用户刚选的那部作品。
     // 每次新操作令 token 自增，只有最新一次的结果允许落盘。
     private var fetchToken = 0
+
+    /// TMDB's facts line with Douban's score after TMDB's.
+    var facts: String { details?.facts(douban: douban) ?? "" }
+
+    private func refreshDouban() {
+        guard let details else { douban = nil; doubanFor = nil; return }
+        let tag = "\(details.mediaType.rawValue)-\(details.id)"
+        guard tag != doubanFor else { return }
+        doubanFor = tag; douban = nil
+        let (id, type) = (details.id, details.mediaType)
+        Task {
+            let score = await DoubanRating.score(tmdbID: id, mediaType: type)
+            if doubanFor == tag { withAnimation(.smooth(duration: 0.3)) { douban = score } }
+        }
+    }
 
     var numbering: TMDBMatch.Numbering { answer?.match?.numbering ?? answer?.numbering ?? .season }
     /// The agent's offset counts only for the work it matched, not one the viewer picked instead.
@@ -208,6 +226,22 @@ import TVCore
         for (episode, info) in zip(items, mapped) { result[episode.id] = info }
         return result
     }
+
+    /// TMDB's episodes for picture tiles: when its season lines up with most of the line's episodes and TMDB has a
+    /// picture to show. An episode without its own still (TMDB is often days behind on a show still airing, and many
+    /// shows have none) shows the show's backdrop with its number, as other players do. Empty for the small chips.
+    func episodeTiles(_ items: [Episode]) -> [Episode.ID: TMDBMatch.EpisodeInfo] {
+        let mapped = episodes(items)
+        guard items.count > 1, mapped.count * 2 >= items.count,
+              mapped.values.contains(where: { $0.still != nil }) || !episodeBackdrops.isEmpty else { return [:] }
+        return mapped
+    }
+
+    /// The show's own pictures, for the episodes TMDB has no still for.
+    var episodeBackdrops: [URL] {
+        if let stills = details?.stills, !stills.isEmpty { return stills }
+        return details?.backdrop.map { [$0] } ?? []
+    }
 }
 
 extension TMDBMatch.Step {
@@ -228,7 +262,9 @@ extension TMDBMatch.Step {
 
 extension TMDBMatch.Details {
     /// "2024 · 剧情 / 古装 · 2 季 · ★ 8.1": what kind of work it is, in a line.
-    var facts: String {
+    var facts: String { facts(douban: nil) }
+
+    func facts(douban: DoubanRating.Score?) -> String {
         var parts: [String] = []
         if let year { parts.append(String(year)) }
         if !genres.isEmpty { parts.append(genres.prefix(3).joined(separator: " / ")) }
@@ -240,6 +276,7 @@ extension TMDBMatch.Details {
             parts.append(minutes >= 60 ? L10n.text("%lldh %lldm", minutes / 60, minutes % 60) : L10n.text("%lld min", minutes))
         }
         if let rating, voteCount >= 10 { parts.append("★ " + String(format: "%.1f", rating)) }
+        if let douban { parts.append(L10n.text("Douban") + " " + String(format: "%.1f", douban.value)) }
         return parts.joined(separator: " · ")
     }
 
@@ -256,7 +293,7 @@ struct TMDBLookupStatus: View {
         switch lookup.phase {
         case .looking:
             HStack(spacing: 12) {
-                ProgressView().controlSize(.small)
+                ProgressView().appControlSize(.small)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text("Finding this title on TMDB")).font(.subheadline.weight(.semibold))
                     Text(lookup.step.text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -361,9 +398,11 @@ struct TMDBBadge: View {
 enum TMDBMetrics {
     #if os(tvOS)
     static let candidate: CGFloat = 200, castPhoto: CGFloat = 110, spacing: CGFloat = 28, badge: CGFloat = 20, focusRoom: CGFloat = 24
+    static let chipSpacing: CGFloat = 20
     static let episodeTile: CGFloat = 340
     #else
     static let candidate: CGFloat = 92, castPhoto: CGFloat = 64, spacing: CGFloat = 12, badge: CGFloat = 12, focusRoom: CGFloat = 0
+    static let chipSpacing: CGFloat = 8
     static let episodeTile: CGFloat = 200
     #endif
 }
@@ -371,31 +410,154 @@ enum TMDBMetrics {
 
 // MARK: Matched
 
-/// Who's in it: round photos with the character under each name.
-struct TMDBCastRow: View {
-    let cast: [TMDBMatch.Person]
+/// Who's in it, or who made it: round photos with the character or job under each name. A person TMDB knows opens
+/// their credits, as on Discover's title page (#505).
+struct TMDBPeopleRow: View {
+    let title: String
+    let people: [TMDBMatch.Person]
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(L10n.text("Cast")).font(.headline)
+            Text(title).font(.headline)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: TMDBMetrics.spacing) {
-                    ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
-                        VStack(spacing: 6) {
-                            PosterImage(url: person.profile, symbol: "person.fill")
-                                .frame(width: TMDBMetrics.castPhoto, height: TMDBMetrics.castPhoto)
-                                .clipShape(Circle())
-                            Text(person.name).font(.caption.weight(.semibold)).lineLimit(1)
-                            if let role = person.role { Text(role).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+                    ForEach(Array(people.enumerated()), id: \.offset) { _, person in
+                        if let id = person.id {
+                            RouteLink { DiscoverPersonView(id: id, name: person.name, profile: person.profile) } label: { card(person) }
+                                .castButton()
+                                .accessibilityIdentifier("tmdb.person.\(id)")
+                        } else {
+                            card(person)
                         }
-                        .frame(width: TMDBMetrics.castPhoto + 16)
-                        .accessibilityElement(children: .combine)
+                    }
+                }
+                .padding(.vertical, TMDBMetrics.focusRoom)
+            }
+            .scrollIndicators(.never)
+            .scrollClipDisabled()
+        }
+    }
+
+    private func card(_ person: TMDBMatch.Person) -> some View {
+        VStack(spacing: 6) {
+            #if os(tvOS)
+            // As Discover's cast on Apple TV: the photo lifts on focus and the names move down with it.
+            PosterImage(url: person.profile, symbol: "person.fill")
+                .frame(width: TMDBMetrics.castPhoto, height: TMDBMetrics.castPhoto)
+                .posterClip(Circle())
+            VStack(spacing: 6) { names(person) }.cardCaption()
+            #else
+            PosterImage(url: person.profile, symbol: "person.fill")
+                .frame(width: TMDBMetrics.castPhoto, height: TMDBMetrics.castPhoto)
+                .clipShape(Circle())
+            names(person)
+            #endif
+        }
+        .frame(width: TMDBMetrics.castPhoto + 16)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private func names(_ person: TMDBMatch.Person) -> some View {
+        Text(person.name).font(.caption.weight(.semibold)).lineLimit(1)
+        if let role = person.role { Text(role).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+    }
+}
+
+private extension View {
+    @ViewBuilder func castButton() -> some View {
+        #if os(tvOS)
+        cardButton(.circle)
+        #else
+        buttonStyle(.plain)
+        #endif
+    }
+}
+
+/// The work's genres; each opens Discover's list of that genre, as on Discover's title page.
+struct TMDBGenreRow: View {
+    let details: TMDBMatch.Details
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.text("Genres")).font(.headline)
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: TMDBMetrics.chipSpacing) {
+                    if let genres = details.genreItems, !genres.isEmpty {
+                        ForEach(genres) { genre in
+                            RouteLink { DiscoverBrowseView(title: genre.name, filter: .genre(genre.id, type: details.mediaType)) } label: { chip(genre.name) }
+                                #if os(tvOS)
+                                .buttonStyle(DiscoverTVChipStyle(active: false))
+                                #else
+                                .buttonStyle(.plain)
+                                #endif
+                                .accessibilityIdentifier("tmdb.genre.\(genre.id)")
+                        }
+                    } else {
+                        // Details saved before genres had ids: names only.
+                        ForEach(details.genres, id: \.self) { name in
+                            #if os(tvOS)
+                            Text(name).font(.system(size: 26, weight: .medium)).padding(.horizontal, 30).frame(height: 62)
+                                .background(.white.opacity(0.14), in: Capsule())
+                            #else
+                            chip(name)
+                            #endif
+                        }
+                    }
+                }
+                .padding(.vertical, TMDBMetrics.focusRoom)
+            }
+            .scrollIndicators(.never)
+            .scrollClipDisabled()
+        }
+    }
+
+    @ViewBuilder private func chip(_ name: String) -> some View {
+        #if os(tvOS)
+        Text(name)
+        #else
+        Text(name).font(.subheadline.weight(.medium)).padding(.horizontal, 16).padding(.vertical, 8)
+            .background(.primary.opacity(0.08), in: Capsule())
+        #endif
+    }
+}
+
+#if !os(tvOS)
+/// Who made or aired it; each opens Discover's list of that studio's or network's titles, as on Discover's title page.
+struct TMDBStudioRow: View {
+    let studios: [TMDBMatch.Studio]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.text("Studios & Networks")).font(.headline)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: TMDBMetrics.spacing) {
+                    ForEach(Array(studios.enumerated()), id: \.offset) { _, studio in
+                        if let id = studio.id {
+                            RouteLink {
+                                DiscoverBrowseView(title: studio.name, filter: .studio(id, type: studio.kind == "network" ? .tv : .movie), logo: studio.logo)
+                            } label: { card(studio) }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("tmdb.studio.\(id)")
+                        } else {
+                            card(studio)
+                        }
                     }
                 }
             }
             .scrollIndicators(.never)
         }
     }
+
+    private func card(_ studio: TMDBMatch.Studio) -> some View {
+        VStack(spacing: 8) {
+            AsyncImage(url: studio.logo) { phase in
+                if let image = phase.image { image.resizable().scaledToFit() } else { Image(systemName: "film.stack").foregroundStyle(.secondary) }
+            }.frame(width: 88, height: 36)
+            Text(studio.name).font(.caption2).lineLimit(1)
+        }
+        .padding(12).frame(width: 124)
+        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
 }
+#endif
 
 /// A related title's row: a 16:9 rounded thumbnail on the left, the title and a line of year/type on the
 /// right, as Bilibili's 相关推荐 list cards. One card serves TMDB's "you may like", the source's own related
@@ -408,12 +570,14 @@ struct TMDBCastRow: View {
 /// The facts that don't fit in a line: who made it, where, when, its original name.
 struct TMDBInfoGrid: View {
     let details: TMDBMatch.Details
+    /// The studios row above already names them.
+    var studiosShown = false
     private var rows: [(String, String)] {
         var rows: [(String, String)] = []
         if !details.originalName.isEmpty, details.originalName != details.name { rows.append((L10n.text("Original Title"), details.originalName)) }
         let makers = details.crew.map(\.name).joined(separator: "、")
         if !makers.isEmpty { rows.append((L10n.text(details.mediaType == .tv ? "Created By" : "Directed By"), makers)) }
-        if !details.networks.isEmpty { rows.append((L10n.text(details.mediaType == .tv ? "Network" : "Studio"), details.networks.joined(separator: "、"))) }
+        if !studiosShown, !details.networks.isEmpty { rows.append((L10n.text(details.mediaType == .tv ? "Network" : "Studio"), details.networks.joined(separator: "、"))) }
         if let date = details.date { rows.append((L10n.text(details.mediaType == .tv ? "First Aired" : "Released"), date)) }
         let countries = details.countries.compactMap { Locale.current.localizedString(forRegionCode: $0) }
         if !countries.isEmpty { rows.append((L10n.text("Country or Region"), countries.joined(separator: "、"))) }
@@ -753,15 +917,22 @@ struct PosterBanner<Actions: View>: View {
 /// so the tile keeps its shape and the row still reads at a glance.
 struct EpisodeNumberArt: View {
     let name: String
+    /// Over the show's backdrop: white, on a shade that keeps it readable, at the leading edge clear of the runtime.
+    var onImage = false
     var body: some View {
         GeometryReader { proxy in
             let number = TMDBMatch.episodeNumber(name)
             let height = proxy.size.height
-            ZStack(alignment: .bottomTrailing) {
-                LinearGradient(colors: [Color.primary.opacity(0.05), Color.primary.opacity(0.13)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            ZStack(alignment: onImage ? .bottomLeading : .bottomTrailing) {
+                if onImage {
+                    LinearGradient(colors: [.black.opacity(0.1), .black.opacity(0.6)], startPoint: .topTrailing, endPoint: .bottomLeading)
+                } else {
+                    LinearGradient(colors: [Color.primary.opacity(0.05), Color.primary.opacity(0.13)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
                 Text(number.map { String(format: "%02d", $0) } ?? name)
                     .font(.system(size: height * (number == nil ? 0.3 : 0.62), weight: .heavy).italic())
-                    .foregroundStyle(Color.primary.opacity(0.78))
+                    .foregroundStyle(onImage ? Color.white.opacity(0.92) : Color.primary.opacity(0.78))
+                    .shadow(color: .black.opacity(onImage ? 0.3 : 0), radius: 6)
                     .lineLimit(1).minimumScaleFactor(0.3)
                     .padding(.horizontal, height * 0.12).padding(.bottom, height * (number == nil ? 0.12 : 0.02))
             }
@@ -770,11 +941,22 @@ struct EpisodeNumberArt: View {
     }
 }
 
+/// An episode's file under its name, 4K · 5.2G (#620): small and dimmed, in the name's colour (the accent's text on the
+/// episode playing).
+struct EpisodeFileDetail: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.caption2).monospacedDigit().lineLimit(1).opacity(0.6)
+    }
+}
+
 /// An episode with TMDB's still: the picture, the source's name for it and TMDB's title. An episode without a still
-/// keeps the tile's shape, with its number in the picture's place.
+/// keeps the tile's shape, with its number over the show's backdrop, or alone when there is none.
 struct TMDBEpisodeTile: View {
     let name: String
     let info: TMDBMatch.EpisodeInfo?
+    /// The file's resolution and size (4K · 5.2G), before TMDB's episode title on the second line.
+    var detail: String? = nil
     var current = false
     /// 0…1 of how far this episode was watched, to draw a resume bar over its still. Distinct from
     /// `current`: an episode you stopped halfway through gets this bar, not the "now playing" badge.
@@ -782,12 +964,25 @@ struct TMDBEpisodeTile: View {
     var loading = false
     /// nil fills the grid cell.
     var width: CGFloat? = TMDBMetrics.episodeTile
+    /// The show's pictures (`TMDBLookup.episodeBackdrops`), for an episode without a still: taken in turn by episode
+    /// number, so a show with several doesn't repeat one picture down the row.
+    var backdrops: [URL] = []
+    /// One line under the picture, the name then TMDB's title: the player's compact Episodes tab.
+    var oneLine = false
+    private var backdrop: URL? {
+        guard !backdrops.isEmpty else { return nil }
+        let number = max(info?.number ?? TMDBMatch.episodeNumber(name) ?? 1, 1)
+        return backdrops[(number - 1) % backdrops.count]
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear.aspectRatio(16.0 / 9.0, contentMode: .fit)
                 .overlay {
                     if let still = info?.still {
                         PosterImage(url: still, symbol: "play.rectangle")
+                    } else if let backdrop {
+                        // Written first, so on Apple TV it's painted under the other overlays, into the lifted cover.
+                        PosterImage(url: backdrop, symbol: "play.rectangle").coverOverlay { EpisodeNumberArt(name: name, onImage: true) }
                     } else {
                         EpisodeNumberArt(name: name).overlay { CoverOverlayStack() }
                     }
@@ -843,6 +1038,11 @@ struct TMDBEpisodeTile: View {
         .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
         .contentShape(Rectangle())
     }
+
+    /// TMDB's stand-in for an episode it has no title for yet (第08集, Episode 8), which only repeats the number.
+    static func isPlaceholder(_ name: String) -> Bool {
+        name.wholeMatch(of: /(?:第\s*\d+\s*[集话話]|[Ee]pisode\s*\d+|[Ee][Pp]\.?\s*\d+)/) != nil
+    }
 }
 
 /// Large TMDB artwork: backdrops at the banner's size (posters stop at 720 pixels) and logos, which are transparent.
@@ -852,6 +1052,8 @@ struct TMDBArtwork: View {
     /// Fills its frame (a backdrop) or fits in it (a logo).
     var fill = true
     var aspect: Binding<CGFloat?>? = nil
+    /// Request headers for hosts that want them (Bilibili's covers, shown large on Apple TV's video page).
+    var headers: [String: String] = [:]
     @State private var image: CGImage?
     private static let cache: NSCache<NSURL, Box> = { let cache = NSCache<NSURL, Box>(); cache.countLimit = 24; return cache }()
     final class Box { let image: CGImage; init(_ image: CGImage) { self.image = image } }
@@ -866,15 +1068,17 @@ struct TMDBArtwork: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: url) {
             if let cached = Self.cache.object(forKey: url as NSURL) { show(cached.image); return }
-            guard let decoded = await Self.load(url, maxPixels: maxPixels), !Task.isCancelled else { return }
+            guard let decoded = await Self.load(url, maxPixels: maxPixels, headers: headers), !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.3)) { show(decoded) }
         }
     }
 
     /// Downloads and decodes `url` into the shared cache; nil when it doesn't load.
-    static func load(_ url: URL, maxPixels: Int) async -> CGImage? {
+    static func load(_ url: URL, maxPixels: Int, headers: [String: String] = [:]) async -> CGImage? {
         if let cached = cache.object(forKey: url as NSURL) { return cached.image }
-        guard let (data, _) = try? await URLSession.shared.data(from: url),
+        var request = URLRequest(url: url)
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
@@ -889,3 +1093,30 @@ struct TMDBArtwork: View {
         aspect?.wrappedValue = CGFloat(decoded.width) / CGFloat(max(decoded.height, 1))
     }
 }
+
+// [融合补入] 演员横排。merge 时 TMDBViews 取了上游版，这个类型只在我们这侧，丢了。
+struct TMDBCastRow: View {
+    let cast: [TMDBMatch.Person]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.text("Cast")).font(.headline)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: TMDBMetrics.spacing) {
+                    ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
+                        VStack(spacing: 6) {
+                            PosterImage(url: person.profile, symbol: "person.fill")
+                                .frame(width: TMDBMetrics.castPhoto, height: TMDBMetrics.castPhoto)
+                                .clipShape(Circle())
+                            Text(person.name).font(.caption.weight(.semibold)).lineLimit(1)
+                            if let role = person.role { Text(role).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+                        }
+                        .frame(width: TMDBMetrics.castPhoto + 16)
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+            .scrollIndicators(.never)
+        }
+    }
+}
+

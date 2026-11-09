@@ -1974,3 +1974,8 @@
 "This source is hidden. Unlock the Privacy Vault to browse it." = "這個來源已隱藏。解鎖隱私保險庫後才能瀏覽。";
 "This source is hidden. Unlock the Privacy Vault to use it." = "這個來源已隱藏。解鎖隱私保險庫後才能使用。";
 "This title is hidden. Unlock the Privacy Vault to play it." = "這個項目已隱藏。解鎖隱私保險庫後才能播放。";
+
+// MARK: - App Language
+"App Language" = "App 語言";
+"Follow System" = "跟隨系統";
+"The app language is independent of your device language and applies immediately." = "App 語言獨立於系統語言設定，切換後立即生效。";

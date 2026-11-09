@@ -61,12 +61,29 @@ home  discover  live  music  search  sites  files  favorites  history  downloads
 | `-qaVideoName` / `-qaVideoPoster` / `-qaVideoRemarks` | `detail:` 页的假标题 / 海报 / 备注 |
 | `-qaStartAt <seconds>` | 播放起跳位置 |
 | `-qaMute 1` / `-qaSpeed <f>` / `-qaSeek <s>` | 静音 / 倍速 / 定位 |
+| `-qaOneSkinWide 1` | 强制「展开宽屏」形态（上半屏全出血 + 下半屏详情抽屉） |
+| `-qaOneSkinSideways 1` | 强制「展开横屏」形态（左右双列）；与上一项成对回归两态是否区分 |
+| `-qaSwitchEpisode <秒>` | 详情页自动播第 1 集、延时播第 2 集（回归换集后画面是否刷新） |
+| `-qaEpisodesSheet 1` | 详情页直接弹出**选集抽屉**（截图用，免点击） |
+| `-qaDownloadPicker 1` | 详情页直接弹出**下载抽屉**（同上） |
 
 ## 关键提醒
 
 - 参数只在 **Debug 构建**生效（`#if DEBUG`）；`install-duo.sh` / `e2e-verify.sh` 出的都是 Debug 包。
+- ⚠️ `-qaPage` **必须同时给 `-qaSection`**：`QALaunch.overrides(_:)` 里第一句是
+  `guard section == self.section`，而 `self.section` 只从 `-qaSection` 来。只给 `-qaPage`
+  时它等于和 nil 比，永远不成立 —— 表现为「参数没生效，停在首页」。
+- 抽屉类页面用 `-qaSection home -qaPage detail:<site>:<video> -qaEpisodesSheet 1`，
+  配 `Scripts/qa-fixture/server.py` 的 `qa2` 源（24 集 × 2 线路）才撑得开列表。
 - `-qaSection` 的 key 是**小写**（`sectionByKey`），而 `yingxia://section/<name>` 深链用的是
   `AppSection.rawValue`（大写，如 `Settings`）——两者别混。
 - `-qaPage detail:<site>:<video>` 的 `<site>` 必须是订阅里真实存在的 key；`<video>` 任意（详情用
   `-qaVideoName` 等 fake 数据，不真的拉详情）。
 - 完整参数散见 `App/QALaunch.swift`、`App/RootView.swift`、`App/PlaybackView.swift` 等的 `"qa…"` 字面量。
+- `-qaRotateCycle <秒>`（Debug / iOS）：进观看页后**进程内**每隔 N 秒真旋转一次
+  （横 → 竖 → 横 …），用 `PlayerOrientation.rotate(to:)` 走系统 `requestGeometryUpdate`。
+  回归「横竖屏来回切，界面 / 控件是否累积推移、是否要重启 App 才恢复」：连拍截图，
+  量化双列竖直分界线的 x 坐标，同一方向的多轮应**完全一致**。
+  `onAppear` 在转屏时会重复触发，钩子内有 `@MainActor static` 单实例闸，别删。
+- `-qaLogGeometry 1`：`VideoDetailView` 的 `GEO probe=… derived=… sig=…` 走 `NSLog`，
+  用来核对「量到的容器尺寸」与「实际用于布局的派生尺寸」是否解耦（后者不该跟着前者逐帧变）。

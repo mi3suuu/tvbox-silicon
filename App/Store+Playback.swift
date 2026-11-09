@@ -10,6 +10,21 @@ extension Store {
         return watchPageScopes.contains(scope)
     }
 
+    /// [mi3s] 二开：小窗是否该显示。
+    ///
+    /// 两道闸，缺一不可：
+    /// 1. `miniPlayerActive` —— **只**由视频控件里的「缩成小窗」写入。折叠、旋转、切页面、
+    ///    返回上一级都不写它，所以它们不可能把小窗拱出来。以前这里是 `floatRequested`，
+    ///    名字上像「请求一次」，实际是一个不会自己清掉的长期授权，转场里任何一次误判都会
+    ///    被它放大成一个小窗。
+    /// 2. `!playsInWatchPage` —— 观看页还在前台时不要再浮第二个画面（`dismiss()` 没生效时
+    ///    的兜底）。这个条件本身在折叠/换向时会有一帧为空，但那时第 1 道闸是关的，
+    ///    所以不会误触发；用户真的按了小窗时，它只在页面真正退场后才放行。
+    func floatsInMiniPlayer(_ channel: Channel?) -> Bool {
+        guard miniPlayerActive, let channel, playing != nil else { return false }
+        return !playsInWatchPage(channel)
+    }
+
     func toggleFavorite(_ channel: Channel) { favorites.toggle(.live(channel)) }
     func isFavorite(_ channel: Channel) -> Bool { favorites.contains(.live(channel)) }
 

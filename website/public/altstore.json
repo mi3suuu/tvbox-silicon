@@ -19,6 +19,36 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.8.15",
+          "buildVersion": "53",
+          "date": "2026-11-08",
+          "localizedDescription": "• 云盘播放自动适配设备\n• 字幕：ASS 样式与图片字幕\n• 播放与播放器控制\n• 搜索、评分与片源\n• Mac：视频页与漫画页\n• 其他修复\n\n• Cloud drives that adapt to your device\n• Subtitles: ASS styling and picture subtitles\n• Playback and player controls\n• Search, ratings and sources\n• Mac: video and comic pages\n• Other fixes",
+          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.15/Yingxia-1.8.15-ios.ipa",
+          "size": 127927291,
+          "sha256": "547065673f43e092a95c787069582157acf48a1d1d0a0edbb14e82eaad316bbd",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.8.14",
+          "buildVersion": "52",
+          "date": "2026-11-08",
+          "localizedDescription": "• 全新哔哩哔哩\n• 字幕文件和在线字幕\n• iPhone 播放器与视频页\n• 下载页全新设计\n• 发现、选集及其他\n• 其他修复\n\n• Bilibili, rebuilt\n• Subtitle files and online subtitles\n• iPhone player and video page\n• Downloads, redesigned\n• Discover, episodes and more\n• Other fixes",
+          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.14/Yingxia-1.8.14-ios.ipa",
+          "size": 126603435,
+          "sha256": "d4302575a567fa0afe2886e0f03dc8ba45f89584329045e558ba378133e62604",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.8.13",
+          "buildVersion": "51",
+          "date": "2026-11-07",
+          "localizedDescription": "• Apple TV 支持猫源\n• 播放器视频标签\n• 字幕延迟\n• 源里的设置项\n• 源自己的网盘登录\n• 播放接对剧集\n• 其他修复\n\n• CatPawOpen on Apple TV\n• Video tags in the player\n• Subtitle Delay\n• Settings inside sources\n• Drive sign-ins from the source\n• Play picks up the right episode\n• Other fixes",
+          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.13/Yingxia-1.8.13-ios.ipa",
+          "size": 124619585,
+          "sha256": "93fcba7f5b74bbd2cd0796b3df6f9d8d61182083d84fc7547841e46be7c3510e",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.8.11",
           "buildVersion": "49",
           "date": "2026-11-06",
@@ -36,36 +66,6 @@
           "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.9/Yingxia-1.8.9-ios.ipa",
           "size": 118106652,
           "sha256": "f751de0653dcf5363b032954728345f0da4d14403f11b1e43f35c2fa5dbc3fe4",
-          "minOSVersion": "17.0"
-        },
-        {
-          "version": "1.8.8",
-          "buildVersion": "46",
-          "date": "2026-11-04",
-          "localizedDescription": "• 在外接显示器上播放\n• 字幕翻译\n• 分类筛选\n• 批量隐藏或显示源\n• “发现”里有豆瓣热门了\n• 内置源改为在线更新\n• 其他修复\n\n• Play on an external display\n• Translated subtitles\n• Category filters\n• Hide or show many sources at once\n• Douban hot lists in Discover\n• Built-in sources from the cloud\n• Other fixes",
-          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.8/Yingxia-1.8.8-ios.ipa",
-          "size": 117877153,
-          "sha256": "417c45e513e36d62eace1bfeeb9cbf56a16fa2ebc38fadc5229808d33fd7b91b",
-          "minOSVersion": "17.0"
-        },
-        {
-          "version": "1.8.7",
-          "buildVersion": "45",
-          "date": "2026-11-03",
-          "localizedDescription": "• 音乐里能听的更多了\n• 支持 115 网盘\n• 单个爬虫也能添加\n• 播放更不容易中断\n• 剧集名称更清楚\n• 其他修复\n\n• More to play in Music\n• 115 cloud drive\n• Add a single spider\n• Playback that keeps going\n• Clear episode names\n• Other fixes",
-          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.7/Yingxia-1.8.7-ios.ipa",
-          "size": 117758042,
-          "sha256": "1a34c38b43b2464687f7d9e4832fc551b0931871cfa5cee853f34a2f10030f85",
-          "minOSVersion": "17.0"
-        },
-        {
-          "version": "1.8.6",
-          "buildVersion": "44",
-          "date": "2026-11-02",
-          "localizedDescription": "• 全新的“现在观看”\n• 更多 4K 视频有画面了\n• 预告片全屏播放\n• CatPawOpen 源可用百度网盘登录\n• 其他修复\n\n• A new Watch Now\n• Picture for more 4K videos\n• Trailers play full screen\n• Baidu Netdisk sign-in for CatPawOpen\n• Other fixes",
-          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.6/Yingxia-1.8.6-ios.ipa",
-          "size": 117329114,
-          "sha256": "199d9dd2b049d84fe59f5a359322410c687d3818cf18a941920be8dafd5ffede",
           "minOSVersion": "17.0"
         }
       ],
