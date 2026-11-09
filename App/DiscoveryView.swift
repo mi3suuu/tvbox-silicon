@@ -28,7 +28,8 @@ struct GlobalSearchView: View {
     /// are cut to one line under a poster (#426).
     @AppStorage("searchResultsAsList") private var showsList = false
     #endif
-    @AppStorage("videoSearchHistory") private var historyData = Data()
+    // 搜索历史按环境隔离：读/写都走 `store.searchHistory` / `store.setSearchHistory`，
+    // key 由 `store.searchHistoryKey` 按 `environments.activeID` 分键（默认环境兼容旧 key）。
     #if os(tvOS)
     /// Titles iQiyi suggests for the draft, and 360kan's chart for an empty field (`SearchSuggestions`).
     @State private var suggested: [String] = []
@@ -37,7 +38,7 @@ struct GlobalSearchView: View {
     @State private var entering = false
     #endif
     private var model: SearchModel { store.searchModel }
-    private var history: [String] { (try? JSONDecoder().decode([String].self, from: historyData)) ?? [] }
+    private var history: [String] { store.searchHistory }
     /// First pages in source order, then later pages as they arrive, so loading more only adds at the end.
     private var posters: [SearchPoster] {
         let shown = model.matches.filter { model.selectedSource == nil || $0.id == model.selectedSource }
@@ -469,7 +470,7 @@ struct GlobalSearchView: View {
                 HStack {
                     Text(L10n.text("Recent Searches")).font(.headline)
                     Spacer()
-                    Button(L10n.text("Clear")) { historyData = Data() }.controlButton()
+                    Button(L10n.text("Clear")) { store.setSearchHistory([]) }.controlButton()
                 }
             }
             #else
@@ -482,7 +483,7 @@ struct GlobalSearchView: View {
                 HStack {
                     Text(L10n.text("Recent Searches")).font(.title3.weight(.bold))
                     Spacer()
-                    Button(L10n.text("Clear")) { historyData = Data() }.buttonStyle(.plain).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).frame(minHeight: 44)
+                    Button(L10n.text("Clear")) { store.setSearchHistory([]) }.buttonStyle(.plain).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).frame(minHeight: 44)
                 }
                 VStack(spacing: 0) {
                     ForEach(Array(history.enumerated()), id: \.element) { index, item in
@@ -592,13 +593,13 @@ struct GlobalSearchView: View {
     }
 
     private func removeSearch(_ item: String) {
-        historyData = (try? JSONEncoder().encode(history.filter { $0 != item })) ?? historyData
+        store.setSearchHistory(history.filter { $0 != item })
     }
 
     private func rememberQuery(_ query: String? = nil) {
         let keyword = query ?? model.keyword
         guard !keyword.isEmpty else { return }
-        historyData = (try? JSONEncoder().encode(Array(([keyword] + history.filter { $0 != keyword }).prefix(20)))) ?? Data()
+        store.setSearchHistory(Array(([keyword] + history.filter { $0 != keyword }).prefix(20)))
         store.persistKeychainBackup()
     }
 

@@ -8,6 +8,11 @@ struct PlaybackSettingsView: View {
     @AppStorage(DanmakuPreference.key) private var showsDanmaku = true
     @AppStorage(DanmakuArea.key) private var danmakuArea = DanmakuArea.standard
     @AppStorage(SpeedBoost.key) private var holdSpeed = SpeedBoost.standard
+    /// 广告库里已学的条数，用于入口右侧的状态文字。
+    @State private var adSkipCount = 0
+    private var adSkipSummary: String? {
+        adSkipCount == 0 ? nil : String(adSkipCount)
+    }
     @AppStorage(PictureLevel.key) private var slidesLevels = true
     @AppStorage(VideoEnhancement.upscaleKey) private var upscalesVideo = false
     @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
@@ -31,6 +36,12 @@ struct PlaybackSettingsView: View {
                     FormLabel(symbol: "paintbrush.fill", tint: .purple, title: "One 风格播放页")
                 }
                 .settingsSwitch()
+            }
+            // 广告跳过：库管理单独一页（它跨作品），入口放这里。
+            SettingsGroup {
+                FormLink(symbol: "megaphone.slash.fill", tint: .pink,
+                         title: L10n.text("Ad Skipping"),
+                         value: adSkipSummary) { AdSkipSettingsView() }
             }
             SettingsGroup(footer: L10n.text("Touch and hold the video to play at this speed. Slide sideways to change it, or slide down to keep it after you let go.")) {
                 Picker(selection: $holdSpeed) {
@@ -81,6 +92,7 @@ struct PlaybackSettingsView: View {
                 }
             }
         }
+            .task { adSkipCount = await AdSignatureLibrary.shared.count() }
     }
 }
 #endif

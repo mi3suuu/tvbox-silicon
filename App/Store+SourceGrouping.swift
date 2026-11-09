@@ -35,6 +35,25 @@ extension Store {
         return sites.count
     }
 
+    /// Reorders the viewer's own groups — a group's title dropped onto another's on the Sources page.
+    /// Subscriptions keep their own order (`moveSourceGroup`); pinned and built-in groups keep theirs,
+    /// because "pinned first" is the promise that makes pinning worth doing.
+    func moveCustomGroup(_ id: String, onto target: String) {
+        sourceGroupBook.move(id, onto: target)
+    }
+
+    /// Steps a group one place up or down: the same reorder without a drag.
+    func moveCustomGroup(_ id: String, by offset: Int) {
+        sourceGroupBook.move(id, by: offset)
+    }
+
+    /// Whether a group can step up or down, so a menu does not offer a move that does nothing.
+    func canMoveCustomGroup(_ id: String, by offset: Int) -> Bool {
+        let groups = sourceGroupBook.groups
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return false }
+        return groups.indices.contains(index + offset)
+    }
+
     /// Sends `sites` back to the subscription they came from — the move is deleted, not rewritten.
     @discardableResult
     func returnSourcesToTheirSubscription(_ sites: [Site]) -> Int {

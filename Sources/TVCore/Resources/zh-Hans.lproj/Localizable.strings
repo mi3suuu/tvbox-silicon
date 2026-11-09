@@ -2019,3 +2019,6 @@
 "Tick sources to move just those; with nothing ticked the move applies to everything in the scope above. A move only changes which group lists a source — it still plays through its own subscription, and it survives a refresh." = "勾选后只移动勾中的源；一个都不勾，则对整个范围生效。移动只改变源显示在哪个分组，播放仍走它自己的订阅，刷新订阅也不会丢。";
 "The route menu pins one source to Direct or Proxy; Auto follows what the last requests managed to reach. Ordering by measured speed bakes the sweep into your own order, which the Sources page then follows." = "行尾菜单可把单个源钉死走直连或代理，「自动」跟随最近几次请求的连通情况。「按实测速度排序」把这次测速的结果写进你自己的顺序，源页面随后按它排列。";
 "A group of your own sits above the subscriptions. Sources filed into it stay playable through their own feed." = "自建分组排在订阅之上。放进去的源仍然走它自己的订阅播放。";
+"Move Group Up" = "分组上移";
+"Move Group Down" = "分组下移";
+"Drag a group's title onto another to change the order they are listed in; the menu on a title does the same two moves. Pinned and built-in groups keep the top." = "把分组标题拖到另一个标题上就能改它们的显示顺序，标题的菜单里也有同样的上移／下移。置顶与内置分组始终排在最前。";

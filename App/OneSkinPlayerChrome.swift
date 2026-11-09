@@ -788,6 +788,23 @@ struct OneSkinChrome: View {
                     Label(L10n.text("Open in Another Player"), systemImage: "play.rectangle.on.rectangle")
                 }
             }
+            // ── 广告标注 ──
+            //
+            // 只在**真的在播**时给入口：标注要抓这前后若干秒的画面算指纹，
+            // 加载中/报错时抓不到有效帧。
+            //
+            // 交互刻意做成「从这里往回标 30 秒」而不是让用户拖区间：
+            // 典型用法是「广告出现了 → 我发现了 → 往回标」，此时广告正好
+            // 在身后这段。30 秒覆盖绝大多数贴片广告，太短抓不全、太长会带进正片。
+            if canMarkAd {
+                Button {
+                    Task { await markAdHere() }
+                } label: {
+                    Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark Last 30s as Ad"),
+                          systemImage: "megaphone.badge.xmark")
+                }
+                .disabled(markingAd)
+            }
         case .quality:
             if let session, session.qualities.count > 1 {
                 Menu { QualityPicker(session: session) } label: {
@@ -1560,6 +1577,34 @@ struct OneSkinChrome: View {
         guard let channel, let session else { return nil }
         return store.step(back: back, from: channel, session: session)
     }
+
+    // MARK: - 广告标注
+
+    @State private var markingAd = false
+
+    /// 能不能标注：要真的在播、有时间轴、不是直播。
+    /// 不要求控件可见 —— 收起控件时也能从菜单标注（菜单本来就是点开的）。
+    private var canMarkAd: Bool {
+        guard let session, session.hasTimeline, !session.isLive else { return false }
+        return session.player.rate > 0 && session.duration > 60
+    }
+
+    /// 把「当前时间往回 30 秒」标成广告。
+    ///
+    /// 为什么是往回而不是往前：用户发现广告时，广告已经在播了。
+    /// 往前标会把还没播的正片吃掉，往回标最坏只是多标几秒广告本身。
+    private func markAdHere() async {
+        guard let session, !markingAd else { return }
+        markingAd = true
+        defer { markingAd = false }
+        let end = session.position
+        let start = max(0, end - 30)
+        guard end - start >= 5 else { return }
+        await session.markAd(from: start, to: end)
+        showedAdMarked = true
+    }
+
+    @State private var showedAdMarked = false
 
     private static let speeds: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
     private func speedLabel(_ speed: Float) -> String {

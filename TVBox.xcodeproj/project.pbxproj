@@ -149,6 +149,7 @@
 		3ED898D04E49F78F4DD57109 /* MoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31D1816B8ED53D49478FD843 /* MoreView.swift */; };
 		3F2E64D0FAA75B78026F115A /* RuntimeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2075419FEF0E1C161A31A9F0 /* RuntimeView.swift */; };
 		41652652896C78E29D07628E /* OneSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF223AA15FA3AF551213F1A8 /* OneSkin.swift */; };
+		43FB839E124CB117117DD991 /* AdSkipSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */; };
 		452280EFF985A9357EAAD738 /* ArtworkLanguageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB6ADF5D41A7842884ED8A4 /* ArtworkLanguageView.swift */; };
 		455119517E0FFF07B799E98C /* MusicPlayerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2CD4FD12F4DD3AAE1F8592A /* MusicPlayerViews.swift */; };
 		45ECD9E8EE6888748AC6D46E /* ThirdPartyNotices.txt in Resources */ = {isa = PBXBuildFile; fileRef = A3012FC04D8DAD058B1A5168 /* ThirdPartyNotices.txt */; };
@@ -258,6 +259,7 @@
 		75327F454262A1854A16C462 /* WebSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D5F41819EAA3AFE7BD6E5AD /* WebSniffer.swift */; };
 		762AAE7DEDF6675A62474B19 /* CatalogPlaybackActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C4D3FABE1C6E7A7B63BA62 /* CatalogPlaybackActions.swift */; };
 		7689A3F6827DAEA08E52CD62 /* SiteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7967648C18110481BD255349 /* SiteView.swift */; };
+		77B1B0F4A710F470CE13E966 /* AdSkipSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */; };
 		78CE336AE6714726DFDFDB43 /* CatalogPlaybackActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C4D3FABE1C6E7A7B63BA62 /* CatalogPlaybackActions.swift */; };
 		7AA851C4D0805EE7D4EAD670 /* SourceEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64BAC6685AECD9293F2D5503 /* SourceEditor.swift */; };
 		7BD36EB4555214FD392DAFEE /* MangaSourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0E5BAF6D854E7CE5DA362D0 /* MangaSourcesView.swift */; };
@@ -288,6 +290,7 @@
 		85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */; };
 		862B4D7324AB9499E249FB15 /* DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B784080CDE6CF171AEA5E7 /* DiscoverView.swift */; };
 		87B2F825565E0BAC988FC145 /* JNA-Apache2.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8320284C7FB9590C44BA7102 /* JNA-Apache2.txt */; };
+		8856C15BDAEE7E53EBCE7705 /* AdSkipSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */; };
 		88B3E7E6F674F06094DA9BEB /* WebCastSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD7A0AABA43477E9E02D2D67 /* WebCastSettingsView.swift */; };
 		89829D5B0A8D5FB9A4A15E56 /* SkipSourceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B33D71251D395335FDF18D8B /* SkipSourceSettingsView.swift */; };
 		8A685170BCEDE3AE50C538DA /* Announcements.swift in Sources */ = {isa = PBXBuildFile; fileRef = F43A8E3DBB135075D0CF9D44 /* Announcements.swift */; };
@@ -527,6 +530,7 @@
 /* Begin PBXFileReference section */
 		00C471D2D671003876D2A4F9 /* XunleiSignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XunleiSignInView.swift; sourceTree = "<group>"; };
 		0119708AAA410683832EA99B /* ResourceRankingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceRankingView.swift; sourceTree = "<group>"; };
+		02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdSkipSettingsView.swift; sourceTree = "<group>"; };
 		03101D27D38CF8B288CE1127 /* PrivacyShade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyShade.swift; sourceTree = "<group>"; };
 		04576D310A36BAA8CCBFC6D0 /* OneSkinBackdrop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneSkinBackdrop.swift; sourceTree = "<group>"; };
 		04E8471F5AF8D64B17693833 /* TVBox-tvOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "TVBox-tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -795,6 +799,7 @@
 		42F85A68BE50D8E117754B11 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */,
 				7DD9CCBC29ECDB9D8B254CBF /* AITranslationView.swift */,
 				075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */,
 				F43A8E3DBB135075D0CF9D44 /* Announcements.swift */,
@@ -1428,6 +1433,7 @@
 			files = (
 				2C9DAB7BDC6194CAAE63292C /* AITranslationView.swift in Sources */,
 				85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */,
+				77B1B0F4A710F470CE13E966 /* AdSkipSettingsView.swift in Sources */,
 				8A685170BCEDE3AE50C538DA /* Announcements.swift in Sources */,
 				0BAEA44063C146779B061BB1 /* ApplePython.c in Sources */,
 				36506AEA4D6F2E1541C1BCD1 /* AppleRuntime.m in Sources */,
@@ -1586,6 +1592,7 @@
 			files = (
 				032345C5D74C16D8BC65731B /* AITranslationView.swift in Sources */,
 				A1D25FF82C16A6CF78FDFBA8 /* AITranslatorAdapter.swift in Sources */,
+				43FB839E124CB117117DD991 /* AdSkipSettingsView.swift in Sources */,
 				D5E6CDAD56F3272FD731DBDE /* Announcements.swift in Sources */,
 				452280EFF985A9357EAAD738 /* ArtworkLanguageView.swift in Sources */,
 				C868FA361E3AFD4CD42B3146 /* AsyncView.swift in Sources */,
@@ -1742,6 +1749,7 @@
 			files = (
 				030DFAB42502A2FB222D80BC /* AITranslationView.swift in Sources */,
 				BB123BCA3A508B0B08D97994 /* AITranslatorAdapter.swift in Sources */,
+				8856C15BDAEE7E53EBCE7705 /* AdSkipSettingsView.swift in Sources */,
 				D54D6BFE675267FF2D16FC49 /* Announcements.swift in Sources */,
 				B7C3291A656E2548E80F1E4B /* ApplePython.c in Sources */,
 				FD9721B84A06B25F362AF291 /* AppleRuntime.m in Sources */,

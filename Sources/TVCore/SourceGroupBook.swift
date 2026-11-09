@@ -77,6 +77,48 @@ public struct CustomSourceGroup: Codable, Identifiable, Hashable, Sendable {
         save()
     }
 
+    /// The order after `id` is dropped onto `target`'s title: onto an earlier title it takes that
+    /// place, onto a later one it lands just after it — the same rule the subscription headers use,
+    /// so a drag means one thing on this page. The list is the display order; nothing else is stored.
+    public static func moving(_ groups: [CustomSourceGroup], id: String, onto target: String) -> [CustomSourceGroup] {
+        guard id != target,
+              let from = groups.firstIndex(where: { $0.id == id }),
+              let to = groups.firstIndex(where: { $0.id == target }) else { return groups }
+        var next = groups
+        let group = next.remove(at: from)
+        // After the removal a later target sits at `to - 1`, so inserting at `to` lands after it.
+        next.insert(group, at: to)
+        return next
+    }
+
+    /// The order after `id` steps `offset` places up (negative) or down (positive). The drag in menu
+    /// form, for a phone in one hand, a Mac without a trackpad, or VoiceOver.
+    public static func moving(_ groups: [CustomSourceGroup], id: String, by offset: Int) -> [CustomSourceGroup] {
+        guard let from = groups.firstIndex(where: { $0.id == id }) else { return groups }
+        let to = from + offset
+        guard to != from, groups.indices.contains(to) else { return groups }
+        var next = groups
+        let group = next.remove(at: from)
+        next.insert(group, at: to)
+        return next
+    }
+
+    /// Reorders the viewer's own groups. Membership is untouched: a group's place on the page is its
+    /// place in this list, and a source's group is still the target of its move.
+    public func move(_ id: String, onto target: String) {
+        apply(Self.moving(groups, id: id, onto: target))
+    }
+
+    public func move(_ id: String, by offset: Int) {
+        apply(Self.moving(groups, id: id, by: offset))
+    }
+
+    private func apply(_ next: [CustomSourceGroup]) {
+        guard next != groups else { return }
+        groups = next
+        save()
+    }
+
     public func group(_ id: String) -> CustomSourceGroup? { groups.first { $0.id == id } }
 
     public func group(named name: String) -> CustomSourceGroup? {

@@ -84,6 +84,10 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     public internal(set) var finished: Date?
     public internal(set) var cid: String?
     public internal(set) var duration: Double?
+    /// [mi3s] 二开：多环境隔离。下载发起时打上当时的 `environments.activeID`，
+    /// 列表按当前环境过滤（见 `DownloadsView.visibleItems`）。nil = environments 出现
+    /// 之前写入的旧记录，归默认环境 —— 升级不隐藏已有下载。
+    public internal(set) var environmentID: UUID?
 
     /// 0...1, by bytes where the total is known, else by pieces.
     public var fraction: Double {
@@ -173,13 +177,13 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     /// Adds an episode to the queue. Already downloaded or queued episodes are left as they are;
     /// a failed one is retried. Returns the episode's download.
     @discardableResult
-    public func download(_ source: DownloadSource, title: String, poster: URL?, posterHeaders: [String: String] = [:]) -> DownloadItem {
+    public func download(_ source: DownloadSource, title: String, poster: URL?, posterHeaders: [String: String] = [:], environmentID: UUID? = nil) -> DownloadItem {
         if let existing = item(for: source) {
             if existing.status == .failed || existing.status == .paused { resume(existing.id) }
             return existing
         }
         let item = DownloadItem(id: UUID().uuidString.lowercased(), title: title, episode: source.episodeName, poster: poster,
-                                posterHeaders: posterHeaders, source: source, created: Date())
+                                posterHeaders: posterHeaders, source: source, created: Date(), environmentID: environmentID)
         items.append(item)
         save()
         schedule()

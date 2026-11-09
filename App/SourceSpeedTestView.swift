@@ -134,6 +134,14 @@ struct SourceSpeedTestView: View {
         }
         .disabled(measuredCount == 0)
 
+        // 分组建好之后，顺序是用户自己的事：源页面上把标题拖到另一个标题上即可，标题菜单里也有
+        // 同样的上移／下移。置顶与内置分组固定在最前，不参与这个顺序。
+        if !store.sourceGroupBook.isEmpty {
+            Text(L10n.text("Drag a group's title onto another to change the order they are listed in; the menu on a title does the same two moves. Pinned and built-in groups keep the top."))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
         if !sweepIsEmpty {
             Text(tally)
                 .font(.caption)

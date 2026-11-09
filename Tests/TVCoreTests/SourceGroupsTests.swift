@@ -224,3 +224,39 @@ private func document(_ origin: String, sites: [(key: String, api: String)]) thr
     #expect(removed.map(\.id) == ["https://one.example/a.json"])
     #expect(removed[0].sites.map(\.key) == ["show", "moved"])
 }
+
+@Test @MainActor func movingAGroupReordersThePageWithoutTouchingMembership() {
+    let a = CustomSourceGroup(id: "a", name: "可连")
+    let b = CustomSourceGroup(id: "b", name: "不通")
+    let c = CustomSourceGroup(id: "c", name: "备用")
+
+    // Dropped onto an earlier title it takes that place; onto a later one it lands after it — the
+    // same rule the subscription headers follow, so a drag means one thing on this page.
+    #expect(SourceGroupBook.moving([a, b, c], id: "c", onto: "a").map(\.id) == ["c", "a", "b"])
+    #expect(SourceGroupBook.moving([a, b, c], id: "a", onto: "c").map(\.id) == ["b", "c", "a"])
+    // Onto itself, or naming a group that is gone: nothing moves.
+    #expect(SourceGroupBook.moving([a, b, c], id: "a", onto: "a").map(\.id) == ["a", "b", "c"])
+    #expect(SourceGroupBook.moving([a, b, c], id: "gone", onto: "a").map(\.id) == ["a", "b", "c"])
+    // The menu's step form walks one place, and stops at either end rather than wrapping.
+    #expect(SourceGroupBook.moving([a, b, c], id: "b", by: 1).map(\.id) == ["a", "c", "b"])
+    #expect(SourceGroupBook.moving([a, b, c], id: "a", by: -1).map(\.id) == ["a", "b", "c"])
+    #expect(SourceGroupBook.moving([a, b, c], id: "c", by: 1).map(\.id) == ["a", "b", "c"])
+}
+
+@Test @MainActor func groupOrderIsWhatRelaunchShows() throws {
+    let suite = "source-groups-order-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let book = SourceGroupBook(defaults: defaults)
+    let reachable = try #require(book.add(name: "可连"))
+    let silent = try #require(book.add(name: "不通"))
+    // The sweep files the silent ones first when it meets them first; the viewer wants the working
+    // ones on top, and that is a fact about the list, so it has to outlive the app.
+    book.move(silent.id, onto: reachable.id)
+    #expect(book.groups.map(\.name) == ["不通", "可连"])
+    #expect(SourceGroupBook(defaults: defaults).groups.map(\.name) == ["不通", "可连"])
+    // A step past the end of the list is a no-op, not a move to the other end.
+    book.move(silent.id, by: -1)
+    #expect(book.groups.map(\.name) == ["不通", "可连"])
+}

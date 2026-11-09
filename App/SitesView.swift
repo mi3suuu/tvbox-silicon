@@ -198,6 +198,9 @@ struct SitesView: View {
                 .draggable(group.id)
                 .dropDestination(for: String.self) { items, _ in
                     guard query.isEmpty, let address = items.first else { return false }
+                    // A group's title dragged onto a subscription header: the viewer's own groups always
+                    // sit above the feeds, so there is no place for it here.
+                    guard CustomSourceGroup.id(inTarget: address) == nil else { return false }
                     store.moveSourceGroup(address, onto: group.id, includeHidden: false)
                     return true
                 }
@@ -207,14 +210,36 @@ struct SitesView: View {
                     store.reassignSourceByKey(drag.key, origin: drag.origin, to: address)
                     return true
                 }
-        } else if case .custom = group.kind, query.isEmpty {
+        } else if case .custom(let id) = group.kind, query.isEmpty {
             // Dropping onto one of the viewer's own groups files the source there — the same move the
-            // speed page's "移动到…" makes, done one card at a time.
-            header.dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
-                guard query.isEmpty, let drag = items.first else { return false }
-                store.reassignSourceByKey(drag.key, origin: drag.origin, to: group.id)
-                return true
-            }
+            // speed page's "移动到…" makes, done one card at a time. Dropping another group's *title*
+            // here changes the order the groups are listed in: they are the viewer's, so their order is
+            // theirs to set. The menu carries the same two moves for places a drag is awkward.
+            header
+                .draggable(group.id)
+                .dropDestination(for: String.self) { items, _ in
+                    guard query.isEmpty, let payload = items.first else { return false }
+                    // Only a group's title reorders groups; a subscription dragged here has no business
+                    // moving above the feeds, so it is refused rather than half-applied.
+                    guard CustomSourceGroup.id(inTarget: payload) != nil else { return false }
+                    store.moveCustomGroup(id, onto: payload)
+                    return true
+                }
+                .dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
+                    guard query.isEmpty, let drag = items.first else { return false }
+                    store.reassignSourceByKey(drag.key, origin: drag.origin, to: group.id)
+                    return true
+                }
+                .contextMenu {
+                    Button { store.moveCustomGroup(id, by: -1) } label: {
+                        Label(L10n.text("Move Group Up"), systemImage: "arrow.up")
+                    }
+                    .disabled(!store.canMoveCustomGroup(id, by: -1))
+                    Button { store.moveCustomGroup(id, by: 1) } label: {
+                        Label(L10n.text("Move Group Down"), systemImage: "arrow.down")
+                    }
+                    .disabled(!store.canMoveCustomGroup(id, by: 1))
+                }
         } else if group.kind == .other, query.isEmpty {
             // Dropping into "Other Sources" is the way back: the source returns to its own subscription.
             header.dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
