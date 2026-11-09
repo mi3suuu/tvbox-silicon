@@ -171,6 +171,10 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
 /// `-` for an empty slot), and the third is the More list.
 struct PlayerControlsLayout: Equatable {
     static let storageKey = "playerControlsOrder"
+    /// 选集页控制栏里**直接显示**的控件（其余仍在「更多」里）。
+    static let watchSurfacedKey = "playerControlsWatchSurfaced"
+    /// 全屏态控制栏里**直接显示**的控件。
+    static let fullSurfacedKey = "playerControlsFullSurfaced"
     /// The number of fixed slots in the top bar and in the bottom bar.
     static let slotCount = 10
     /// The empty-slot marker in the stored form.
@@ -180,15 +184,33 @@ struct PlayerControlsLayout: Equatable {
     var bottomSlots: [PlayerControl?]
     var more: [PlayerControl]
 
+    /// 选集页控制栏直接显示的控件集合（其余进「更多」菜单）。
+    ///
+    /// 与 `topSlots` 的区别：槽位决定**顺序与位置**，这两个集合决定
+    /// **在哪种播放状态下真的出现在控制栏里**。一个控件可以同时在两个集合里
+    /// （选集页和全屏都直接显示），互不冲突 —— 这是用户明确要求的形式。
+    var watchSurfaced: [PlayerControl]
+    /// 全屏态控制栏直接显示的控件集合。
+    var fullSurfaced: [PlayerControl]
+
     /// The non-empty controls in each row, in slot order.
     var top: [PlayerControl] { topSlots.compactMap { $0 } }
     var bottom: [PlayerControl] { bottomSlots.compactMap { $0 } }
 
-    init(topSlots: [PlayerControl?], bottomSlots: [PlayerControl?], more: [PlayerControl]) {
+    init(topSlots: [PlayerControl?], bottomSlots: [PlayerControl?], more: [PlayerControl],
+         watchSurfaced: [PlayerControl]? = nil, fullSurfaced: [PlayerControl]? = nil) {
         self.topSlots = Self.normalized(topSlots)
         self.bottomSlots = Self.normalized(bottomSlots)
         self.more = more
+        // 没给就走默认：选集页显示常用那几个，全屏只显示 transport 相关。
+        self.watchSurfaced = watchSurfaced ?? Self.defaultWatchSurfaced
+        self.fullSurfaced = fullSurfaced ?? Self.defaultFullSurfaced
     }
+
+    /// 选集页默认直接显示：画中画、小窗、外播、视频信息、选集。
+    static let defaultWatchSurfaced: [PlayerControl] = [.episodes, .pictureInPicture, .miniPlayer, .anotherPlayer, .videoInfo]
+    /// 全屏默认只显示 playback 类（其余全屏里没意义，或会盖住画面）。
+    static let defaultFullSurfaced: [PlayerControl] = []
 
     /// Pads or trims a slot list to exactly `slotCount` entries.
     private static func normalized(_ slots: [PlayerControl?]) -> [PlayerControl?] {
@@ -211,6 +233,11 @@ struct PlayerControlsLayout: Equatable {
             }
         }
         switch parts.count {
+        case 5:
+            self.init(topSlots: parseSlots(parts[0]), bottomSlots: parseSlots(parts[1]),
+                      more: parts[2].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) },
+                      watchSurfaced: parts[3].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) },
+                      fullSurfaced: parts[4].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) })
         case 3:
             self.init(topSlots: parseSlots(parts[0]), bottomSlots: parseSlots(parts[1]),
                       more: parts[2].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) })
@@ -238,7 +265,11 @@ struct PlayerControlsLayout: Equatable {
         func slots(_ s: [PlayerControl?]) -> String {
             s.map { $0.map(\.rawValue) ?? Self.empty }.joined(separator: ",")
         }
+        // 五段：top|bottom|more|watchSurfaced|fullSurfaced
+        // 老的四段/三段串照旧能读（见 init(stored:)），新段缺省走默认值。
         return slots(topSlots) + "|" + slots(bottomSlots) + "|" + more.map(\.rawValue).joined(separator: ",")
+            + "|" + watchSurfaced.map(\.rawValue).joined(separator: ",")
+            + "|" + fullSurfaced.map(\.rawValue).joined(separator: ",")
     }
 
     /// Which zone a control is in, so the player can route its rendering.

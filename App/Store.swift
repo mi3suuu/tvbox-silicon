@@ -55,6 +55,8 @@ import TVCore
     let lineSettings: LineSettings
     /// Where a source was dragged across subscriptions (displayed group override).
     let sourceReassignment: SourceReassignment
+    /// The viewer's own groups — the ones a sweep can fill with "these answer" and "these do not".
+    let sourceGroupBook: SourceGroupBook
     /// Keeps the viewer's library the same on their other devices; nil for tests and QA's isolated data.
     let cloudSync: CloudSync?
     /// The history entry being resumed; another entry, or leaving the page, replaces or cancels it.
@@ -463,7 +465,7 @@ import TVCore
     private func currentSiteListStamp() -> String {
         let imported = subscription?.importedAt.timeIntervalSince1970 ?? 0
         let entries = environmentSubscriptions.map { "\($0.address)=\($0.enabled)" }.joined(separator: "\n")
-        return "\(subscription?.origin.absoluteString ?? "")|\(imported)|\(subscription?.sites.count ?? 0)|\(entries)|\(pinnedSources.revision)|\(hiddenSources.revision)|\(vault.revision)|\(sourceOrder.revision)|\(sourceReassignment.revision)"
+        return "\(subscription?.origin.absoluteString ?? "")|\(imported)|\(subscription?.sites.count ?? 0)|\(entries)|\(pinnedSources.revision)|\(hiddenSources.revision)|\(vault.revision)|\(sourceOrder.revision)|\(sourceReassignment.revision)|\(sourceGroupBook.revision)"
     }
     private var persistsChanges: Bool {
         #if DEBUG
@@ -505,6 +507,7 @@ import TVCore
         SourceOverrides.shared = sourceOverrides
         LineSettings.shared = lineSettings
         sourceReassignment = SourceReassignment(defaults: playbackDefaults)
+        sourceGroupBook = SourceGroupBook(defaults: playbackDefaults)
         cloudSync = defaults === UserDefaults.standard && !defaults.bool(forKey: "qaIsolatedData") ? CloudSync() : nil
         favorites = Favorites(defaults: defaults)
         var loadedAI = SubtitleTranslator.Configuration(baseURL: "", model: "", apiKey: "", targetLanguage: "")
@@ -1385,9 +1388,23 @@ import TVCore
     /// compile and a dead host to time out at every step: the app looked frozen because it was. The
     /// reader can stop it, and the progress is visible while it runs.
     func startProbingAllSources() {
-        guard probeTask == nil, let config = subscription else { return }
-        let targets = probeTargets(config)
-        guard !targets.isEmpty else { return }
+        guard let config = subscription else { return }
+        startProbing(probeTargets(config))
+    }
+
+    /// Measures just these sources — the ones in one group, or the ones the reader ticked. A full
+    /// sweep of 350 sources takes minutes; re-checking the twenty that survived is the common case.
+    func startProbing(_ sites: [Site]) {
+        guard let config = subscription else { return }
+        var seen = Set<String>()
+        let targets = sites
+            .filter { seen.insert($0.id).inserted }
+            .map { ProbeTarget(site: $0, origin: $0.origin(or: config.origin), jarURL: config.spiderURL) }
+        runProbe(targets)
+    }
+
+    private func runProbe(_ targets: [ProbeTarget]) {
+        guard probeTask == nil, !targets.isEmpty else { return }
         probeRun = ProbeRun(done: 0, total: targets.count)
         let token = UUID()
         probeToken = token
@@ -1610,7 +1627,7 @@ import TVCore
             // Address first: the subscription keeps the address the viewer added, so a refresh that
             // lands on a new mirror keeps every move. The origin is only for older records.
             sourceReassignment.destination(address: address, sourceKey: site.sourceKey, origin: site.provenance?.origin)
-        })
+        }, customGroups: sourceGroupBook.groups)
         // The viewer's own order, while it is on, orders the sources inside each group too.
         if sourceOrder.enabled { groups = sourceOrder.arrange(groups, origin: config.origin) }
         rememberSiteLists(stamp)

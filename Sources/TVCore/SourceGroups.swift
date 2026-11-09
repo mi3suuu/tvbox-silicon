@@ -10,6 +10,8 @@ public enum SourceLists {
 public struct SourceGroup: Equatable, Sendable, Identifiable {
     public enum Kind: Equatable, Sendable {
         case pinned, builtIn, subscription(String)
+        /// A group the viewer made up (`CustomSourceGroup`), listed by its id.
+        case custom(String)
         /// The sources the viewer hid, last on the page.
         case hidden
         // [mi3s] 二开：case other —— 改派来源落不到任何订阅时仍需显示，否则「源存在却看不见」
@@ -27,6 +29,7 @@ public struct SourceGroup: Equatable, Sendable, Identifiable {
         case .pinned: "pinned"
         case .builtIn: "builtIn"
         case .subscription(let address): address
+        case .custom(let id): "group:" + id
         case .hidden: "hidden"
         case .other: "other"
         }
@@ -39,7 +42,7 @@ public enum SourceGroups {
     /// it — a privacy-hidden source must disappear entirely when locked, or the "Hidden Sources" group
     /// and its count would tell a locked-out viewer how much is in the vault. Unlock and it returns
     /// to its own group.
-    public static func make(entries: [SubscriptionEntry], documents: [String: Subscription], builtIns: [Site], builtInOrigin: URL, mergedSites: [Site], pinOrder: [Site], userHidden: (Site) -> Bool, includeHidden: Bool, jarURL: URL?, privacyHidden: (Site) -> Bool = { _ in false }, reassign: (Site, String) -> String? = { _, _ in nil }) -> [SourceGroup] {
+    public static func make(entries: [SubscriptionEntry], documents: [String: Subscription], builtIns: [Site], builtInOrigin: URL, mergedSites: [Site], pinOrder: [Site], userHidden: (Site) -> Bool, includeHidden: Bool, jarURL: URL?, privacyHidden: (Site) -> Bool = { _ in false }, reassign: (Site, String) -> String? = { _, _ in nil }, customGroups: [CustomSourceGroup] = []) -> [SourceGroup] {
         /// An entry is known by the address the viewer typed; its copy is known by where the address
         /// finally landed — a redirect, a mirror, an http-to-https hop. Grouping used to compare the
         /// two directly, so every subscription that redirected filed nothing: its sources silently
@@ -72,6 +75,14 @@ public enum SourceGroups {
         if !pinnedSites.isEmpty { groups.append(SourceGroup(kind: .pinned, title: "Pinned Group", sites: pinnedSites)) }
         let builtInSites = builtIns.filter { eligible($0) && !isPinned($0, fallback: builtInOrigin) }
         if !builtInSites.isEmpty { groups.append(SourceGroup(kind: .builtIn, title: "Built-in", sites: builtInSites)) }
+        // The viewer's own groups sit above the feeds: a sweep that says "these answer, those do not"
+        // is only useful if the answer is the first thing on the page. A group with nothing in it is
+        // still listed — it was just made, and it needs somewhere to be dropped onto.
+        for custom in customGroups {
+            let members = mergedSites.filter { !$0.isBuiltIn && !isPinned($0, fallback: builtInOrigin) && eligible($0) && home($0) == custom.target }
+            groups.append(SourceGroup(kind: .custom(custom.id), title: custom.name,
+                                      sites: SourceStrategy.arrange(members, where: { _ in true })))
+        }
         // A source the viewer dragged onto another subscription files under that subscription instead of its own.
         for entry in entries where entry.enabled {
             guard let origin = documents[entry.address]?.origin else { continue }

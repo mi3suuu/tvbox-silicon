@@ -442,15 +442,16 @@ struct OneSkinChrome: View {
             iconButton("chevron.left", label: L10n.text("Back")) {
                 if fullScreen { onExitFullScreen() } else { onBack() }
             }
-            iconButton(kit.isFullScreen ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
-                       label: kit.isFullScreen ? L10n.text("Exit Full Screen") : L10n.text("Full Screen")) {
-                kit.toggleFullScreen()
-            }
+            // ⛔ 已删「伪全屏」按钮（rectangle.expand.vertical）。
+            //    它在 OneSkin 路径下只是把窗口铺满整列，真正的全屏由底部胶囊条/手势承担；
+            //    留在顶栏第二位只造成「这里一个全屏、那里一个全屏」的混淆。
+            //    全屏进出的唯一入口现在是控制栏里的 fullScreen 控件（若设为可见）+ 系统手势。
             iconButton("rectangle.landscape.rotate", label: L10n.text("Rotate")) { onRotate() }
             // 全屏里没有「合拢/展开」这回事（画面已占满整屏），把它收掉免得占位。
             if !fullScreen {
-                iconButton("sidebar.right", label: L10n.text("Collapse")) { onFold() }
-
+                // ⛔ 已删「选集抽屉」按钮（sidebar.right）。
+                //    选集面板由底部胶囊条的「选集」chip 打开，顶栏再放一个同功能按钮
+                //    会让两个入口抢同一块状态（showsEpisodes vs showsSeries）。
                 ForEach(surfacedControls, id: \.self) { control in
                     controlButton(control)
                 }
@@ -505,14 +506,23 @@ struct OneSkinChrome: View {
     private var topSurfaceCapacity: Int {
         // 返回、全屏、旋转（全屏态到此为止）
         // + 合拢、更多、选集聚合（仅选集页）+ 锁定。
-        let structural = fullScreen ? 4 : 7
+        let structural = fullScreen ? 2 : 5
         let spare = winW - barLeading - barTrailing - CGFloat(structural) * m.hit
         return max(0, Int(spare / m.hit))
     }
 
+    /// 控制栏里**直接显示**的控件。
+    ///
+    /// 现在由两个独立集合决定（设置页可改）：
+    /// · 选集页 → `layout.watchSurfaced`
+    /// · 全屏态 → `layout.fullSurfaced`
+    /// 同一个控件可以同时出现在两边，互不冲突。列表顺序仍按 `layout.top` 的槽位顺序，
+    /// 这样用户在设置里调过位置后，两种状态里的相对次序保持一致。
     private var surfacedControls: [PlayerControl] {
-        Array(layout.top
+        let allowed = Set(fullScreen ? layout.fullSurfaced : layout.watchSurfaced)
+        return Array(layout.top
             .filter { $0 != .fullScreen && $0 != .rotate && $0 != .lock }
+            .filter { allowed.contains($0) }
             .filter(available)
             .prefix(topSurfaceCapacity))
     }
@@ -1220,12 +1230,30 @@ struct OneSkinChrome: View {
                 TapGesture()
                     .onEnded { singleTap() }
             )
+            // ⛔ 手势顺序与「独占」是关键：
+            //
+            // 原来四个手势全部 `simultaneousGesture` 平挂，`DragGesture(minimumDistance: 14)`
+            // 又要求移动 14pt 才成立 —— 于是「按住不动 0.45 秒」这段时间里，
+            // 长按识别器还没完成、拖动识别器也还没成立，**只剩 TapGesture 能赢**，
+            // 手一松就成了单击（用户报的「长按快进变成了单击快进」）。
+            //
+            // 现在把长按加速放在 `.gesture()` 里做**主手势**：SwiftUI 会先让它识别，
+            // 按住满 0.45 秒即进入加速态，此时其它 simultaneous 手势被 `boost != nil` 门控忽略。
+            // 拖动改成 `minimumDistance: 24` 并保留 simultaneous —— 够大的位移才抢，
+            // 避免手抖把「长按」判成「拖动」。
+            .gesture(holdSpeedGesture)
             .simultaneousGesture(
-                DragGesture(minimumDistance: 14)
-                    .onChanged { value in dragged(value) }
-                    .onEnded { _ in dragEnded() }
+                DragGesture(minimumDistance: 24)
+                    .onChanged { value in
+                        // 正在长按加速时不接管：横向位移用于改档（已由 movedHold 处理）。
+                        if boost != nil { return }
+                        dragged(value)
+                    }
+                    .onEnded { _ in
+                        if boost != nil { return }
+                        dragEnded()
+                    }
             )
-            .simultaneousGesture(holdSpeedGesture)
             .allowsHitTesting(!locked)
     }
 
@@ -1285,6 +1313,7 @@ struct OneSkinChrome: View {
     private func doubleTap(at location: CGPoint) {
         // 双击已经成立，把挂在单击上的「收控件」取消掉。
         tapTask?.cancel(); tapTask = nil
+        guard boost == nil else { return }
         guard let session else { return }
         let zone = PictureTaps.zone(x: Double(location.x), width: Double(winW), seekable: seekable)
         switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone) {
@@ -1353,6 +1382,8 @@ struct OneSkinChrome: View {
 
     /// 单击：只有全屏才管控件，且要等双击的判定窗口过去。
     private func singleTap() {
+        // 长按加速进行中/刚结束：这一下是加速手势的收尾，不是单击。
+        guard boost == nil else { return }
         guard fullScreen, !locked else { return }
         tapTask?.cancel()
         tapTask = Task { @MainActor in

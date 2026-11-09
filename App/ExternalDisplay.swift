@@ -7,6 +7,17 @@ extension UIApplication {
     /// shows a window the user must tap uses this instead.
     var appWindowScene: UIWindowScene? {
         let scenes = connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.session.role == .windowApplication }
+        // ⛔ 必须优先选**真的有 keyWindow**的那个 scene。
+        //
+        // 原来按 `activationState == .foregroundActive` 取第一个：Duo 展开/收起时两块屏
+        // 都可能报 foregroundActive，取到的那块可能没有 keyWindow（外屏占了 active，
+        // 内容却还在内屏）。`PlayerOrientation.apply` 就是在 `scene.keyWindow` 上找
+        // rootViewController 再请求转屏 —— scene 选错，`controller` 为 nil，
+        // `setNeedsUpdateOfSupportedInterfaceOrientations` 根本没发出去，
+        // 症状正是用户报的「旋转按钮点了没反应」。
+        if let keyed = scenes.first(where: { $0.keyWindow != nil || !$0.windows.isEmpty }) {
+            return keyed
+        }
         return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     }
 }

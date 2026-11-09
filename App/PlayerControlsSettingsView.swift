@@ -108,8 +108,65 @@ private struct PlayerControlsEditor: View {
             rowSection(title: L10n.text("Top Row"), slots: layout.topSlots, zone: .top)
             rowSection(title: L10n.text("Bottom Row"), slots: layout.bottomSlots, zone: .bottom)
             moreSection
+            surfacingSections
         }
         .padding(.vertical, 8)
+    }
+
+    /// 两个**独立**的勾选列表：哪些控件在「选集页」控制栏直接出现、哪些在「全屏」直接出现。
+    ///
+    /// 同一个控件可以两边都勾 —— 用户明确要求「这两个可以都显示，不冲突」。
+    /// 没勾的控件仍在「更多」菜单里，不丢功能。
+    private var surfacingSections: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            surfacingSection(
+                title: L10n.text("Shown While Watching"),
+                symbol: "rectangle.on.rectangle",
+                hint: L10n.text("Buttons that sit in the control bar on the episode page."),
+                controls: layout.top.filter { $0 != .fullScreen && $0 != .rotate && $0 != .lock },
+                isOn: { layout.watchSurfaced.contains($0) },
+                toggle: { control, on in
+                    var set = layout.watchSurfaced
+                    if on { if !set.contains(control) { set.append(control) } }
+                    else { set.removeAll { $0 == control } }
+                    layout.watchSurfaced = set
+                    stored = layout.stored
+                }
+            )
+            surfacingSection(
+                title: L10n.text("Shown in Full Screen"),
+                symbol: "arrow.up.left.and.arrow.down.right",
+                hint: L10n.text("Buttons that sit in the control bar in full-screen playback."),
+                controls: layout.top.filter { $0 != .fullScreen && $0 != .rotate && $0 != .lock },
+                isOn: { layout.fullSurfaced.contains($0) },
+                toggle: { control, on in
+                    var set = layout.fullSurfaced
+                    if on { if !set.contains(control) { set.append(control) } }
+                    else { set.removeAll { $0 == control } }
+                    layout.fullSurfaced = set
+                    stored = layout.stored
+                }
+            )
+        }
+    }
+
+    private func surfacingSection(title: String, symbol: String, hint: String,
+                                  controls: [PlayerControl],
+                                  isOn: @escaping (PlayerControl) -> Bool,
+                                  toggle: @escaping (PlayerControl, Bool) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).textCase(nil)
+            Text(hint).font(.caption).foregroundStyle(.tertiary)
+            ForEach(controls, id: \.self) { control in
+                Toggle(isOn: Binding(get: { isOn(control) },
+                                     set: { toggle(control, $0) })) {
+                    Label(L10n.text(control.title), systemImage: control.symbol)
+                        .font(.footnote)
+                }
+                .toggleStyle(.switch)
+            }
+        }
     }
 
     private func rowSection(title: String, slots: [PlayerControl?], zone: PlayerControlsLayout.Zone) -> some View {

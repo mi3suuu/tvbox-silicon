@@ -22,7 +22,20 @@ extension Store {
     ///    所以不会误触发；用户真的按了小窗时，它只在页面真正退场后才放行。
     func floatsInMiniPlayer(_ channel: Channel?) -> Bool {
         guard miniPlayerActive, let channel, playing != nil else { return false }
-        return !playsInWatchPage(channel)
+        // ⛔ 闸二不能用 `!playsInWatchPage(channel)`。
+        //
+        // 那条判据读的是 `watchPageScopes`，而它由 `onAppear` / `onDisappear` 维护 ——
+        // 两者都是 **SwiftUI 的下一帧动作**。用户点「缩成小窗」的那一刻顺序是：
+        //   1) `miniPlayerActive = true`
+        //   2) `dismiss()`
+        //   3) 本函数被调用 → 此时 `onDisappear` 还没跑，`watchPageScopes` 仍含当前页
+        //   4) 于是返回 false，小窗视图根本没被挂上
+        //   5) 之后 scope 更新了，但状态早已判完，这一帧错过了就再也不会重算
+        // 用户看到的就是「点了没反应」。
+        //
+        // 改用 `presentingPlayer`：它是同一次点击里同步置 false 的，
+        // 而且语义就是「播放页还在不在前台」，比 scope 集合更贴近这条闸想问的事。
+        return !presentingPlayer
     }
 
     func toggleFavorite(_ channel: Channel) { favorites.toggle(.live(channel)) }
