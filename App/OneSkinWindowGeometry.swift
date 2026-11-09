@@ -77,6 +77,7 @@ struct OneSkinWindowGeometry {
     /// 竖屏片源 0.56 会把窗口算成列高的近两倍，用户看到的正是
     /// 「播放竖屏时播放器被拉高、画面糊满整列」；等轮询读到真比例，
     /// 窗口还会再跳一次。片源比例只决定 `videoGravity` 在窗口内部怎么留黑边。
+    @MainActor
     init(size: CGSize, landscape: Bool, fullScreen: Bool) {
         let colW = size.width
         let colH = size.height
@@ -103,63 +104,47 @@ struct OneSkinWindowGeometry {
             // ★ 播放器外壳**满宽**（用户明确要求）：
             //   · 竖屏播放态：占满整个屏幕宽度；
             //   · 横屏双栏：占满整个左列宽度（winX = 0）。
-            // One 原版那 2.36% / 3.33% 的左右内缩不再施加到外壳上，
-            // 让左右不再露出两条海报底。
-            // 两态同一条规则：外壳宽度 = 列宽、winX = 0。
-            // 「横屏保持内缩」是上一轮的临时方案，但用户本次明确要求：
-            //   「竖屏播放态需要让视频播放器外壳占据所有宽度，
-            //     横屏双栏也是 占据整个左边的宽度」。
-            // 控件（顶/底栏、进度条、全屏键）全部由**同一份 geo** 派生，
-            // 宽度变满宽时它们跟着等比铺开，不会各自漂移 —— 22:24 的横屏
-            // 双栏截图已验证：分界 53.43%、进度条与全屏键仍贴窗口右缘。
-            // ⛔ 别再把 `colW - inset*2` 带回来，那会在左列两侧留下两条海报底。
             let innerW = max(colW, 1)
 
-            // ⛔ 宽度绝不允许再被「高度兜底」反推回去。
+            // ⛔ 竖屏与横屏**独立定义**（用户明确：不能共用一个公式）。
             //
-            // 旧代码：`if height > availableH { height = availableH; width = height*1.819 }`。
-            // 竖屏时传进来的 colH 其实是 `pictureHeightOf` 切出来的**画面区高度**
-            // （≈ 0.131·H + winH），而 availableH 又写成 `colH*0.72 − colH*0.091`
-            // = 0.629·colH —— 对同一块空间夹了两次，于是每帧都命中：
-            //   iPhone 393 宽 → 窗口只剩 363（左右各 15pt 空带）
-            //   Duo 669 宽   → 窗口只剩 543（左右各 63pt 空带）
-            // 这正是「外壳没占满宽度」的根因。现在宽度恒等于列宽，
-            // 空间不够只压高度：画面在窗口内由 `.resizeAspect` letterbox，
-            // 不会拉伸、也不会改变窗口尺寸（片源比例依旧不参与几何）。
-            let portraitTopY = colH * Metrics.portraitTop
-            let usableLandscapeH = max(
-                colH - Self.topPaddingLandscape - Self.margin(forColumnWidth: colW),
-                1
-            )
-            // 横屏窗口按 45.5% 居中，上沿不越界 ⇒ winH ≤ 0.91·usableH；
-            // 竖屏窗口从 9.1%·colH 起，底部留 4% 呼吸 ⇒ winH ≤ colH − topY − 0.04·colH。
-            let maxH = max(
-                landscape ? usableLandscapeH * 0.91 : colH - portraitTopY - colH * 0.04,
-                min(Metrics.minPictureHeight, colH)
-            )
-            // 宽度恒等于列宽，**任何形态都不允许按高度反推宽度**。
-            // 空间不够只压高度：画面在窗口内由 `.resizeAspect` letterbox，
-            // 不会拉伸，也不会改变窗口尺寸（片源比例依旧不参与几何）。
-            let fittedH = max(
-                min(innerW / Metrics.windowAspect, maxH),
-                min(Metrics.minPictureHeight, colH)
-            )
-            self.winW = innerW
-            self.winH = fittedH
-            self.winX = 0
+            // 越界根因：竖屏的 `colH` 是 `pictureHeightOf` 算出的「画面区高度」，
+            // 它**已经包含**窗口高度（= screenH*0.091 + winH + screenH*0.04）。
+            // 旧代码又用 `colH*0.091` 当 winY、用 `colH` 当 maxH 基准 ——
+            // 对「含窗口高的高度」再套一次「顶部留白比例 + 窗口高」，双重计算。
+            // 屏幕较矮时 colH 被 0.72 夹住，winY + winH 就超出 colH，
+            // 窗口底部压进 detailColumn —— 用户报的「越界」。
+            //
+            // 正解：竖屏窗口几何直接用**屏幕尺寸**（离散值，不随动画变），
+            // 与 colH/picH 完全解耦：
+            //   winW = 屏幕宽（满宽）
+            //   winH = 屏幕宽 ÷ 1.819（固定版式比例，不夹 maxH）
+            //   winY = 屏幕高 × 0.091（顶部留白，基于屏幕高）
+            // 窗口底 = 屏幕高×0.091 + 屏宽÷1.819，天然 ≤ 屏幕高（屏宽÷1.819 < 屏高）。
+            let raw = OneSkin.fixedScreenSize()
+            let screenW = min(raw.width, raw.height)
+            let screenH = max(raw.width, raw.height)
 
             if landscape {
-                // 中心落在「可用高度」的 45.5%（One 实测 (357+915)/2/1398）。
-                // 注意：`stage` 的 `.padding(.top, 8)` 已经把内容区整体下移了 8pt，
-                // 这里算出的 winY 是相对已下移内容区的偏移 —— **不要再加 8**，
-                // 否则会累积成 2×8pt ≈ 17px（实测窗口顶 374 而不是 357）。
+                // 横屏：窗口在左列内，winW=左列宽、winH=winW/1.819、中心 45.5%。
                 let usableH = max(
                     colH - Self.topPaddingLandscape - Self.margin(forColumnWidth: colW),
                     1
                 )
-                self.winY = usableH * Metrics.landscapeCentre - self.winH / 2
+                let fittedH = max(
+                    min(innerW / Metrics.windowAspect, usableH * 0.91),
+                    min(Metrics.minPictureHeight, colH)
+                )
+                self.winW = innerW
+                self.winH = fittedH
+                self.winX = 0
+                self.winY = usableH * Metrics.landscapeCentre - fittedH / 2
             } else {
-                self.winY = colH * Metrics.portraitTop
+                // 竖屏：独立定义，用屏幕尺寸，不经过 picH 双重计算。
+                self.winW = innerW
+                self.winH = max(innerW / Metrics.windowAspect, min(Metrics.minPictureHeight, screenH))
+                self.winX = 0
+                self.winY = screenH * Metrics.portraitTop
             }
         }
     }

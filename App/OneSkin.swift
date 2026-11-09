@@ -1342,17 +1342,28 @@ struct OneSkinStage: View {
     ///
     /// One 竖屏实测（1398×2034）：窗口 y185–920，即顶部留白 9.1%、
     /// 窗口高 735px（= 1332÷1.811）。所以画面区总高 = 0.091·H + winH。
+    /// 竖屏画面区（外壳）高度。
+    ///
+    /// ★ 纯函数：**只吃 `size`，不读屏幕**。
+    ///
+    /// 之前这里调 `OneSkin.fixedScreenSize()`，结果每帧都重新测一次屏幕，
+    /// 而这个 VM 的 `screen.bounds` 在形态稳定后仍在变（日志铁证同一形态下
+    /// `col=466x317 / 343 / 345 / 380 / 678` 五种高度、`ROOT proxy` 在
+    /// `466x604 / 638 / 555 / 507` 之间跳）—— 画面区高度跟着抖，整页就推。
+    ///
+    /// 现在留白比例直接乘 `size.height`（= 已冻结的 `frozenBox` 高度）：
+    /// box 只在 onAppear / 形态切换时重算，所以这个值也跟着离散、不抖。
     private func pictureHeightOf(_ size: CGSize, landscape: Bool) -> CGFloat {
         guard !landscape else {
             // 横屏双列时画面列就是整列高，不用切
             return size.height
         }
-        // ★ 外壳满宽后窗口宽度就是列宽。这里必须同步按满宽算窗口高度，
-        // 否则画面区仍按旧的 2.36% 内缩宽度切，比真实窗口矮一截，
-        // 窗口下沿会压到详情列上（竖屏最明显）。
         let winW = max(size.width, 1)
         let winH = winW / OneSkinWindowGeometry.Metrics.windowAspect
-        return min(size.height * OneSkinWindowGeometry.Metrics.portraitTop + winH + size.height * 0.04, size.height * 0.72)
+        let h = max(size.height, 1)
+        // 上限 0.72 保留：画面区最多占 72%，其余留给详情列。
+        return min(h * OneSkinWindowGeometry.Metrics.portraitTop + winH + h * 0.04,
+                   h * 0.72)
     }
 
     /// 播放器窗口内的控件层。
