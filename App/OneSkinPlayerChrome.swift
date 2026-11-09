@@ -42,6 +42,29 @@ import AVKit
 import AVFoundation
 import TVCore
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// ⚠️ 长期约束（踩过两次，别再犯）
+//
+// 1. 决定 UI 结构的计算属性，只能用**离散量**。
+//
+//    `canMarkAd` 曾经依赖 `session.player.rate` 与调用链上的 `position`：
+//    `position` 每秒被 `updateSkipping` 改写，于是「更多」菜单的内容被
+//    判定为每帧都在变，列表持续重绘 —— 用户点不中、下拉选不了。
+//
+//    凡是 `if`/`ForEach`/`Section` 的分支条件，只允许读：
+//      时长、开关、枚举、布尔、静态配置
+//   禁止读：
+//      播放位置、进度、速率、任何逐帧变化的量
+//
+// 2. 画面手势只保留**一个** `pressGesture`，由它自己计时区分
+//    单击 / 双击 / 长按加速 / 横滑定位。
+//
+//    不要退回多手势 `simultaneousGesture` 平挂，也不要再用
+//    `LongPressGesture().sequenced(before:)` —— 后者在 TapGesture 共存时
+//    收不到 `.first(true)` 中间态，长按永远不会触发（表现为「单击即加速」）。
+// ═══════════════════════════════════════════════════════════════════════
+
 // MARK: - 播放控件总线
 
 /// One 页与播放引擎之间的唯一接口。
@@ -1276,57 +1299,105 @@ struct OneSkinChrome: View {
                 SpatialTapGesture(count: 2)
                     .onEnded { value in doubleTap(at: value.location) }
             )
-            .simultaneousGesture(
-                TapGesture()
-                    .onEnded { singleTap() }
-            )
-            // ⛔ 手势顺序与「独占」是关键：
+            // ⛔ 这里**只有一个交互手势**（`pressGesture`），单击/双击/长按/横滑全部
+            //    由它按「按下时长 + 位移」自己判定。
             //
-            // 原来四个手势全部 `simultaneousGesture` 平挂，`DragGesture(minimumDistance: 14)`
-            // 又要求移动 14pt 才成立 —— 于是「按住不动 0.45 秒」这段时间里，
-            // 长按识别器还没完成、拖动识别器也还没成立，**只剩 TapGesture 能赢**，
-            // 手一松就成了单击（用户报的「长按快进变成了单击快进」）。
+            // 走过的弯路（别再回去）：
+            //   1. 四个 `simultaneousGesture` 平挂 → 长按被 TapGesture 抢先，一松手变单击；
+            //   2. 把 `LongPressGesture().sequenced(before: DragGesture)` 提为主 `.gesture()`
+            //      → 仍然不生效：`sequenced` 要等**整个序列结束**才走 `onEnded`，
+            //      而 `.first(true)` 这个中间态在同时挂着 TapGesture 时常常收不到，
+            //      `beginHold()` 从来没被调用过。
             //
-            // 现在把长按加速放在 `.gesture()` 里做**主手势**：SwiftUI 会先让它识别，
-            // 按住满 0.45 秒即进入加速态，此时其它 simultaneous 手势被 `boost != nil` 门控忽略。
-            // 拖动改成 `minimumDistance: 24` 并保留 simultaneous —— 够大的位移才抢，
-            // 避免手抖把「长按」判成「拖动」。
-            .gesture(holdSpeedGesture)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 24)
-                    .onChanged { value in
-                        // 正在长按加速时不接管：横向位移用于改档（已由 movedHold 处理）。
-                        if boost != nil { return }
-                        dragged(value)
-                    }
-                    .onEnded { _ in
-                        if boost != nil { return }
-                        dragEnded()
-                    }
-            )
+            // 现在的做法：用 `DragGesture(minimumDistance: 0)` 自己计时。
+            // 它按下即触发 `onChanged`，位移为 0 也能拿到 —— 时间由我们数，
+            // 不依赖任何系统长按识别器，行为完全确定。
+            .gesture(pressGesture)
             .allowsHitTesting(!locked)
     }
 
-    /// 长按加速 → 不松手继续拖：横滑改档、下滑保持（与旧播放器同一套 `SpeedBoost` 规则）。
+    /// 画面上的**唯一**交互手势：按下时长 + 位移决定是单击 / 双击 / 长按加速 / 横滑定位。
     ///
-    /// 为什么不用 `onLongPressGesture`：它只在按下/抬起两个时刻回调，
-    /// 中间没有位移可读，于是「横滑改档」「下滑保持」在 One 页根本无从实现 ——
-    /// 这也正是这里此前只有固定 2× 的原因。
-    private var holdSpeedGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.45)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+    /// 为什么自己计时而不是用 `LongPressGesture`：见 `gestureLayer` 的注释 ——
+    /// `sequenced` 组合在 TapGesture 共存时收不到中间态，长按永远不触发。
+    ///
+    /// 时序：
+    ///   · 按下 → 记录起点与时刻，起一个 0.45s 定时器
+    ///   · 定时器到点仍在按 → `beginHold()` 进入加速
+    ///   · 松手 → 若已加速则 `endedHold()`（恢复原速）；否则按位移判定横滑/单击
+    ///   · 双击 → 由 `doubleTap` 自己处理，单击靠延迟 0.26s 让位
+    private var pressGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                switch value {
-                case .first(true):
-                    beginHold()
-                case .second(true, let drag):
-                    if let drag { movedHold(drag.translation) }
-                default:
-                    break
+                // 已经在加速：位移用于改档（横滑）或保持（下滑）。
+                if boost != nil {
+                    movedHold(value.translation)
+                    return
+                }
+                // 首次按下：记时刻、起长按定时器。
+                if pressStartedAt == nil {
+                    pressStartedAt = Date()
+                    let startLocation = value.startLocation
+                    holdTask?.cancel()
+                    holdTask = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(450))
+                        guard !Task.isCancelled, pressStartedAt != nil, boost == nil else { return }
+                        beginHold()
+                    }
+                    return
+                }
+                // 未进入加速但已经移动够远：交给横滑/竖滑。
+                if hypot(value.translation.width, value.translation.height) >= 14 {
+                    dragged(value)
                 }
             }
-            .onEnded { _ in endedHold() }
+            .onEnded { value in
+                holdTask?.cancel()
+                holdTask = nil
+                let held = pressStartedAt != nil ? Date().timeIntervalSince(pressStartedAt!) : 0
+                let moved = hypot(value.translation.width, value.translation.height)
+                pressStartedAt = nil
+
+                if boost != nil {
+                    endedHold()
+                    return
+                }
+                // 没进入加速：位移大就是滑动手势的收尾，否则算点击。
+                if moved >= 14 {
+                    dragEnded()
+                } else if held < 0.45 {
+                    // 短按：可能是单击的第一下，也可能是双击的第一下。
+                    // 交给双击判定窗口，0.26s 后仍没有第二下才算单击。
+                    handleTap(at: value.location)
+                }
+            }
     }
+
+    /// 单击 / 双击的统一入口。
+    ///
+    /// 不用 `SpatialTapGesture(count: 2)`：它和自定义的 pressGesture 抢事件，
+    /// 而且双击的第二下会被 pressGesture 自己也收到一次。这里自己数时间间隔。
+    private func handleTap(at location: CGPoint) {
+        let now = Date()
+        if let last = lastTapAt, now.timeIntervalSince(last) < 0.30 {
+            lastTapAt = nil
+            tapTask?.cancel(); tapTask = nil
+            doubleTap(at: location)
+            return
+        }
+        lastTapAt = now
+        tapTask?.cancel()
+        tapTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            lastTapAt = nil
+            singleTap()
+        }
+    }
+
+    @State private var pressStartedAt: Date?
+    @State private var holdTask: Task<Void, Never>?
+    @State private var lastTapAt: Date?
 
     /// 能不能加速：要真的在播、有时间轴、且没有别处占用（画中画 / 锁屏）。
     private var canHoldSpeed: Bool {
@@ -1373,12 +1444,16 @@ struct OneSkinChrome: View {
         guard boost == nil else { return }
         guard let session else { return }
         let zone = PictureTaps.zone(x: Double(location.x), width: Double(winW), seekable: seekable)
-        switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone) {
-        case .toggleControls:
-            break
-        case .togglePlayback:
+        // ⛔ 不再走 `taps.tap(at:in:)`：那个方法内部自己数双击间隔，
+        //    而 `handleTap` 已经数过一遍（0.30s 窗口）。两套计数叠加会让
+        //    第二下双击被它判成「新的一次 streak 起点」，跳过永远不触发。
+        //    这里直接按 zone 分派。
+        switch zone {
+        case .middle:
             session.togglePlayback()
-        case .skip(let seconds, let total, _):
+        case .back, .forward:
+            let seconds: Double = zone == .back ? -10 : 10
+            let total = 10.0
             session.skip(seconds)
             withAnimation(.snappy(duration: 0.2)) { skipped = (seconds > 0, total) }
             skippedTask?.cancel()
