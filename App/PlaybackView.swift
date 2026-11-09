@@ -23,6 +23,20 @@ import TVCore
     private(set) var duration: Double = 0
     private var skipScope: String?
     private var skipPass = EpisodeSkipPass()
+    // ── 广告识别 ──
+    /// 抓帧采样器（`AVPlayerItemVideoOutput`，零额外解码）。
+    private let adSampler = AdFrameSampler()
+    /// 与广告库的匹配状态机。
+    private var adMatcher = AdMatcher()
+    /// 广告库快照，开播时载入一次；标注新广告后刷新。
+    private var adLibrary: [AdSignature] = []
+    /// 用户是否开启自动跳广告。
+    var skipsAds: Bool {
+        get { UserDefaults.standard.object(forKey: "player.skipAds") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "player.skipAds") }
+    }
+    /// 最近一次跳过的广告，界面可以拿它弹个 toast。
+    private(set) var lastSkippedAd: AdSignature?
     private var editingSkip = false
     private var resumeAfterEditing = false
     private var seekingSegment = false
@@ -46,6 +60,94 @@ import TVCore
         settings.save(scope: skipScope, defaults: skipDefaults)
         skipSettings = settings
         skipPass = EpisodeSkipPass()
+    }
+
+    // MARK: - 广告识别
+
+    /// 开播/换集时调用：载入广告库并对这条 item 开始采样。
+    ///
+    /// 只在 `skipsAds` 开着、库非空、且这条 item 确实在播时启动 ——
+    /// 空库时采样毫无意义，白白耗电。
+    func startAdDetection(for item: AVPlayerItem) {
+        stopAdDetection()
+        guard skipsAds, !adLibrary.isEmpty else { return }
+        adMatcher = AdMatcher()
+        adSampler.start(item: item) { [weak self] hash, seconds in
+            Task { @MainActor [weak self] in
+                self?.handleAdHash(hash, at: seconds)
+            }
+        }
+    }
+
+    func stopAdDetection() {
+        adSampler.stop()
+        adMatcher.reset()
+    }
+
+    /// 从磁盘（或云端合并后的结果）刷新库快照。
+    func reloadAdLibrary() async {
+        adLibrary = await AdSignatureLibrary.shared.all()
+        if adLibrary.isEmpty { stopAdDetection() }
+    }
+
+    /// 采样器每 1 秒回调一次。
+    private func handleAdHash(_ hash: UInt64, at seconds: Double) {
+        guard skipsAds, !adLibrary.isEmpty,
+              !seekingSegment, pendingResume == nil, !restoringPosition,
+              player.rate > 0 else { return }
+
+        guard let hit = adMatcher.feed(hash, library: adLibrary) else { return }
+        adMatcher.reset()
+
+        // 命中：静默跳到这支广告的结尾。
+        //
+        // 用「命中时刻 + 剩余时长」而不是「广告起点 + 时长」——
+        // 同一支广告在不同视频里的位置不同，我们只知道现在正处在广告里，
+        // 不知道这段是从第几秒开始的。保守做法是跳到「当前 + 时长」，
+        // 最坏情况是少跳一点（用户多看一两秒），不会误剪正片。
+        let target = min(seconds + hit.duration, max(duration - 1, seconds + 1))
+        guard target > seconds + 1 else { return }
+
+        lastSkippedAd = hit
+        Diagnostics.shared.record(.info, "ads",
+            "skip ad \(hit.title.isEmpty ? hit.id.uuidString.prefix(8).description : hit.title) from=\(Int(seconds)) to=\(Int(target))")
+        seekingSegment = true
+        let activeGeneration = generation
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == activeGeneration else { return }
+                self.seekingSegment = false
+            }
+        }
+    }
+
+    /// 把「刚刚这段」存成一支新广告。
+    ///
+    /// 调用方（「标记为广告」按钮）负责给出这段的起点与终点。
+    /// 采样器已经攒了哈希，但那些哈希在 `AdFrameSampler` 内部没有留存 ——
+    /// 设计上采样器只负责「当前帧 → 哈希」，不保存历史。
+    /// 所以标注走另一条路：用 `AVAssetImageGenerator` 离线补抓这段的帧，
+    /// 因为这时候不需要和播放抢解码器（可以暂停后抓，或接受短暂掉帧）。
+    func markAd(from start: Double, to end: Double) async {
+        guard let item = player.currentItem else { return }
+        let length = end - start
+        guard length >= 3 else { return }
+
+        let hashes = await AdFrameSampler.hashes(for: item.asset,
+                                                 from: start, to: end, interval: 1.0)
+        guard hashes.count >= 3 else { return }
+
+        let ad = AdSignature(title: "", duration: length,
+                             hashes: hashes, sampleInterval: 1.0)
+        let added = await AdSignatureLibrary.shared.add(ad)
+        guard added else { return }
+        await reloadAdLibrary()
+
+        // 新标注的这段本集就生效：加进当前 skipSettings，并清掉已跳记录。
+        var settings = skipSettings
+        settings.ads.append(AdRange(start: start, length: length))
+        applySkipSettings(settings)
     }
 
     private func updateSkipping(_ item: AVPlayerItem) {
