@@ -32,6 +32,17 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     /// `PlayerControl` 这张表，也就**既不能隐藏、也不能摆位置**（设置页只认这张表）。
     /// 新按钮一律走同一张表：默认落在「更多」，用户想摆到控制栏就拖上去。
     case markAd = "markAd"
+    /// 广告拦截开关（`player.skipAds`）。
+    ///
+    /// 与 `.markAd` 是两件事：`.markAd` 是播到广告时「把这段记下来」，
+    /// `.adBlock` 是「以后认出这类画面就自动跳过」的总开关。
+    ///
+    /// 此前这个开关只存在于「设置 › 播放 › 广告跳过」那一页，
+    /// `PlayerControl` 里根本没有它 —— 于是设置页的拖拽表里
+    /// **根本列不出「广告拦截」这一项**，用户看到的就是
+    /// 「这个按钮我无法设置」。开关本身早就在（`AdSkip.key`），
+    /// 缺的只是把它做成一个和其它控件同等的、可摆放可隐藏的条目。
+    case adBlock = "adBlock"
 
     // Transport controls (historically the bottom row).
     case backTen = "backTen"
@@ -69,6 +80,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .speechSubtitles: L10n.text("Write Subtitles From the Sound")
         case .anotherPlayer: L10n.text("Open in Another Player")
         case .markAd: L10n.text("Mark Ad")
+        case .adBlock: L10n.text("Ad Blocking")
         case .backTen: L10n.text("Back 10 seconds")
         case .playPause: L10n.text("Play / Pause")
         case .forwardTen: L10n.text("Forward 10 seconds")
@@ -99,7 +111,8 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .videoInfo: "info.circle"
         case .speechSubtitles: "waveform.badge.plus"
         case .anotherPlayer: "play.rectangle.on.rectangle"
-        case .markAd: "megaphone.badge.xmark"
+        case .markAd: "megaphone"
+        case .adBlock: "shield.lefthalf.filled"
         case .backTen: "gobackward.10"
         case .playPause: "play.fill"
         case .forwardTen: "goforward.10"
@@ -108,7 +121,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .fullScreen: "arrow.up.left.and.arrow.down.right"
         case .autoPlayNext: "play.circle"
         case .moreInSeries: "rectangle.stack"
-        case .skipIntroAuto: "forward.to.end.alt"
+        case .skipIntroAuto: "forward.end.alt"
         case .skipIntroManual: "forward.end"
         }
     }
@@ -134,7 +147,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     static var standardMore: [PlayerControl] {
         [.quality, .audio, .subtitles, .speed, .pictureSize, .pictureInPicture, .miniPlayer,
          .lock, .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer, .markAd,
-         .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]
+         .adBlock, .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]
     }
 
     /// 能摆进顶栏的那些控件 —— 设置页的两个「直接显示」勾选表就是它。
@@ -143,6 +156,24 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     /// 因此不在这张表里：把它们勾上不会有任何可见变化，那就是在骗人。
     static var barControls: [PlayerControl] {
         allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }
+    }
+
+    /// 这个名字在**本机**真的能画出来吗。
+    ///
+    /// SF Symbols 名字写错时 `Image(systemName:)` 不报错、不崩溃 —— 它画出来的是一颗
+    /// **有底无图标的空圆**。设置页能勾、能拖，播放器里却什么都没有，正是
+    /// 「控件没实现完整」最难看懂的一种。`megaphone.badge.xmark` 与
+    /// `forward.to.end.alt` 都曾这样躺了很久（两个名字在系统符号库里根本不存在）。
+    ///
+    /// 这是一道**兜底**，不是常规路径：名字对的时候它什么都不做。
+    static func fallbackSymbol(_ name: String, to replacement: String) -> String {
+        #if os(iOS)
+        return UIImage(systemName: name) != nil ? name : replacement
+        #elseif os(macOS)
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil ? name : replacement
+        #else
+        return name
+        #endif
     }
 
     var tint: Color {
@@ -163,6 +194,7 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .speechSubtitles: .pink
         case .anotherPlayer: .indigo
         case .markAd: .pink
+        case .adBlock: .green
         case .backTen: .gray
         case .playPause: .white
         case .forwardTen: .gray
@@ -192,6 +224,170 @@ struct PlayerControlsLayout: Equatable {
     static let watchSurfacedKey = "playerControlsWatchSurfaced"
     /// 全屏态控制栏里**直接显示**的控件。
     static let fullSurfacedKey = "playerControlsFullSurfaced"
+
+    // MARK: - 按形态分别存（三形态各自独立的控制栏）
+    //
+    // 用户要求：**各自互补，各自有独立的播放控件设置页**。
+    // 折叠外屏、展开竖持、展开横持三种形态的可用空间差一倍，
+    // 一套槽位不可能同时合适：外屏顶栏只放得下 2–3 个，横持能放 6 个。
+    // 共用一套的结果就是「在外屏删掉的按钮，横持时也没了」。
+    //
+    // 键名规则：`playerControlsOrder.<形态>`。形态用名字而不是序号，
+    // 因为序号会在将来插入新形态时错位。
+    //
+    // ⛔ 向后兼容：`playerControlsOrder`（无后缀）仍是**默认值来源**。
+    // 用户从旧版升上来时三份都还没有 → 各自回退到旧键；
+    // 一旦某个形态自己保存过，就用自己那份，不再被旧键覆盖。
+    enum Shape: String, CaseIterable {
+        /// 合起外屏 466×678。
+        case folded
+        /// 展开竖持 669×951。
+        case unfolded
+        /// 展开横持 951×669（以及手机横持）。
+        case sideways
+
+        /// 本形态的存储键。`folded` 直接复用旧键，用户的现有配置原样保留。
+        var storageKey: String {
+            switch self {
+            case .folded: return PlayerControlsLayout.storageKey
+            default: return PlayerControlsLayout.storageKey + "." + rawValue
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .folded:   return L10n.text("Folded outer screen")
+            case .unfolded: return L10n.text("Unfolded, upright")
+            case .sideways: return L10n.text("Unfolded, sideways")
+            }
+        }
+    }
+
+    /// 按形态读一份布局。该形态没存过时**回退到旧键**，再没有就用 standard。
+    static func stored(for shape: Shape) -> String {
+        if let own = UserDefaults.standard.string(forKey: shape.storageKey), !own.isEmpty {
+            return own
+        }
+        // 折叠态直接就是旧键本身（见 `Shape.storageKey`），走到这里说明确实还没写过。
+        return PlayerControlsLayout.standard.stored
+    }
+
+    /// 该形态是否已经有自己的配置（设置页据此显示「已自定义 / 跟随默认」）。
+    static func hasOwnConfiguration(for shape: Shape) -> Bool {
+        guard let own = UserDefaults.standard.string(forKey: shape.storageKey) else { return false }
+        return !own.isEmpty
+    }
+
+    /// 把当前形态的配置清掉，重新回到默认。
+    static func reset(_ shape: Shape) {
+        UserDefaults.standard.removeObject(forKey: shape.storageKey)
+    }
+
+    /// 当前设备的形态（给播放器各读取点用）。
+    ///
+    /// ⛔ 判据**不能**读 `interfaceOrientation`（BUG-L）。
+    ///
+    /// 原来这里是：`width < 560 ? .folded : (interfaceOrientation 是横 ? .sideways : .unfolded)`。
+    /// 而 Apple 对 iPhone Duo 的事实是：**内屏不遵守 `supportedInterfaceOrientations`**，
+    /// 它自己转（`mirzaaghazadeh/iphone-duo-skills` 的 `device-facts.md`：
+    /// "The inner display does not honor your supported interface orientations —
+    /// it rotates regardless"；`duo-continuity` 同样写明「不要让 supported orientations
+    /// 作判据」）。实测内屏竖持时它仍报 `.landscapeLeft`。
+    ///
+    /// 后果很具体：内屏竖持（669×951）被算成 `.sideways`，
+    /// 于是用户在设置页为「展开竖持」排的那套 `playerControlsOrder.unfolded`
+    /// **一次都读不到**，永远读到 sideways 那份 —— 「设置里改了没反应」。
+    ///
+    /// 现在只按**实际空间**判：先看宽度分窄屏，再用宽高比定横竖。
+    /// 这与 `OneSkinShapeResolver` 的口径一致（都只看空间，不看方向声明），
+    /// 只是这里拿不到滞回状态，所以阈值取两档之间一个保守值。
+    ///
+    /// - Parameter width: 可用**宽度**（窄屏判据）。
+    /// - Parameter height: 可用**高度**；缺省 0 表示调用方没有高度，
+    ///   此时退回 `.unfolded`（宽屏、非横向），而不是去猜方向。
+    @MainActor
+    static func currentShape(width: CGFloat, height: CGFloat = 0) -> Shape {
+        guard width > 0 else { return .folded }
+        if width < 560 { return .folded }
+        // 宽屏之后再分横竖：宽 > 高即横持。高度未知时不猜，按竖持处理。
+        guard height > 1 else { return .unfolded }
+        return width > height ? .sideways : .unfolded
+    }
+
+    /// 由**页面形态**直接映射到控制栏配置 —— 播放器皮肤的**首选**入口。
+    ///
+    /// ⛔ 为什么不能从窗口尺寸反推横竖（这一步是上一版修法的漏洞）：
+    ///
+    /// 播放器**窗口本身永远是横向的**。竖屏窗口的版式比例固定 1.819
+    /// （`OneSkinWindowGeometry.Metrics.windowAspect`），所以：
+    ///   内屏竖持 fullBleed → 窗口 669×532（宽>高）
+    ///   内屏竖持单列      → 窗口 669×345（宽>高）
+    /// 拿窗口宽高比判，两种竖持都会被判成 `.sideways`。而
+    /// `appScreenBounds.width` 在内屏恒为 669（物理固定值），同样分不开。
+    /// 「窗口是横的」和「设备是横的」是两件事，混用就永远选错配置。
+    ///
+    /// `OneSkinShape` 已经由调用方用**离散信号**判好了（`duoExpanded` +
+    /// 空间比例 + 折叠带），是页面形态的唯一真源。这里直接把形态映射成
+    /// 配置档位，不再二次推断。
+    ///
+    /// - 合拢 / 展开竖持（`.column` / `.fullBleed`）→ `.unfolded`
+    ///   两者都是竖持语义，共用「展开竖持」那一套；窄屏再单独落 `.folded`。
+    /// - 展开横持（`.split`）→ `.sideways`
+    @MainActor
+    static func shape(for skinShape: OneSkinShape, width: CGFloat) -> Shape {
+        // ⛔ `split` 必须**先于**任何宽度闸门返回。
+        //
+        // 上一版写成「先 `width < 560 → .folded`，再 `case .split → .sideways`」，
+        // 而两个调用点传的 `width` 是**播放器窗口宽 winW = 左列宽 ≈ 屏宽 × 0.5334**：
+        //   内屏横持 split: 951 × 0.5334 = 507.3 < 560 → .folded（应 sideways）
+        //   手机横持 split: 678 × 0.5334 = 361.6 < 560 → .folded
+        //   iPad 横持:      1024 × 0.5334 = 546.2 < 560 → .folded
+        // 于是「凡 split 形态，winW 恒 < 560」——`case .split` 整段是**不可达代码**，
+        // 用户单独配的 `playerControlsOrder.sideways` **一次都读不到**。
+        // 这是「设置里改了没反应」换个成因复发。
+        //
+        // 判据修正：**形态本身已经是可靠信号**（调用方用 duoExpanded + 空间比例 +
+        // 折叠带判出来的），横竖不需要再看窗口宽度。宽度只用于区分
+        // 「宽屏竖持」与「窄屏竖持」这一件事。
+        switch skinShape {
+        case .split:
+            return .sideways
+        case .fullBleed:
+            return .unfolded
+        case .halfFold:
+            // 半折是**竖持语义**（帐篷立起来），不是横屏。
+            // 但它的控制台在下半屏、横向空间受限，所以走 `.folded` 的紧凑档位
+            // 而不是 `.unfolded` 的宽屏档 —— `.unfolded` 的双列控件塞进
+            // 半个屏宽会挤成一团。
+            return .folded
+        case .column:
+            // 合盖外屏 466 → folded；宽屏单列 → unfolded。
+            // `width <= 0`（尚未布局）时按 folded —— 与旧行为一致，不会闪成双列。
+            return width > 0 && width >= 560 ? .unfolded : .folded
+        }
+    }
+
+    /// 按页面形态读一份布局（皮肤层首选；见 `shape(for:width:)`）。
+    @MainActor
+    static func current(forSkinShape skinShape: OneSkinShape, width: CGFloat) -> PlayerControlsLayout {
+        PlayerControlsLayout(stored: stored(for: shape(for: skinShape, width: width)))
+    }
+
+    /// 按当前形态读一份布局（播放器与皮肤都走这个，不要再自己读裸键）。
+    ///
+    /// 传入的是**当前可用空间**（不是屏幕尺寸）：Duo 的两块屏、Split View 半边、
+    /// 被 PiP 压短的高度，都应当影响这一份配置的选择。
+    @MainActor
+    static func current(forSize size: CGSize) -> PlayerControlsLayout {
+        PlayerControlsLayout(stored: stored(for: currentShape(width: size.width, height: size.height)))
+    }
+
+    /// 只有宽度时的便捷入口（旧调用点保留）。高度未知 → 按竖持处理。
+    @MainActor
+    static func current(forWidth width: CGFloat) -> PlayerControlsLayout {
+        current(forSize: CGSize(width: width, height: 0))
+    }
+
     /// The number of fixed slots in the top bar and in the bottom bar.
     static let slotCount = 10
     /// The empty-slot marker in the stored form.

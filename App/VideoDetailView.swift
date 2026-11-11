@@ -22,6 +22,19 @@ struct VideoDetailView: View {
     // 改 @AppStorage 持久化：状态与页面身份解耦，重建后自动恢复。
     // 退出点（exitFullScreen / onDisappear / 折叠复位）照常写 false。
     @AppStorage("watchFullScreen") private var fullScreen = false
+    /// 折叠带（x 区间）。`nil` = 这台设备/这个系统给不出分界信息，退回原推导。
+    ///
+    /// 这是对齐 One 1.7.0 的关键一步（见 `Docs/duo/One-1.7.0-旋转与折叠适配审查.md`）：
+    /// One 的 `VideoDetailPage` 直接持有 `__division: State<CGRect?>`，
+    /// 布局按**那条带**算，而不是按 `duoExpanded` 这类布尔二次推导。
+    /// 我们此前的形态链是 `duoExpanded → sideways → 布局分支`，
+    /// 每一环都是间接推断，折叠瞬间多个输入同时变，必然出现自相矛盾的中间态。
+    @State private var foldGap: FoldGap?
+    /// 横向折痕（书本 / 帐篷半折）。有它 = 半折形态；`nil` = 不是半折或信息不可用。
+    @State private var horizontalFold: FoldGap.HorizontalBand?
+    /// 遮挡内缩（贴顶 / 贴底两条）。Duo 展开时遮挡在右上角，
+    /// 统一塞 `safeAreaInsets` 会把内容多推半个屏。
+    @State private var occlusionInsets: OcclusionInsets = .zero
     /// 详情页的选集抽屉开关。
     ///
     /// ⛔ **不能用 `store.showsEpisodes`**：那个键是上游全屏播放器
@@ -30,6 +43,28 @@ struct VideoDetailView: View {
     /// 结果是页面被挤回推荐首页、后续所有触摸失效。这正是用户报的现象。
     /// 详情页用自己的 @State，两条路径互不干扰。
     @State private var showsAllEpisodes = false
+    /// 换源面板。
+    @State private var showsCrossSource = false
+    /// 本次离开页面是为了缩成小窗。
+    ///
+    /// 与 `store.miniPlayerActive` 的分工：那个是**全局展示开关**（`RootView` 读它决定画不画小窗），
+    /// 这个是**本页的一次性意图**，只在 `onDisappear` 里被消费一次。
+    /// 两者分开是因为全局开关会被 `onAppear` 重置（回到页内就要收回小窗），
+    /// 而 pop 过渡期间 `onAppear` 可能再跑一次 —— 用一次性意图才不会被误清。
+    @State private var leavingForMiniPlayer = false
+    /// 哔哩哔哩皮肤的画中画控制器。
+    ///
+    /// ⛔ 此前哔哩哔哩皮肤**没有自己的 PiP 实例**，画面层 `BiliSkinPicture` 也没接
+    /// `attach`，于是 `PictureInPicture.current` 恒 nil：
+    ///   · 全屏右缘那颗 `pip` 键调 `startCurrent()`，第一行 guard 就返回 —— 点了没反应；
+    ///   · `RootView.arbitrate` 里 `pipPossible: PictureInPicture.current != nil` 恒 false
+    ///     → `PlaybackExit` 走 ③b 返回 `.keep` → 离开 App 不浮窗也不登出，音频后台空转。
+    /// 现在与 One 皮肤同一套做法：一个皮肤一个实例，各自绑自己那条 `AVPlayerLayer`。
+    /// 不能与 One 皮肤共用 —— 一个 `AVPlayer` 同时只驱动一层画面，
+    /// 共用会让悬浮窗只剩声音（见 `PictureInPicture.sourceLayer` 的注释）。
+    @State private var biliPip = PictureInPicture()
+    /// 换源结果的反馈（成功/失败各一句），三秒后自己消失。
+    @State private var crossSourceNotice: String?
     /// 选集抽屉当前停在哪一档高度。集合固定 `[.medium, .large]`，只换这个值。
     @State private var episodeDetent: PresentationDetent = .medium
     /// 选集抽屉：搜索词与当前页（每页 10 集）。
@@ -90,7 +125,7 @@ struct VideoDetailView: View {
     /// 方向一变立即得到新值，一次到位，也不会卡死。
     #if os(iOS)
     private var layoutSize: CGSize {
-        let b = UIApplication.shared.appWindowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
+        let b = UIApplication.shared.appWindowScene?.screen.bounds.size ?? UIApplication.shared.appScreenBounds.size
         // screen.bounds 是物理固定方向，旋转时不产生动画中间态；
         // 按界面方向交换宽高即得当前逻辑尺寸。
         return landscapeScreen
@@ -99,6 +134,18 @@ struct VideoDetailView: View {
     }
     private var containerWidth: CGFloat { layoutSize.width }
     private var containerHeight: CGFloat { layoutSize.height }
+
+    /// 半折时**上半个屏**占整高的比例，直接取折痕中心。
+    ///
+    /// 折痕不在正中央时（帐篷略前倾、书本略后翻），画面列必须与折痕对齐，
+    /// 否则上半画面和中途开始的折痕面会错位。没有折痕信息时退回 0.5。
+    private var halfFoldSplitRatio: CGFloat {
+        guard let band = horizontalFold, band.isHorizontal, containerHeight > 1 else { return 0.5 }
+        let ratio = band.centerY / containerHeight
+        // 夹到 0.25–0.75（与 `splitsContainer` 同一区间）—— 万一读到的值
+        // 越界，宁可按正中央也不产出一个只用 20pt 的画面列。
+        return min(max(ratio, 0.25), 0.75)
+    }
     #else
     // macOS / tvOS 没有设备旋转，测量回写不构成闭环，保留原行为。
     @State private var containerWidth: CGFloat = 0
@@ -107,6 +154,12 @@ struct VideoDetailView: View {
     /// The picture's own width-over-height, reported by the player once the stream is known.
     /// 16:9 until then, which is what most sources serve and therefore the least surprising guess.
     @State private var playerAspectRatio: CGFloat = 16.0 / 9.0
+    /// 画面比例模式（二进制实证 5 种）。持久化到 `OneSkin.fitModeKey`。
+    @State private var biliAspectMode: BiliAspectMode = BiliAspectMode.fromStored(
+        UserDefaults.standard.string(forKey: OneSkin.fitModeKey)
+    )
+    /// 只用来触发 body 重算（滤镜存在 UserDefaults，不是 @State）。
+    @State private var biliColorFilterTick: UInt = 0
     /// 每条线路的测速样本（线路名 → 已解析的播放地址）。
     /// 只放**真正解析出来**的地址：type 3/4 的源要先经 preparePlayback 才能拿到流，
     /// 直接拿 `episode.address` 去测等于测一个解析不了的字符串，数字毫无意义。
@@ -124,6 +177,8 @@ struct VideoDetailView: View {
     /// A sign-in the source's CatPawOpen bundle runs itself (UC's TV token).
     @State private var bundleSignIn: BundleSignIn?
     @State private var choosingDownloads = false
+    /// 从选集卡上的下载角标进来时要预勾的集；从页面底部「下载」进来时为空。
+    @State private var downloadPreselect: Set<String> = []
     /// How many episodes were just queued, shown briefly under the header.
     @State private var queuedNotice: Int?
     /// A line has no episode to continue the one playing: shown briefly under the header.
@@ -188,6 +243,32 @@ struct VideoDetailView: View {
             // 生命周期认 `watchPageLifecycle`（两条分支共用同一套）。
             if watchLayout {
                 watchPageLifecycleBody(watchBody
+                    // 读折叠带与遮挡（iOS 27.1 用官方 reservedRegions）。
+                    // 挂在这里而不是各皮肤内部：三皮肤共用同一份几何，
+                    // 不会出现「One 皮肤知道折痕、哔哩哔哩皮肤不知道」的分叉。
+                    .readFoldRegion(fold: $foldGap,
+                                    horizontalFold: $horizontalFold,
+                                    occlusion: $occlusionInsets)
+                    // ★ 摄像头挖孔避让。`occlusionInsets` 由 `FoldRegionReader` 从
+                    // iOS 27.1 的 `reservedRegions` 读出（Duo 合盖时挖孔在顶部、
+                    // 展开时在右上角），**以前只写不读 —— 探针算完了没人用**，
+                    // 于是「竖屏控件压到挖孔下面」这个一直存在的问题根本没被修。
+                    //
+                    // 全屏时不避让：全屏是沉浸态，画面就该铺满，
+                    // 控件由各皮肤自己的安全区处理。
+                    // ⛔ 不能把 `occlusionInsets` 直接当增量再补一次（BUG-O）。
+                    //
+                    // `occlusionInsets.top` 是 occlusion 矩形的**绝对下边界**
+                    // （`OcclusionInsets.init` 里取 `rect.maxY`，从容器顶算起）；
+                    // 而系统**已经**把内容推到了 `safeAreaInsets.top`。
+                    // 两者是同一坐标系里语义重叠的两个量，直接相加 = 推两遍：
+                    //   safe=84、occlusion=60 → 实推 144（多 60）
+                    //   safe=84、occlusion=100 → 实推 184（多 84，本该只补 16）
+                    //
+                    // 只补「系统安全区没盖住的那一段」：
+                    //   补量 = max(0, occlusion - safe)
+                    // 这样 safe 已经够时补 0，occlusion 超出时才补差额。
+                    .occlusionTopUp(occlusionInsets, fullScreen: fullScreen)
                     .watchSystemChrome(fullScreen: fullScreen))
                     // The upright watch page is immersive and its navigation bar is hidden, so the
                     // edge swipe is its way back. One screen edge only: the player owns the rest.
@@ -215,6 +296,26 @@ struct VideoDetailView: View {
             let _ = oneSkinLog("episodes sheet BUILDING eps=\(activeEpisodes.count) pages=\(episodePageCount)")
             #endif
             allEpisodes
+        }
+        // 换源面板。与选集抽屉同层挂在 Group 之后 —— 分支内部挂 sheet 找不到稳定锚点。
+        .sheet(isPresented: $showsCrossSource) {
+            CrossSourceSheet { candidate in
+                // 换成功：面板自己关。这里只给一句反馈，让用户确认「确实换了」。
+                withAnimation(.smooth(duration: 0.2)) {
+                    crossSourceNotice = L10n.text("Now playing from %@", candidate.sourceName)
+                }
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    withAnimation(.smooth(duration: 0.2)) { crossSourceNotice = nil }
+                }
+            } onFailed: { message in
+                withAnimation(.smooth(duration: 0.2)) { crossSourceNotice = message }
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    withAnimation(.smooth(duration: 0.2)) { crossSourceNotice = nil }
+                }
+            }
+            .environment(store)
         }
         .onChange(of: showsAllEpisodes) { _, open in
             // 每次打开重新落档：宽屏（Duo 展开 / iPad）直接给满高，窄屏先给半屏。
@@ -289,9 +390,14 @@ struct VideoDetailView: View {
             // picture, so the auto-pop sheet would only cover it — skip the pop there.
             // [mi3s] OneSkin 皮肤开着时**不再自动弹选集 sheet**：
             // 皮肤详情栏里本来就有选集区，再弹全屏 sheet 只会盖住右栏、遮掉画面控件。
+            // ⚠️ 必须连 `biliActive` 一起排除。判据写的是 `!oneSkinActive`，而
+            // `oneSkinActive` 在哔哩哔哩皮肤下是 false（两条皮肤互斥）——
+            // 于是 B站皮肤一进来，上游这个自动弹的选集 sheet 就把整个皮肤页盖住了。
+            // 实测：截图里只剩上游抽屉的「lineA/lineB、10/页、1/3、24集」，
+            // 皮肤自己的控件全在它下面。
             if opensIntoEpisodes, store.resumingHistoryID == nil, watchChannel == nil,
                !(duoExpanded && sideways), !portraitExpanded,
-               !oneSkinActive, !choosingDownloads {
+               !oneSkinActive, !biliActive, !choosingDownloads {
                 // ⛔ 必须是 `showsAllEpisodes`（本页抽屉的键）。
                 // 写 `store.showsEpisodes` 打开的是上游全屏播放器的面板 —— 本页没有宿主，
                 // 结果「什么都不弹」，还留下一个 true 的脏状态。
@@ -350,6 +456,16 @@ struct VideoDetailView: View {
         }
         .onDisappear {
             store.watchPageOpen = false
+            store.isWatchPageMounted = false
+            // ⛔ 离开观看页必须**归还载体声明**。
+            //
+            // `presentingPlayer` 的语义是「播放页在前台」。观看页本身就是那个页 —— 它退出时
+            // 若还留着 true，弹层判据 `(!presentingPlayer)` 为假、而 `playsInWatchPage` 也随
+            // scope 清空变假，于是 `fullScreenCover` 会**突然弹出来盖住用户退回的那一页**。
+            //
+            // 同时这一步也让退场裁决器看到「没有页面内画面」，从而正确走小窗 / 登出分支，
+            // 而不是以为画面还在。
+            store.presentingPlayer = false
             requestTask?.cancel()
             #if os(iOS)
             // The page itself is gone (not just folded/unfolded): leave Full Screen. The video keeps playing,
@@ -362,6 +478,13 @@ struct VideoDetailView: View {
             // 正是用户说的「每个页的全屏机制没有独立做好，无法共用」。
             // 方向只由旋转键与播放器关闭时的 `release()` 管。
             if fullScreen { fullScreen = false }
+            // ⚠️ 必须释放方向锁。整个仓库此前**没有任何一处调用 `PlayerOrientation.release()`**
+            // —— 从全屏（横屏）退出页面后，`fullScreenOwnsOrientation` 与 `.landscape` 掩码
+            // 都留在原地，整机就锁在横屏，重启 App 也回不来（真机实测：o=90）。
+            // `release()` 会清 `isLocked` / `holdsPortrait`，并在 `mask == .landscape` 时转回竖屏；
+            // 但闸门还在，所以先关闸门再释放。
+            PlayerOrientation.setFullScreenHeld(false)
+            PlayerOrientation.release()
             #endif
         }
         .task(id: detail?.id) {
@@ -420,7 +543,8 @@ struct VideoDetailView: View {
                            episodes: activeEpisodes, origin: client.origin,
                            // One 皮肤 / 全屏时页面是黑的，抽屉也跟着黑，避免浅色材质糊在画面上。
                            dark: drawerIsDark,
-                           startsLarge: drawerStartsLarge) { count in
+                           startsLarge: drawerStartsLarge,
+                           preselect: downloadPreselect) { count in
                 guard count > 0 else { return }
                 withAnimation(.smooth(duration: 0.2)) { queuedNotice = count }
                 Task { try? await Task.sleep(for: .seconds(6)); withAnimation(.smooth(duration: 0.2)) { queuedNotice = nil } }
@@ -502,7 +626,9 @@ struct VideoDetailView: View {
             .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
-        if let notice = lineNotice {
+        // 换源的反馈与换线共用同一个条位：两者都是「刚才那个动作的结果」，
+        // 分成两条会在短时间内叠成两层，而用户只关心最新那条。
+        if let notice = crossSourceNotice ?? lineNotice {
             HStack(spacing: 12) {
                 Image(systemName: "info.circle.fill").foregroundStyle(Brand.accent)
                 Text(notice).font(.subheadline.weight(.medium))
@@ -1172,7 +1298,8 @@ struct VideoDetailView: View {
                     if saved == nil || saved?.status == .failed {
                         Button(L10n.text("Download"), systemImage: "arrow.down.circle") {
                             DownloadLibrary.shared.download(DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin),
-                                                            title: video.name, poster: video.poster, posterHeaders: video.posterHeaders)
+                                                            title: video.name, poster: video.poster, posterHeaders: video.posterHeaders,
+                                                            environmentID: store.environments.activeID)
                         }
                     } else if let saved {
                         Button(L10n.text(saved.status == .completed ? "Delete Download" : "Cancel Download"), systemImage: "trash", role: .destructive) {
@@ -1205,8 +1332,13 @@ struct VideoDetailView: View {
         100
         #endif
     }
+    /// 这一集在本环境下的下载记录。
+    ///
+    /// 必须走 `visibleItem(for:)` 而不是 `item(for:)`：另一环境下过的那一集是一条独立记录，
+    /// 在别的环境里既不该显示「已下载」徽标，也不该走「从设备播放」那条路 —— 那条路会当场
+    /// 抛「这个下载已不在本机」，因为它是另一环境名下的。
     private func download(_ episode: Episode) -> DownloadItem? {
-        DownloadLibrary.shared.item(for: DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin))
+        DownloadLibrary.shared.visibleItem(for: DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin))
     }
     private func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
         #if DEBUG
@@ -1358,6 +1490,18 @@ struct VideoDetailView: View {
         // the width can: wide = unfolded, narrow = folded.
         // A landscape phone (compact × compact) is wide too, but it is NOT the Duo unfolded — it keeps its
         // immersive single-surface layout. Only a regular-width phone (the Duo's inner display) can be unfolded.
+        // ★ 折叠带优先：系统给了分界线，就以它为准。
+        //
+        // `foldGap != nil` 表示「这台设备确实摊开了，分界线在这里」——
+        // 那是**系统观测到的物理事实**，比 `containerWidth > 600` 这类阈值推断可靠。
+        // 反过来 `duoExpanded == false` 但 `foldGap != nil` 的情况（宽屏但没到 600pt、
+        // 或 size class 抖动）也能被纠正。
+        //
+        // 注意：`foldGap == nil` **不等于**「没折叠」—— 它只表示「这条信息不可用」
+        // （更早的系统、非折叠设备、或查询失败）。所以 nil 时仍走原来的推断，
+        // 不能直接返回 false，否则会把所有旧设备的正常行为一起改坏。
+        if let foldGap, foldGap.isVertical { return true }
+
         return UIDevice.current.userInterfaceIdiom == .phone
             && sizeClass == .regular
             && (containerWidth > 600 || verticalSizeClass == .regular)
@@ -1372,10 +1516,42 @@ struct VideoDetailView: View {
     /// critical point during the unfold/rotate animation, so it is the stable signal that keeps the
     /// two unfolded shapes — landscape column vs portrait full-bleed — independent.
     private var landscapeScreen: Bool {
-        switch UIApplication.shared.appWindowScene?.interfaceOrientation {
-        case .landscapeLeft, .landscapeRight: return true
-        default: return false
-        }
+        // ⛔ `interfaceOrientation` 在 **Duo 内屏竖持**时不可靠：实测报 `.landscapeLeft`，
+        //    而同一时刻窗口实际是 669×780（竖的）。
+        //
+        // 这个假值往下游传染得很远：
+        //   · `sideways = duoExpanded && landscapeScreen` → 展开竖持被判成「展开横屏」；
+        //   · `layoutSize` 按它交换宽高 → 排版基准算成 951×669；
+        //   · 三栏按 951 分（左列 507 + 间隙 + 右栏 427）铺到 669 宽上 → **横向溢出 282pt**，
+        //     右栏被推出屏幕 —— 用户报的「展开竖屏时整页推移、右边被切掉」。
+        //     （实测日志：`ROOT proxy=669x780` 与 `stage box=951x669` 同时出现。）
+        //
+        // 修法：方向信号与**窗口实际比例**不一致时，以窗口为准。
+        //
+        // ⛔ 这里读的是 `window.bounds`，**不是** SwiftUI 的 `proxy.size`：
+        //    后者是本视图布局的输出，拿它回写布局基准就构成自反馈环
+        //    （`layoutSize` 的注释里记的那次「右侧浅色列不断往左推进」）。
+        //    `window.bounds` 归 UIKit 所有，只随系统的旋转/折叠变化，不会被我们的重排带着走。
+        let declared: Bool = {
+            switch UIApplication.shared.appWindowScene?.interfaceOrientation {
+            case .landscapeLeft, .landscapeRight: return true
+            default: return false
+            }
+        }()
+        // 只有「摊开的大屏」才做这个校正 —— 手机横持与外屏行为原样不动。
+        //
+        // ⛔ 这里**不能**用 `duoExpanded` 当门：它读 `containerWidth`，
+        //    而 `containerWidth` ← `layoutSize` ← `landscapeScreen` ← 本函数 —— 构成计算环。
+        //    改判「窗口短边是否够大」：Duo 内屏 669、iPad 744+，都远大于阈值；
+        //    外屏 466、iPhone 393 都小于它。这个量只来自 UIKit 的窗口，与我们的布局无关。
+        let window = UIApplication.shared.appWindowScene?.keyWindow?.bounds.size
+            ?? UIApplication.shared.appScreenBounds.size
+        let isLargeScreen = min(window.width, window.height) > 600
+        guard isLargeScreen else { return declared }
+        return OneSkinShapeResolver.isLandscape(declaredIsLandscape: declared,
+                                               containerSize: window,
+                                               wasPortrait: nil,
+                                               isLargeScreen: true)
     }
     /// [mi3s] 二开：Duo 摊开后默认**留在竖屏**（单列：画面在上、详情与选集在下）。
     /// 想看双列就把设备转横 —— 不再一展开就强制横屏。
@@ -1384,7 +1560,48 @@ struct VideoDetailView: View {
     /// `unfoldedLandscapeHolds`（轮询失败后继续硬撑双列），外加 `landLandscape()`
     /// 主动请求旋转。结果是「展开 = 双屏」，用户要的竖屏形态永远看不到。整套已删除：
     /// `landscapeScreen` 只在设备**真的**横过来时才为真。
-    private var sideways: Bool { duoExpanded && landscapeScreen }
+    ///
+    /// ## 锁定态冻结握持（第五点需求的第二层）
+    ///
+    /// iPhone Duo 的内屏**不遵守 `supportedInterfaceOrientations`** —— 锁了方向，系统照样
+    /// 会按物理握持改窗口形状（`duo-games` 实测：只支持横屏的构建，在桌面半折时仍拿到
+    /// 669×951 的竖高窗口）。所以「锁屏防误触」在内屏上**无法靠方向掩码兑现**，
+    /// 只能靠「自己不再理会握持变化」。
+    ///
+    /// 做法：锁定期间把横竖判定**冻结**在锁定那一刻的值。
+    ///   解锁后立刻恢复跟随真实空间；`sideways` 是派生量，不需要额外清理。
+    ///
+    /// ⛔ 只冻结**横竖**，绝不冻结 `duoExpanded`。
+    ///    折叠/展开是真实的物理事件（用户把手机合上就该回到外屏），
+    ///    把它一起冻住会让画面留在内屏布局上、外屏一片空白。
+    ///    区分标准很清楚：
+    ///      · 握持转向 = 同一个形态、同一个窗口、只是宽高互换 → 锁定时忽略
+    ///      · 折叠/展开 = 形态本身变了（`duoExpanded` 翻转）→ 永远响应
+    private var sideways: Bool {
+        // 冻结值优先：锁定时记下的横竖，切换形态（折叠/展开）时自动失效。
+        if let frozen = landscapeFrozenWhileLocked, frozen.expanded == duoExpanded {
+            return duoExpanded && frozen.landscape
+        }
+        return duoExpanded && landscapeScreen
+    }
+
+    /// 锁定那一刻的横竖判定。`nil` = 没锁。
+    ///
+    /// 带 `expanded` 是为了「折叠/展开时自动失效」：形态一变，旧冻结值就不再适用，
+    /// 于是 `sideways` 回到真实判据 —— 折叠永远被响应。
+    private struct LandscapeFreeze: Equatable {
+        let landscape: Bool
+        let expanded: Bool
+    }
+    @State private var landscapeFrozenWhileLocked: LandscapeFreeze?
+
+    /// 锁定状态的可观察镜像 —— `PlayerOrientation.isLocked` 是普通静态量，
+    /// SwiftUI 看不见它变化，没法直接 `onChange`。
+    ///
+    /// 由 `OneSkinPlayerChrome` 那颗锁钮通过
+    /// `.onChange(of: PlayerOrientation.isLocked)` → 发通知 → 这里回读；
+    /// 也在这里的 `onAppear` 回读一次。只做「镜像 + 转发」，不持有真相。
+    @State private var lockedForShape = false
 
     private var portraitExpanded: Bool { duoExpanded && !sideways }
     /// The page is laid out left/right — picture on one side, details and episodes beside it — rather
@@ -1416,7 +1633,59 @@ struct VideoDetailView: View {
         // [mi3s] 二开：One 皮肤。开关在设置里（`OneSkinPreferencePanel`），
         // 存 `UserDefaults` 的 `oneSkinEnabled`。关着就走下面原版 `upstreamWatchBody`，
         // 一个字节的版式都没换。
-        if oneSkinActive {
+        if biliActive {
+            // [mi3s] 哔哩哔哩皮肤：独立一层，与 One 皮肤、上游原版三者并存。
+            // 画面同样由自绘 AVPlayerLayer 承载（镜像只翻画面不翻弹幕字幕），
+            // 会话仍由下面离屏 stage 产生 —— 两条皮肤共用同一个 `oneSkinSessionStage`。
+            biliSkinBody
+                .ignoresSafeArea(edges: fullScreen ? .all : [.top, .horizontal])
+                .padding(.bottom, oneSkinTabReserve.bottom)
+                .padding(.trailing, oneSkinTabReserve.trailing)
+                .background(BiliPalette.page.ignoresSafeArea())
+                .background(alignment: .topLeading) {
+                    // 和 One 皮肤同一个理由：用 offset 推到屏幕外，不用 opacity ——
+                    // 极低 opacity 时 SwiftUI 可能跳过子树渲染，onAppear 就不触发。
+                    oneSkinSessionStage
+                        .frame(width: 8, height: 8)
+                        .offset(x: -4000, y: -4000)
+                        .allowsHitTesting(false)
+                }
+                // ★ 三个面板分开挂，用枚举区分。
+                //
+                // 不能用 `.sheet(isPresented:)` 叠两个 —— 实测同层第二个会被静默丢掉；
+                // 而且哔哩哔哩这三个面板的**条目集本来就不同**，共用一个 bool 也不对。
+                .overlay { biliPanelOverlay }
+                // 画面比例：**唯一真实来源是 `AVPlayerItem.presentationSize`**。
+                // 皮肤路径下视图层 `aspect` 回调不触发，`playerAspectRatio` 会一直停在
+                // 16:9 初值 —— 于是横屏切竖屏后播放器尺寸不跟着变（用户实测反馈）。
+                // 这里在每次播放会话变化 / 进入页面时轮询一次，读到非零尺寸就更新。
+                .task(id: playerSession?.player.currentItem) {
+                    await syncAspectFromPresentationSize()
+                }
+                #if DEBUG
+                // `-qaBiliSettings 1` 自动展开面板给截图用（guest 里点不到小图标）。
+                //
+                // ⚠️ 不能放在 `.onAppear` 里判 `fullScreen`：onAppear 触发时
+                // `@AppStorage("watchFullScreen")` 还没被读到本视图状态，恒为 false，
+                // 于是无论怎么配都开成 `.actionMenu`（实测把全屏页盖成了详情页菜单）。
+                // 改成监听 `fullScreen` 的变化 —— 它变 true 时再开对应面板。
+                // ⚠️ 只在**本次启动确实传了 -qaBiliSettings** 时自动开面板。
+                // 之前只判 `qaBiliOpenSettings` 这个持久键 —— 截图时写进去一次，
+                // 之后每次进详情页都会自动弹菜单盖住页面（用户实测「进视频直接开了弹窗」）。
+                // `qaBiliSettings` 由 QALaunch 按启动参数逐次重写（不传就 remove），
+                // 所以它是可靠的「本次是否要 QA 开面板」判据。
+                .onChange(of: fullScreen, initial: true) { _, isFull in
+                    #if DEBUG
+                    guard UserDefaults.standard.bool(forKey: "qaBiliSettings") else { return }
+                    if isFull {
+                        biliPanel = (!landscapeScreen) ? .settings : .rail
+                    } else {
+                        biliPanel = .actionMenu
+                    }
+                    #endif
+                }
+                #endif
+        } else if oneSkinActive {
             // [mi3s] One 皮肤整屏独立：不吃上一层的列宽/内边距，
             // 自己从全屏尺寸开始排版（横屏双列必须拿到完整宽高）。
             oneSkinBody
@@ -1457,6 +1726,23 @@ struct VideoDetailView: View {
                         .offset(x: -4000, y: -4000)
                         .allowsHitTesting(false)
                 }
+                // ⛔ 片源比例：One 皮肤此前**从不更新** `playerAspectRatio`（BUG-N）。
+                //
+                // 上面那句「唯一真实来源是 `AVPlayerItem.presentationSize`」原来只挂在
+                // 哔哩哔哩分支上；One 分支没有，`OneSkinStage` 内部也没有任何
+                // `presentationSize` 消费者（`OneSkin.swift` 里那段轮询早被删了）。
+                // 于是 One 皮肤的 `aspectRatio` 永远是 16:9 初值：
+                //   · fullBleed / halfFold 的 `picH = 宽 / 片源比` 按横片算，
+                //     竖屏片源本该占 532pt 高，实际按 16:9 只给 376pt，
+                //     画面被压成中间一条、上下大黑边；
+                //   · 竖屏片源的「填充」也就没有意义。
+                // 这条直接违反项目铁律「画面比例唯一真源是 `presentationSize`」。
+                //
+                // 与哔哩哔哩那一支用**同一个**函数、同一个 `task(id:)` 触发点，
+                // 两个皮肤不再各有一套比例来源。
+                .task(id: playerSession?.player.currentItem) {
+                    await syncAspectFromPresentationSize()
+                }
                 // [mi3s] 系统栏位（状态栏 / 导航栏 / 标签栏 / Home 指示条）
                 // 已经**不在这一支里写**了 —— 见 `body` 里 `watchBody` 外层挂的
                 // `WatchSystemChrome`。判据只有 `fullScreen` 一个，两条渲染分支共用，
@@ -1485,6 +1771,17 @@ struct VideoDetailView: View {
         if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
         if UserDefaults.standard.bool(forKey: "qaOneSkinSideways") { return .split }
         #endif
+        // ★ 半折优先：横向折痕落在容器中部 = 书本 / 帐篷，是第五态。
+        //
+        // 判据来自系统给的 division 矩形（`FoldGap.horizontalBand`）：
+        // 横带中心落在容器 25%–75% 之间才算半折 —— 贴顶/贴底的横带
+        // 是状态栏或手势条，不是折痕，不能误判。
+        // 这一支必须排在 duoExpanded 之前：半折时 size class 仍报 regular，
+        // 若先走 duoExpanded 会被当成「摊开竖持」，画面铺满整屏而控制台丢失。
+        if let horizontalFold,
+           horizontalFold.splitsContainer(max(containerHeight, 1)) {
+            return .halfFold
+        }
         if duoExpanded {
             // 展开宽屏 vs 展开横屏：只差 `sideways`（设备 interfaceOrientation）。
             return sideways ? .split : .fullBleed
@@ -1494,13 +1791,63 @@ struct VideoDetailView: View {
 
     @AppStorage(OneSkin.enabledKey) private var oneSkinEnabled = true  // [临时验证] 默认开，QA 参数传不进 Fig-clone
     @AppStorage(OneSkin.speedKey) private var oneSkinSpeed: Double = 1
+    /// [mi3s] 三态换皮：原版 / One / 哔哩哔哩。
+    ///
+    /// 存空串就是「还没选过」，此时按 `PlaySkin.current` 走 —— 那个计算属性会把旧版
+    /// 只有 `oneSkinEnabled` 一个布尔的状态迁移过来，升级不会掉皮肤。
+    /// 不直接把默认值写成 `PlaySkin.current.rawValue`：`@AppStorage` 的默认值只在
+    /// 键缺失时被读，两者等价，但写空串让「没选过」这个状态显式可判。
+    /// ⛔ 默认值**不能**是空串。
+    ///
+    /// `@AppStorage` 在键缺失时把默认值写回 UserDefaults，而它同时是 Picker 的绑定源。
+    /// 实测（vphone guest，wda.prdc.yingxia.guji）：手工把 plist 写成 `playSkin=bilibili`，
+    /// 启动后立刻被改回 `native` —— 因为属性初始化先以 `""` 写入，
+    /// `playSkin` 计算属性读到非法值退回 `.current`（`.native`），Picker 随即把它落盘。
+    /// 默认值直接取迁移结果，就不会有这个覆盖窗口。
+    @AppStorage(PlaySkin.key) private var playSkinRaw = PlaySkin.current.rawValue
+    /// 哔哩哔哩详情页上的选集抽屉。详情页与播放页是两级，抽屉挂在详情页。
+    /// 当前打开的哔哩哔哩弹出面板。
+    ///
+    /// 实测哔哩哔哩有**三个互不相同**的面板（条目集都不一样），不能共用一个 bool：
+    /// `actionMenu`（详情页更多）/ `settings`（竖屏齿轮，含 Speed+Timer）/
+    /// `rail`（横屏全屏三点，含镜像/后台/画幅）。
+    @State private var biliPanel: BiliPanel?
+
+    /// 打开设置面板时要聚焦的分区。实测底栏三个文字按钮（字幕/倍速/画质）
+    /// 打开的是**同一个**面板，靠滚动位置区分落点。
+    @State private var biliSettingsFocus: BiliSettingsFocus = .speed
+    /// 详情页选集抽屉内的倒序开关。
+    @AppStorage("biliEpisodesReversed") private var biliReversesEpisodes = false
+    /// 当前集序号（1 基）；没有集就 0。详情页的 `N/M` 用它。
+    private var currentEpisodeIndex: Int {
+        let episodes = activeEpisodes
+        guard !episodes.isEmpty else { return 0 }
+        if let chosen = currentEpisode, let idx = episodes.firstIndex(where: { $0.id == chosen.id }) {
+            return idx + 1
+        }
+        if let id = currentEpisodeID, let idx = episodes.firstIndex(where: { $0.id == id }) {
+            return idx + 1
+        }
+        return 1
+    }
+
+    private var playSkin: PlaySkin {
+        if let stored = PlaySkin(rawValue: playSkinRaw) { return stored }
+        return PlaySkin.current
+    }
 
     /// [mi3s] QA 强制开关：启动参数 `-qaOneSkin`（或 `qaOneSkin=1`）时强制启用皮肤，
     /// 免去验证时和 cfprefsd 抢 UserDefaults 的麻烦。普通用户走 `oneSkinEnabled`（设置页）。
     private var oneSkinActive: Bool {
         // 同 key 在 OneSkinPreferencePanel 里也是 @AppStorage；两处默认值必须一致，
         // 否则谁先构造谁决定实际值（曾因那边默认 false 导致皮肤永远不生效）。
-        oneSkinEnabled || UserDefaults.standard.bool(forKey: "qaOneSkin")
+        guard !biliActive else { return false }
+        return oneSkinEnabled || UserDefaults.standard.bool(forKey: "qaOneSkin")
+    }
+
+    /// 哔哩哔哩皮肤是否生效。QA 用 `-qaBiliSkin`。
+    private var biliActive: Bool {
+        UserDefaults.standard.bool(forKey: "qaBiliSkin") || playSkin == .bilibili
     }
 
     /// 选集页要给菜单栏让出的空间。
@@ -1509,13 +1856,21 @@ struct VideoDetailView: View {
     /// 而且**形状随方向变**：竖持是底部横胶囊，横持是贴右缘的竖胶囊。
     /// 只让底边是之前「横屏内容被菜单栏盖住」的原因（Duo 内屏截图逐像素量过）。
     private var oneSkinTabReserve: (bottom: CGFloat, trailing: CGFloat) {
-        // ⛔ 底部菜单已折起（WatchSystemChrome.oneSkin → tabBar 恒收，2026-11-09）：
-        // 液态玻璃胶囊不再渲染，两向让位全部归零。保留判据注释以防回退时误读：
-        // 竖持让底边、横持让右边（Duo 内屏 regular×regular 的 size class 判据不可用，
-        // 必须看 landscapeScreen）。
+        // ⛔ 此前这里三个分支**全返回 (0,0)** —— 等于「永远不让位」。
+        //
+        // 那个决定的前提是「`WatchSystemChrome` 把 tabBar 恒收掉」。但同文件里
+        // `.setBarVisibility(fullScreen ? .hidden : .visible, for: .tabBar)` 只在**全屏**收，
+        // 非全屏时 iOS 26 的液态玻璃胶囊照常渲染，而它是**浮层**、不进 `safeAreaInsets`，
+        // 于是没有任何一边给它让位：
+        //   · 竖持：底部横向胶囊压住最后一行（选集卡片被压掉半行）；
+        //   · 横持：它收成**贴右缘的竖排胶囊**，直接压住右栏的选集按钮与第 2 集卡片。
+        // `WatchPageChrome.swift` 里 `WatchTabBarReserve`（bottom 36 / trailing 64）
+        // 当初就是按截图逐像素量出来解决这件事的，但**从来没接线**（全仓零引用，纯死代码）。
+        // 现在按形态接上：竖持让底边，横持让右边。
         guard !fullScreen else { return (0, 0) }
-        if landscapeScreen { return (0, 0) }
-        return (0, 0)
+        return landscapeScreen
+            ? (0, WatchTabBarReserve.trailing)
+            : (WatchTabBarReserve.bottom, 0)
     }
 
     // MARK: One 皮肤用到的三处取值
@@ -1604,6 +1959,934 @@ struct VideoDetailView: View {
         playerSession ?? watchChannel.map { store.playbackSession(for: $0) }
     }
 
+    /// 哔哩哔哩版式：半屏卡片 + 详情 + 选集抽屉；全屏时齿轮从右侧划出设置面板。
+    ///
+    /// 与 One 分支的区别只有版式和控件位置 —— 会话、换集、字幕、弹幕全部走同一套引擎，
+    /// 所以这里传的参数几乎和 `oneSkinBody` 一样，少的是 One 自己的 chip 与配色状态。
+
+    /// 三个弹出面板的宿主。
+    ///
+    /// 用 `overlay` 而不是 `sheet`：哔哩哔哩这三个面板都是**浮在画面上**的
+    /// （详情页操作菜单、全屏齿轮设置、横屏右缘竖条），不是全屏 modal。
+    /// 实测它们的形态各不相同，所以每个分支自己决定摆放位置。
+    /// 上一集（`bbplayer_fullscreen_playlast`）。
+    ///
+    /// 不去 B 站侧找「上一条」，直接用**当前线路的集数列表** ——
+    /// 这是播放器自己的能力，与账号生态无关。
+    private func awaitPreviousEpisode() {
+        guard let cur = currentEpisode,
+              let idx = activeEpisodes.firstIndex(where: { $0.id == cur.id }),
+              idx > 0 else { return }
+        Task { await play(activeEpisodes[idx - 1]) }
+    }
+
+    /// 截当前画面（`bbplayer_fullscreen_screenshot`）。
+    ///
+    /// 用 `AVPlayerItemVideoOutput` 拿不到当前显示帧时，退回到 `AVPlayerLayer`
+    /// 的 `render(in:)` —— 两种都只截画面本身，不含 SwiftUI 控件（与哔哩哔哩一致）。
+    private func saveCurrentFrame() {
+        guard let layer = playerSession?.player.currentItem else { return }
+        _ = layer
+        let bounds = UIApplication.shared.appScreenBounds
+        let renderer = UIGraphicsImageRenderer(bounds: bounds)
+        let image = renderer.image { ctx in
+            // 画面层：从当前视图树里找到 AVPlayerLayer 直接渲染
+            if let window = UIApplication.shared.appWindowScene?.windows.first {
+                window.layer.render(in: ctx.cgContext)
+            }
+        }
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+    }
+
+    /// 从 `AVPlayerItem.presentationSize` 同步画面比例。
+    ///
+    /// 硬约束：这是**唯一可靠来源**。`presentationSize` 在 item 未 ready 时是 `.zero`，
+    /// 所以要轮询到非零为止；拿到后就停。
+    @MainActor
+    private func syncAspectFromPresentationSize() async {
+        for _ in 0..<40 {
+            if let size = playerSession?.player.currentItem?.presentationSize,
+               size.width > 0, size.height > 0 {
+                let ratio = size.width / size.height
+                if ratio.isFinite, ratio > 0.2, ratio < 6,
+                   abs(ratio - playerAspectRatio) > 0.01 {
+                    playerAspectRatio = ratio
+                }
+                return
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if Task.isCancelled { return }
+        }
+    }
+
+    /// 全屏态四钮共用的弹窗（以「画质」框为基准款式）。
+    /// 内容按 `biliSettingsFocus` 切换：subtitles / speed / quality / episodes。
+    @ViewBuilder private var fullscreenPopupPanel: some View {
+        BiliFullscreenPopup(
+            title: fullscreenPopupTitle,
+            trailing: fullscreenPopupTrailing,
+            landscape: false,
+            onClose: { biliPanel = nil }
+        ) {
+            fullscreenPopupRows
+        }
+    }
+
+    /// 横屏版：同一款式，右下角 208pt 窄条。
+    /// 单独抽成属性，避免塞进 switch 里触发类型检查过载（实测会编译失败）。
+    @ViewBuilder private var fullscreenPopupPanelLandscape: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            BiliFullscreenPopup(
+                title: fullscreenPopupTitle,
+                trailing: fullscreenPopupTrailing,
+                landscape: true,
+                onClose: { biliPanel = nil }
+            ) {
+                fullscreenPopupRows
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .ignoresSafeArea(edges: .vertical)
+    }
+
+    private var fullscreenPopupTitle: String {
+        switch biliSettingsFocus {
+        case .subtitles:   return L10n.text("Subtitles")
+        case .speed:       return L10n.text("Speed")
+        case .quality:     return L10n.text("Resolution")
+        case .episodes:    return L10n.text("Episodes")
+        case .timer:       return L10n.text("Timer")
+        case .aspect:      return L10n.text("Aspect Ratio")
+        case .colorFilter: return L10n.text("Color Filter")
+        case .menuEditor:  return L10n.text("Customize Menu")
+        }
+    }
+
+    /// 只有画质框右上有 `Advanced Settings >`（实测）。
+    private var fullscreenPopupTrailing: String {
+        biliSettingsFocus == .quality ? L10n.text("Advanced Settings") : ""
+    }
+
+    @ViewBuilder private var fullscreenPopupRows: some View {
+        // 实测（全屏 More 面板首屏）：最上面是**四个大按钮横排** ——
+        //   See Original / Watch Later / PiP / Cast，各 85×102
+        // 之前整段缺失，于是点 More 第一眼看到的是 Speed，与哔哩哔哩完全不同。
+        HStack(spacing: 0) {
+            heroButton("rectangle.on.rectangle", L10n.text("See Original")) { biliPanel = nil }
+            heroButton("clock", L10n.text("Watch Later")) { biliPanel = nil }
+            heroButton("pip", L10n.text("PiP")) { biliPip.startFloating() }
+            heroButton("airplayvideo", L10n.text("Cast")) { biliPanel = nil }
+        }
+        .padding(.bottom, 8)
+
+        // ⚠️ 结构照 `BBPlayerPlaySettingWidget` 的真实 5 个 Cell 重建。
+        //
+        // swift-section 实证（/tmp/bili_objc.txt:788530）：
+        //   BBPlayerOperationListCell            _operationListCell   ← 操作四键（横排 UICollectionView）
+        //   BBPlayerPlaySettingPlaybackRateCell  _playbackRateCell    ← 倍速
+        //   BBPlayerPlaySettingPlaybackModeCell  _playbackModeCell    ← 播放模式
+        //   BBPlayerPlaySettingScaleCell         _scaleCell           ← 画面比例
+        //   BBPlayerPlaySettingConfigCell        _configCell          ← 配置入口
+        //
+        // 每个 Cell 内部都是 `UILabel *_titleLbl` + `NSArray *_btnArray`（一排按钮），
+        // 且 PlaybackRateCell 有 `-calculateBtnNumOfLineWithWidth:` ——
+        // **每行按钮数按可用宽度动态算**，不是固定列数。
+        // 所以我之前用「3 列 GridItem」或「9 行单列」都是错的：
+        // 正确形态是**每类一行，行内按钮按宽度自动折行**。
+        // ★ 用户自定义菜单（设置里拖过的顺序 + 隐藏项）**必须在这里出现**。
+        //
+        // `BiliMenuConfig`（BiliMenuCustomization.swift）存了 `biliMenuOrder` /
+        // `biliMenuHidden`，编辑页 `BiliMenuEditorView` 也在写它们 ——
+        // 但**全项目没有任何读取方**：本面板只渲染固定五个 Cell，
+        // `menuRow(for:)` 定义了却零调用。用户排完菜单、隐藏了几项，
+        // 播放器里一点变化都没有 —— 这就是「二开功能写了没落地」。
+        //
+        // 现在：自定义菜单排在上面（顺序与显隐都按配置），
+        // 五个固定 Cell 排在下面 —— 后者对齐 B站二进制（`BBPlayerPlaySetting*Cell`），
+        // 是「面板本体」，不被用户配置影响；前者是用户自己的快捷入口。
+        ForEach(BiliMenuConfig.visible) { item in
+            menuRow(for: item)
+        }
+
+        ForEach(BiliPlaySettingSection.allCases, id: \.self) { section in
+            playSettingSection(section)
+        }
+
+        // 编辑入口（rea 实证 `-[BBPlayerPlaySettingWidget editBtnClicked]`）。
+        BiliPopupRow(text: L10n.text("Customize Menu") + "  ›",
+                     selected: false, height: BiliPopupMetrics.rowHeight) {
+            biliSettingsFocus = .menuEditor
+        }
+
+        switch biliSettingsFocus {
+        case .speed:
+            // 倍速。`BiliSettingsFocus.speed` 是**默认落点**（底栏 Speed 键、
+            // 齿轮面板都把它设成 .speed），而这个 switch 此前**没有这个 case** ——
+            // 于是点「倍速」打开的面板主体是空的，只有上面的固定几行。
+            // 档位与 One 皮肤一致（`OneSkin.speeds`），七档。
+            ForEach(OneSkin.speeds, id: \.self) { (rate: Float) in
+                BiliPopupRow(text: OneSkin.label(rate),
+                             selected: abs(oneSkinSpeed - Double(rate)) < 0.01,
+                             height: BiliPopupMetrics.rowHeight) {
+                    oneSkinSpeed = Double(rate)
+                    playerSession?.setSpeed(rate)
+                    biliPanel = nil
+                }
+            }
+        case .quality:
+            // 实测：Auto (720P HD) / 720P HD / 480P SD / 360P Smooth
+            ForEach(["Auto (720P HD)", "720P HD", "480P SD", "360P Smooth"], id: \.self) { (q: String) in
+                BiliPopupRow(text: L10n.text(q), selected: false,
+                             height: BiliPopupMetrics.rowHeight) {
+                    biliPanel = nil
+                }
+            }
+        case .subtitles:
+            BiliPopupRow(text: L10n.text("Off"), selected: false,
+                         height: BiliPopupMetrics.rowHeight) {
+                UserDefaults.standard.set(false, forKey: "biliSubtitlesOn")
+            }
+            BiliPopupRow(text: L10n.text("Chinese"),
+                         selected: UserDefaults.standard.bool(forKey: "biliSubtitlesOn"),
+                         height: BiliPopupMetrics.rowHeight) {
+                UserDefaults.standard.set(true, forKey: "biliSubtitlesOn")
+            }
+        case .episodes:
+            if activeEpisodes.isEmpty {
+                BiliPopupRow(text: L10n.text("No episodes"), selected: false,
+                             height: BiliPopupMetrics.rowHeight) {}
+            } else {
+                ForEach(activeEpisodes) { (ep: Episode) in
+                    BiliPopupRow(text: ep.name, selected: ep.id == currentEpisode?.id,
+                                 height: BiliPopupMetrics.rowHeight) {
+                        withAnimation(.smooth(duration: 0.2)) { biliPanel = nil }
+                        Task { await play(ep) }
+                    }
+                }
+            }
+        case .menuEditor:
+            // 菜单项自定义面板（与 One 独立）。
+            BiliMenuEditorView(onClose: { biliSettingsFocus = .speed })
+        case .timer:
+            // 实测五档：Disabled / 15:00 / 30:00 / 60:00 / **Custom**
+            // 之前缺最后一档 Custom。
+            ForEach([0, 15, 30, 60], id: \.self) { (m: Int) in
+                BiliPopupRow(text: m == 0 ? L10n.text("Disabled") : "\(m):00",
+                             selected: false, height: BiliPopupMetrics.rowHeight) {
+                    if m == 0 { BiliPlayerExtras.shared.cancelSleep() }
+                    else { BiliPlayerExtras.shared.startSleep(minutes: m) }
+                }
+            }
+            BiliPopupRow(text: L10n.text("Custom"), selected: false,
+                         height: BiliPopupMetrics.rowHeight) {
+                biliPanel = nil
+            }
+        case .aspect:
+            // 画面比例。二进制实证 5 档：`ratio16_9` / `ratio4_3` /
+            // `ratioadjustcontent` / `ratioadjustscreen` / `ratiocentercrop`。
+            // 此前这个 case 缺失 —— `BiliSettingsFocus.aspect` 在别的入口能设到，
+            // 但这个 switch 没处理，面板会画成空白（用户点了「画面比例」什么都不出来）。
+            ForEach(BiliAspectMode.allCases) { (mode: BiliAspectMode) in
+                BiliPopupRow(text: mode.label,
+                             selected: BiliAspectMode.current == mode,
+                             height: BiliPopupMetrics.rowHeight) {
+                    UserDefaults.standard.set(mode.stored, forKey: OneSkin.fitModeKey)
+                    biliPanel = nil
+                }
+            }
+        case .colorFilter:
+            // 色彩滤镜（二进制实证 `color_filter`）。
+            ForEach(BiliColorFilter.allCases) { (filter: BiliColorFilter) in
+                BiliPopupRow(text: filter.label,
+                             selected: BiliColorFilter.current == filter,
+                             height: BiliPopupMetrics.rowHeight) {
+                    UserDefaults.standard.set(filter.rawValue, forKey: "biliColorFilter")
+                    biliPanel = nil
+                }
+            }
+                default:
+            // 其余 focus（speed / aspect / colorFilter / backgroundPlay / mirrorFlip /
+            // miniPlayer / screenshot / lockScreen / danmuSettings）的内容
+            // 已由上方 `ForEach(BiliPlaySettingSection.allCases)` 的五个 Cell 渲染，
+            // 这里不再重复（重复会出现两套同样的 UI）。focus 只用来滚到那一段。
+            EmptyView()
+}
+    }
+
+    /// 渲染播放设置的一个 Cell（照 `BBPlayerPlaySettingWidget` 的 5 个成员）。
+    @ViewBuilder
+    private func playSettingSection(_ section: BiliPlaySettingSection) -> some View {
+        switch section {
+        case .operation:
+            // `BBPlayerOperationListCell` 的四键**已由 `fullscreenPopupRows` 顶部的
+            // `heroButton` 那组渲染**（带图标、各 85×102，与实测一致）。
+            // 这里若再画一遍会重复两套同样的按钮 —— 所以本 Cell 不再产出内容。
+            EmptyView()
+
+        case .playbackRate:
+            // `BBPlayerPlaySettingPlaybackRateCell` —— speed05…speed30 七档
+            BiliPSCellRow(title: section.title, minChipWidth: 44) {
+                ForEach([Float(3.0), 2.0, 1.5, 1.25, 1.0, 0.75, 0.5], id: \.self) { (v: Float) in
+                    BiliPSChip(text: speedLabel(v),
+                               selected: abs(oneSkinSpeed - Double(v)) < 0.01) {
+                        oneSkinSpeed = Double(v); playerSession?.setSpeed(v)
+                    }
+                }
+            }
+
+        case .playbackMode:
+            // `BBPlayerPlaySettingPlaybackModeCell` —— actionloop/next/nextloop/quit 四态
+            BiliPSCellRow(title: section.title, minChipWidth: 76) {
+                ForEach(BiliPlayMode.allCases, id: \.self) { (m: BiliPlayMode) in
+                    BiliPSChip(text: L10n.text(m.title), selected: currentPlayMode == m) {
+                        applyPlayMode(m)
+                    }
+                }
+            }
+
+        case .scale:
+            // `BBPlayerPlaySettingScaleCell` —— ratio* 五种
+            BiliPSCellRow(title: section.title, minChipWidth: 68) {
+                ForEach(BiliAspectMode.allCases) { (m: BiliAspectMode) in
+                    BiliPSChip(text: L10n.text(m.label), selected: biliAspectMode == m) {
+                        biliAspectMode = m
+                        UserDefaults.standard.set(m.stored, forKey: OneSkin.fitModeKey)
+                    }
+                }
+            }
+
+        case .config:
+            // `BBPlayerPlaySettingConfigCell` —— 对应 16 个 `_show*Item` 布尔
+            BiliPSCellRow(title: section.title, minChipWidth: 96) {
+                BiliPSToggleChip(text: L10n.text("Mirror Flip"),
+                                 on: Binding(get: { BiliPlayerExtras.shared.mirror },
+                                             set: { BiliPlayerExtras.shared.mirror = $0 }))
+                BiliPSToggleChip(text: L10n.text("Background Play"),
+                                 on: Binding(get: { BiliPlayerExtras.shared.backgroundAudio },
+                                             set: { BiliPlayerExtras.shared.backgroundAudio = $0 }))
+                BiliPSToggleChip(text: L10n.text("Auto-Play Next"),
+                                 on: Binding(get: { store.autoPlayNext },
+                                             set: { store.autoPlayNext = $0 }))
+                BiliPSToggleChip(text: L10n.text("Loop playback"),
+                                 on: Binding(get: { playerSession?.looping ?? false },
+                                             set: { playerSession?.looping = $0 }))
+            }
+        }
+    }
+
+    /// 当前播放模式（由 looping/autoPlayNext 两布尔反推四态）。
+    private var currentPlayMode: BiliPlayMode {
+        BiliPlayMode.from(loops: playerSession?.looping ?? false,
+                          advances: store.autoPlayNext)
+    }
+
+    private func applyPlayMode(_ mode: BiliPlayMode) {
+        playerSession?.looping = mode.loopsCurrent
+        store.autoPlayNext = mode.autoAdvances
+    }
+
+    /// 把自定义菜单项映射成一行（点击后切到对应面板段）。
+    @ViewBuilder
+    private func menuRow(for item: BiliMenuItem) -> some View {
+        BiliPopupRow(text: L10n.text(item.label) + "  ›", selected: false,
+                     height: BiliPopupMetrics.rowHeight) {
+            switch item {
+            case .speed:          biliSettingsFocus = .speed
+            case .quality:        biliSettingsFocus = .quality
+            case .subtitles:      biliSettingsFocus = .subtitles
+            case .episodes:       biliSettingsFocus = .episodes
+            case .timer:          biliSettingsFocus = .timer
+            case .aspectRatio:    biliSettingsFocus = .aspect
+            case .colorFilter:    biliSettingsFocus = .colorFilter
+            case .danmuSettings:  biliPanel = .danmuSettings
+            case .backgroundPlay:
+                BiliPlayerExtras.shared.backgroundAudio.toggle()
+                biliPanel = nil
+            case .mirrorFlip:
+                BiliPlayerExtras.shared.mirror.toggle()
+                biliPanel = nil
+            case .miniPlayer:
+                // 同上：菜单里的「小窗」是应用内小窗，不是画中画。
+                biliPanel = nil
+                collapseToMiniPlayer()
+            case .screenshot:
+                saveCurrentFrame()
+                biliPanel = nil
+            case .lockScreen:
+                biliPanel = nil
+            case .adBlock:
+                // 广告拦截：与 One 皮肤、原版播放器、HLS 代理同一个键。
+                // 这一行的动作是**就地开关**（不是切面板），和其它「一次性动作」同类，
+                // 所以顺手关掉面板。
+                //
+                // ⛔ 必须走 `AdSkip.enabled` 的 setter，不要自己拼 `UserDefaults.set`。
+                // 这个键在仓里已经有 5 个读取者（设置页 / One / 原版 / 哔哩哔哩 / PlaybackView），
+                // 每多一处手写，就多一处将来漏改的地方。`AdSkip` 是它的唯一写入点。
+                AdSkip.enabled.toggle()
+                biliPanel = nil
+            }
+        }
+    }
+
+    /// 全屏弹窗顶部的四个大按钮（实测 85×102，图标在上文字在下）。
+    private func heroButton(_ symbol: String, _ title: String,
+                            _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.system(size: 22))
+                    .foregroundStyle(BiliPalette.primary)
+                Text(title)
+                    .font(.system(size: 10))
+                    .foregroundStyle(BiliPalette.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 85, height: 102)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private func speedLabel(_ v: Float) -> String {
+        v == Float(Int(v)) ? String(format: "%.1f", v) : String(format: "%g", v)
+    }
+
+    @ViewBuilder private var biliPanelOverlay: some View {
+        if let biliPanel {
+            // ⚠️ `alignment: .bottom` 是必须的。
+            // ZStack 默认 `.center`，里面那层全屏遮罩（`Color.black`）会把
+            // 子视图整体居中 —— 于是「底部升起」的弹窗被顶到了屏幕中间
+            // （真机实测：`分辨率` 标题跑到 y=16，菜单项从 y=158 起）。
+            ZStack(alignment: .bottom) {
+                // 遮罩：点空白处关闭
+                Color.black.opacity(0.28)
+                    .ignoresSafeArea()
+                    .onTapGesture { withAnimation(.smooth(duration: 0.2)) { self.biliPanel = nil } }
+
+                switch biliPanel {
+                case .actionMenu:
+                    // 实测（`/tmp/popup.png` 取色）：操作菜单**有实体底色**，
+                    // 是一整块 `#F7F7F9` 白面板，从 y≈0.400 铺到屏幕底，上沿 `#C8CCD0` 分界线。
+                    //
+                    // ⚠️ 关闭入口只留**外层那层遮罩**（`Color.black.opacity(0.28)` 已铺满全屏
+                    // 并带 onTapGesture）。之前在这里又叠了一层 `Rectangle().fill(Color.clear)`
+                    // 加 onTapGesture —— 两层手势叠在同一区域，SwiftUI 只认一层，
+                    // 结果两个都不灵，菜单彻底关不掉（实测卡死）。
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        BiliActionMenu(
+                            portrait: !landscapeScreen,
+                            speed: Binding(
+                                get: { Float(oneSkinSpeed) },
+                                set: { oneSkinSpeed = Double($0); playerSession?.setSpeed($0) }
+                            ),
+                            autoPlayNext: Binding(
+                                get: { store.autoPlayNext },
+                                set: { store.autoPlayNext = $0 }
+                            ),
+                            loopPlayback: Binding(
+                                get: { playerSession?.looping ?? false },
+                                set: { playerSession?.looping = $0 }
+                            )
+                        )
+                        // 实测垂直范围：上沿在归一化 y≈0.400（678 × 0.40 ≈ 271pt），铺到屏幕底。
+                        // **横屏不整宽**：左 20% / 右 13% 不是面板色（截图逐点采样 `/tmp/pop2.png`）。
+                        //   竖屏：整宽 `#F7F7F9`
+                        //   横屏：x 0.20~0.87，底色 `#F4F7F8`（比竖屏灰 3 阶）
+                        // 白面板本体：**从 y≈0.400 铺到屏幕底**（实测），
+                        // 不是「内容自身加 padding 当底」。所以背景挂在菜单容器上，
+                        // 并给它一个「屏高 × (1-0.400)」的最小高度，让面板真的铺到底。
+                        .frame(maxWidth: .infinity, alignment: .top)
+                        .padding(.top, 16)
+                        .frame(minHeight: UIApplication.shared.appScreenBounds.height * 0.60,
+                               alignment: .top)
+                        .background(landscapeScreen
+                                    ? BiliPalette.popupSurfaceLandscape
+                                    : BiliPalette.popupSurface)
+                        .overlay(alignment: .top) {
+                            Rectangle()
+                                .fill(BiliPalette.popupEdge)
+                                .frame(height: 0.5)
+                        }
+                        // 横屏实测也不是整宽：x 0.20~0.87
+                        .padding(.horizontal, landscapeScreen ? UIApplication.shared.appScreenBounds.width * 0.20 : 0)
+                    }
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .ignoresSafeArea(edges: .bottom)
+
+                // 全屏态：四钮（Subtitles/Episodes/Speed/Auto）统一套用「画质框」款式。
+                // 见 `BiliFullscreenPopup`：竖屏底部升起整宽、横屏右侧 208pt 窄条，
+                // 标题行左右分置、选项行距 61、深色底 #212326。
+                //
+                // 与详情页的 `.settings`（白色下半屏面板）是**两套**，不能混。
+                case .settings where landscapeScreen && fullScreen:
+                    fullscreenPopupPanelLandscape
+                        .transition(.move(edge: .trailing))
+
+                case .settings where landscapeScreen:
+                    // 详情页横屏：底部大面板会把画面挤没，走右缘竖条。
+                    // （全屏横屏已在上一个 case 走统一弹窗款式。）
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        BiliSettingsRail(
+                            sleepMinutes: Binding(
+                                get: {
+                                    guard let left = BiliPlayerExtras.shared.sleepRemaining else { return 0 }
+                                    return max(0, Int((left / 60).rounded()))
+                                },
+                                set: { minutes in
+                                    if minutes <= 0 { BiliPlayerExtras.shared.cancelSleep() }
+                                    else { BiliPlayerExtras.shared.startSleep(minutes: minutes) }
+                                }
+                            ),
+                            playMode: Binding(
+                                get: {
+                                    BiliPlayMode.from(loops: playerSession?.looping ?? false,
+                                                      advances: store.autoPlayNext)
+                                },
+                                set: { mode in
+                                    playerSession?.looping = mode.loopsCurrent
+                                    store.autoPlayNext = mode.autoAdvances
+                                }
+                            ),
+                            mirror: Binding(
+                                get: { BiliPlayerExtras.shared.mirror },
+                                set: { BiliPlayerExtras.shared.mirror = $0 }
+                            ),
+                            backgroundAudio: Binding(
+                                get: { BiliPlayerExtras.shared.backgroundAudio },
+                                set: { BiliPlayerExtras.shared.backgroundAudio = $0 }
+                            ),
+                            fitToScreen: Binding(
+                                get: { UserDefaults.standard.object(forKey: OneSkin.fitModeKey) as? String == "fit" },
+                                set: { UserDefaults.standard.set($0 ? "fit" : "fill", forKey: OneSkin.fitModeKey) }
+                            ),
+                            speed: Binding(
+                                get: { Float(oneSkinSpeed) },
+                                set: { oneSkinSpeed = Double($0); playerSession?.setSpeed($0) }
+                            )
+                        )
+                        .frame(width: min(112, UIApplication.shared.appScreenBounds.width * 0.24))
+                    }
+
+                // 全屏竖屏：四钮统一套「画质框」款式（深色底部升起）。
+                case .settings where fullScreen:
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        fullscreenPopupPanel
+                    }
+                    .ignoresSafeArea(edges: .vertical)
+                    .transition(.move(edge: .bottom))
+
+                case .settings:
+                    // 详情页竖屏：底部白色覆盖面板（与全屏是两套配色）。
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        BiliSettingsSheet(
+                            speed: Binding(
+                                get: { Float(oneSkinSpeed) },
+                                set: { oneSkinSpeed = Double($0); playerSession?.setSpeed($0) }
+                            ),
+                            sleepMinutes: Binding(
+                                // `BiliPlayerExtras` 存的是**截止时刻**（`sleepDeadline`），不是分钟数；
+                                // 这里换算成分钟供面板显示，写入时再换回截止时刻。
+                                get: {
+                                    guard let left = BiliPlayerExtras.shared.sleepRemaining else { return 0 }
+                                    return max(0, Int((left / 60).rounded()))
+                                },
+                                set: { minutes in
+                                    if minutes <= 0 { BiliPlayerExtras.shared.cancelSleep() }
+                                    else { BiliPlayerExtras.shared.startSleep(minutes: minutes) }
+                                }
+                            ),
+                            autoPlayNext: Binding(
+                                get: { store.autoPlayNext },
+                                set: { store.autoPlayNext = $0 }
+                            ),
+                            loopPlayback: Binding(
+                                get: { playerSession?.looping ?? false },
+                                set: { playerSession?.looping = $0 }
+                            ),
+                            backgroundAudio: Binding(
+                                get: { BiliPlayerExtras.shared.backgroundAudio },
+                                set: { BiliPlayerExtras.shared.backgroundAudio = $0 }
+                            ),
+                            // 字幕开关：本仓库**没有**字幕偏好键，`PlaybackSession` 也没暴露该属性，
+                            // 所以用皮肤自带的一个本地键，只影响本皮肤的显示意图。
+                            subtitlesOn: Binding(
+                                get: { UserDefaults.standard.bool(forKey: "biliSubtitlesOn") },
+                                set: { UserDefaults.standard.set($0, forKey: "biliSubtitlesOn") }
+                            ),
+                            mirror: Binding(
+                                get: { BiliPlayerExtras.shared.mirror },
+                                set: { BiliPlayerExtras.shared.mirror = $0 }
+                            ),
+                            onSubtitleSettings: { self.biliPanel = .subtitleSettings },
+                            onDanmuSettings: { self.biliPanel = .danmuSettings },
+                            onMoreSettings: { self.biliPanel = .moreSettings },
+                            onNotes: { self.biliPanel = .notes },
+                            onClose: { self.biliPanel = nil }
+                        )
+                        // ⚠️ 实测是**贴底覆盖面板**，不是悬浮圆角卡片。
+                        // 之前用 `cornerRadius 16` + 左右 8pt padding + 底部 8pt，
+                        // 渲染出来是一个居中悬浮的白话框 —— 与哔哩哔哩那种
+                        // 「从底边整宽升起、四角只有上圆角、贴满左右和底」完全不是一类东西。
+                        // 现在：整宽、只切上圆角、底部贴屏幕边（不 inset）。
+                        // ⚠️ 高度按屏幕比例算，不能写死 420。
+                        // 竖屏 678 高时 420 留 258pt 给画面（合理）；
+                        // 横屏只有 466 高，420 会盖掉 90%，把画面挤成一条缝。
+                        // 实测哔哩哔哩面板约占屏幕 62%。
+                        .frame(maxWidth: .infinity, alignment: .bottom)
+                        .frame(maxHeight: max(240, UIApplication.shared.appScreenBounds.height * 0.62))
+                        .background(BiliPalette.panel)
+                        .clipShape(UnevenRoundedRectangle(
+                            topLeadingRadius: 12, bottomLeadingRadius: 0,
+                            bottomTrailingRadius: 0, topTrailingRadius: 12
+                        ))
+                        .ignoresSafeArea(edges: .bottom)
+                    }
+
+                case .episodes:
+                    // 选集容器：**两个方向都由抽屉打开**（用户明确要求）。
+                    //
+                    // 差别只在抽屉的**摆放位置与宽度**：
+                    //   · 竖屏 → 从底部升起，占满整宽
+                    //   · 横屏 → 从右缘滑出，占宽 36.7%（实测边界 x=1288/2034）
+                    // 抽屉内部版式一致：系列信息区 + Episodes/Ascending + 单列列表。
+                    HStack(spacing: 0) {
+                        if !landscapeScreen {
+                            // 竖屏：整宽
+                        } else {
+                            Spacer(minLength: 0)
+                        }
+                        BiliEpisodeDrawer(
+                            episodes: activeEpisodes,
+                            playing: currentEpisode,
+                            flags: flags,
+                            activeLine: activeFlag,
+                            title: detail?.name ?? video.name,
+                            summary: detail.map { L10n.text("%@ videos", String($0.episodes.count)) } ?? "",
+                            reversed: $biliReversesEpisodes,
+                            onSelectLine: { flag in selectWatchLine(flag) },
+                            onFavorite: { store.favorites.toggle(videoFavorite()) },
+                            onPlay: { episode in
+                                withAnimation(.smooth(duration: 0.2)) { self.biliPanel = nil }
+                                Task { await play(episode) }
+                            }
+                        )
+                        // 宽度按**当前屏幕宽**算比例，不能写死 678 ——
+                        // 678 是横屏宽；竖屏只有 466，写死会让面板宽出屏幕 200pt。
+                        .frame(width: landscapeScreen
+                               ? UIApplication.shared.appScreenBounds.width * BiliMetrics.landscapePanelFraction
+                               : nil)
+                        .background(BiliPalette.panel)
+                    }
+                    // 竖屏抽屉从**底部**升起（对齐到底），横屏贴右缘满高。
+                    .frame(maxHeight: .infinity, alignment: landscapeScreen ? .center : .bottom)
+                    .frame(maxHeight: landscapeScreen ? .infinity : UIApplication.shared.appScreenBounds.height * 0.72)
+                    .ignoresSafeArea(edges: .vertical)
+
+                case .rail:
+                    // 实测：右缘竖条，可视宽 63pt（x=615 / 屏宽 678）。
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        BiliSettingsRail(
+                            sleepMinutes: Binding(
+                                // `BiliPlayerExtras` 存的是**截止时刻**（`sleepDeadline`），不是分钟数；
+                                // 这里换算成分钟供面板显示，写入时再换回截止时刻。
+                                get: {
+                                    guard let left = BiliPlayerExtras.shared.sleepRemaining else { return 0 }
+                                    return max(0, Int((left / 60).rounded()))
+                                },
+                                set: { minutes in
+                                    if minutes <= 0 { BiliPlayerExtras.shared.cancelSleep() }
+                                    else { BiliPlayerExtras.shared.startSleep(minutes: minutes) }
+                                }
+                            ),
+                            playMode: Binding(
+                                get: {
+                                    BiliPlayMode.from(loops: playerSession?.looping ?? false,
+                                                      advances: store.autoPlayNext)
+                                },
+                                set: { mode in
+                                    playerSession?.looping = mode.loopsCurrent
+                                    store.autoPlayNext = mode.autoAdvances
+                                }
+                            ),
+                            mirror: Binding(
+                                get: { BiliPlayerExtras.shared.mirror },
+                                set: { BiliPlayerExtras.shared.mirror = $0 }
+                            ),
+                            backgroundAudio: Binding(
+                                get: { BiliPlayerExtras.shared.backgroundAudio },
+                                set: { BiliPlayerExtras.shared.backgroundAudio = $0 }
+                            ),
+                            fitToScreen: Binding(
+                                get: { UserDefaults.standard.object(forKey: OneSkin.fitModeKey) as? String == "fit" },
+                                set: { UserDefaults.standard.set($0 ? "fit" : "fill", forKey: OneSkin.fitModeKey) }
+                            ),
+                            speed: Binding(
+                                get: { Float(oneSkinSpeed) },
+                                set: { oneSkinSpeed = Double($0); playerSession?.setSpeed($0) }
+                            )
+                        )
+                        // 实测可视宽 63pt（x=615 / 屏宽 678），但那是「内容固有宽被裁切」
+                        // 的结果 —— 照 63 建布局会把「自动连播」「循环播放」全裁成「自动…」。
+                        // 取 112：比实测可视宽略宽，保证中文标签完整，仍只占右缘一条。
+                        // 实测是右半屏宽面板，不是 63pt 窄条。
+                        // 抓到 20 元素版：四个大按钮从 x=342 起（各 85x102，步长 85），
+                        // Timer 整排也从 342 起 —— 宽 = 678-342 = 336pt。
+                        // 之前按可视宽 63pt 做成 112pt，把 Timer 那排整个裁掉了。
+                        .frame(width: UIApplication.shared.appScreenBounds.width * 0.495)
+                        .clipShape(RoundedRectangle(cornerRadius: 0))
+                        // 实测（`/tmp/fs.png` 取色）：全屏弹窗是**深色面板 `#212326`**，
+                        // 不是透明浮在画面上。上沿有一道 `#3D3F43` 边，
+                        // 段落之间是 `#D8D9DC` 亮线。
+                        //
+                        // ⚠️ 详情页弹窗是白色 `#F7F7F9`，这里是深色 —— 两套配色不可混用。
+                        .background(BiliPalette.fullscreenPopup)
+                        .overlay(alignment: .leading) {
+                            Rectangle()
+                                .fill(BiliPalette.fullscreenPopupEdge)
+                                .frame(width: 0.5)
+                        }
+                    }
+                // 设置面板里四个整宽可点行的子面板（之前是空回调）。
+                case .subtitleSettings:
+                    BiliSubtitleSettingsView(onClose: { self.biliPanel = .settings })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .background(BiliPalette.panel)
+                case .danmuSettings:
+                    BiliDanmuSettingsView(onClose: { self.biliPanel = .settings })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .background(BiliPalette.panel)
+                case .moreSettings:
+                    BiliMorePlaybackSettingsView(onClose: { self.biliPanel = .settings })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .background(BiliPalette.panel)
+                case .notes:
+                    BiliNotesView(videoID: video.id, onClose: { self.biliPanel = .settings })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .background(BiliPalette.panel)
+                }
+            }
+            .transition(.opacity.combined(with: .move(edge: biliPanel == .settings ? .bottom : .trailing)))
+            .animation(.smooth(duration: 0.24), value: biliPanel)
+        }
+    }
+
+    @ViewBuilder private var biliSkinBody: some View {
+        // 哔哩哔哩是**三个独立屏幕族**，不是一套布局换参数。
+        //
+        // 类名证据（595 个 BBPlayer 类里）：
+        //   BBPlayerFullScreen{Top,Bottom,Left,Right}Widget
+        //   BBPlayerHalfScreen{Top,Bottom,Left,Right}Widget + HalfScreenBottomRowLayout
+        //   BBPlayerPortraitScreen{Top,Bottom}Widget   （只有上下，没有左右）
+        //
+        // 所以这里也是三个平级页面组件，各自吃 `BiliMetrics` 里的实测值：
+        //   · 全屏      → BiliFullScreenPage
+        //   · 横屏展开  → BiliLandscapePage（左画面 + 右信息列）
+        //   · 竖屏      → BiliPortraitPage（顶部卡片 + 内联选集）
+        //
+        // 三个弹出面板也分开挂（实测条目集不同）：
+        //   actionMenu（详情页更多）/ settings（竖屏齿轮）/ rail（横屏竖条）
+        if fullScreen {
+            BiliFullScreenPage(
+                video: video,
+                session: oneSkinStageSession,
+                position: playerSession?.position ?? 0,
+                duration: playerSession?.duration ?? 0,
+                portrait: !landscapeScreen,
+                episodes: activeEpisodes,
+                playing: currentEpisode,
+                isFavorite: store.favorites.contains(videoFavorite()),
+                danmakuOn: danmakuOnForSkin,
+                speed: Float(oneSkinSpeed),
+                // `quality` 是 `Int?`（当前清晰度序号），不是对象；
+                // 要显示名得从会话的 `qualities` 里按序号取。
+                qualityLabel: currentQualityLabel,
+                onBack: { exitFullScreen() },
+                onLike: {},
+                onShare: {},
+                // 实测：竖屏全屏的齿轮打开的是**底部设置面板**（Speed/Timer/开关），
+                // 只有横屏全屏才用右缘竖条。之前一律开 .rail，竖屏下就是一条
+                // 被挤在右缘的窄条，既不像哔哩哔哩也读不全。
+                // ⚠️ 全屏 `More operations` 实测打开的是**深色右侧面板**（`#212326`，
+                // 宽约 37%、贴右缘）—— 正是四钮统一弹窗款式的横屏形态。
+                // 之前指向 `.rail`，那是个**死分支**（`BiliSettingsRail` 用 112pt 窄条
+                // + `BiliPalette.panel`），形态和实测完全不符。
+                // 现在走 `.settings`，由 `landscapeScreen && fullScreen` 分支渲染
+                // `fullscreenPopupPanelLandscape`（208pt、`#212326`、标题左右分置）。
+                onSettings: { biliSettingsFocus = .speed; biliPanel = .settings },
+                onTogglePlay: {
+                    if let episode = currentEpisode ?? activeEpisodes.first, !playingOnThisPage {
+                        Task { await play(episode) }
+                    } else {
+                        playerSession?.togglePlayback()
+                    }
+                },
+                onSeekBack: { skip(by: -10) },
+                onSeekForward: { skip(by: 10) },
+                onNext: { advanceEpisode() },
+                onPrevious: { awaitPreviousEpisode() },
+                // 「小窗」= **应用内**小窗（哔哩哔哩的 `miniscreen` 就是这个语义），
+                // 与「画中画」是两件事。
+                //
+                // ⛔ 这里原来写的是 `PictureInPicture.startCurrent()` —— 两个错叠在一起：
+                //   1) 语义错：小窗键去做画中画；
+                //   2) 事实上恒为空操作：哔哩哔哩画面层当时从不 attach，
+                //      `PictureInPicture.current` 永远 nil，guard 第一行就返回。
+                // 现在走 `onMiniPlayer`（One 皮肤同一套），由页面置
+                // `store.miniPlayerActive` 并 dismiss，RootView 挂小窗卡片。
+                onMiniScreen: { collapseToMiniPlayer() },
+                onScreenshot: { saveCurrentFrame() },
+                onSeekTo: { fraction in
+                    guard let session = playerSession, session.duration > 0 else { return }
+                    session.seek(to: session.duration * fraction)
+                },
+                panelOpen: biliPanel != nil,
+                // 三个按钮都打开同一个设置面板，但**意图不同**：
+                // 字幕要滚到字幕区、倍速要滚到 Speed、画质要滚到画质。
+                // 之前三个都只写 `.settings`，面板打开后一律停在顶部，
+                // 用户点「字幕」看到的是 See Original —— 点了等于没点。
+                // 全屏底栏四个按钮的分派（由二进制类族裁决，不是猜）：
+                //   Subtitles / Speed / Auto → `.settings`（`BBPlayerPlaySettingWidget`
+                //     的五个 Cell 里就有 scale/rate/subtitle 这些项）
+                //   Episodes               → `.episodes`（**独立** `BBPlayerEpisodeListWidget`，
+                //     与 PlaySettingWidget 平级，不在其 Cell 之内）
+                // 两者配色/形态必须统一（深色 BiliFullscreenPopup），只差内容。
+                // ⚠️ 之前注释写成「四个都走 .settings」与代码矛盾，已按实证改正。
+                onSubtitles: { biliSettingsFocus = .subtitles; biliPanel = .settings },
+                onSpeed: { biliSettingsFocus = .speed; biliPanel = .settings },
+                onQuality: { biliSettingsFocus = .quality; biliPanel = .settings },
+                onToggleDanmu: { toggleSkinDanmaku() },
+                // Episodes：独立 `BBPlayerEpisodeListWidget`，但仍用**同一款式**的
+                // `BiliFullscreenPopup`（同配色同圆角），只是内容换成选集列表。
+                onEpisodes: { biliPanel = .episodes },
+                // 哔哩哔哩皮肤自己的 PiP 实例：画面层据此登记内容源。
+                pip: biliPip
+            )
+        } else if oneSkinShape == .split {
+            BiliLandscapePage(
+                video: video,
+                session: oneSkinStageSession,
+                position: playerSession?.position ?? 0,
+                duration: playerSession?.duration ?? 0,
+                aspectRatio: BiliAspectMode.effectiveAspect(sourceRatio: playerAspectRatio),
+                episodes: activeEpisodes,
+                playing: currentEpisode,
+                flags: flags,
+                activeLine: activeFlag,
+                seriesTitle: detail?.name,
+                summary: detail?.name ?? "",
+                isFavorite: store.favorites.contains(videoFavorite()),
+                pip: biliPip,
+                onBack: { leavePlayer() },
+                onCast: {},
+                onMore: { biliPanel = .actionMenu },
+                onFollow: {},
+                onLike: {},
+                onDislike: {},
+                onCoin: {},
+                onFavorite: { store.favorites.toggle(videoFavorite()) },
+                onShare: {},
+                onEpisodes: { biliPanel = .episodes },
+                onPlay: { episode in Task { await play(episode) } },
+                onSettings: { biliSettingsFocus = .speed; biliPanel = .settings }
+            )
+        } else {
+            BiliPortraitPage(
+                video: video,
+                session: oneSkinStageSession,
+                position: playerSession?.position ?? 0,
+                duration: playerSession?.duration ?? 0,
+                aspectRatio: BiliAspectMode.effectiveAspect(sourceRatio: playerAspectRatio),
+                episodes: activeEpisodes,
+                playing: currentEpisode,
+                flags: flags,
+                activeLine: activeFlag,
+                seriesTitle: detail?.name,
+                seriesSummary: detail?.name ?? "",
+                isFavorite: store.favorites.contains(videoFavorite()),
+                danmakuOn: danmakuOnForSkin,
+                pip: biliPip,
+                onBack: { leavePlayer() },
+                onCast: {},
+                onMore: { biliPanel = .actionMenu },
+                onTogglePlay: {
+                    if let episode = currentEpisode ?? activeEpisodes.first, !playingOnThisPage {
+                        Task { await play(episode) }
+                    } else {
+                        playerSession?.togglePlayback()
+                    }
+                },
+                onFullScreen: { setFullScreenEnteringCurrentOrientation() },
+                onToggleDanmu: { toggleSkinDanmaku() },
+                onFollow: {},
+                onLike: {},
+                onDislike: {},
+                onCoin: {},
+                onFavorite: { store.favorites.toggle(videoFavorite()) },
+                onShare: {},
+                onPlay: { episode in Task { await play(episode) } },
+                onSeekTo: { fraction in
+                    guard let session = playerSession, session.duration > 0 else { return }
+                    session.seek(to: session.duration * fraction)
+                },
+                onEpisodes: { biliPanel = .episodes }
+            )
+        }
+    }
+
+    /// 哔哩哔哩皮肤的弹幕开关（与 One 分开存，避免互相覆盖）。
+    private var danmakuOnForSkin: Bool {
+        UserDefaults.standard.object(forKey: DanmakuPreference.key) as? Bool ?? true
+    }
+
+    /// 当前清晰度的显示名。`PlaybackSession.quality` 只有序号，
+    /// 名字在 `qualities` 里；取不到就显示 `Auto`（与哔哩哔哩一致）。
+    private var currentQualityLabel: String {
+        guard let session = playerSession,
+              let index = session.quality,
+              session.qualities.indices.contains(index) else {
+            return L10n.text("Auto")
+        }
+        return session.qualities[index].label
+    }
+
+    private func toggleSkinDanmaku() {
+        // 哔哩哔哩的弹幕开关写 `DanmakuPreference.key`；
+        // 这里没有独立的 revision 计数器（那里的 `danmakuRevision` 是播放页私有状态），
+        // 所以只翻存储值 —— 覆盖层本身监听同一个 key。
+        UserDefaults.standard.set(!danmakuOnForSkin, forKey: DanmakuPreference.key)
+    }
+
+    /// 全屏里的「下一集」。没有下一集就不动，不要静默从头开始。
+    private func advanceEpisode() {
+        let list = activeEpisodes
+        guard list.count > 1, let current = currentEpisode,
+              let i = list.firstIndex(where: { $0.id == current.id }),
+              i + 1 < list.count else { return }
+        let next = list[i + 1]
+        Task { await play(next) }
+    }
+
+    /// 切换线路：复用上游那套「换 flag 后播续上当前集」的逻辑，One 与哔哩哔哩两个皮肤共用。
+    private func selectWatchLine(_ flag: String) {
+        let previous = activeFlag
+        selectedFlag = flag
+        guard watchChannel != nil, let episodes = detail?.episodes else { return }
+        let playing = episodes.first { $0.id == currentEpisodeID }
+        guard let same = episode(on: flag, matching: playing, in: episodes) else {
+            selectedFlag = previous
+            withAnimation(.smooth(duration: 0.2)) { lineNotice = L10n.text("This line doesn't have this episode.") }
+            Task { try? await Task.sleep(for: .seconds(4)); withAnimation(.smooth(duration: 0.2)) { lineNotice = nil } }
+            return
+        }
+        if same.id != currentEpisodeID { startRequest { await play(same) } }
+    }
+
     /// One 版式：黑底一列，画面→控制条→标题→主按钮→标签→选集。
     /// 画面仍是同一套播放引擎，只是把画面当成一个 View 传进去，皮肤层不认识 `PlaybackSession`。
     @ViewBuilder private var oneSkinBody: some View {
@@ -1613,7 +2896,7 @@ struct VideoDetailView: View {
             current: currentEpisode,
             playing: playingOnThisPage,
             busy: busy,
-            aspectRatio: max(playerAspectRatio, 0.4),
+            aspectRatio: BiliAspectMode.effectiveAspect(sourceRatio: playerAspectRatio),
             shape: oneSkinShape,
             // 片源身份：字幕文件、请求头、片头片尾 scope、上下集都靠它（成员顺序在 shape 之后）。
             channel: watchChannel,
@@ -1667,9 +2950,18 @@ struct VideoDetailView: View {
                 session.seek(to: session.duration * fraction)
             },
             onFullScreen: {
-                #if DEBUG
-                #endif
-                setFullScreen(landscape: playerAspectRatio > 1)
+                // ⛔ 不能再用「片源比例 > 1」决定全屏方向。
+                //
+                // 原来写的是 `setFullScreen(landscape: playerAspectRatio > 1)`：
+                // 横版片源进全屏就被**强制**转成横屏，竖版片源被强制转成竖屏，
+                // 用户手上的旋转键在全屏里又被 `fullScreenOwnsOrientation` 闸门挡住
+                // （`rotate(to:)` 与 `turn(to:)` 都不改写全屏态的 mask）。
+                // 结果就是「全屏只能在片源那一个方向」——
+                // 用户明确要求「全屏也要能横屏也能竖屏」。
+                //
+                // 现在：进全屏**沿用当前屏幕方向**，之后由旋转键自由切换
+                // （见 `PlayerOrientation.setFullScreenHeld` / `rotateInFullScreen`）。
+                setFullScreenEnteringCurrentOrientation()
             },
             onEpisodes: {
                 // 本页的抽屉只认 `showsAllEpisodes`。
@@ -1685,6 +2977,7 @@ struct VideoDetailView: View {
                 withAnimation(.smooth(duration: 0.25)) { oneSkinEnabled = false }
             },
             onDownload: {
+                downloadPreselect = []
                 choosingDownloads = true
             },
             onFavorite: {
@@ -1711,6 +3004,9 @@ struct VideoDetailView: View {
             isFavorite: store.favorites.contains(videoFavorite()),
             lines: flags,
             activeLine: activeFlag,
+            // 半折时上半个屏占多少 —— 跟随折痕真实位置，不用固定 0.5。
+            // 位置必须与声明次序一致（`activeLine` 之后、`lineSamples` 之前）。
+            halfFoldSplitRatio: halfFoldSplitRatio,
             lineSamples: lineSamples,
             onSelectLine: { flag in
                 // 复用上游 watchLines 的换线逻辑：换 flag 后播「续上当前集」的那一集。
@@ -1727,23 +3023,42 @@ struct VideoDetailView: View {
                 if same.id != currentEpisodeID { startRequest { await play(same) } }
             },
             onRotate: {
-                // 横竖屏切换：按**当前方向**反向转。PlayerOrientation 会同时调整允许的方向掩码。
-                // ⛔ 不能用 screen.bounds 的宽高比：VM 上它恒报竖屏原值（466×678），
-                // 不随 interfaceOrientation 交换 —— 实际已横屏时仍算出 landscape=true，
-                // 旋转键永远请求横屏、转不回竖屏。interfaceOrientation 是离散信号，
-                // 与本文件 landscapeScreen 同一来源。
-                let nowLandscape = UIApplication.shared.appWindowScene.map { scene in
-                    switch scene.interfaceOrientation {
-                    case .landscapeLeft, .landscapeRight: return true
-                    default: return false
-                    }
-                } ?? false
+                // 横竖屏切换：按**当前形态**反向转（BUG-M）。
+                //
+                // ⛔ 原来用 `interfaceOrientation` 取反。而 iPhone Duo 的内屏
+                //    **不遵守 `supportedInterfaceOrientations`**，它自己转
+                //    （`device-facts.md`："The inner display does not honor your supported
+                //     interface orientations — it rotates regardless"），实测内屏
+                //    竖持时仍报 `.landscapeLeft`。于是：
+                //      内屏竖持 → nowLandscape=true → set(landscape:false) → 请求竖屏
+                //      可用户此刻**就是竖的**，旋转键等于原地不动。
+                //    外屏是普通 iPhone 语义，那条路上这个信号是对的 —— 所以这个 bug
+                //    只在展开后出现，很难联想到这里。
+                //
+                // 现在：横竖只认 `oneSkinShape`（`.split` 即横持，其余为竖持），
+                // 与版面、控制栏配置用的是**同一个**形态真源。
+                let nowLandscape = (oneSkinShape == .split)
                 PlayerOrientation.set(landscape: !nowLandscape)
             },
             onMiniPlayer: {
                 // 唯一入口：视频控件里的「缩成小窗」。
-                // 先置**手动开关**，再离开观看页 —— 小窗只认这个开关，不认「是否在观看页」。
+                //
+                // ⛔ 顺序与时机都很关键 —— 这里是「按了缩成小窗但小窗没出来」的根因所在：
+                //
+                //   1) `dismiss()` 是**异步**的：它只是把 pop 请求交给导航栈，
+                //      本页的 `onDisappear` 要等下一帧过渡结束才跑。
+                //   2) `miniPlayerActive` 只在 `RootView` 的 `floatsInMiniPlayer` 里被读，
+                //      而那个视图在 `dismiss()` 之前就已经求值过一次（结果是 false，
+                //      因为那时 `miniPlayerActive` 还是 false）—— 之后的赋值必须能触发重算。
+                //   3) `store` 是 `@Observable`，赋值本身会通知；所以问题不在「没触发」，
+                //      而在**有人把它又写回 false**：本页 `onAppear` 里那句
+                //      `store.miniPlayerActive = false` 会在过渡动画期间被再跑一次
+                //      （页面在 pop 动画里仍算 onAppear 过一次），把刚设的 true 清掉。
+                //
+                // 修法：把「这次离开是缩成小窗」记成一次性意图，由页面自己消费，
+                // 不再依赖一个会被 `onAppear` 覆盖的长期布尔。
                 store.miniPlayerActive = true
+                leavingForMiniPlayer = true
                 dismiss()
             },
             onFold: {
@@ -1841,20 +3156,29 @@ struct VideoDetailView: View {
     private func watchPageLifecycleBody<Content: View>(_ content: Content) -> some View {
         content
             .onAppear {
+                store.isWatchPageMounted = true
                 store.watchPageScopes.formUnion(watchScopes)
                 // 回到观看页，小窗授权作废 —— 否则从观看页退回后小窗会再次自动弹出。
-                // （开关只由控件里的「缩成小窗」写入，这里负责在画面回到页内时收回。）
-                store.miniPlayerActive = false
-                // ★ One 皮肤开着的选集页**不钉竖屏**：
-                // 用户的要求是「横屏竖屏一样，都保留菜单栏」，而横屏必须真的能转过去
-                // 才谈得上双列选集页。上游那套「观看页恒竖屏、只有全屏才转」在
-                // 皮肤下会让转屏变成空操作（`holdPortrait` 把 mask 锁成 `.portrait`）。
-                // 皮肤关着仍按上游：折叠钉竖、展开松手。
-                if oneSkinActive {
-                    PlayerOrientation.holdPortrait(false)
-                } else {
-                    PlayerOrientation.holdPortrait(!duoExpanded)
+                //
+                // ⛔ 但不能无条件清：点「缩成小窗」时的顺序是
+                //   `miniPlayerActive = true` → `dismiss()` → pop 过渡 → `onAppear` 可能再跑一次。
+                // 无条件清会把刚设的 true 抹掉，小窗就永远出不来（这正是用户报的现象）。
+                // 所以只在**不是为缩小窗而离开**时才清。
+                if !leavingForMiniPlayer {
+                    store.miniPlayerActive = false
                 }
+                leavingForMiniPlayer = false
+                // ★ 选集页**一律不钉竖屏**。
+                //
+                // 用户的要求是：外屏要能横屏也能竖屏、展开横竖都行、全屏横竖都行。
+                // `holdPortrait(true)` 会把 mask 锁成 `.portrait` —— 外屏横持会被
+                // 系统**强行拉回竖屏**，用户手里的旋转键也无效（`rotate(to:)` 只改 mask，
+                // 而页面每次 onAppear / 折叠都会再把它锁回竖）。
+                //
+                // 原来只有 One 皮肤这一支放开（`oneSkinActive ? false : !duoExpanded`），
+                // 于是「原生/哔哩哔哩皮肤 + 外屏」永远只能竖持。
+                // 现在两支都放开：横竖由用户与设备决定，页面不再钉任何方向。
+                PlayerOrientation.holdPortrait(false)
                 #if DEBUG
                 // QA：`-qaWatchFullScreen 1` 直接进全屏，用来给「全屏控件层」截图
                 // （真机上要靠点全屏键，模拟器不好触发）。
@@ -1889,23 +3213,78 @@ struct VideoDetailView: View {
                 store.watchPageScopes.subtract(old.subtracting(new)); store.watchPageScopes.formUnion(new)
             }
             .onChange(of: duoExpanded) { _, expanded in
+                // ⛔ 折叠 / 展开会把画面层重挂一次，AVKit 会把「inline layer 离开屏幕」
+                // 当成「用户离开 App」而自己浮出 PiP 窗。这是用户明确禁止的行为
+                // （「转个横屏、展开个横竖屏就跳出应用外小窗」）。
+                // 在动作前后临时关掉自动浮起，宽限窗过后自动恢复 —— 能力保留，误判被挡住。
+                // 此前这一步只有注释、没有实现（`suspendAutomaticFloating()` 全仓无定义）。
+                PictureInPicture.suspendAutomaticFloating()
+
                 // 折叠 ⇄ 展开只改「方向锁」：折叠态钉竖屏（外屏），展开后交还给设备。
                 // 这里不调 `landLandscape()`：展开的默认落点是**竖屏单列**，
                 // 双列只在设备真的横过来时出现（`sideways` 只看 `landscapeScreen`）。
-                PlayerOrientation.holdPortrait(oneSkinActive ? false : !expanded)
+                // 同上：折叠/展开都不再钉方向。折叠进外屏也允许横持
+                //（外屏宽 466，横过来是 678×466，双列依然排得下）。
+                PlayerOrientation.holdPortrait(false)
                 // A Full Screen started on the inner display must not carry onto the outer one:
                 // folding while full-screen left the player filling a portrait screen it could not
                 // turn, with the watch page's own layout gone.
-                if !expanded && fullScreen { fullScreen = false }
+                //
+                // ⛔ 必须走 `exitFullScreen()`，不能直接写 `fullScreen = false`。
+                // `PlayerOrientation.fullScreenOwnsOrientation` 是**全屏闸门**，
+                // 只在 `setFullScreen` / `exitFullScreen` / 页面 disappear 时才会被清掉；
+                // 而 `holdPortrait(_:)` 的第一行就是 `guard !fullScreenOwnsOrientation else { return }`。
+                // 直接写 `fullScreen = false` 会留下「状态说不在全屏、闸门仍说在全屏」，
+                // 于是上面那句 `holdPortrait(!expanded)` 被 guard 静默丢弃 ——
+                // 外屏该钉竖屏而没钉，再展开时 `holdPortrait(false)` 同样被丢，
+                // 之后三形态怎么切方向规则都不再生效，直到整页 disappear。
+                if !expanded && fullScreen { exitFullScreen() }
             }
             // Fold/unfold flips the tab bar, the scrim's bleed and the controls' safe-area padding at
             // once; animate the lot together so the swap reads as one move, not a pop.
             .animation(.smooth(duration: 0.3), value: duoExpanded)
+            // ★ 锁定态冻结握持（第五点第二层）。见 `sideways` 的注释。
+            //
+            // 锁定 → 把当前横竖记下来，此后握持怎么变版面都不动。
+            // 解锁 → 清掉冻结，立刻回到跟随真实空间。
+            //
+            // 为什么需要这一层：内屏不遵守方向掩码（`duo-games` 实测），
+            // 所以「锁定后不再理会握持」是内屏上唯一能兑现的防误触手段。
+            .onChange(of: lockedForShape) { _, locked in
+                if locked {
+                    // ⛔ 用 `lock()` 内部的快照，**不要**现读 `landscapeScreen`。
+                    //
+                    // 后者读 `window.bounds`（连续量）：点锁定会先请求转向，
+                    // 这一帧读到的是动画中间帧（669×951→951×669 途中约 810×810，
+                    // 宽高比 1.0 ≤ portraitEnter 1.15）→ 判成横持 → 冻结值写反且永久保留。
+                    // 快照在 `mask` 已定的时刻取，不存在这个窗口。
+                    landscapeFrozenWhileLocked = LandscapeFreeze(landscape: PlayerOrientation.lockedLandscape,
+                                                                 expanded: duoExpanded)
+                } else {
+                    landscapeFrozenWhileLocked = nil
+                }
+            }
+            .onAppear {
+                // 页面重建（形态切换会重建控件层）后按当前锁定状态重新冻结，
+                // 否则「锁着进来」的一刻冻结值是 nil，握持仍会生效。
+                lockedForShape = PlayerOrientation.isLocked
+                if lockedForShape {
+                    // 同上：用快照。页面重建时 `lockedLandscape` 仍在（它是静态量）。
+                    landscapeFrozenWhileLocked = LandscapeFreeze(landscape: PlayerOrientation.lockedLandscape,
+                                                                 expanded: duoExpanded)
+                }
+            }
+            // 锁钮在 `OneSkinPlayerChrome` 里，隔了好几层视图；用广播回读最省事，
+            // 不把「锁定」这个状态穿透成一串闭包参数。
+            .onReceive(NotificationCenter.default.publisher(for: PlayerOrientation.lockStateDidChange)) { _ in
+                lockedForShape = PlayerOrientation.isLocked
+            }
             .onDisappear {
                 // An iPhone Duo fold/unfold swaps `watchBody` for `pageBody` (and back) without the
                 // page leaving, so the page-level `onDisappear` handles stopping playback and leaving
                 // Full Screen. Here only the watch page's own contributions are undone; they are
                 // re-established by `onAppear` when the watch page returns.
+                store.isWatchPageMounted = false
                 store.watchPageScopes.subtract(watchScopes)
                 // Unconditional: an unfold sets the hold to false already, but closing the page while
                 // folded shut used to skip this and leave the app held upright.
@@ -1964,12 +3343,16 @@ struct VideoDetailView: View {
                                                   leave: leavePlayer,
                                                   immersive: splitsWatchPage || duoExpanded,
                                                   started: { playerStarted = $0 }, opened: { playerSession = $0 },
-                                                  aspect: { ratio in
-                                                      // Only grow, never shrink below 16:9 into a squat box: a
-                                                      // source that reports nothing keeps the usual shape.
-                                                      guard ratio.isFinite, ratio > 0.2, ratio < 6 else { return }
-                                                      if abs(ratio - playerAspectRatio) > 0.01 { playerAspectRatio = ratio }
-                                                  },
+                                                  // ⚠️ 硬约束：画面比例唯一真实来源是 `AVPlayerItem.presentationSize`，
+                // **不得依赖视图层 `aspect` 回调** —— 该回调在 One/哔哩哔哩皮肤路径下
+                // 根本不触发，于是 `playerAspectRatio` 永远停在 16:9 初值。
+                // 表现：横屏切竖屏后播放器尺寸不变（用户实测反馈）。
+                // 这里保留该回调只为上游原版路径（那边确实会触发），
+                // 真正的更新走下面 `syncAspectFromPresentationSize()`。
+                aspect: { ratio in
+                    guard ratio.isFinite, ratio > 0.2, ratio < 6 else { return }
+                    if abs(ratio - playerAspectRatio) > 0.01 { playerAspectRatio = ratio }
+                },
                                                   // 同上：本页的抽屉只认 `showsAllEpisodes`。
                                                   openEpisodes: { showsAllEpisodes = true }),
                              stageOnly: stageOnly,
@@ -1990,6 +3373,28 @@ struct VideoDetailView: View {
         if fullScreen { exitFullScreen() } else { dismiss() }
     }
 
+    /// 收进**应用内小窗**并离开本页（哔哩哔哩皮肤的「小窗」键与菜单项共用）。
+    ///
+    /// 与 One 皮肤的 `onMiniPlayer` 是同一件事，只是那条在 `OneSkinStage` 的泛型视图里、
+    /// 走的是它自己的闭包；哔哩哔哩三个页面组件都没有这个入口，所以在这里收一个具名方法，
+    /// 三个页面 + 菜单项都调它，避免第三处再写一遍并把顺序写错。
+    ///
+    /// ⛔ 顺序不能换（见 `onMiniPlayer` 里那段完整推导）：
+    /// `miniPlayerActive = true` → `leavingForMiniPlayer = true` → `dismiss()`。
+    /// 先置全局开关再 pop，`RootView.floatsInMiniPlayer` 才来得及在下一帧挂上卡片；
+    /// 而 `leavingForMiniPlayer` 会挡住 `onAppear` 把刚设的 true 清掉。
+    private func collapseToMiniPlayer() {
+        guard store.playing != nil else {
+            // 没有在播就没有可缩小窗的画面 —— 直接退全屏/关页，别留一个空卡片。
+            if fullScreen { exitFullScreen() } else { dismiss() }
+            return
+        }
+        store.miniPlayerActive = true
+        leavingForMiniPlayer = true
+        if fullScreen { exitFullScreen() }
+        dismiss()
+    }
+
     /// 明确地退出全屏（单向），绝不关页。
     ///
     /// 不能用 `setFullScreen(landscape:)` 代劳：那是个**对折开关**（`entering = !fullScreen`），
@@ -2000,8 +3405,19 @@ struct VideoDetailView: View {
     private func exitFullScreen() {
         guard fullScreen else { return }
         withAnimation(.smooth(duration: 0.3)) { fullScreen = false }
-        // 与 setFullScreen 同一条规则：全屏/退全屏都不碰方向。原来这里
-        // `PlayerOrientation.set(landscape: false)` 会把方向 mask 锁回竖屏 ——
+        // ★ 退全屏必须**打开方向闸门**，否则页面从此再也钉不住方向。
+        //
+        // `PlayerOrientation.fullScreenOwnsOrientation` 一旦为 true，
+        // `holdPortrait(_:)` 的第一行 `guard !fullScreenOwnsOrientation` 就把所有
+        // 「折叠钉竖屏 / 展开松手」的写入静默丢弃。此前只有 `setFullScreen` 会设 true、
+        // 只有页面 `onDisappear` 会设 false —— 于是：
+        //   · 点返回键退全屏（`onBack: { exitFullScreen() }`）→ 闸门仍 true
+        //   · 全屏中合盖（`onChange(of: duoExpanded)`）→ 闸门仍 true
+        // 两种最常见的退出路径都漏了这一步，表现是「三形态来回切几次后，
+        // 折叠不再钉竖屏、展开也不再松手，要重启 App 才恢复」。
+        PlayerOrientation.setFullScreenHeld(false)
+        // 与 setFullScreen 同一条规则：这里**不碰方向掩码**。原来这里
+        // `PlayerOrientation.set(landscape: false)` 会把 mask 锁回竖屏 ——
         // 横屏全屏退回后用户再点旋转键，被这个锁住的 mask 拦住，表现为
         // 「横屏过来的 UI/控件漂移，重启才恢复」的一环。
         // 退全屏只是恢复页面布局；方向仍然只归旋转键管。
@@ -2017,17 +3433,37 @@ struct VideoDetailView: View {
         return PlaybackWait(message: progress.title, detail: progress.detail)
     }
 
+    /// 进全屏：**沿用当前屏幕方向**，不再由片源比例决定。
+    ///
+    /// 用户要求「全屏也要能横屏也能竖屏」。此前进全屏一律
+    /// `setFullScreen(landscape: playerAspectRatio > 1)` —— 横版片源强制横屏、
+    /// 竖版片源强制竖屏，而全屏态下旋转键又被方向闸门挡住，于是全屏只有一种方向。
+    ///
+    /// 现在：进去时保持用户此刻的握持方向，进去之后旋转键可以自由切换。
+    private func setFullScreenEnteringCurrentOrientation() {
+        guard !fullScreen else { exitFullScreen(); return }
+        let nowLandscape: Bool = {
+            switch UIApplication.shared.appWindowScene?.interfaceOrientation {
+            case .landscapeLeft, .landscapeRight: return true
+            default: return false
+            }
+        }()
+        setFullScreen(landscape: nowLandscape)
+    }
+
     private func setFullScreen(landscape: Bool) {
         let entering = !fullScreen
         withAnimation(.smooth(duration: 0.3)) { fullScreen = entering }
-        // ⛔ 全屏**不再主动转屏**（mi3s 二开，2026-11-09）：
-        // 全屏 = 画面铺满**当前**屏幕方向。原来按片源比例决定转屏（横版片源进全屏
-        // 请求转横）—— 竖屏下点全屏会出现「尝试切横屏又弹回竖屏」：
-        // `requestGeometryUpdate` 的转屏请求与全屏过渡互锁（上游注释自认过这个坑：
-        // interlocks the refused geometry update with the full-screen transition），
-        // 请求被系统弹回，全屏状态却已置位，两套状态打架就是用户看到的「没反应」。
-        // 方向只归 Chrome 的旋转键管（onRotate）。`landscape` 参数保留但不再触发转屏。
-        _ = landscape
+        // 进全屏时按片源方向请求（横版片源 → 横屏），退全屏时**显式回竖屏**。
+        //
+        // 两个坑都踩过：
+        // ① 只写 `setFullScreenHeld` 而不调 `set(landscape:fullScreen:)` —— 方向掩码
+        //    没更新，竖屏点全屏只铺满竖屏，与哔哩哔哩（直接进横屏全屏）不符。
+        // ② 退全屏时把 `landscape`（片源比例）原样传进去 —— 掩码又被设成 `.landscape`，
+        //    全屏退了机器还横着，且 `release()` 里的 `set(landscape:false)` 会被闸门拦住。
+        // `fullScreenOwnsOrientation` 闸门已在 `PlayerOrientation` 内部解决互锁问题
+        // （PlayerView.swift:812-818），这里可以放心用。
+        PlayerOrientation.set(landscape: entering ? landscape : false, fullScreen: entering)
         // ★ 告诉方向系统「现在处于全屏」/「已经退出全屏」。
         //
         // 这是「全屏机制独立」的开关：
@@ -2284,6 +3720,18 @@ struct VideoDetailView: View {
         return nil
     }
 
+    /// 当前这一集在 TMDB 里的剧照（16:9），作为观看页背景。
+    ///
+    /// 数据来自现成的 `watchStills(_:)`：它已经处理了「TMDB 的那一季和源站集数对得上」
+    /// 与「这一季真的大部分集都有图」两个前置条件，对不上时返回空字典 ——
+    /// 那种情况下剧照会张冠李戴（第 3 集的图配到第 5 集），比没有更糟。
+    ///
+    /// 因此这里只做一次查表：能查到就用，查不到返回 nil，由 `OneSkinStage` 退回海报。
+    private var currentEpisodeStill: URL? {
+        guard let id = currentEpisodeID else { return nil }
+        return watchStills(activeEpisodes)[id]?.still
+    }
+
     /// TMDB's stills for the line's episodes, when its season lines up with most of them and has pictures for them;
     /// otherwise none, and the episodes keep their small cards.
     private func watchStills(_ items: [Episode]) -> [Episode.ID: TMDBMatch.EpisodeInfo] {
@@ -2369,7 +3817,8 @@ struct VideoDetailView: View {
             if saved == nil || saved?.status == .failed {
                 Button(L10n.text("Download"), systemImage: "arrow.down.circle") {
                     DownloadLibrary.shared.download(DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin),
-                                                    title: video.name, poster: video.poster, posterHeaders: video.posterHeaders)
+                                                    title: video.name, poster: video.poster, posterHeaders: video.posterHeaders,
+                                                    environmentID: store.environments.activeID)
                 }
             } else if let saved {
                 Button(L10n.text(saved.status == .completed ? "Delete Download" : "Cancel Download"), systemImage: "trash", role: .destructive) {
@@ -2609,7 +4058,7 @@ enum WatchPage {
         // 会让观看页永远走 pageBody（图文详情页），One 皮肤根本没机会渲染。
         // 补一条：屏幕短边 < 600pt 也按手机观看页处理（真机 phone 亦满足）。
         if UIDevice.current.userInterfaceIdiom == .phone { return true }
-        let b = UIScreen.main.bounds.size
+        let b = UIApplication.shared.appScreenBounds.size
         return min(b.width, b.height) < 600
     }
 }

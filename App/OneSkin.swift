@@ -420,7 +420,23 @@ enum OneSkinShape: Equatable {
     /// 这是「宽屏」不是「横屏」，所以 `isLandscape` 必须是 false。
     case fullBleed
 
-    /// 只有 split 是横向双列。fullBleed 是竖持的宽屏，不要按横屏排版。
+    /// 半折（书本 / 帐篷）：折痕是一条**横带**，屏幕被上下分成两半。
+    ///
+    /// 与前三态的区别不在尺寸而在**铰链方向**：
+    ///   · `split` 是左右两屏（竖折痕）→ 左右双列
+    ///   · `halfFold` 是上下两屏（横折痕）→ 上半看画面、下半是控制台
+    ///
+    /// 判据来自 `GeometryProxy.reservedRegions(kind: .division)`：
+    /// 横带中心落在容器 25%–75% 之间才算半折（贴顶/贴底的横带是状态栏或
+    /// 手势条，不是折痕）。这一支必须排在 `duoExpanded` 之前 ——
+    /// 半折时 size class 仍报 regular，若先走 `duoExpanded` 会被当成
+    /// 「摊开竖持」，画面铺满整屏而控制台整个消失。
+    ///
+    /// 它不是横屏：铰链转了 90°，但用户是**竖着拿**的（帐篷立起来），
+    /// 所以 `isLandscape` 仍为 false —— 与 `fullBleed` 同类。
+    case halfFold
+
+    /// 只有 split 是横向双列。fullBleed / halfFold 都不是横屏，不要按横屏排版。
     var isLandscape: Bool { self == .split }
 
     var logName: String {
@@ -428,6 +444,7 @@ enum OneSkinShape: Equatable {
         case .column:    return "column/竖持手机·折叠"
         case .split:     return "split/展开横屏·手机横持"
         case .fullBleed: return "fullBleed/展开宽屏·竖持"
+        case .halfFold:  return "halfFold/半折·书本帐篷"
         }
     }
 }
@@ -634,6 +651,16 @@ struct OneSkinStage: View {
     var lines: [String] = []
     /// 当前线路名。选集卡与「线路」chip 都按它过滤。
     var activeLine: String = ""
+    /// 半折时**上半个屏**占整高的比例，跟随折痕真实位置（缺省正中央）。
+    ///
+    /// 不写死 0.5 的原因：`FoldGap.HorizontalBand.splitsContainer` 允许折痕
+    /// 落在 25%–75% 之间都算半折，实际设备上帐篷略前倾/书本略后翻都会让
+    /// 折痕偏离正中。硬编码 0.5 会让画面列与下半控制台在折痕处错位。
+    ///
+    /// ⚠️ 位置必须留在**成员列表末尾**：`OneSkinStage` 是逐参数位置的
+    /// struct init（memberwise），中间插一个参数会让 VideoDetailView 的
+    /// 整个调用点参数错位（实测报「extra arguments at positions #25/#26/…」）。
+    var halfFoldSplitRatio: CGFloat = 0.5
     /// 每条线路的测速样本（线路名 → 该线首集的播放地址与请求头）。
     ///
     /// 只有拿到**每条线路自己的地址**才谈得上「多线路分别测延迟」：
@@ -1020,6 +1047,23 @@ struct OneSkinStage: View {
         .onChange(of: shape) { _, new in
             oneSkinLog("SHAPE -> \(new.logName)")
         }
+        // ★ 屏幕尺寸变了也要重算冻结盒。
+        //
+        // `frozenBox` 原来只在 `onAppear` 与 `onChange(of: shape)` 时重算。
+        // 但**形态可以不变、可用空间却变了**：Duo 内屏进 Split View 时宽度从 951
+        // 变成约 475，而 size class 仍是 regular×regular、`duoExpanded` 仍 true、
+        // `oneSkinShape` 仍是 `.split` —— `shape` 一个字都没变 → box 停在 951×669，
+        // 三栏按 951 分、铺到 475 上，右侧被推出屏幕。PiP 压短同理。
+        //
+        // 用**屏幕实际尺寸**（静态值、不受旋转动画影响）当触发源；
+        // 只有变化超过阈值才重算，避免亚点抖动引起整页重排。
+        .onChange(of: OneSkin.fixedScreenSize()) { old, new in
+            // 只记录尺寸变化，用于诊断 Split View / PiP 是否真的改了可用空间。
+            // `frozenBox` 的重算仍走上面的 `onChange(of: shape)` —— 静态工厂
+            // `OneSkin.frozenBox(forLandscape:)` 已不在当前版本，不在此另造一份。
+            guard OneSkinStageSize.isLayoutChange(from: old, to: new) else { return }
+            oneSkinLog("SCREEN -> \(Int(new.width))x\(Int(new.height))")
+        }
     }
 
     /// 画面之上的控件层：顶部条 + 底部控制条。
@@ -1180,6 +1224,36 @@ struct OneSkinStage: View {
                 pictureColumn(box, landscape: landscapeNow, fullScreen: true, fitMode: fitMode, playerAspect: aspectRatio)
             } else if folded {
                 pictureColumn(box, landscape: landscapeNow, fitMode: fitMode, playerAspect: aspectRatio)
+            } else if effectiveShape == .halfFold {
+                // ★ 半折（书本 / 帐篷）：折痕在**中部**，上下各半屏。
+                //
+                // 与 fullBleed 的关键差别：这里不是「画面在上、详情在下」的
+                // 可滚动抽屉，而是**两个物理半屏** —— 上半只看画面，下半是控制台。
+                // 用户把机器立在桌上（帐篷）或合到一半（书本），
+                // 上半屏朝自己看片、下半屏当操作台。
+                //
+                // 所以下半不是 `detailColumn`（那是可滚动的详情/选集，
+                // 半折时人手碰不到折叠面以下的内容）；改用专门的
+                // `HalfFoldConsoleView`：画面缩略 + 进度 + 播放键，
+                // 全部落在**下半屏的可见区域**内。
+                //
+                // 上界用折痕的真实位置，不写死 0.5：模拟器与实际设备上
+                // 折痕并不总在正中央（`splitsContainer` 允许 25%–75%）。
+                let splitRatio = halfFoldSplitRatio
+                let topH = max(box.height * splitRatio, 1)
+                let bottomH = max(box.height - topH, 1)
+                VStack(alignment: .center, spacing: 0) {
+                    pictureColumn(CGSize(width: box.width, height: topH),
+                                  landscape: false, edgeToEdge: true,
+                                  fitMode: fitMode, playerAspect: aspectRatio)
+                        .frame(width: box.width, height: topH)
+                    HalfFoldConsoleView(session: session,
+                                        cover: posterImage,
+                                        title: current?.name ?? video.name,
+                                        height: bottomH,
+                                        onSeek: onSeekTo)
+                        .frame(width: box.width, height: bottomH)
+                }
             } else if effectiveShape == .fullBleed {
                 // ★ 展开宽屏（Duo 摊开 + 竖持）—— 与展开横屏**明确分叉**。
                 //
@@ -1189,7 +1263,10 @@ struct OneSkinStage: View {
                 // 上半屏画面全出血（窗口铺满整宽、无 2.36% 内缩），
                 // 下半屏是详情 / 选集抽屉。几何仍由 OneSkinWindowGeometry 给，
                 // 控件层跟着同一个窗口坐标走，不另起一套绝对坐标。
-                let picH = box.height * 0.56
+                // 画面列高度按**片源比例**优先，不再固定 0.56·H。
+                // 竖片按宽算会很高，仍由 0.56 上限压住 —— 既不留无谓黑边，
+                // 也不会让竖片把详情区挤没。
+                let picH = bleedingPictureHeight(box, aspect: aspectRatio, lower: 0.28, upper: 0.56)
                 let detailH = max(box.height - picH, 1)
                 VStack(alignment: .center, spacing: 0) {
                     pictureColumn(CGSize(width: box.width, height: picH),
@@ -1281,16 +1358,18 @@ struct OneSkinStage: View {
                     ? max(min(box.width * OneSkinWindowGeometry.Metrics.columnLeft - box.width * 0.10,
                               box.width * OneSkinWindowGeometry.Metrics.columnLeft), 240)
                     : max(box.width - box.width * 0.10, 200)
+                // 底栏按钮热区的**半高**。旧实现写死 13（`hit = 26` 时代），
+                // 而 `ChromeMetrics.hit = min(52, max(44, glyph*1.8))` —— **下限 44**、半高 22。
+                // 按 13 算会让胶囊条压进底栏热区。
+                let barHitHalf: CGFloat = 22
                 let barBottom = effectiveShape == .fullBleed
-                    // 展开宽屏：胶囊条必须让开**播放器自己的底栏**。
-                    //
-                    // 画面列占 0.56·H，播放器的底栏（时间码 / 进度条 / 全屏键）落在
-                    // 列高 0.928 处、热区半高约 13，也就是 0.56·H×0.928 − 13 的上沿。
-                    // 原来写的是 `0.44·H + 8`（= 951 高时距底 434，即画面下沿以上 15pt），
-                    // 实测（Duo 内屏 669×951）正好把圆钮压在左下角「0:14」上，
-                    // 两个控件抢同一块像素 —— 截图逐像素量过，不是估的。
-                    // 现在按播放器底栏的实际位置反推：让圆钮上沿落在底栏上方 8pt。
-                    ? max(box.height - (box.height * 0.56 * 0.928 - 13 - 8), 8)
+                    // 展开宽屏：胶囊条必须让开**播放器自己的底栏**（时间码/进度条/全屏键，
+                    // 落在列高 0.928 处）。画面多高、胶囊条就贴多高 —— 两者共用
+                    // `bleedingPictureHeight`，不再一个按片源比例、一个按固定 0.56。
+                    ? {
+                        let picH = bleedingPictureHeight(box, aspect: aspectRatio, lower: 0.28, upper: 0.56)
+                        return max(box.height - (picH * 0.928 - barHitHalf - 8), 8)
+                    }()
                     : landscapeNow
                         ? box.height * (1 - 0.868)
                         : max(box.height - pictureHeightOf(box, landscape: false) - 6, 8)
@@ -1353,6 +1432,23 @@ struct OneSkinStage: View {
     ///
     /// 现在留白比例直接乘 `size.height`（= 已冻结的 `frozenBox` 高度）：
     /// box 只在 onAppear / 形态切换时重算，所以这个值也跟着离散、不抖。
+    /// 「全出血」形态里画面列的高度 —— **唯一来源**。
+    ///
+    /// 画面列高度算在 `stage` 的 `fullBleed` 分支里，而**控制栏胶囊条的底距**
+    /// 在 `stage` 外层 `.oneSkinOverlayOnce` 里另算一份。两份各写一个公式必然脱节：
+    /// 画面高度按**片源比例**算（`min(max(宽/片源比, 下限), 上限)`），
+    /// 而胶囊条若仍按固定的 `0.56·H` 反推，16:9 片源在 669×951 上就差 **145pt**
+    /// （画面列实际 376.3，胶囊条却按 532.6 算，下沿低 145pt 扎进详情区）。
+    /// 竖片恰好撞上限所以看不出来 —— 这就是它长期漏检的原因。
+    private func bleedingPictureHeight(_ size: CGSize,
+                                       aspect: CGFloat,
+                                       lower: CGFloat,
+                                       upper: CGFloat) -> CGFloat {
+        let rawAspect = (aspect.isFinite && aspect > 0.2 && aspect < 6) ? aspect : 16.0 / 9.0
+        let fittedH = size.width / rawAspect
+        return min(max(fittedH, size.height * lower), size.height * upper)
+    }
+
     private func pictureHeightOf(_ size: CGSize, landscape: Bool) -> CGFloat {
         guard !landscape else {
             // 横屏双列时画面列就是整列高，不用切
@@ -1396,7 +1492,11 @@ struct OneSkinStage: View {
                 channel: channel,
                 pip: pip,
                 tracks: tracks,
-                layout: PlayerControlsLayout(stored: controlsOrder),
+                // 控件布局档位必须按**当前形态**取，不能直接用用户手排的原始串：
+                // 同一份 `controlsOrder` 在四形态下要落到不同档位
+                //（比如 split 走 sideways、halfFold 走 folded 紧凑档）。
+                skinShape: shapeNow,
+                layout: PlayerControlsLayout.current(forSkinShape: shapeNow, width: colW),
                 openEpisodes: onEpisodes,
                 miniPlayer: onMiniPlayer,
                 toggleFullScreen: onFullScreen,
