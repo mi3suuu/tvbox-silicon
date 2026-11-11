@@ -57,7 +57,7 @@ struct ResourceRankingView: View {
             } footer: {
                 // No header: the page's own title already says what this is, and a second copy an
                 // inch below it is noise.
-                Text(L10n.text("Attributes are applied top to bottom. Drag to reorder; swipe to stop using one. The speed test measures resolution only, so ordering by bitrate, file size or colour range does not change which source comes first yet."))
+                Text(L10n.text("Attributes are applied top to bottom. Drag to reorder; swipe to stop using one. The speed test reads all four: resolution, bitrate and colour range from the stream's own playlist, and file size from the server's byte range. File size is blank for segmented streams, which never report a total."))
             }
 
             Section {

@@ -26,13 +26,18 @@ public struct ResourceRanking: Codable, Hashable, Sendable {
         public enum Attribute: String, Codable, Sendable, CaseIterable {
             case resolution, bitrate, fileSize, colourRange
 
-            /// Whether the source speed test can supply this attribute at all.
+            /// 探针能否提供这一项。
             ///
-            /// It measures what a source's newest video declares (its height) and how fast the host
-            /// serves bytes. Bitrate, file size and HDR belong to one *file*, and a source is not a
-            /// file: the sweep never reads them, so ordering sources by them changes nothing. The
-            /// settings page says so instead of offering three switches that do nothing.
-            public var speedTestProvides: Bool { self == .resolution }
+            /// 四项现在**全部可采**（都从头 8 KB 的 m3u8 主列表或响应头里读）：
+            ///   · `resolution` ← `RESOLUTION=` 或文件名
+            ///   · `bitrate`    ← `BANDWIDTH=` / `AVERAGE-BANDWIDTH=`（bit/s → kbps）
+            ///   · `fileSize`   ← `Content-Range: bytes 0-N/TOTAL`（分片流拿不到）
+            ///   · `colourRange`← `VIDEO-RANGE=SDR|HLG|PQ`
+            ///
+            /// ⛔ 之前的实现是 `self == .resolution`，理由是「源不是文件，扫不出码率/大小/HDR」。
+            /// 那个理由只对**源级**扫描成立（每源只抓最新一部的一条线）；
+            /// 一旦探针改读 m3u8 主列表，这三项就都在同一段头里。
+            public var speedTestProvides: Bool { true }
         }
         public var attribute: Attribute
         /// True when larger is better (resolution, bitrate, HDR). False when smaller is better.
@@ -91,14 +96,27 @@ public struct ResourceRanking: Codable, Hashable, Sendable {
         }
 
         /// Builds from a probe result, so the two never drift apart.
+        ///
+        /// ⛔ 原来这里是 `bitrateBitsPerSecond = nil` 硬写、另两项取调用方默认 nil。
+        ///    也就是说：`speedTestProvides` 允许四项排序之后，**唯一的生产调用点**
+        ///    （`Store+SourceAdmin` 的 `Candidate(reading)`）拿到的三个字段全是 nil，
+        ///    `sort` 逐键 `continue` → 排序效果与「只按分辨率」完全一样。
+        ///    设置页于是出现三个「能选、但选了没变化」的开关 ——
+        ///    与修复前那三个空开关是同一个病，只是从「没数据」变成了「有数据但没人读」。
+        ///
+        /// 现在三项全部从探针真实字段取：
+        ///   · 码率 ← `declaredBitrateKbps`（源自己声明的峰值，kbps → bit/s）
+        ///   · 文件大小 ← `fileSizeBytes`（`Content-Range` 总长）
+        ///   · HDR ← `colourRange == "HLG" || "PQ"`
+        /// 参数仍保留，供「调用方有更准确数字」时覆盖。
         public init(_ probe: SourceProbeResult, fileSizeBytes: Int64? = nil, isHDR: Bool? = nil) {
             self.resolutionHeight = probe.resolutionHeight
-            // The probe measures throughput, not the file's own bitrate. Using it as a stand-in
-            // would rank a fast server above a high-bitrate file, which is the opposite of the
-            // question being asked — so leave it nil unless the caller knows the real figure.
-            self.bitrateBitsPerSecond = nil
-            self.fileSizeBytes = fileSizeBytes
-            self.isHDR = isHDR
+            // 用**声明码率**，不是实测吞吐 —— 后者是「这条线现在能跑多快」，
+            // 前者才是「这路流本身需要多少」。用吞吐冒充码率会把快服务器排在
+            // 高码率文件前面，正好与要回答的问题相反。
+            self.bitrateBitsPerSecond = probe.declaredBitrateKbps.map { $0 * 1_000 }
+            self.fileSizeBytes = fileSizeBytes ?? probe.fileSizeBytes.map(Int64.init)
+            self.isHDR = isHDR ?? probe.colourRange.map { $0 == "HLG" || $0 == "PQ" }
         }
 
         func value(for attribute: Key.Attribute) -> Double? {
