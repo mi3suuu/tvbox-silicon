@@ -215,6 +215,17 @@ enum OneSkinPalette {
 /// 日志里只会出现 `[webcast]` 那类 NSLog 行（实测：埋了 7 个 print，
 /// --console 一行都没收到）。也不能用 `NSLog`：本项目全局禁用了可变参数版本。
 /// stderr 是唯一稳定被 console 收走的通道。
+/// body 重算探针的计数器。放文件级是为了不引入新的 @State（那本身会变成重算源）。
+///
+/// 单看「body 被调用多少次」无法区分「用户操作触发」与「自反馈环」；
+/// 带序号与时间戳之后，相邻两次的 dt 直接读出环的速度：
+///   dt ≈ 16 ms  → 每帧一次 = 自反馈环
+///   dt 很大/为负 → 离散事件（用户点击、形态切换）
+enum ROOTRecomputeProbe {
+    nonisolated(unsafe) static var n = 0
+    nonisolated(unsafe) static var last: TimeInterval = 0
+}
+
 @inline(__always)
 func oneSkinLog(_ message: @autoclosure () -> String) {
     #if DEBUG
@@ -845,7 +856,15 @@ struct OneSkinStage: View {
         let forceLandscape = !forcePortrait && UserDefaults.standard.bool(forKey: "qaOneSkinLandscape")
         if forcePortrait { return .column }
         if forceLandscape { return .split }
-        return shapeNow
+        // ★ 直接读**传入参数** `shape`，不读镜像出来的 `shapeNow`。
+        //
+        // `shapeNow` 是 `onChange(of: shape)` 里写进来的 @State，读它意味着
+        // 「外部已变 → 先写 State → 下一次重排才生效」，**中间必然有一帧用旧形态排版**。
+        // 用户看到的「旋转后控件滞后一拍再跳过去」就是这个：几何已经承诺了新尺寸，
+        // 版面却还按旧形态排。
+        // `shape` 是 `let` 参数，随父视图传入即刻可见，没有这个时间差。
+        // `shapeNow` 只用于 QA 循环等必须覆盖外部值的场景（由 effectiveShape 之前的分支处理）。
+        return shape
     }
     /// 是否走横向双列。fullBleed（展开宽屏）是**竖持**，必须返回 false。
     private var stageIsLandscape: Bool { effectiveShape.isLandscape }
@@ -910,6 +929,18 @@ struct OneSkinStage: View {
             // 局部坐标空间」—— 它跟着父容器走，父容器若是横的，它就是横的。
             // 因此直接用 proxy.size，只做一次「谁是可视区」的安全夹取。
             let screen = OneSkin.fixedScreenSize()
+            #if DEBUG
+            // 一次性打齐所有几何来源，定位 294 是谁给的（只打前 3 帧，避免刷屏）。
+            // ⛔ 必须写成 `let _ = { … }()` 而不是裸 `if` ——
+            //    `ViewBuilder` 会把语句级 `if` 当成**条件视图**，返回 `()`
+            //    就要报 "type '()' cannot conform to 'View'"（实测踩过）。
+            let _ = {
+                guard ROOTRecomputeProbe.n <= 3 else { return }
+                let wp = (UIApplication.shared.appWindowScene?.windows.first?.bounds.size) ?? .zero
+                let sc = (UIApplication.shared.appWindowScene?.screen.bounds.size) ?? .zero
+                oneSkinLog("GEO proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) win0=\(Int(wp.width))x\(Int(wp.height)) scr=\(Int(sc.width))x\(Int(sc.height)) safe=\(Int(proxy.safeAreaInsets.top)),\(Int(proxy.safeAreaInsets.bottom))")
+            }()
+            #endif
             // ⛔ 伪全屏修复：`availableSize` 的短边上限缩放是给**双列态**防
             // 侧栏把内容区撑大用的（951×669 那个坑）。但全屏态侧栏已经
             // `.persistentSystemOverlays(.hidden)` 隐藏、proxy 本应就是真实可视区，
@@ -926,7 +957,16 @@ struct OneSkinStage: View {
             // 而且它是「只在稳定后提交」，一旦某一帧被判成稳定、后续又变了，
             // 几何就永久卡在旧值 —— 全屏点不动也是它连带的。
             // 真正的正解是：**几何只由离散形态决定，不依赖连续尺寸**（见 shape 的说明）。
-            let _ = oneSkinLog("ROOT proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow)")
+            // ★ 重算频率探针：带单调递增序号 + 毫秒时间戳。
+            // 单看 body 被调用次数无法区分「用户操作触发」与「自反馈环」；
+            // 序号间隔（dt）能直接读出环的速度：dt≈16ms = 每帧一次 = 环。
+            let _ = {
+                ROOTRecomputeProbe.n += 1
+                let now = Date().timeIntervalSince1970
+                let dt = ROOTRecomputeProbe.last > 0 ? Int((now - ROOTRecomputeProbe.last) * 1000) : -1
+                ROOTRecomputeProbe.last = now
+                oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) shape=\(shapeNow.logName) folded=\(foldedNow) portrait=\(portraitNow)")
+            }()
             // ★ 整页底色必须**单独一层、不跟着内容内缩**。
             //
             // `stage` 内部是 `Group`，而 Group 上的修改器是**逐个子视图**生效的：
@@ -964,6 +1004,19 @@ struct OneSkinStage: View {
             OneSkinBackdropLayer(image: posterImage).ignoresSafeArea()
         )
         .foregroundStyle(OneSkinPalette.primary)
+        // ★ 形态切换的**视觉**过渡。
+        //
+        // 几何本身是离散的（`frozenBox` 一步到位，不做插值 —— 插值会产生
+        // 「box 是新尺寸、landscapeNow 还是旧形态」的中间帧，那正是「推移」的来源）。
+        // 但**离散 ≠ 硬跳**：用户看到的是控件瞬间换位，观感上是「滞后一拍再猛跳」。
+        //
+        // 这里把动画加在**渲染层**而不是几何层：
+        //   · `frozenBox` / `effectiveShape` 立即变成终值（无中间态、无环）
+        //   · 屏幕上的位置由 SwiftUI 的隐式动画补间（smooth 曲线，0.28s）
+        // 于是既有确定的终点，又有顺滑的过渡。
+        // 只对 `.animation` 生效，不参与布局计算，因此不会反向影响 proxy。
+        .animation(.smooth(duration: 0.28), value: effectiveShape)
+        .animation(.smooth(duration: 0.28), value: frozenBox)
         .oneSkinStatusBarHidden()
         .task(id: shown.poster) { await refreshBackdrop() }
         // 片源比例不再轮询：窗口是固定版式比例，画面在窗口内 letterbox。
@@ -1027,16 +1080,19 @@ struct OneSkinStage: View {
             withAnimation(.smooth(duration: 0.28)) { fullScreenNow = new }
         }
         .onChange(of: shape) { _, new in
-            // 旋转/折叠后调用方改了 shape 参数：泛型视图不保证重算 body，
-            // 必须镜像进 @State 才会驱动 stage 重建（用户报的「旋转后 UI 漂移、
-            // 重启才生效」正是布局停在旧形态上）。
-            guard shapeNow != new else { return }
-            // ⛔ 不能用 withAnimation：shapeNow 走动画会停在 column↔split 中间态，
-            // 而 frozenBox 同步一步到位 —— 两者在动画期间不同步，box 是新尺寸、
-            // landscapeNow 还是旧形态，控件按错形态排布 → 「推移」复发。
-            // 形态是离散枚举，本该一步到位，不做过渡。
+            // 旋转/折叠后调用方改了 shape 参数。
+            //
+            // ⛔ 这里只更新 `shapeNow`（镜像）与 `frozenBox`（冻结屏幕盒），
+            //    **不参与 `effectiveShape` 的判定** —— 后者已改为直接读 `shape`，
+            //    见 `effectiveShape` 里的说明。
+            //
+            // 两个 @State 写在一起，SwiftUI 会合并成一次事务，不会出现
+            // 「形态新的、尺寸旧的」中间帧。
+            //
+            // 形态是离散枚举，几何一步到位、不做插值；**视觉上的平滑由外层
+            // 的 `.animation` 承担**（见 body 上的 `oneSkinTransition`），
+            // 这样既有确定的终点，又不会在中间态停留。
             shapeNow = new
-            // 形态变了才重算冻结盒（离散事件，非动画中间帧，现算安全）。
             let raw = OneSkin.fixedScreenSize()
             let land = CGSize(width: max(raw.width, raw.height), height: min(raw.width, raw.height))
             let port = CGSize(width: min(raw.width, raw.height), height: max(raw.width, raw.height))
@@ -1169,7 +1225,49 @@ struct OneSkinStage: View {
         // 不能每帧由 screen.bounds 现算：旋转动画里 screen.bounds 连续变，
         // box 每帧变 = 「横竖屏切换控件疯狂推移」复发（日志铁证见 frozenBox 注释）。
         // 首帧兜底：frozenBox 尚未初始化（.zero）时按当前形态现算一次。
-        let box: CGSize = {
+        // ★ 布局基准盒 = 「冻结的屏幕尺寸」与「系统实际分配给本视图的空间」取交集。
+        //
+        // ⛔ 这是一个自反馈环的修复（实测日志铁证）：
+        //   stage 内部所有子视图都 `.frame(width: box.width, height: box.height)`，
+        //   而 box 原来**只**来自 frozenBox（= 屏幕 669×951）。但 stage 被放在
+        //   `GeometryReader { proxy }` 里，proxy 的高度是**父容器分给它的**，
+        //   实测只有 294（屏幕 669）。于是：
+        //     内容钉死 951 高 → 溢出容器 → SwiftUI 重新协商 → proxy 缩小 → 再排 → …
+        //   日志里 proxy.width 逐帧单调收缩、从不重复：
+        //     978→964→953→…→722（每帧约 11–13pt，dt 28–40ms ≈ 每帧一次）
+        //   这就是用户报的「控件一直在推移」。
+        //
+        // 现在把容器空间纳入上限：内容永远不会高于/宽于系统给的空间，
+        // 容器因而不再需要重新协商，环断开。
+        // 冻结盒仍然决定**版式基准**（比例、列宽），只是不能超出容器。
+        // ★★ 布局基准 = **容器**，不是屏幕。
+        //
+        // One 1.7.1 原版的真实结构（MachOSwiftSection 从 IPA 提取，
+        // 见 Docs/duo/evidence-2026-11-11/One-1.7.1.interface.swift）：
+        //
+        //   struct VideoDetailPage {
+        //       var _wide: One.LargeCanvas                    // 只读 size class
+        //       var __pageSize: SwiftUI.State<CGSize>         // 一次写入
+        //       var __division: SwiftUI.State<CGRect?>
+        //   }
+        //   struct LargeCanvas {
+        //       var _horizontal: Environment<UserInterfaceSizeClass?>
+        //       var _vertical:   Environment<UserInterfaceSizeClass?>
+        //   }
+        //
+        // **原版没有任何逐帧几何依赖**：宽屏看 size class，页面尺寸存 State。
+        // 我们是反过来的 —— 14 个 GeometryReader + 每帧 proxy.size 驱动布局，
+        // 而连续量驱动布局必然自反馈：
+        //   内容比容器高 → 容器重分配 → proxy 变小 → 再排 → …
+        // 日志铁证（Fig，dt=28–40ms 每帧）：
+        //   proxy.width 1210→1196→…→725（36 帧连续 -14）→ 跳回 1268 → 再收缩
+        //   proxy.height 恒 294，而 screen 669；669-294=375 无法用任何安全区解释
+        //   ⇒ 294 是 GeometryReader 在高度未定的父级里用「子视图理想高度」反推的
+        //
+        // 修法：`size`（系统真正分配的空间）是**唯一**布局基准。
+        // `frozenBox` 只用来决定**比例意图**（谁宽谁高），不参与像素计算。
+        // 内容永不超出 size ⇒ 容器无需重协商 ⇒ 环断开。
+        let screenBox: CGSize = {
             if frozenBox.width > 1, frozenBox.height > 1 { return frozenBox }
             let raw = OneSkin.fixedScreenSize()
             let land = CGSize(width: max(raw.width, raw.height), height: min(raw.width, raw.height))
@@ -1178,8 +1276,10 @@ struct OneSkinStage: View {
                 : forceLandscape ? land
                 : (landscapeNow ? land : port)
         }()
+        // ⛔ size 无效时（首帧 / 尚未布局）才退回 screenBox；绝不反向。
+        let box: CGSize = (size.width > 1 && size.height > 1) ? size : screenBox
         #if DEBUG
-        let _ = oneSkinLog("stage box=\(Int(box.width))x\(Int(box.height)) shape=\(effectiveShape.logName) land=\(landscapeNow) frozen=\(Int(frozenBox.width))x\(Int(frozenBox.height))")
+        let _ = oneSkinLog("stage size=\(Int(size.width))x\(Int(size.height)) box=\(Int(box.width))x\(Int(box.height)) shape=\(effectiveShape.logName) land=\(landscapeNow) frozen=\(Int(frozenBox.width))x\(Int(frozenBox.height))")
         #endif
         // One 的真实实现（Ghidra 解析 VideoDetailPage.sub_1001d90f4 伪代码）：
         //   if (bool == 0) { HorizontalAlignment.center; HStackLayout }
@@ -1398,6 +1498,20 @@ struct OneSkinStage: View {
         // 只为拿一个 margin 就把整个 StageLayout（7 字段 + 40 行 makeLayout）
         // 重建一遍，纯浪费。margin 的定义就是 max(10, 列宽 × 0.0147)。
         .padding(.bottom, fullScreenNow ? 0 : (landscapeNow ? OneSkinWindowGeometry.margin(forColumnWidth: box.width) : 28))
+        // ★★ 把整页钉在**容器**上 —— 这是断环的最后一步。
+        //
+        // 上面所有子视图都用 `.frame(width: box.width, height: box.height)`，
+        // 而 `box` 现在 = `size`（系统分配的空间）。但**这条修饰符链本身**
+        // 没有告诉 SwiftUI「我占多大」，于是它按内容理想尺寸上报。
+        // 内容高度不受限 → 父级 `GeometryReader` 拿到的 proxy 就是内容高度
+        // （实测 294，而屏幕 669）→ 容器重分配 → 再排 → 环。
+        //
+        // 显式声明「我的尺寸 = 容器尺寸」之后，上报值与容器一致，
+        // 父级不再需要重协商，proxy 稳定，环断开。
+        //
+        // `max(1, …)`：`size` 在首帧可能为 0，`.frame(width: 0)` 会让整页不可见；
+        // 给 1pt 兜底，下一帧就有真值。
+        .frame(width: max(1, box.width), height: max(1, box.height), alignment: .topLeading)
         // 顶部条带的补色放在 `body` 里（stage 外面）—— 这里的 `.background`
         // 会跟着 Group 逐个子视图生效，仍旧只填到内缩后的范围，条带照样露底色。
     }

@@ -75,6 +75,25 @@ public actor EmbeddedNodeHost {
         return try JSONDecoder().decode([String: JSONValue].self, from: Data(text.utf8))
     }
 
+    /// A WeBox plugin's `ctx.compute.run`: its own code plus the binaries it instantiates, with Node's
+    /// WebAssembly. `runner` is the bundled compute.mjs, so the Mac host and this one share one implementation.
+    /// Answers `{"result": ...}` or `{"error": "..."}` as text, like the Mac host's node run prints.
+    public func compute(_ request: Data, runner: String) async throws -> String {
+        guard Self.available else { throw TVError.unsupported(L10n.text("This device can't run CatPawOpen sources.")) }
+        var body = Data(#"{"compute":"#.utf8) + request + Data(#","runner":"#.utf8)
+        body += try JSONEncoder().encode(runner)
+        body += Data("}".utf8)
+        let control = try await start()
+        let answer: Data
+        do { answer = try await send(body, to: control) }
+        catch let error as URLError where error.code == .cannotConnectToHost || error.code == .networkConnectionLost {
+            answer = try await send(body, to: try await relisten(after: control))
+        }
+        let envelope = try? JSONDecoder().decode([String: JSONValue].self, from: answer)
+        if let text = envelope?["result"]?.string { return text }
+        throw TVError.unsupported(envelope?["error"]?.string ?? L10n.text("The plugin returned no content. Try another source."))
+    }
+
     /// A bundle's media proxy address at the port the bundle listens on now. iOS takes back a suspended app's listening
     /// sockets and Node then listens again on new ports, so an episode that was playing when the screen went off can't
     /// reach its address any more (#485). Nil when the address is still current, or Node can't say.

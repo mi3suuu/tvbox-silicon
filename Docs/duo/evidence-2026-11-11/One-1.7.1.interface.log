@@ -1,0 +1,12 @@
+[14:47:00] [INFO] Extracted 284 Swift types
+[14:47:00] [INFO] Extracted 478 protocol conformances
+[14:47:00] [INFO] Extracted 211 associated types
+[14:47:00] [INFO] Extracted 0 symbol index
+[14:47:00] [INFO] Types: 270 successful, 0 failed, 14 C-imported skipped, 38 nested, 0 in extensions
+[14:47:00] [INFO] Protocols: 0 successful, 0 failed
+[14:47:00] [INFO] Conformances: 478 extensions, 0 failed
+[14:47:00] [INFO] Extensions: 0 type, 0 protocol, 0 typealias, 0 failed
+[14:47:00] [SUCCESS] Indexing completed
+[14:47:00] [SUCCESS] Preparation completed
+[14:47:00] [INFO] Found 0 modules to import
+[14:47:00] [SUCCESS] Preparation completed
