@@ -1,0 +1,62 @@
+{
+  "symptom": "swift test 全量 1269 用例中有 11 个 issue 失败，落在 4 个套件：ReleaseFeedTests(altStoreSourceListsReleasedIPAsNewestFirst 3 + publishedFeedIsValidAndTranslated 1)、OneWatchPageTests(backdropUsesTheConstantsOneShipsWith 2)、OneSkinWindowGeometryTests(thePortraitWindowLeavesRoomForTheControlBar 1 + theWindowGeometryIsIndependentOfSourceAspect 1)、BitmapSubtitleTests(remuxedMatroskaDecodesPGSAndVobSub 3)。期望：查清每个失败到底在守什么、失的是什么、是否值得修",
+  "created": "2026-11-12T22:26:26+0800",
+  "hypotheses": [
+    {
+      "id": "H1",
+      "text": "OneWatchPage.topDim/bottomDim：测试钉二进制原值(0.15/0.88)，源码是有意改小(0.10/0.35)并写了真机反推理由——测试是过期的，不是代码错",
+      "dims": [
+        8,
+        10
+      ],
+      "prior": "high",
+      "test": "读 OneWatchPageModel.swift:100-115 的注释与测试 :18-27 的期望值；核对同套其它三常量(maxPixel/scale/coverOpacity)是否通过",
+      "result": "",
+      "verdict": "confirm",
+      "evidence": "同一测试里 maxPixel==48 / scale==1.4 / coverOpacity==0.6 三项**通过**，只有 topDim/bottomDim 两项失败 ⇒ 不是整体环境问题，是这两个值被有意改过。源码 :100-115 写明了原因：若 d=0.88 则底部亮度 22.7 需海报原亮度 L=315>255（物理不可能）、最亮处 110.7 需 L=1537。用户原话「明暗取决于海报，不是硬编码」。⇒ 测试期望的是二进制原值，代码按真机实测改小了，**测试过期**。"
+    },
+    {
+      "id": "H2",
+      "text": "ReleaseFeed：releases.json 最新 build=888/最新版本 1.8.11，而 project.yml CURRENT_PROJECT_VERSION='889'；altstore.json 有 1.8.13/14/15 但 releases.json 里没有这三条",
+      "dims": [
+        2,
+        10
+      ],
+      "prior": "high",
+      "test": "python 读 releases.json 与 altstore.json 做集合比对；grep project.yml 版本号",
+      "result": "",
+      "verdict": "confirm",
+      "evidence": "releases.json: 40 条, 最新 version=1.8.11 build=888；project.yml: CURRENT_PROJECT_VERSION='889' ⇒ builds.first(888) != projectBuild(889)。altstore.json versions=[1.8.15,1.8.14,1.8.13,1.8.11,1.8.9]，而 releases.json 里 1.8.13/14/15 **均不存在** ⇒ 三条 'not an iOS release in releases.json' 失败。⇒ **发布数据没同步**，不是代码错。"
+    },
+    {
+      "id": "H3",
+      "text": "OneSkinWindowGeometry：h=300 时 winY+winH=300.0 > limit 282.51（越界 17.5pt，压住控件条）；932 高时窗口比例 1.604 而非约定 1.819",
+      "dims": [
+        3,
+        8
+      ],
+      "prior": "high",
+      "test": "写临时测试打印 geometry() 真实数值",
+      "result": "",
+      "verdict": "confirm",
+      "evidence": "实测输出：h=300 → winY=27 winH=273 bottom=300.0 limit=282.51 **越界**（容器极矮时窗口没给底部控件条留位）；h=500/700/951 均 OK；932 高 → winW=430 winH=268 ratio=1.6045，期望 1.819±0.02 且 winH(268) < 430/1.819=236.4 为假 ⇒ 两条都**真实**。这是极端输入下的真缺陷（容器比窗口需要还矮时），非测试写错。"
+    },
+    {
+      "id": "H4",
+      "text": "BitmapSubtitle：打出来的 libFFmpeg.a 缺 pgssub/dvdsub 解码器——构建脚本声明了但库是脚本改动之前编译的（库 11-03，脚本 11-09）",
+      "dims": [
+        9,
+        1
+      ],
+      "prior": "high",
+      "test": "nm 查符号 + 阳性对照；比对 mtime",
+      "result": "",
+      "verdict": "confirm",
+      "evidence": "nm libFFmpeg.a：pgssub/dvdsub 符号 0 命中；阳性对照成立（全库 6633 符号、h264/av1 解码器在、字幕 API 5 个）；**全部 _ff_*_decoder 里没有任何字幕解码器**。Scripts/build-apple-ffmpeg.sh:65 明写 SUBTITLE_DECODERS=pgssub,dvdsub；库 mtime=Nov 3 21:05，脚本 mtime=Nov 9 23:41 ⇒ **库早于脚本，没按当前配置重编**。"
+    }
+  ],
+  "reverse": {
+    "expect": "若这四条判决成立，则应分别观察到：①只改测试里的两个常量为 0.10/0.35 后该测试通过、而另三个常量断言全程不动；②把 releases.json 补上 1.8.13/14/15 且 build 改成 889、并与 altstore 对齐后 ReleaseFeed 四条全过；③h=300 的越界只出现在「容器高度 < 窗口最小可行高度」的极端尺寸，正常手机尺寸 430x932 不越界；④重新编译 libFFmpeg.a 后 nm 能查到 _ff_pgssub_decoder / _ff_dvdsub_decoder，且字幕测试不再因缺轨失败",
+    "result": "静态与实测逐条核对：①同套三常量确实全过（48/1.4/0.6），失败只集中在 topDim/bottomDim 两项 ⇒ 定位精确；②releases.json 最新 1.8.11 而 altstore 有 1.8.15，差集正好是失败的三条 ⇒ 一一对应；③h=300 越界、h=500/700/951 全 OK ⇒ 只在极端矮容器触发，与「正常手机不越界」吻合；④构建脚本已声明 SUBTITLE_DECODERS=pgssub,dvdsub，而库 mtime 早于脚本 6 天、符号 0 命中且全库无任何字幕解码器 ⇒ 「重编即修复」这一预测与证据一致。四条均未被反证。"
+  }
+}
