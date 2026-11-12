@@ -268,11 +268,27 @@ STATUS=${PIPESTATUS[0]}
 set -e
 
 RESULT=$(ls -1dt "$OUT"/DerivedData/Logs/Test/*.xcresult 2>/dev/null | head -1)
+# ⛔ `cp` 那一步**不许**再挂 `|| true`。
+#
+#   复制失败却静默继续，下游门禁只能看到「目录恰好存在」（旧判据还是 `[ -d ]`），
+#   于是证据链出现空洞：截图/结果其实没落地，门禁照样放行。
+#   两个错误叠在一起，任一条单独看都不明显 —— 合起来正好把「没证据」伪装成「有证据」。
+#   所以：复制失败直接判红（RESULT_COPY_FAILED=1，末尾统一并入退出码）。
+#
+#   上面 rmtree 那行的 `|| true` 可以留 —— 它只是清理旧产物，清不掉不影响正确性。
+#   另外不用 `rm -rf`：本机的 safe-delete 拦截器会把一次删 60 个文件的递归删除拦下来，
+#   脚本在 set -e 下直接退出 —— 用例明明是绿的，截图却一张没导。
+RESULT_COPY_FAILED=0
 if [[ -n "$RESULT" ]]; then
-    # 不用 `rm -rf`：本机的 safe-delete 拦截器会把一次删 60 个文件的递归删除拦下来，脚本在 set -e 下
-    # 直接退出 —— 用例明明是绿的，截图却一张没导，看上去像「跑完了但没产物」。
     python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)" "$OUT/result.xcresult" 2>/dev/null || true
-    cp -R "$RESULT" "$OUT/result.xcresult" 2>/dev/null || true
+    if ! cp -R "$RESULT" "$OUT/result.xcresult" 2>/dev/null; then
+        echo "复制结果包失败：$RESULT → $OUT/result.xcresult" >&2
+        RESULT_COPY_FAILED=1
+    fi
+else
+    # 一条 xcresult 都没有：xcodebuild 连结果包都没产出，属于严重异常。
+    echo "找不到任何 xcresult（$OUT/DerivedData/Logs/Test/）—— xcodebuild 没有产出结果包。" >&2
+    RESULT_COPY_FAILED=1
 fi
 
 step "导出截图"
@@ -322,6 +338,13 @@ if [[ -d "$OUT/shots" ]]; then
     echo "截图目录 $OUT/shots（$(ls -1 "$OUT"/shots/*.png 2>/dev/null | wc -l | tr -d ' ') 个 png）"
 fi
 echo "完整日志 $OUT/test.log"
+
+# 结果包没复制成功 = 证据链断了，即使用例本身全绿也不能算通过。
+if [[ "${RESULT_COPY_FAILED:-0}" -ne 0 && $STATUS -eq 0 ]]; then
+    echo "" >&2
+    echo "用例本身通过，但结果包没有落地 —— 没有可复核的证据，按失败处理。" >&2
+    STATUS=1
+fi
 
 if [[ $STATUS -ne 0 ]]; then
     echo "" >&2

@@ -88,17 +88,60 @@ fi
 #   B（真探测）：仅在 A 发现候选时执行，且排除 gate.sh / 自身。
 step "门禁 2.5 · 脚本 trap-EXIT 吞退出码自检"
 
+# ── 2.5a 受保护断言清单自校验（F5）───────────────────────────────
+# 为什么要这一关：`UITests/.protected-assertions.txt` 原先只有仓库外的 pre-commit 钩子
+# （~/.dsh/discipline/lint-agent-diff.sh）读它。仓内零消费方 = 换台机器/别人 clone 后
+# 这份清单就是一段没人看的文字 —— **没有读取方的护栏是假护栏**。
+# 所以这里在仓内接上：清单里每一条登记都必须能兑现，否则判红。
+#   格式：<必须存在的字面量>|<文件>|<理由>
+#   判据：① 文件存在时，每条的模式都要能在对应文件里 grep 到；② 登记条数 > 0。
+PROT_LIST="UITests/.protected-assertions.txt"
+if [ ! -f "$PROT_LIST" ]; then
+  fail "缺少 $PROT_LIST —— 受保护断言清单没了，删它等于把该类缺陷从测试里永久删除"
+else
+  PROT_N=0; PROT_BAD=0
+  while IFS='|' read -r pat file reason; do
+    case "$pat" in ''|\#*) continue;; esac
+    pat=$(printf '%s' "$pat" | sed 's/[[:space:]]*$//')
+    file=$(printf '%s' "$file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    PROT_N=$((PROT_N+1))
+    if [ ! -f "$file" ]; then
+      echo "  受保护断言登记指向的文件不存在：$file"; PROT_BAD=$((PROT_BAD+1))
+    elif ! grep -qF "$pat" "$file"; then
+      echo "  受保护断言消失：$file 里找不到「$pat」（理由：$reason）"; PROT_BAD=$((PROT_BAD+1))
+    fi
+  done < "$PROT_LIST"
+  echo "受保护断言：登记 ${PROT_N} 条，失效 ${PROT_BAD} 条"
+  if [ "$PROT_N" -eq 0 ]; then
+    fail "$PROT_LIST 里 0 条登记 —— 空清单等于没有护栏"
+  elif [ "$PROT_BAD" -gt 0 ]; then
+    fail "有 ${PROT_BAD} 条受保护断言失效（见上）"
+  else
+    ok "受保护断言 ${PROT_N} 条全部兑现"
+  fi
+fi
+
+
 # 只看真正的 trap 语句：去掉注释行，避免匹配到文档里举例的写法。
 # 判据：trap '...exit...' EXIT —— 没有 exit 的 trap（如 `trap 'rm -f "$LOCK"' EXIT`）
 # 不可能改变退出码，不存在吞码风险，无需真跑。
-TRAP_EXIT_CANDIDATES=$(grep -rlnE "^[^#]*trap[[:space:]]+['\"][^'\"]*exit[^'\"]*['\"][[:space:]]+EXIT" \
+# 判据（2026-11-13 修正）：只看真正的 trap 语句行，且**不得假设引号种类**。
+#   旧写成 `trap[[:space:]]+['\"][^'\"]*exit[^'\"]*['\"][[:space:]]+EXIT`
+#   —— 这个 `[^'\"]*` 要求「单引号里不许出现双引号」，而真实写法是
+#     `trap 'rc=$?; rm -f "$LOCK"; exit $rc' EXIT`（单引号内含双引号），于是永远匹配不到。
+#   后果：判据恒空，等于把「会吞退出码的写法」永久排除在检测之外 —— 假通过。
+#   正对照发现的：造一个含 exit 的 trap 样本喂给旧规则 → 0 命中（规则坏），
+#   改成下面的宽松形态后 → 命中；不含 exit 的样本仍不命中（区分能力保留）。
+#   教训：「0 命中」必须先用正样本证明规则本身有效，否则分不清「无对象」与「规则坏」。
+TRAP_EXIT_PATTERN='^[[:space:]]*trap[[:space:]]+.*exit.*[[:space:]]+EXIT[[:space:]]*$'
+TRAP_EXIT_CANDIDATES=$(grep -rlnE "$TRAP_EXIT_PATTERN" \
     --include="*.sh" . 2>/dev/null \
   | grep -v "^./build/" \
   | grep -vE "^./tools/qa/(gate|trap-exit-probe)\.sh$" \
   | sort || true)
 
 if [ -z "$TRAP_EXIT_CANDIDATES" ]; then
-  ok "无脚本在 trap 里 exit（静态判据 0 命中，不存在吞退出码的写法）"
+  ok "无脚本在 trap 里 exit（静态判据 0 命中；该判据已用正/负样本双向校验有效）"
 else
   echo "静态判据命中 $(printf '%s\n' "$TRAP_EXIT_CANDIDATES" | wc -l | tr -d ' ') 个候选，交给探针真跑："
   printf '  - %s\n' $TRAP_EXIT_CANDIDATES
@@ -184,15 +227,16 @@ else
     # 底下这几条是判红的**独立依据**：退出码被吞（本仓库 2026-11-13 实测过一次：
     # test-duo-ui.sh 里管道末尾的 `|| true` 把 PIPESTATUS 重置为 0，用例全红也 exit 0）、
     # 或者 runner 半路死掉留下一个空结果包，都只能靠这些产物检查兜住。
-    UI_PASS=$(grep -cE "Test Case .* passed \(" /tmp/gate-ui.log 2>/dev/null || true)
-    UI_FAIL=$(grep -cE "Test Case .* failed \(" /tmp/gate-ui.log 2>/dev/null || true)
-    echo "用例计数：passed=${UI_PASS} failed=${UI_FAIL}"
-    if [ "${UI_FAIL:-0}" -gt 0 ]; then
-      fail "有 ${UI_FAIL} 个用例失败（见上面明细与 evidence 里的 test.log）"
-    fi
-    if [ "${UI_PASS:-0}" -eq 0 ]; then
-      fail "没有任何用例通过 —— 0 passed 说明用例根本没跑起来，不能算绿"
-    fi
+    # ⛔ 文本计数只作参考，**不作判据**。
+    #    实测（同一份产物，同一次运行）：
+    #      grep -cE "Test Case .* failed \("  test.log  →  2
+    #      xcrun xcresulttool ... summary        failedTests →  3
+    #    第三条是 `testContentIsDrawnInCompactCompact() :: Test crashed with signal term.`，
+    #    它在 test.log 里**只有 started 行、没有 failed 行** —— crash 型失败对文本 grep 完全不可见。
+    #    所以下面真正判红绿的是 xcresulttool 读出的机器可读结论，不是这个 grep。
+    UI_PASS_TEXT=$(grep -cE "Test Case .* passed \(" /tmp/gate-ui.log 2>/dev/null || true)
+    UI_FAIL_TEXT=$(grep -cE "Test Case .* failed \(" /tmp/gate-ui.log 2>/dev/null || true)
+    echo "文本计数（仅供参考，含 crash 时会少报）：passed=${UI_PASS_TEXT} failed=${UI_FAIL_TEXT}"
 
     echo ""
     echo "── 可归档证据（评审复核用，路径均为绝对路径）──"
@@ -206,10 +250,42 @@ else
       echo "截图目录 $UI_OUT/shots"
       echo "完整日志 /tmp/gate-ui.log"
     fi
-    if [ -d "$UI_OUT/result.xcresult" ]; then
-      ok "结果包存在：$UI_OUT/result.xcresult"
+    # ⛔ 判据必须是「结果包里的结论」，不是「结果包目录存在」。
+    #
+    #    `[ -d result.xcresult ]` 对**已失败**的结果包同样返回真 —— 目录存在就是存在，
+    #    跟里面是 Passed 还是 Failed 无关。实测：一个 result=Failed / failedTests=3 的包，
+    #    `[ -d ]` 依然 TRUE。这就是「跑崩了但门禁照样过」的那条缝。
+    #
+    #    改读 xcresulttool 的机器可读摘要，要求同时满足：
+    #      · result == "Passed"
+    #      · passedTests > 0        （0 通过 = 用例根本没跑起来）
+    #    读不出 / 解析失败 / result != Passed / passedTests == 0 ——一律判红。
+    XCR="$UI_OUT/result.xcresult"
+    if [ ! -e "$XCR" ]; then
+      fail "没有结果包 $XCR —— 没有产物就不算跑过"
     else
-      fail "没有结果包 $UI_OUT/result.xcresult —— 没有产物就不算跑过"
+      XCR_JSON=$(xcrun xcresulttool get test-results summary --path "$XCR" --format json 2>/dev/null || true)
+      if [ -z "$XCR_JSON" ]; then
+        fail "结果包存在但读不出摘要（xcresulttool 失败或包损坏）：$XCR"
+      else
+        XCR_VERDICT=$(printf '%s' "$XCR_JSON" | python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print('UNREADABLE'); raise SystemExit
+print('%s %s %s' % (d.get('result','?'), d.get('passedTests','?'), d.get('failedTests','?')))" 2>/dev/null || echo "UNREADABLE - -")
+        XCR_RESULT=$(echo "$XCR_VERDICT" | awk '{print $1}')
+        XCR_PASSED=$(echo "$XCR_VERDICT" | awk '{print $2}')
+        XCR_FAILED=$(echo "$XCR_VERDICT" | awk '{print $3}')
+        echo "结果包结论：result=${XCR_RESULT} passed=${XCR_PASSED} failed=${XCR_FAILED}"
+        if [ "$XCR_RESULT" != "Passed" ]; then
+          fail "结果包 result=${XCR_RESULT}（要求 Passed）—— 用例未全绿，门禁不得放行"
+        elif ! printf '%s' "$XCR_PASSED" | grep -qE '^[0-9]+$' || [ "$XCR_PASSED" -le 0 ]; then
+          fail "结果包 passedTests=${XCR_PASSED}（要求 > 0）—— 0 通过说明用例根本没跑起来"
+        else
+          ok "结果包结论 Passed，passed=${XCR_PASSED}：$XCR"
+        fi
+      fi
     fi
   else
     echo "（无 test-duo-ui.sh，跳过）"
