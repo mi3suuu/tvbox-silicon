@@ -50,9 +50,31 @@ fi
 echo "设备 $DEVICE"
 
 step "构建"
-xcodebuild -project TVBox.xcodeproj -scheme TVBox-iOS -destination "id=$DEVICE" \
+# ⛔ 不能只传 `-xcconfig`：那个 xcconfig 会被**所有 target**（含 SPM 的 TVCore）读到，
+# 而 TVCore 不参与打包、不允许指定 provisioning profile —— 直接报
+# `TVCore_TVCore does not support provisioning profiles`。
+# 所以签名相关的三项在这里**按 target 精确覆盖**，xcconfig 只提供团队与 bundle id 的默认值。
+TEAM=$(grep -oE "DEVELOPMENT_TEAM[[:space:]]*=[[:space:]]*[^[:space:]]+" "$XC_CONFIG" | sed -E "s/.*=[[:space:]]*//")
+PROFILE=$(grep -oE "TEST_PROVISIONING_PROFILE[[:space:]]*=[[:space:]]*[^[:space:]]*" "$XC_CONFIG" | sed -E "s/.*=[[:space:]]*//")
+STYLE=$(grep -oE "CODE_SIGN_STYLE[[:space:]]*=[[:space:]]*[^[:space:]]+" "$XC_CONFIG" | sed -E "s/.*=[[:space:]]*//")
+
+# 先试「自动」：Xcode 有账号时它能自己开档，最省事。
+# 失败（本机常见：`No Accounts`）再退回「手动 + 指定 profile」。
+if xcodebuild -project TVBox.xcodeproj -scheme TVBox-iOS -destination "id=$DEVICE" \
     -configuration Debug -xcconfig "$XC_CONFIG" -allowProvisioningUpdates \
-    -derivedDataPath build/DD-duo -quiet build
+    -derivedDataPath build/DD-duo -quiet build 2>/tmp/install-auto.log; then
+    echo "自动签名成功"
+else
+    echo "自动签名不可用（$(grep -oE 'No Accounts|No profiles for[^:]*' /tmp/install-auto.log | head -1)），改用手动 profile：$PROFILE"
+    [[ -z "$PROFILE" ]] && { echo "xcconfig 里没有 TEST_PROVISIONING_PROFILE，无法手动签名" >&2; exit 4; }
+    xcodebuild -project TVBox.xcodeproj -scheme TVBox-iOS -destination "id=$DEVICE" \
+        -configuration Debug -xcconfig "$XC_CONFIG" \
+        -derivedDataPath build/DD-duo -quiet build \
+        DEVELOPMENT_TEAM="$TEAM" \
+        CODE_SIGN_STYLE=Manual \
+        CODE_SIGN_IDENTITY="iPhone Developer" \
+        PROVISIONING_PROFILE_SPECIFIER="$PROFILE"
+fi
 APP="build/DD-duo/Build/Products/Debug-iphoneos/TVBox-iOS.app"
 if [[ ! -d "$APP" ]]; then
     APP=$(ls -dt "$HOME"/Library/Developer/Xcode/DerivedData/TVBox-*/Build/Products/Debug-iphoneos/TVBox-iOS.app 2>/dev/null | head -1)

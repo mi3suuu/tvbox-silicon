@@ -1,5 +1,10 @@
 import http.server, socketserver, json, os, re
-PORT=8899; BASE=f"http://192.168.64.1:{PORT}"
+PORT=8899
+# 模拟器里的 127.0.0.1 是模拟器自己，不是 Mac；而 Mac 的局域网地址随网络变化
+# （实测 192.168.64.1 只在那台 VM 的网桥上成立）。所以让地址可覆盖：
+#   QA_HOST=192.168.124.6 python3 Scripts/qa-fixture/server.py
+# 不传时保持原来的 192.168.64.1，脚本的既有用法不变。
+BASE=f"http://{os.environ.get('QA_HOST', '192.168.64.1')}:{PORT}"
 SUB={"sites":[{"key":"qa","name":"QA Fixture","type":1,"api":f"{BASE}/api","searchable":1,"quickSearch":1},
                 # 24 集 × 2 线路：选集抽屉要能看出分页、筛选与高度档位是否正常，
                 # 单集片源（上面的 `qa`）根本撑不开列表。

@@ -110,7 +110,7 @@ needs_sub() { case "$1" in detail|site-home|channels) return 0 ;; *) return 1 ;;
 step "fixture 服务"
 FIXTURE_PID=""
 if ! curl -s -o /dev/null "http://127.0.0.1:$FIXTURE_PORT/sub.json"; then
-  echo "  起本地 fixture 服务（127.0.0.1:$FIXTURE_PORT）"
+  echo "  本地 fixture 服务（127.0.0.1:${FIXTURE_PORT}）"
   python3 Scripts/qa-fixture/server.py >/tmp/qa-fixture.log 2>&1 &
   FIXTURE_PID=$!
   trap 'kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
