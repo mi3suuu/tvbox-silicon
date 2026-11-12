@@ -107,8 +107,14 @@ else
     PROT_N=$((PROT_N+1))
     if [ ! -f "$file" ]; then
       echo "  受保护断言登记指向的文件不存在：$file"; PROT_BAD=$((PROT_BAD+1))
-    elif ! grep -qF "$pat" "$file"; then
-      echo "  受保护断言消失：$file 里找不到「$pat」（理由：$reason）"; PROT_BAD=$((PROT_BAD+1))
+    # ⛔ 必须**先剔除注释行再匹配**（F7）。
+    #    否则登记项只要在注释里出现就能「兑现」，护住的是词不是断言。
+    #    实测过的假绿：把断言本体里的 "1.8" 改成 "9.9"（= 删掉该检测器）、注释不动，
+    #    不跳注释时 grep 仍命中 → 判绿。跳注释后 → 判「受保护断言消失」。
+    elif ! grep -vE '^[[:space:]]*(///|//|/\*|\*)' "$file" | grep -qF "$pat"; then
+      # ⛔ 全部变量都写成 ${VAR}：裸写 $pat 后面紧跟中文「」（」会被 bash 并进变量名 → unbound。
+      #    这正是本任务一路在修的同类 bug，我自己又犯了一次 —— 实测 gate.sh:115 unbound variable。
+      echo "  受保护断言消失：${file} 的非注释代码里找不到「${pat}」（理由：${reason}）"; PROT_BAD=$((PROT_BAD+1))
     fi
   done < "$PROT_LIST"
   echo "受保护断言：登记 ${PROT_N} 条，失效 ${PROT_BAD} 条"
@@ -133,15 +139,40 @@ fi
 #   正对照发现的：造一个含 exit 的 trap 样本喂给旧规则 → 0 命中（规则坏），
 #   改成下面的宽松形态后 → 命中；不含 exit 的样本仍不命中（区分能力保留）。
 #   教训：「0 命中」必须先用正样本证明规则本身有效，否则分不清「无对象」与「规则坏」。
-TRAP_EXIT_PATTERN='^[[:space:]]*trap[[:space:]]+.*exit.*[[:space:]]+EXIT[[:space:]]*$'
+# 允许用 QA_TRAP_EXIT_PATTERN 覆盖 —— **只为自测判据本身**（见门禁 2.5 的自校验）。
+# 这样「把判据改坏，门禁能不能自己发现」可以用一条命令复现，不必改源码：
+#   QA_TRAP_EXIT_PATTERN='坏正则' bash tools/qa/gate.sh --fast
+TRAP_EXIT_PATTERN="${QA_TRAP_EXIT_PATTERN:-^[[:space:]]*trap[[:space:]]+.*exit.*[[:space:]]+EXIT[[:space:]]*$}"
 TRAP_EXIT_CANDIDATES=$(grep -rlnE "$TRAP_EXIT_PATTERN" \
     --include="*.sh" . 2>/dev/null \
   | grep -v "^./build/" \
   | grep -vE "^./tools/qa/(gate|trap-exit-probe)\.sh$" \
   | sort || true)
 
+# ── F8：判据自校验，**每次跑门禁都真执行** ──
+# 上一版这里只写了一句「该判据已用正/负样本双向校验有效」—— 那句校验是我手工跑过一次，
+# 不在门禁里。后来正则被改坏了（`[^'\"]*` 要求单引号里不许有双引号，而真实写法恰好含），
+# 门禁照样打印那句话 —— **断言式的「已验证」会变成谎话且无人发现**。
+# 所以现在现场造两个样本，让门禁自己证明这条正则此刻真的能区分：
+#   样本A 含 exit 的 trap → 必须命中
+#   样本B 不含 exit 的 trap → 必须不命中
+# 任一不符即判红。输出打印的是**本次实测结果**，不是承诺。
+TRAP_SELFTEST_DIR="$(mktemp -d)"
+printf '#!/bin/bash\ntrap %s EXIT\n' "'rc=\$?; rm -f \"\$LOCK\"; exit \$rc'" > "$TRAP_SELFTEST_DIR/has_exit.sh"
+printf '#!/bin/bash\ntrap %s EXIT\n' "'rm -f /tmp/x.lock'" > "$TRAP_SELFTEST_DIR/no_exit.sh"
+ST_POS=0; ST_NEG=0
+grep -qE "$TRAP_EXIT_PATTERN" "$TRAP_SELFTEST_DIR/has_exit.sh" && ST_POS=1
+grep -qE "$TRAP_EXIT_PATTERN" "$TRAP_SELFTEST_DIR/no_exit.sh" && ST_NEG=1
+python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)" "$TRAP_SELFTEST_DIR" 2>/dev/null || true
+echo "判据自校验（本次实测）：含 exit 样本命中=${ST_POS}（需 1）/ 不含 exit 样本命中=${ST_NEG}（需 0）"
+if [ "$ST_POS" -ne 1 ] || [ "$ST_NEG" -ne 0 ]; then
+  fail "trap-exit 判据失效：正则此刻分不出含/不含 exit 的 trap —— 该判据的一切「0 命中」结论都不可信"
+fi
+
 if [ -z "$TRAP_EXIT_CANDIDATES" ]; then
-  ok "无脚本在 trap 里 exit（静态判据 0 命中；该判据已用正/负样本双向校验有效）"
+  if [ "$ST_POS" -eq 1 ] && [ "$ST_NEG" -eq 0 ]; then
+    ok "无脚本在 trap 里 exit（静态判据 0 命中；自校验本次实测通过，见上一行）"
+  fi
 else
   echo "静态判据命中 $(printf '%s\n' "$TRAP_EXIT_CANDIDATES" | wc -l | tr -d ' ') 个候选，交给探针真跑："
   printf '  - %s\n' $TRAP_EXIT_CANDIDATES
@@ -153,6 +184,62 @@ else
   else
     grep -E "✘|★|结果：|不合格" /tmp/gate-trapprobe.log | head -20
     fail "有脚本在 unbound 下退出码为 0（会假绿）"
+  fi
+fi
+
+# ── 门禁 2.6：裸写 $VAR 紧跟非 ASCII 字符自检 ──────────────────────
+# 这类 bug 在本任务里被踩了三次（test-duo-ui.sh 三处、gate.sh 的 $APP_ID、以及我自己
+# 新写的 $pat / $TESTED_FILE）—— 说明靠人眼复查不可靠，必须机器扫。
+#
+# 原理：bash 把 `$NAME` 后面紧跟的多字节 UTF-8 字符并进变量名。
+#   echo "$BUNDLE_ID。..."  →  BUNDLE_ID?: unbound variable
+# 中文注释多的脚本里，`$VAR（`、`$VAR，`、`$VAR」` 这种写法极易无意写出。
+# 判据：变量后必须跟 ASCII 分隔符，否则一律要求写成 ${VAR}。
+# 例外白名单（不在本判据射程内，不参与扫描）：
+#   · 双引号/空格/换行/常见 ASCII 标点结尾的用法本来就安全；
+#   · heredoc 里的 $TESTS / $ROOT 后面跟 ASCII，不受影响。
+step "门禁 2.6 · 裸写 \$VAR 紧跟中文自检"
+BARE_HITS=$(python3 - <<'PYSCAN'
+import re, glob, os
+pat = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*')
+hits = []
+for p in sorted(glob.glob("tools/qa/*.sh") + glob.glob("Scripts/*.sh")):
+    try:
+        s = open(p, encoding="utf-8").read()
+    except Exception:
+        continue
+    for i, line in enumerate(s.splitlines(), 1):
+        # 跳过纯注释行：注释里的示例不参与执行
+        if line.lstrip().startswith("#"):
+            continue
+        for m in pat.finditer(line):
+            nxt = line[m.end():m.end()+1]
+            if nxt and ord(nxt) > 127:
+                hits.append("%s:%d: %s" % (p, i, line.strip()[:100]))
+                break
+print("\n".join(hits))
+PYSCAN
+)
+# 判据范围：本任务拥有的脚本判红，其余既有脚本只告警。
+# 理由：那 5 处是别人文件里的既有隐患，改它们超出本任务边界（并行会话纪律）。
+# 但**必须把它们列出来**，不能因为「不归我改」就隐去 —— 隐去等于假装不存在。
+# ⛔ grep -E 的 alternation 是 `|` 不是 `\|`（后者是 BRE 语法，在 -E 下会被当成字面量）。
+#    踩过：写成 `\|` 导致三个自有文件全都不匹配 → 负对照本该判红却判绿。
+OWNED="^(tools/qa/gate\.sh|tools/qa/trap-exit-probe\.sh|Scripts/test-duo-ui\.sh):"
+BARE_OWNED=$(echo "$BARE_HITS" | grep -E "$OWNED" || true)
+BARE_OTHER=$(echo "$BARE_HITS" | grep -vE "$OWNED" | grep -v '^$' || true)
+
+if [ -z "$BARE_HITS" ]; then
+  ok "无裸写 \$VAR 紧跟中文（写法规范）"
+else
+  if [ -n "$BARE_OWNED" ]; then
+    echo "$BARE_OWNED" | head -10
+    fail "本任务脚本里有 $(printf '%s\n' "$BARE_OWNED" | wc -l | tr -d ' ') 处裸写 \$VAR 紧跟中文 —— 会 unbound，改成 \${VAR}"
+  fi
+  if [ -n "$BARE_OTHER" ]; then
+    echo "  既有脚本中的同型隐患（不在本任务范围，仅登记，待各文件归属方修）："
+    echo "$BARE_OTHER" | sed 's/^/    /'
+    ok "本任务脚本已无此类写法（另有 $(printf '%s\n' "$BARE_OTHER" | wc -l | tr -d ' ') 处在他人文件，已登记）"
   fi
 fi
 
@@ -175,6 +262,15 @@ fi
 
 # ── 门禁 4：模拟器 UI 行为测试 ──────────────────────────────────────
 step "门禁 4/4 · 模拟器 UI 测试（真跑）"
+
+# ── F10：先把「环境缺工具」与「产物坏了」分开 ──
+# 上一版两者都归到 UNREADABLE，会把人引向「结果包坏了」而其实是机器没装 python3。
+if ! command -v python3 >/dev/null 2>&1; then
+  fail "缺少 python3 —— 无法解析 xcresult 摘要。这是环境问题，不是结果包问题"
+  echo "（请先安装 python3 再跑门禁 4）"
+elif ! command -v xcrun >/dev/null 2>&1; then
+  fail "缺少 xcrun —— 无法调用 xcresulttool。这是环境问题，不是结果包问题"
+fi
 if [ "$DO_UI" != "1" ]; then
   echo "（未指定 --ui，跳过。改 UI 时必须加 --ui）"
 else
@@ -287,6 +383,18 @@ print('%s %s %s' % (d.get('result','?'), d.get('passedTests','?'), d.get('failed
         fi
       fi
     fi
+    # ── F9：打印本次实际覆盖面，避免「门禁 4 通过」被读成「31 个方法都跑过」──
+    TESTED_FILE=$( [ -f Scripts/test-duo-ui.sh ] && sed -n 's/^TESTS="\$ROOT\/\(.*\)"$/\1/p' Scripts/test-duo-ui.sh | head -1 )
+    echo ""
+    echo "── 本次覆盖面（口径必须随结论一起给）──"
+    if [ -n "$TESTED_FILE" ] && [ -f "$TESTED_FILE" ]; then
+      echo "门禁 4 只跑：${TESTED_FILE}（$(grep -c 'func test' "${TESTED_FILE}") 个 test 方法）"
+    else
+      echo "门禁 4 跑的是 Scripts/test-duo-ui.sh 的默认 TESTS（未能解析出具体文件）"
+    fi
+    TOTAL_M=$(grep -c 'func test' UITests/*.swift 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+    echo "UITests/ 全部方法数：${TOTAL_M}（其余由 Scripts/test-library-ui.sh 与 Scripts/test-tv-ui.sh 覆盖）"
+    echo "⛔ 「门禁 4 通过」= 上面的文件真的跑了且失败会判红，不等于 ${TOTAL_M} 个方法都跑过。"
   else
     echo "（无 test-duo-ui.sh，跳过）"
   fi

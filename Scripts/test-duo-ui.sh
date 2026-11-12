@@ -41,6 +41,16 @@ CERT_DIR="$HOME/Documents/windows11/编程工具/mac/证书/Duo 证书"
 PROFILE="$CERT_DIR/all1023.mobileprovision"
 DEVICE=""
 SIMULATOR=""
+# ── 覆盖面说明（不是「全部 UI 测试」）──────────────────────────────────
+# UITests/ 有 4 个测试文件、共 31 个 test 方法，本脚本默认**只编一个**：
+#   DuoAcceptanceUITests.swift   5 方法  ← 默认进本脚本（门禁 4 的实际覆盖面）
+#   LibraryUITests.swift         8 方法  ← 需 Scripts/qa-server.py --port 8776 + 真 clip.mp4
+#                                          （全部用例 launchArguments 硬指向 127.0.0.1:8776），
+#                                          走专用 Scripts/test-library-ui.sh
+#   TVNavigationUITests.swift   17 方法  ← 整文件 `#if os(tvOS)`，iOS 模拟器根本不编译，
+#                                          走专用 Scripts/test-tv-ui.sh（tvOS destination）
+#   ControlWalkUITests.swift     1 方法  ← 审计用，按需 --tests 指定
+# ⇒ 本脚本跑通 ≠ 全部 UI 测试跑通。用 --tests 可换文件，但另两个的依赖不在本脚本里。
 TESTS="$ROOT/UITests/DuoAcceptanceUITests.swift"
 # 显式指定的 bundle id。空 = 未指定，交给下面的优先级往下走。
 BUNDLE_ID_OPT=""
