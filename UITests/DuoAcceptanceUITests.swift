@@ -1,19 +1,22 @@
 #if os(iOS)
 import XCTest
 
-/// Phone acceptance against a real device (Scripts/test-duo-ui.sh).
+/// Phone acceptance against an installed Mi3s build (Scripts/test-duo-ui.sh), on a real device or a simulator.
 ///
-/// Nothing here runs against the QA host app: every test drives the installed Mi3s build
-/// (`wda.prdc.yingxia.dev`) through `XCUIApplication(bundleIdentifier:)`, so the screens under test are
-/// the user's own — their subscriptions, their settings. The tests therefore only read: they walk to a
-/// screen, assert what must be on it, and photograph it. Nothing is toggled, deleted or reordered.
+/// Nothing here runs against the QA host app: every test drives the installed Mi3s build through
+/// `XCUIApplication(bundleIdentifier:)`, so the screens under test are the user's own — their
+/// subscriptions, their settings. The tests therefore only read: they walk to a screen, assert what must
+/// be on it, and photograph it. Nothing is toggled, deleted or reordered.
+///
+/// The bundle id is not written here: it comes from `QATarget.appBundleID`, injected at build time by
+/// `Scripts/test-duo-ui.sh`. A simulator install (`wda.prdc.yingxia.guji`) and a device install
+/// (`wda.prdc.yingxia.dev`) are signed by different teams, so one hardcoded literal can only ever match one of them.
 final class DuoAcceptanceUITests: XCTestCase {
-    private let bundleID = "wda.prdc.yingxia.dev"
     private var app: XCUIApplication!
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-        app = XCUIApplication(bundleIdentifier: bundleID)
+        app = XCUIApplication(bundleIdentifier: try QATarget.appBundleID)
     }
 
     override func tearDownWithError() throws {
