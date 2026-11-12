@@ -58,6 +58,33 @@ struct WatchSystemChrome: ViewModifier {
             // 被系统重新摆回来，toolbar 偏好不保证跟着重算。传同一判据，
             // 否则退全屏后菜单栏再也不回来。
             .hidesAppTabBar(fullScreen)
+            // ★ 全屏播放器要**显式关掉垂直栏**（BUG-P）。
+            //
+            // iPhone Duo 的系统栏位会变成贴边的**竖向**条（`device-facts`：
+            // navigation/controls 移到侧边）。全屏播放是沉浸态，那条竖栏会
+            // 压进画面右缘，而且它让安全区变**不对称**（trailing 84 / leading 0），
+            // 与「四路径对称」的前提冲突。
+            //
+            // `duo-media` 规则 8 的原话：全屏播放器用
+            // `toolbarVerticalBehavior(.disabled)`，"as a fixed choice for that screen" ——
+            // 是这一屏的固定选择，**不要**跟着视图状态切换。
+            //
+            // API 门槛：`@available(anyAppleOS 27.1, *)`，本工程部署目标 17.0，
+            // 所以必须包在 `if #available` 里（已核 iPhoneOS27.2.sdk 的 swiftinterface）。
+            .modifier(HideVerticalBarWhenFullScreen(fullScreen: fullScreen))
+    }
+}
+
+/// 全屏时关掉 Duo 的竖向系统栏；低版本系统上是空操作。
+private struct HideVerticalBarWhenFullScreen: ViewModifier {
+    let fullScreen: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 27.1, *) {
+            content.toolbarVerticalBehavior(fullScreen ? .disabled : .automatic)
+        } else {
+            content
+        }
     }
 }
 

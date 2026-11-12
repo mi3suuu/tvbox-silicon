@@ -115,6 +115,7 @@ extension View {
 }
 #endif
 
+#if !os(tvOS)
 /// 与 `ChromeButtonStyle` 同样的尺寸与按压行为，但**不画圆底**。
 ///
 /// One 的「•••」/选集入口是裸图标，没有液态玻璃底座。
@@ -131,3 +132,4 @@ private struct PlainChromeButtonStyle: ButtonStyle {
             .opacity(enabled ? (configuration.isPressed ? 0.72 : 1) : 0.38)
     }
 }
+#endif

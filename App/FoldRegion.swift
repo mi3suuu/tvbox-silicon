@@ -45,6 +45,21 @@ struct FoldGap: Equatable, Sendable {
 
     static let none = FoldGap(minX: 0, maxX: 0)
 
+    /// 0.5pt 容差比较（对齐 B 站 `if (fabs(m - applied) <= 0.5) return;` 的幂等门）。
+    ///
+    /// ⛔ 原来 `apply` 里是 `fold != nextFold` —— 合成 `==` 精确到浮点位，
+    ///   半折态折缝随铰链角**连续移动**，0.25s 一次的轮询每次都能落出一个
+    ///   新值：`foldGap` 变 → `oneSkinShape` 重判 → 整页重排，4Hz 持续抖动。
+    ///   0.5pt 是「肉眼看不见、但明显折动仍跟手」的量级（同 B 站实测常数）。
+    static func isSame(_ a: FoldGap?, _ b: FoldGap?, tolerance: CGFloat = 0.5) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?):
+            return abs(x.minX - y.minX) <= tolerance && abs(x.maxX - y.maxX) <= tolerance
+        default: return false
+        }
+    }
+
     /// 从 `reservedRegions(kind: .division)` 的矩形换出来。
     ///
     /// iOS 27.1 起 SwiftUI 有 `GeometryProxy.reservedRegions(kind:)`
@@ -76,11 +91,35 @@ struct FoldGap: Equatable, Sendable {
         var height: CGFloat { max(0, maxY - minY) }
         var centerY: CGFloat { (minY + maxY) / 2 }
         var isHorizontal: Bool { height > 0 }
-        /// 折痕中心是否落在容器中部（书本/帐篷的特征）。
+        /// 折痕中心是否落在容器中部。
+        ///
+        /// ⛔ 2026-11-12 实测修正：原来用 `0.25 < ratio < 0.75`，
+        /// 而真机/模拟器实测的三个折缝中心比是 **0.600 / 0.554 / 0.507**
+        /// —— 全部落在该区间内，等于「只要有折缝就判半折」，包括摊开态。
+        ///
+        /// 正确的物理事实：**摊开时折缝在正中（ratio≈0.5），半折时折缝偏移**。
+        /// 但实测显示摊开态的 0.600 与半折态的 0.554 只差 0.046（44pt），
+        /// 单靠这个比例分不开。
+        ///
+        /// 所以这个判据不再单独决定形态，只作为「折缝存在且在中部」的粗筛；
+        /// 摊开/半折的真判据改用**折缝绝对位置表**（见 `OneSkinShape` 的实测锚点）。
         func splitsContainer(_ containerHeight: CGFloat) -> Bool {
             guard isHorizontal, containerHeight > 0 else { return false }
             let ratio = centerY / containerHeight
-            return ratio > 0.25 && ratio < 0.75
+            // 放宽到 0.15–0.85：只要折缝确实横穿中部区域就算「参与了分割」，
+            // 交给上层用绝对位置区分摊开/半折，不再在这里武断二分。
+            return ratio > 0.15 && ratio < 0.85
+        }
+
+        /// 0.5pt 容差比较 —— 与 `FoldGap.isSame` 同一套幂等门，理由见那里。
+        static func isSame(_ a: HorizontalBand?, _ b: HorizontalBand?,
+                           tolerance: CGFloat = 0.5) -> Bool {
+            switch (a, b) {
+            case (nil, nil): return true
+            case let (x?, y?):
+                return abs(x.minY - y.minY) <= tolerance && abs(x.maxY - y.maxY) <= tolerance
+            default: return false
+            }
         }
     }
 
@@ -94,38 +133,96 @@ struct FoldGap: Equatable, Sendable {
     }
 }
 
-/// 遮挡（挖孔 / 摄像头 / 系统胶囊）在容器上、下两侧的内缩。
+/// 遮挡（挖孔 / 摄像头 / 系统胶囊）在容器四边上的内缩。
 ///
 /// One 用 `OcclusionAvoider { let band: CGFloat; var _insets: State<OcclusionInsets> }`
-/// + `GeometryValueReader` 读出来。这里保留同样的形状（top/bottom 两个数），
-/// 因为**方向是有意义的**：Duo 合盖时挖孔在顶部，展开时在右上角，
-/// 统一塞进 `safeAreaInsets` 会让内容在展开态被多推半个屏。
+/// + `GeometryValueReader` 读出来。这里保留同样的形状，但**必须是四边**：
+/// Duo 合盖时挖孔在**顶部**，摊开时在**右上角** —— 只建 top/bottom 两条，
+/// 摊开态那个孔会被判成「贴顶 → 内容整体下推」，而它其实贴在右缘。
+///
+/// ⛔ 2026-11-12 修正（P1-8）：此前只有 `top` / `bottom`，且
+///   `init(occlusionRects:containerHeight:)` 里用 `containerHeight * 0.33 / 0.67`
+///   两条线判「贴顶还是贴底」。三个问题：
+///   ① 没有 left / right —— 展开态挖孔在侧边，被当成顶部下推（顶栏整体多推一段）；
+///   ② `containerHeight` 传的是 `screen.bounds.height`（Duo 上**不随方向交换**），
+///      横持时容器 ≈466 而那个值 ≈951，两条线全部错位，贴底的会被判成贴顶；
+///   ③ 矩形本身是探针局部坐标，带内容原点偏移（见 P0-1）。
+///   现在：四边 + 由调用方传入**容器尺寸**（不再跨源读 screen）+ 角部规则。
 struct OcclusionInsets: Equatable, Sendable {
     var top: CGFloat
     var bottom: CGFloat
+    var left: CGFloat
+    var right: CGFloat
 
-    static let zero = OcclusionInsets(top: 0, bottom: 0)
+    static let zero = OcclusionInsets(top: 0, bottom: 0, left: 0, right: 0)
 
-    /// 从 occlusion 矩形换出来：取所有矩形里最靠上的下边界与最靠下的上边界。
-    init(top: CGFloat, bottom: CGFloat) {
+    /// 从 occlusion 矩形换出来：每条边取「所有贴该边的矩形里侵入最深的那一个」。
+    init(top: CGFloat, bottom: CGFloat, left: CGFloat = 0, right: CGFloat = 0) {
         self.top = top
         self.bottom = bottom
+        self.left = left
+        self.right = right
     }
 
-    init(occlusionRects: [CGRect], containerHeight: CGFloat) {
-        var top: CGFloat = 0
-        var bottom: CGFloat = 0
+    /// - Parameters:
+    ///   - occlusionRects: 系统报的遮挡矩形（应与 `containerSize` 同一坐标系）。
+    ///   - containerSize: **容器**尺寸（不是物理屏）。横持时它的高是 466 而不是 951。
+    init(occlusionRects: [CGRect], containerSize: CGSize) {
+        let w = max(containerSize.width, 1)
+        let h = max(containerSize.height, 1)
+        // 「贴着这条边」的判定容差。取 8% 而不是固定 8pt：
+        // 矩形坐标带内容原点偏移（顶部安全区可达 60pt），固定小容差会漏判；
+        // 8% 在 951 高上是 76pt、466 高上是 37pt，足够吸收偏移又不会把
+        // 「屏中部的东西」误判成贴边。
+        let tolY = max(24, h * 0.08)
+        let tolX = max(24, w * 0.08)
+
+        var top: CGFloat = 0, bottom: CGFloat = 0, left: CGFloat = 0, right: CGFloat = 0
         for rect in occlusionRects {
-            // 贴顶部的那条 → 决定 top 内缩
-            if rect.minY <= containerHeight * 0.33 {
+            let touchesTop = rect.minY <= tolY
+            let touchesBottom = rect.maxY >= h - tolY
+            let touchesLeft = rect.minX <= tolX
+            let touchesRight = rect.maxX >= w - tolX
+
+            // 形状先验：这条矩形**可能是什么**。
+            //   · `canBeSide`   —— 不宽于 30%：可能是一条竖着的侧边遮挡（挖孔/竖胶囊）；
+            //   · `canBeTB`     —— 不高于 30%：可能是一条横着的上/下遮挡（状态栏/手势条）。
+            // ⛔ 必须双向排除，否则「横贯整宽的顶部状态栏带」同时满足
+            //    `touchesLeft && touchesRight`，于是 left = 整宽、right = 整宽，
+            //    内容区被两边各挤掉一整个屏宽 —— 直接消失。
+            let canBeSide = rect.width <= w * 0.30
+            let canBeTB = rect.height <= h * 0.30
+            // ★ 角部规则：既贴上下、又贴左右的**小孔**（展开态右上角摄像头）只算侧边。
+            //
+            // 算成 top 会让整页内容下推一个孔高（历史现象：展开后顶栏按钮位置错乱）；
+            // 算成 right 只是让内容避开右缘那一条 —— 那正是孔所在的位置。
+            let isCornerHole = canBeSide && (touchesLeft || touchesRight)
+            if touchesTop, canBeTB, !isCornerHole {
                 top = max(top, rect.maxY)
             }
-            // 贴底部的那条 → 决定 bottom 内缩
-            if rect.maxY >= containerHeight * 0.67 {
-                bottom = max(bottom, containerHeight - rect.minY)
+            if touchesBottom, canBeTB, !isCornerHole {
+                bottom = max(bottom, h - rect.minY)
+            }
+            if touchesLeft, canBeSide {
+                left = max(left, rect.maxX)
+            }
+            if touchesRight, canBeSide {
+                right = max(right, w - rect.minX)
             }
         }
-        self.init(top: top, bottom: bottom)
+        self.init(top: top, bottom: bottom, left: left, right: right)
+    }
+}
+
+// MARK: - 遮挡 → 几何层
+extension OcclusionInsets {
+    /// 交给 `OneSkinGeometryDriver` 的形状（P1-8 / 16.1）。
+    ///
+    /// 两套类型长得一样但语义不同：本文件的 `OcclusionInsets` 是**读数**，
+    /// `OneSkinOcclusionInsets` 是**几何输入**（带 0.5pt 幂等门）。
+    /// 转换只写在这一切，别在各处手写 `OneSkinOcclusionInsets(left:right:top:bottom:)`。
+    var geometryInsets: OneSkinOcclusionInsets {
+        OneSkinOcclusionInsets(left: left, right: right, top: top, bottom: bottom)
     }
 }
 
@@ -227,11 +324,23 @@ struct FoldSplitLayout: SwiftUI.Layout, Animatable {
 /// **父容器**的分界区矩形，`reservedRegions` 报的是相对容器坐标系的，
 /// 与探针自身尺寸无关。
 struct FoldRegionProbe: View {
+    /// 容器尺寸（调用方传入的 `layoutSize` / 窗口尺寸）。
+    ///
+    /// ⛔ 不要在这里读 `screen.bounds`：Duo 上它是**物理固定值**，不随方向交换，
+    ///    横持时容器高 466 而它报 951 —— 遮挡矩形的「贴顶/贴底」判定会全部错位（P1-8）。
+    var containerSize: CGSize
     var onChange: ([CGRect], [CGRect]) -> Void
 
     // 探针自身是 0×0，`proxy.size` 不会变 —— 只能借外部信号判断「该重读了」。
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
+
+    /// 低频轮询源。
+    ///
+    /// ⛔ 必须是 `static`：写成 body 里的 `Timer.publish(...).autoconnect()`
+    ///    会在**每次 body 求值**时新建一条定时器（订阅换一个就丢一个），
+    ///    既多分配又让节流形同虚设。
+    private static let poll = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     /// 当前窗口所在屏的尺寸（静态值，不随旋转动画逐帧变化）。
     private var screenSize: CGSize {
@@ -258,9 +367,33 @@ struct FoldRegionProbe: View {
                     //   · 屏幕尺寸 —— 换屏/分屏会变；
                     //   · `scenePhase` —— 进出前台兜底重读一次。
                     // 三者任一变化就重读。重读是幂等的（`apply` 里逐项比对后才写回）。
+                    // ⛔ 上面这三个信号在 Duo 折叠时**全都不变**（实测 987/987 全 nil）：
+                    //   · `verticalSizeClass` —— 内屏横竖都报 regular×compact，折叠不翻转；
+                    //   · `screenSize` —— screen.bounds 是物理固定值，折叠不变；
+                    //   · `scenePhase` —— 只在切前后台时变。
+                    // 所以 foldGap 实际只在 onAppear 读过一次，之后永久冻结。
+                    //
+                    // ★ 折叠没有可靠的 SwiftUI 通知（`onHingeChange` 也未生效），
+                    //   只能用**低频轮询**：每 0.5s 触发一次 read。
+                    //   `read` 本身是幂等的（`apply` 逐项比对后才写回），
+                    //   同一个值不会引起 body 重算，因此不会形成反馈环。
+                    //
+                    // ★ 2026-11-12（P1-7）两个修正：
+                    //   ① **轮询降到 0.5s 且只在前台读**。
+                    //      原来 0.25s 常开：只要选集页在栈里就跑，进后台、被 sheet
+                    //      盖住也每 250ms 查一次 `reservedRegions`（还带两条 DEBUG
+                    //      拼串）。四态都白付这个代价。现在 `scenePhase != .active`
+                    //      直接跳过 —— 定时器本身几乎零成本，贵的是那次系统查询。
+                    //   ② **`apply` 改成 0.5pt 容差比较**（`FoldGap.isSame`）。
+                    //      原来 `fold != nextFold` 是精确相等，半折态折缝随角度
+                    //      连续移动 → 每 0.25s 都落一个新值 → 形态重判 → 整页重排，
+                    //      4Hz 持续抖动。有容差之后，轮询频率不再是抖动来源。
                     .onChange(of: verticalSizeClass) { _, _ in read(proxy) }
-                    .onChange(of: screenSize) { _, _ in read(proxy) }
                     .onChange(of: scenePhase) { _, _ in read(proxy) }
+                    .onReceive(Self.poll) { _ in
+                        guard scenePhase == .active else { return }
+                        read(proxy)
+                    }
             }
             .frame(width: 0, height: 0)
             .clipped()
@@ -272,21 +405,39 @@ struct FoldRegionProbe: View {
 
     @available(iOS 27.1, *)
     private func read(_ proxy: GeometryProxy) {
+        #if DEBUG
+        // 直接打印系统返回的原始区域数，确认是「系统不给」还是「我们解析错」。
+        let d = proxy.reservedRegions(kind: .division)
+        let o = proxy.reservedRegions(kind: .occlusion)
+        OneSkinProbe.log("FOLDRAW division=\(d.count) occlusion=\(o.count) frames=\(d.map { "\(Int($0.frame.minX)),\(Int($0.frame.maxX)),\(Int($0.frame.minY)),\(Int($0.frame.maxY))" }.joined(separator: "|"))")
+        #endif
         onChange(proxy.reservedRegions(kind: .division).map(\.frame),
                  proxy.reservedRegions(kind: .occlusion).map(\.frame))
     }
 }
 
 /// 铰链状态一变化就让探针重读。低版本系统上是空操作。
+///
+/// 同时把**铰链状态本身**回传出去（`onStatus`）——
+/// 这是判「摊开 vs 半折」唯一权威的信号：
+///   `DeviceHinge.status` 只有 `closed / partiallyOpen / fullyOpen` 三档
+///   （已核 `SwiftUICore.swiftinterface` L16799-16826），而折缝的**位置**不可靠：
+///   摊开态实测折缝中心比就有 0.507 / 0.554 / 0.600 三种（斜着拿手机都会变），
+///   拿「偏离正中多少」猜半折必然误判（P0-1）。
 private struct RereadFoldOnHingeChange: ViewModifier {
     let onChange: () -> Void
+    /// `nil` = 系统没给（旧系统 / 非折叠设备）。
+    let onStatus: (Bool?) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 27.1, *) {
             content.onHingeChange { old, new in
                 // 只在**折痕状态**真的变了时重读；纯角度抖动（半折时手抖）不重读，
                 // 否则每一帧都要重查 reserved regions。
-                if old.hinge?.status != new.hinge?.status { onChange() }
+                if old.hinge?.status != new.hinge?.status {
+                    onChange()
+                    onStatus(new.hinge.map { $0.status == .partiallyOpen })
+                }
             }
         } else {
             content
@@ -306,6 +457,12 @@ struct FoldRegionReader: ViewModifier {
     /// 横向折痕（书本 / 帐篷半折）。有它才是「半折」形态。
     @Binding var horizontalFold: FoldGap.HorizontalBand?
     @Binding var occlusion: OcclusionInsets
+    /// 铰链是否处于 **partiallyOpen**。`nil` = 系统没报（旧系统 / 非折叠设备）。
+    ///
+    /// 这是判半折的**权威**信号，比「折缝偏离正中」可靠得多（P0-1）。
+    @Binding var hingePartiallyOpen: Bool?
+    /// 容器尺寸：遮挡矩形的「贴哪条边」必须按**容器**判，不能按物理屏（P1-8）。
+    var containerSize: CGSize
 
     func body(content: Content) -> some View {
         content
@@ -324,10 +481,13 @@ struct FoldRegionReader: ViewModifier {
                 // 铰链变了 → 让探针重新读一次。
                 // 探针是 0×0，没有尺寸可观察，所以用这个计数器当驱动。
                 foldReadTick &+= 1
+            }, onStatus: { open in
+                // 只有在**结论真的变了**时才写，避免无谓的 body 重算。
+                if hingePartiallyOpen != open { hingePartiallyOpen = open }
             }))
             .background(alignment: .topLeading) {
                 // 计数器变化 → 重建探针 → `onAppear` 再次执行 → 重读
-                FoldRegionProbe { division, occlusionRects in
+                FoldRegionProbe(containerSize: containerSize) { division, occlusionRects in
                     apply(division: division, occlusion: occlusionRects)
                 }
                 .id(foldReadTick)
@@ -336,14 +496,21 @@ struct FoldRegionReader: ViewModifier {
 
     /// 把读到的原始矩形写进状态。只在真的变了时写回 ——
     /// 否则几何回调会把状态搅成自激环（这个坑 `OneSkin` 的 frozenBox 也踩过）。
+    ///
+    /// ⛔ 「变了」用 **0.5pt 容差**判（`FoldGap.isSame` / `HorizontalBand.isSame`），
+    ///    不是精确相等：半折时折缝随铰链角连续移动，精确比较等于每轮询一次
+    ///    就写一次状态 → 整页重排（P1-7）。
     private func apply(division: [CGRect], occlusion occlusionRects: [CGRect]) {
         let nextFold = FoldGap(divisionRects: division)
         let nextHorizontal = FoldGap.horizontalBand(in: division)
-        // 遮挡的容器高度用**屏幕**高度：探针自身是 0×0，拿不到有意义的 height。
+        // ★ 遮挡按**容器**尺寸判边（旧代码传的是 `appScreenBounds.height`，
+        //   Duo 上不随方向交换，横持时整条判据错位 —— P1-8）。
         let nextOcclusion = OcclusionInsets(occlusionRects: occlusionRects,
-                                            containerHeight: UIApplication.shared.appScreenBounds.height)
-        if fold != nextFold { fold = nextFold }
-        if horizontalFold != nextHorizontal { horizontalFold = nextHorizontal }
+                                            containerSize: containerSize)
+        if !FoldGap.isSame(fold, nextFold) { fold = nextFold }
+        if !FoldGap.HorizontalBand.isSame(horizontalFold, nextHorizontal) {
+            horizontalFold = nextHorizontal
+        }
         if occlusion != nextOcclusion { occlusion = nextOcclusion }
     }
 }
@@ -352,8 +519,13 @@ extension View {
     /// 读折叠带与遮挡。两个绑定都可为 nil / zero —— 表示「这条信息不可用」。
     func readFoldRegion(fold: Binding<FoldGap?>,
                         horizontalFold: Binding<FoldGap.HorizontalBand?>,
-                        occlusion: Binding<OcclusionInsets>) -> some View {
-        modifier(FoldRegionReader(fold: fold, horizontalFold: horizontalFold, occlusion: occlusion))
+                        occlusion: Binding<OcclusionInsets>,
+                        hingePartiallyOpen: Binding<Bool?>,
+                        containerSize: CGSize) -> some View {
+        modifier(FoldRegionReader(fold: fold, horizontalFold: horizontalFold,
+                                  occlusion: occlusion,
+                                  hingePartiallyOpen: hingePartiallyOpen,
+                                  containerSize: containerSize))
     }
 }
 
@@ -387,11 +559,19 @@ struct OcclusionTopUp: ViewModifier {
         // ⛔ 用 `OneSkinSafeArea.topUp` 这个**唯一真源**，不要在这里自己再写一遍
         //    `max(0, a - b)`。上一版就是这么写的 —— 于是同一套算术存在两份，
         //    其中一份（这个 modifier）没有单测覆盖，改真源时它会静默不同步。
+        //
+        // ★ 四边都补（P1-8）：遮挡模型已经是四边了，这里只补上下就等于
+        //   把展开态「右上角挖孔」算出来的 right 白扔了。左右同样只补
+        //   「系统安全区没盖住的那一段」。
         let topUp = fullScreen ? 0 : OneSkinSafeArea.topUp(occlusion: insets.top, safe: safe.top)
         let bottomUp = fullScreen ? 0 : OneSkinSafeArea.topUp(occlusion: insets.bottom, safe: safe.bottom)
+        let leftUp = fullScreen ? 0 : OneSkinSafeArea.topUp(occlusion: insets.left, safe: safe.left)
+        let rightUp = fullScreen ? 0 : OneSkinSafeArea.topUp(occlusion: insets.right, safe: safe.right)
         content
             .safeAreaPadding(.top, topUp)
             .safeAreaPadding(.bottom, bottomUp)
+            .safeAreaPadding(.leading, leftUp)
+            .safeAreaPadding(.trailing, rightUp)
         #else
         content
         #endif

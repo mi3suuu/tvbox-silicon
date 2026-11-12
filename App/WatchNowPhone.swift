@@ -72,9 +72,12 @@ struct WatchNowPhonePage: View {
     }
 
     @ViewBuilder private var rows: some View {
-        if sections.contains(.continueWatching), !store.playbackHistory.entries.isEmpty {
+        // [mi3s] 二开：这里原先是直读 `store.playbackHistory.entries` —— 裸数据，不带环境过滤，
+        // 所以切了环境这一行仍然画着上一个环境看过的片（「继续观看」与下面首页的「待播」同病）。
+        // 一律走 `visibleHistory`：它先按当前环境过滤，再按隐私保险库过滤。
+        if sections.contains(.continueWatching), !store.visibleHistory.isEmpty {
             WatchNowPhoneShelf(title: L10n.text("Continue Watching"), action: { openSection(.history) }) {
-                ForEach(store.playbackHistory.entries.prefix(12)) { HistoryCard(entry: $0) }
+                ForEach(store.visibleHistory.prefix(12)) { HistoryCard(entry: $0) }
             }
             .accessibilityIdentifier("home.continueWatching")
         }
@@ -96,9 +99,10 @@ struct WatchNowPhonePage: View {
             }
         }
         if sections.contains(.recommendations) { RecommendationsView(config: config, rails: true) }
-        if sections.contains(.favorites), !store.favorites.items.isEmpty {
+        // 与 tvOS 及本文件其余各行统一走可见出口：裸 `items` 少了保险库那一层过滤。
+        if sections.contains(.favorites), !store.visibleFavorites.isEmpty {
             WatchNowPhoneShelf(title: L10n.text("Favorites"), action: { openSection(.favorites) }) {
-                ForEach(Array(store.favorites.items.prefix(20))) { WatchNowPhoneFavorite(item: $0) }
+                ForEach(Array(store.visibleFavorites.prefix(20))) { WatchNowPhoneFavorite(item: $0) }
             }
         }
         if sections.contains(.liveTV), !config.lives.isEmpty {

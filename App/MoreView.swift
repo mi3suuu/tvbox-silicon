@@ -184,7 +184,9 @@ struct MoreView: View {
         // 直接写在首页上。三个计数在无密码时与原始计数相等，所以未启用保险库的用户看不出差异。
         case .history: store.visibleHistory.count
         case .favorites: store.visibleFavorites.count
-        case .downloads: store.vault.visibleDownloads(DownloadLibrary.shared.items).count
+        // 必须过 `visibleItems()`：只过保险库不过环境的话，切到空环境后下载页是空的、
+        // 这里却还显示上一个环境的条数。
+        case .downloads: store.vault.visibleDownloads(DownloadLibrary.shared.visibleItems()).count
         default: nil
         }
     }

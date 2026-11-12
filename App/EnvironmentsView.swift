@@ -38,8 +38,15 @@ struct EnvironmentsView: View {
             Button(L10n.text("Create")) {
                 let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
+                // `add` 会直接激活新环境，所以偏好与下载也要跟着切过去：
+                // 新环境是一张白纸，不该继承上一个环境的置顶/隐藏/排序/分组。
                 store.environments.add(name: name)
                 store.saveVault()
+                store.applyEnvironmentToPreferenceStores(store.environments)
+                DownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
+                MusicDownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
+                MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
+                store.rebuildForActiveEnvironment()
                 newName = ""
             }
         }
@@ -50,11 +57,18 @@ struct EnvironmentsView: View {
                     store.environments.remove(target.id)
                     // The environment's records live in the history, favourites and subscriptions
                     // stores, so they must be deleted here too — otherwise the data outlives its
-                    // environment.
+                    // environment. Downloads and the preference stores are partitioned the same way.
                     store.playbackHistory.delete(environment: target.id)
                     store.favorites.delete(environment: target.id)
                     store.removeSubscriptions(in: target.id)
+                    DownloadLibrary.shared.delete(environment: target.id)
+                    MusicDownloadLibrary.shared.delete(environment: target.id)
+                    store.deletePreferences(of: target.id)
                     store.saveVault()
+                    store.applyEnvironmentToPreferenceStores(store.environments)
+                    DownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
+                    MusicDownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
+                MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
                     store.rebuildForActiveEnvironment()
                 }
                 removing = nil
@@ -73,6 +87,12 @@ struct EnvironmentsView: View {
             Button {
                 store.environments.activate(environment.id)
                 store.saveVault()
+                // 偏好 store（置顶/隐藏/排序/源改派/分组）与下载都按环境分键/打戳，
+                // 切环境必须一起跟过去，否则上一个环境的东西会留在这里继续生效。
+                store.applyEnvironmentToPreferenceStores(store.environments)
+                DownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
+                MusicDownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
+                MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
                 store.rebuildForActiveEnvironment()
             } label: {
                 HStack {

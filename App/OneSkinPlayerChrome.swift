@@ -78,6 +78,9 @@ struct OneSkinPlayerKit {
     /// 画中画控制器，由 OneSkinStage 以 `@State` 持有，并绑到它自己那条 AVPlayerLayer。
     var pip: PictureInPicture
     var tracks: MediaTracks
+    /// 页面形态（`OneSkinShape`）。控制栏配置**只认这个**，不认窗口宽高比 ——
+    /// 播放器窗口恒为横向（1.819），从窗口比例反推横竖会把竖持判成横持。
+    var skinShape: OneSkinShape
     var layout: PlayerControlsLayout
     var openEpisodes: () -> Void
     var miniPlayer: () -> Void
@@ -116,13 +119,31 @@ struct OneSkinChrome: View {
     var safeLeft: CGFloat = 0
     var safeRight: CGFloat = 0
 
-    var onBack: () -> Void = {}
+    /// **物理屏**在当前方向下的尺寸（宽 = 正在使用的那条边）。
+    ///
+    /// ⛔ 为什么必须单独传：`safeTop/Bottom/Left/Right` 是从**屏幕边**量出来的，
+    ///    而 `colW/colH` 是**画面列**——两者只在全屏/竖持单列时才相等。
+    ///    横持双列时画面列只有 523 宽，屏幕是 951：
+    ///      · `spaceRightOfWindow = colW − winX − winW` 会算成 0
+    ///        → `safeRight`（内屏横持实测 71）被当成「窗口内的安全区」全额扣掉，
+    ///          进度条 / 剩余时间 / 全屏键整排左缩 ~39pt；
+    ///      · `spaceBelowWindow = colH − winY − winH` 同病：
+    ///        `edgeToEdge`（展开宽屏）时窗口就是画面列，`colH == winH`
+    ///        → 误判「窗口贴屏幕底」，底栏凭空抬高 20/34pt。
+    ///    这两个量只有拿**屏幕**做基准才成立。0 = 未知，退回列尺寸（旧行为）。
+    var screenW: CGFloat = 0
+    var screenH: CGFloat = 0
+
     /// 明确「退出全屏」——不是切换。
     ///
-    /// `onBack` 的语义是「离开这一页」，它自己会按页面的 `fullScreen` 分流；但页面那份
-    /// 状态和皮肤这份镜像（`fullScreenNow`）是两个变量，任一侧读到过期值，返回就会
-    /// 落到 `dismiss()` 上 —— 用户看到的就是「全屏里点返回直接回主页」。
+    /// 页面那份 `fullScreen` 与皮肤这份镜像（`fullScreenNow`）是两个变量，任一侧读到
+    /// 过期值，返回就会落到 `dismiss()` 上 —— 用户看到的就是「全屏里点返回直接回主页」。
     /// 所以全屏下的返回走这条单向通道：只退全屏，绝不离开页面。
+    ///
+    /// ⛔ 这里**没有** `onBack` 了（2026-11-11）。选集页的退出键已迁到页面层
+    /// （`VideoDetailView.watchPageExitButton`），因为这一层被
+    /// `.frame(winW, winH).offset(winX, winY)` 锁在画面窗口内，画在这里的键出不了窗口。
+    /// 留一个无人读取的 `onBack` 只会让人以为顶栏还有返回键。
     var onExitFullScreen: () -> Void = {}
     var onFold: () -> Void = {}
     var onRotate: () -> Void = {}
@@ -143,6 +164,8 @@ struct OneSkinChrome: View {
     /// 画质增强（Smooth Motion / Sharper Picture）。与旧播放器和设置页同两个键。
     @AppStorage(VideoEnhancement.upscaleKey) private var upscalesVideo = false
     @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
+    /// 广告拦截总开关。与设置页、原版播放器、HLS 代理**同一个键**（`player.skipAds`）。
+    @AppStorage(AdSkip.key) private var skipsAds = true
 
     /// 控件锁：手势与遮挡层全部失效（只有「解锁」还能点）。
     @State private var locked = false
@@ -153,10 +176,23 @@ struct OneSkinChrome: View {
     /// 单击与双击的仲裁：单击延迟 0.26s 执行，双击一落就取消它。
     @State private var tapTask: Task<Void, Never>?
     @State private var showsInfo = false
+    /// 起播耗时浮层。
+    ///
+    /// One 的 `showPlaybackStats`：把「慢」拆成「解析 / 就绪 / 首帧 / 共几秒」，
+    /// 画在播放器画面**右上角**，并注明这次走的是 HLS 还是 mp4 —— 用户报「起播慢」
+    /// 时能直接看出慢在哪一段，不必去翻控制台。
+    /// 数据源是 `PlayerClock.marks`（`PlaybackMarks` 的四个时间戳），
+    /// 与卡顿看门狗同一份，不另记一套。
+    @State private var showsPlaybackStats = false
     /// 「更多本剧」与「跳过片头片尾」两个 sheet 的开关。
     /// 这两项原属上游 `CatalogPlaybackActions`，收进枚举后在 One 页里自己持有。
     @State private var showsSeries = false
     @State private var showsSkip = false
+    /// 「更多」面板是否展开。
+    ///
+    /// 它是个普通 `@State`，不是系统菜单 —— 这样父视图每秒重算（进度条读 `position`）
+    /// 不会把已展开的列表重建一遍。见 `moreMenu` 的注释。
+    @State private var showsMore = false
     @State private var externalStream: OneSkinHandoff?
 
     /// 双击跳转的累计气泡。
@@ -233,7 +269,16 @@ struct OneSkinChrome: View {
 
     private var session: PlaybackSession? { kit.session }
     private var channel: Channel? { kit.channel }
-    private var layout: PlayerControlsLayout { PlayerControlsLayout(stored: layoutRaw) }
+    /// 按当前形态读（三形态各自独立的控制栏）。
+    /// `layoutRaw` 只作为刷新信号保留 —— `@AppStorage` 不能动态选键。
+    private var layout: PlayerControlsLayout {
+        _ = layoutRaw
+        // ⛔ 不能用 `appScreenBounds.width`（BUG-L）：Duo 的 `screen.bounds` 是**物理固定值**，
+        //    内屏恒报 669（`device-facts` / `duo-metrics` 实测），既不随方向交换，
+        //    也不反映 Split View 半边或 PiP 压短后的真实空间。
+        //    而 `winW×winH` 就是这个播放器窗口此刻真正拿到的尺寸 —— 用它选那一份控制栏配置。
+        return PlayerControlsLayout.current(forSkinShape: kit.skinShape, width: winW)
+    }
     private var scaling: PictureScaling { PictureScaling(rawValue: scalingRaw) ?? .source }
 
     private var position: Double { session?.position ?? 0 }
@@ -248,6 +293,12 @@ struct OneSkinChrome: View {
     /// 字形又按宽再乘 0.34、播放键另取一套并夹到 30），落到屏幕上就是
     /// 「同一个播放器里控件有大有小」。现在只留一个比例尺，其余全是倍数。
     private var m: ChromeMetrics { ChromeMetrics(winW: winW, winH: winH) }
+
+    /// 屏幕尺寸（当前方向）。未知时退回列尺寸，保持旧行为。
+    private var screenSize: CGSize {
+        CGSize(width: screenW > 1 ? screenW : colW,
+               height: screenH > 1 ? screenH : colH)
+    }
 
     /// 当前窗口所在那块屏的安全区。
     ///
@@ -286,7 +337,35 @@ struct OneSkinChrome: View {
         // 安全区若落在窗口内部（winY < safeTop），才需要把它顶下去。
         let safeInsideWindow = max(0, safeTop - winY)
         let cleared = safeInsideWindow + m.hit / 2 + m.edge
-        return max(design, cleared)
+        let baseline = max(design, cleared)
+
+        // ★ 传感器（灵动岛 / 刘海 / 挖孔）按**水平位置**分别避让。
+        //
+        // 上面那条 `cleared` 只回答「整条顶栏要压在哪儿」，它拿 `safeTop` 一刀切，
+        // 假定了「遮挡物横贯整屏」。实际不是：
+        //   · 竖屏灵动岛只在**中间一段**（约屏宽 27%），左右两侧是空的；
+        //   · 横屏刘海在**左缘一条**，而那时 `safeTop` 通常为 0，这条判据根本不报警。
+        // 于是用户报的「竖屏控件被摄像头压住 / 横屏最左边点不到」两件事，
+        // 都不是这句 `cleared` 能解决的。真正的判据在 `OneSkinSafeArea`。
+        let housing = OneSkinSafeArea.housing(
+            screen: screenSize,
+            safeTop: safeTop,
+            safeLeft: safeLeft,
+            portrait: !landscape
+        )
+        // 顶栏的内容水平范围：从窗口左缘 + 边距，到窗口右缘 − 边距。
+        let x0 = winX + barLeading
+        let x1 = winX + winW - barTrailing
+        let clearedForHousing = OneSkinSafeArea.clearedCentreY(
+            baseline,
+            halfHeight: m.hit / 2,
+            windowTop: winY,
+            x0: x0,
+            x1: x1,
+            housing: housing,
+            margin: m.edge
+        )
+        return clearedForHousing
     }
 
     /// 底栏中心 y。设计值是 `winH * 0.928`，同样要在窗口贴屏幕底时让开 Home 指示条。
@@ -298,9 +377,13 @@ struct OneSkinChrome: View {
         // `colH - winY` 却拿整列高算，底栏被推到窗口下沿之外很远的地方；
         // 同时 `safeBottom`（Home 指示条）也被无条件扣掉 —— 可它根本不在窗口内部。
         let design = min(winH * 0.928, winH - m.hit / 2 - m.edge)
-        // 窗口底边在列坐标系里 = winY + winH。屏幕底边 = colH。
-        // 落到窗口内部的安全区高度 = max(0, safeBottom - (colH - winY - winH))。
-        let spaceBelowWindow = max(0, colH - winY - winH)
+        // 窗口底边到**屏幕底边**还剩多少。
+        //
+        // ⛔ 原来写 `colH - winY - winH`（列底），展开宽屏 `edgeToEdge` 时
+        //    窗口就是整列 → 差值 0 → 判定「窗口贴屏幕底」→ 把 Home 条那
+        //    20/34pt 扣进窗口内部，底栏整体抬高。而窗口其实在中部，
+        //    离屏幕底还有几百 pt。必须用屏幕高做基准。
+        let spaceBelowWindow = max(0, screenSize.height - winY - winH)
         let safeInsideWindow = max(0, safeBottom - spaceBelowWindow)
         let lowest = winH - safeInsideWindow - m.hit / 2 - m.edge
         return min(design, max(lowest, m.hit / 2 + m.edge))
@@ -336,9 +419,13 @@ struct OneSkinChrome: View {
         //
         // 真正的语义：屏幕安全区**如果落在窗口内部**才需要让开；落在窗口外面
         // 的那部分天然就在画面之外，不该再变成内边距。
-        // 窗口右缘在列内的位置 = winX + winW；列宽 = colW。
-        // 窗口右侧还剩多宽？这段里有多少被安全区占掉？
-        let spaceRightOfWindow = max(0, colW - winX - winW)
+        // 窗口右缘在屏幕里的位置 = winX + winW（画面列贴屏幕左缘，列原点是 0）；
+        // 屏幕宽度 = screenSize.width。窗口右侧还剩多宽？这段里有多少被安全区占掉？
+        //
+        // ⛔ 基准必须是**屏幕宽**，不是 `colW`：横持双列时画面列 523、屏幕 951，
+        //    用列宽算出的余量恒为 0 → 把屏幕右缘那 71pt 安全区当成窗口内的，
+        //    整排控件左缩 39pt（P1，见 16.2）。
+        let spaceRightOfWindow = max(0, screenSize.width - winX - winW)
         let safeInsideWindow = max(0, safeRight - spaceRightOfWindow)
         return max(m.edge, m.edge + safeInsideWindow)
     }
@@ -375,9 +462,11 @@ struct OneSkinChrome: View {
                         bottomBar
                     }
                 }
+                morePanel
                 gestureHUD
                 boostLayer
                 infoLayer
+                playbackStatsLayer
                 skipLayer
                 stallNotice
             }
@@ -397,7 +486,21 @@ struct OneSkinChrome: View {
         .task(id: skipKey) { await loadSkipMarkers() }
         // 锁屏 / 控制中心：接上遥控键，并在状态变化时重写信息。
         // `initial: true` 覆盖「进页面时就已经在播」这一常见情形。
-        .onAppear { attachClock(); if let session { nowPlaying.start(session) } }
+        .onAppear {
+            attachClock()
+            if let session { nowPlaying.start(session) }
+            // ★ 锁定态必须从 `PlayerOrientation` 回读，不能靠本地 @State 初值。
+            //
+            // `locked` 是 `@State`，而控件层在**每次形态切换**时都会被重建
+            // （折叠 / 展开 / 转屏 / 进出全屏都会换窗口尺寸、换 `winW×winH`）。
+            // 重建后它回到 `false`，可 `PlayerOrientation.isLocked` 仍是 `true`：
+            //   · 画面上看是「未锁定」—— 顶栏、播放键、进度条全部回来且**可点**；
+            //   · 方向其实还钉死着，于是按键响应了、画面不动；
+            //   · 而且这时不再画 `unlockButton`，用户**没有任何入口解锁**，
+            //     只能退出页面再进 —— 正是用户报的「锁定后切形态就乱了 / 解不开」。
+            // 回读一次让两者始终是同一事实。
+            locked = PlayerOrientation.isLocked
+        }
         // 会话是异步来的（先有 channel，再有 player），两个时刻都要重新挂看门狗。
         // 广告被自动跳过时弹一下提示。
         //
@@ -424,6 +527,18 @@ struct OneSkinChrome: View {
         .sheet(item: externalBinding) { handoff in
             Mi3sExternalPlayerMenu(stream: handoff.url, headers: channel?.headers ?? [:])
         }
+        // ⛔ 这两个 sheet 此前**根本没有挂**。
+        //
+        // `showsSeries` / `showsSkip` 只被菜单条目置 true，没有任何 `.sheet` 消费它们 ——
+        // 于是「更多本剧」和「跳过片头片尾」点了什么都不发生。用户报
+        // 「控件没有实现完整」，这是最典型的形态：条目在、动作写了、界面没接上。
+        // 现在挂上与上游 `CatalogPlaybackActions` 同一对视图，行为一致。
+        .sheet(isPresented: $showsSeries) {
+            if let channel { SeriesSuggestionSheet(channel: channel) }
+        }
+        .sheet(isPresented: $showsSkip) {
+            if let session { EpisodeSkipSettingsView(session: session) }
+        }
         // 弹幕列表：旧播放器一直有，One 页此前没有入口，只能看飘过的、找不到刚才那条。
         .sheet(isPresented: $showsDanmakuList) {
             if let session {
@@ -435,6 +550,23 @@ struct OneSkinChrome: View {
             // 进全屏：先亮出控件，几秒后自动收起，画面才干净；
             // 退全屏：恢复常驻（选集页必须能一直看到返回）。
             if full { revealChrome(schedule: true) } else { cancelHide(); chromeHidden = false }
+            // ⛔ 「更多」面板必须随全屏切换一起收起。
+            //
+            // `morePanel` 的显示条件是 `if showsMore, !fullScreen, ...` —— 进全屏时它被条件
+            // 藏起来，但 `showsMore` 仍是 true。等用户退出全屏回到选集页，条件重新成立，
+            // 面板会**自己弹出来**盖在画面上，用户没点过任何东西。
+            // 状态与可见性必须同时收，否则就是「隐藏了但没关」。
+            if showsMore { closeMore() }
+        }
+        // `morePanel` 的显示条件里还有一个 `showsTransport`（换集/切源时它会短暂变 false）。
+        // 面板会因此消失，但 `showsMore` 还留着 true —— 新集就绪后它**自己弹回来**。
+        // 与 fullScreen / locked 同族，这里一并收掉。
+        .onChange(of: showsTransport) { _, ready in
+            if !ready, showsMore { showsMore = false }
+        }
+        // 广告拦截开关变了要**当场**生效，不能等下一集（见 `adBlockingDidChange`）。
+        .onChange(of: skipsAds) { _, enabled in
+            session?.adBlockingDidChange(enabled: enabled)
         }
         .onChange(of: playing) { _, isPlaying in
             // 暂停就留着控件，继续播再开始倒计时 —— 与上游播放器一致。
@@ -450,6 +582,9 @@ struct OneSkinChrome: View {
         // 现在整段删掉，PiP 只由 `kit.pip.toggle()` 那一个按钮起停。
         .onDisappear {
             cancelHide(); tapTask?.cancel()
+            // 控件层在每次形态切换时会被重建，`showsMore` 随 @State 归零；
+            // 但同一次构建内离页再回来（sheet 关闭等）不一定重建，显式清一次。
+            showsMore = false
             // 语音字幕是长任务：离页必须取消，否则识别在后台跑完也无人接收。
             speechTask?.cancel(); speechTask = nil
             // 锁屏信息随页面一起撤掉；不撤的话离开播放页后锁屏还停在上一集。
@@ -464,35 +599,69 @@ struct OneSkinChrome: View {
 
     private var topBar: some View {
         HStack(spacing: 0) {
-            // [mi3s] 二开：返回键**任何状态都在**，而且全屏时只退全屏。
-            // 原来只在全屏里画，且点了直接 dismiss 整页；选集页里反而没有返回，
-            // 只能靠屏幕边缘右滑。现在：
-            //   全屏 → `onExitFullScreen()`：退全屏，回到选集页继续播（画面、进度、选集都在）；
-            //   选集页 → `onBack()`：正常返回上一页。
-            // 这里用控件层**自己**的 `fullScreen`（就是它正在画的那一版）判断，不读页面状态：
-            // 两个状态一旦不同步，返回就会被解释成「离开页面」。
-            iconButton("chevron.left", label: L10n.text("Back")) {
-                if fullScreen { onExitFullScreen() } else { onBack() }
-            }
-            // ⛔ 已删「伪全屏」按钮（rectangle.expand.vertical）。
-            //    它在 OneSkin 路径下只是把窗口铺满整列，真正的全屏由底部胶囊条/手势承担；
-            //    留在顶栏第二位只造成「这里一个全屏、那里一个全屏」的混淆。
-            //    全屏进出的唯一入口现在是控制栏里的 fullScreen 控件（若设为可见）+ 系统手势。
-            iconButton("rectangle.landscape.rotate", label: L10n.text("Rotate")) { onRotate() }
-            // 全屏里没有「合拢/展开」这回事（画面已占满整屏），把它收掉免得占位。
-            if !fullScreen {
-                // ⛔ 已删「选集抽屉」按钮（sidebar.right）。
-                //    选集面板由底部胶囊条的「选集」chip 打开，顶栏再放一个同功能按钮
-                //    会让两个入口抢同一块状态（showsEpisodes vs showsSeries）。
-                ForEach(surfacedControls, id: \.self) { control in
-                    controlButton(control)
+            // [mi3s] 二开（2026-11-11）：**选集页的「退出」不再画在这里**。
+            //
+            // 用户的诉求：退出按钮要离开视频窗口、落到界面上，而且从它退出**不进小窗**。
+            // 这一层（`OneSkinChrome`）被 `pictureColumn` 用
+            // `.frame(winW, winH).offset(winX, winY)` 锁在**画面窗口**里 —— 所以画在这里
+            // 的键无论怎么放都在窗口内。选集页那颗已迁到页面的 `watchPageExitButton`。
+            //
+            // 这里只保留**全屏态**那一颗：全屏时画面铺满整屏、窗口＝屏幕，
+            // 它本来就已经落在「界面上」；而全屏里需要的是「退全屏」而不是「退出页面」，
+            // 语义不同、不能合到页面那颗上去（页面那颗一律退出页面）。
+            if fullScreen {
+                iconButton("chevron.left", label: L10n.text("Exit Full Screen")) {
+                    // 用控件层**自己**的 `fullScreen` 判断，不读页面状态：
+                    // 两个状态一旦不同步，返回就会被解释成「离开页面」。
+                    onExitFullScreen()
                 }
+            }
+            // 转屏：**受布局控制**，不再是硬编码。
+            //
+            // 原来这一颗无条件画在返回键右边，`PlayerControl.rotate` 明明在枚举里、
+            // 设置页也列得出、也能拖进「更多」—— 但顶栏这一颗永远在，
+            // 于是「拖进更多」等于白拖（还多一份），「隐藏」更是不可能。
+            //
+            // 现在：用户把它排进顶栏 → 由 `surfacedControls` 按槽位画，这里不再兜底；
+            // 排进「更多」→ 只在更多里出现；两处都没有（老配置没这一项）→ 才画这颗兜底，
+            // 免得升级上来的用户失去转屏入口。
+            // ⛔ 不能再带 `!fullScreen`。
+            //
+            // 全屏态三处都不给转屏入口：这里被 `!fullScreen` 关掉、`morePanel` 全屏不画、
+            // `barControls` 又把 `.rotate` 排除在设置页之外 —— 于是**全屏里根本无法转屏**，
+            // 只能先退全屏。而原先是无条件画这颗的，那是本批改出来的回归。
+            // 全屏是最需要转屏的场景（横过来看宽银幕），这里必须留。
+            if !controlsRotateElsewhere {
+                iconButton("rectangle.landscape.rotate", label: L10n.text("Rotate")) { onRotate() }
+            }
+            // ⛔ 这里**不能**再套一层 `if !fullScreen`。
+            //
+            // `surfacedControls` 自己就是 `fullScreen ? layout.fullSurfaced : layout.watchSurfaced`。
+            // 原来外面又包一层 `if !fullScreen`，于是全屏时这段整个不画 ——
+            // `fullSurfaced` 分支**永远不可达**，设置页那张「Shown in Full Screen」
+            // 勾选表对 One 皮肤是纯粹的谎：勾什么都看不到。
+            //
+            // 现在交给 `surfacedControls` 自己分流：全屏取 `fullSurfaced`（默认是空数组，
+            // 所以默认行为一个字节没变），选集页取 `watchSurfaced`。
+            // 用户真去勾了全屏那几项，才会在全屏顶栏看到它们。
+            ForEach(surfacedControls, id: \.self) { control in
+                controlButton(control)
             }
 
             Spacer(minLength: 0)
 
+            // 锁定是**唯一**保留的结构位，而且必须留。
+            //
+            // 理由不是懒惰：锁定后 `morePanel` / 顶栏控件全都不画（见 body 里的 `locked` 分支），
+            // 所以它自己的入口**不可能**放在「更多」或可隐藏的槽位里 ——
+            // 放进去了就是「锁上之后再也解不开，只能退出页面」。
+            // 它也不在 `barControls` 里，设置页不会让用户勾选它，
+            // 所以不存在「设置里说能改、实际改不了」的矛盾。
             iconButton(locked ? "lock.fill" : "lock.open",
                        label: L10n.text(locked ? "Unlock Controls" : "Lock Controls")) {
+                // 锁定同样要先收面板：`morePanel` 在 `locked` 时不画，但 `showsMore` 还留着 true，
+                // 一解锁面板就自己弹出来。
+                if showsMore { closeMore() }
                 locked.toggle()
                 if locked { PlayerOrientation.lock() } else { PlayerOrientation.unlock() }
             }
@@ -519,7 +688,7 @@ struct OneSkinChrome: View {
         // 额外让开左右刘海 —— 横屏时它在左边，最左那颗返回键会整个陷进去。
         .padding(.leading, barLeading)
         .padding(.trailing, barTrailing)
-        .frame(width: winW, height: m.hit)
+        .frame(width: winW, height: m.barHeight)
         // 中心不能只按比例给：小窗（winH≈206）时 0.072×206≈15，
         // 半个 26pt 热区会顶出窗口上沿，图标看起来「缺了一条边」。
         // 贴屏幕顶时还要让开状态栏 —— 见 `topBarY`。
@@ -536,9 +705,14 @@ struct OneSkinChrome: View {
     /// 先各占一个热区，剩下的宽度能塞几颗就放几颗，再把控件清单按用户排布过滤后取前 N 个。
     /// 窗口窄（小窗 / 折叠竖持）时 N 自然变小，不会挤成一团。
     private var topSurfaceCapacity: Int {
-        // 返回、全屏、旋转（全屏态到此为止）
-        // + 合拢、更多、选集聚合（仅选集页）+ 锁定。
-        let structural = fullScreen ? 2 : 5
+        // 结构位**不含返回键了**（2026-11-11 起选集页的退出键已移到页面层）。
+        // 全屏：退全屏 + 旋转 = 2。
+        // 选集页：旋转 + 合拢 + 更多 + 选集聚合 + 锁定 = 5 → **改成 5 减 1 = 4**。
+        //
+        // ⛔ 这里少减一个，顶栏就空出一个用不上的槽 —— 用户把控件排进顶栏时会发现
+        // 「勾了 3 颗只画出 2 颗」，且没有任何提示（正是本项目反复出现的
+        // 「设置里排好了、播放器里是空槽」那一类）。
+        let structural = fullScreen ? 2 : 4
         let spare = winW - barLeading - barTrailing - CGFloat(structural) * m.hit
         return max(0, Int(spare / m.hit))
     }
@@ -553,10 +727,53 @@ struct OneSkinChrome: View {
     private var surfacedControls: [PlayerControl] {
         let allowed = Set(fullScreen ? layout.fullSurfaced : layout.watchSurfaced)
         return Array(layout.top
-            .filter { $0 != .fullScreen && $0 != .rotate && $0 != .lock }
+            // ⛔ 这里不再按 `.fullScreen / .rotate / .lock` 过滤。
+            //
+            // 原来这三项被滤掉，同时又各自有一颗硬编码的结构键 —— 于是用户把它们
+            // 摆到顶栏之后，得到的是「滤掉的那一颗没出现，硬编码的那一颗还在原地」，
+            // 也就是「拖了没反应、位置也改不了」。现在谁被排进顶栏就画谁，
+            // 唯一的结构位只剩锁定（理由见 `topBar` 里那颗锁定键的注释）。
+            .filter { $0 != .lock }
             .filter { allowed.contains($0) }
             .filter(available)
             .prefix(topSurfaceCapacity))
+    }
+
+    /// 转屏这一项是否已经由用户摆在别处（顶栏槽位或「更多」里）。
+    ///
+    /// 用来决定顶栏那颗**兜底**转屏键要不要画 —— 只有当用户在哪都没排它时
+    /// （典型是从旧版升上来、配置串里没有 rotate 这一项）才补一颗，
+    /// 免得「升级后突然不能转屏了」。
+    private var controlsRotateElsewhere: Bool {
+        // 三处都要看。原来只看 top / more，于是用户把转屏摆到**底栏**时
+        // 顶栏那颗兜底仍然画 —— 上下各一颗，顶栏那颗还删不掉。
+        layout.top.contains(.rotate) || layout.more.contains(.rotate) || layout.bottom.contains(.rotate)
+    }
+
+    /// 底栏传输区控件 —— **按 `layout.bottomSlots` 渲染**（用户在设置页 Bottom Row 里排的那十格）。
+    ///
+    /// ⛔ 这里曾经是硬编码的「时间码 + 进度条 + 剩余时间 + 全屏键」，**完全不读
+    /// `layout.bottomSlots`**。后果：设置页明确提供「Bottom Row」十格拖拽区
+    /// （`PlayerControlsSettingsView:160`，footer 也写着 "Drag a button onto any slot
+    /// in the top **or bottom** row"），用户把「上一集/下一集/后退十秒」拖到底栏后，
+    /// One 皮肤里一个都不出现 —— 拖了等于没拖。只有原版皮肤（`MobilePlayer`）
+    /// 真的读 `bottomSlots`，两套皮肤行为分叉。
+    ///
+    /// 现在：底栏左侧是用户排的传输控件（含空槽占位），进度条仍在中间，
+    /// 时间码/剩余时间留在右侧 —— 保留 One 的版式，只把「哪些按钮、什么顺序」交还给用户。
+    ///
+    /// ⛔ 这里**不再排除** `.fullScreen` / `.lock` / `.rotate`。
+    ///
+    /// 原来这三项被无条件滤掉，而底栏右端又硬编码画了一颗全屏键 ——
+    /// 结果就是「全屏键永远在右下角，用户在设置里怎么排都动不了它」，
+    /// 正是用户说的「控件没有实现完整、不能自定义」。现在：用户把全屏键摆进
+    /// Bottom Row 就按他的位置画；没摆才用那颗硬编码的兜底（永远有全屏入口）。
+    private var transportControls: [PlayerControl] {
+        _ = layoutRaw
+        // `.lock` 例外：顶栏那颗锁定键是**结构位**（锁上后其它控件与「更多」全都不画，
+        // 它自己的入口必须常在，否则锁了再也解不开）。它不进 `barControls`，用户本不该
+        // 能排它；但老配置串里可能有，这里兜一道，避免底栏多出一颗只上锁不解锁的锁。
+        return layout.bottom.filter { $0 != .lock }.filter(available)
     }
 
     /// 当前上下文是否用得上这个控件（与 `MobilePlayerView.available` 同一套判断）。
@@ -565,10 +782,17 @@ struct OneSkinChrome: View {
         switch control {
         case .airPlay: return true
         case .episodes: return channel?.historyContext != nil
+        // 这里只回答「这个皮肤有没有 PiP 这项能力」（= 平台支持 + 画面层已接 pip）。
+        // 「此刻能不能点」是另一件事，由各自的 `.disabled` 读 `canToggle` 决定 ——
+        // 见下面三处按钮：`supported` 恒真但 `possible` 还没就绪时，
+        // 以前按钮是**亮着但点了没反应**（`startCurrent()` 的 guard 直接返回）。
         case .pictureInPicture: return kit.pip.supported
         case .miniPlayer, .pictureSize, .videoInfo, .anotherPlayer: return true
         // 广告标注：得真的在播（抓得到帧）、有时间轴、不是直播。
         case .markAd: return canMarkAd
+        // 广告拦截是**总开关**，不依赖这条片源：任何时候都能开/关，
+        // 关着的时候也能打开。所以它永远可用，不做内容守卫。
+        case .adBlock: return true
         case .lock, .rotate: return true
         case .danmaku: return !session.danmaku.isEmpty
         case .quality: return session.qualities.count > 1
@@ -583,7 +807,9 @@ struct OneSkinChrome: View {
         // 这四项来自上游那套菜单，收进枚举后一并给出可用性判据。
         case .autoPlayNext: return channel.flatMap { store.catalog(for: $0) } != nil
         case .moreInSeries: return channel?.historyContext != nil
-        case .skipIntroAuto, .skipIntroManual: return !session.isLive
+        // 同 `MobilePlayer`：没有 `skipScope` 时 `applySkipSettings` 静默返回，
+        // 开关点了会弹回，不如不显示。
+        case .skipIntroAuto, .skipIntroManual: return !session.isLive && session.canPersistSkipSettings
         }
     }
 
@@ -611,9 +837,13 @@ struct OneSkinChrome: View {
 
     private var bottomBar: some View {
         HStack(spacing: 0) {
-            // 左侧时间码同理：按文字实际宽度占位，不再吃 10.8% 窗口宽。
-            // 两侧都收紧后，中间的 seekTrack 才能真正撑满剩余空间，
-            // 进度条才「占满整个宽度」。
+            // 左侧：用户在设置页「Bottom Row」里排的传输控件（上一集 / 播放暂停 / 下一集 …）。
+            // 空槽不留间距 —— One 的底栏本来就贴边，留空会把它挤窄。
+            ForEach(Array(transportControls.enumerated()), id: \.offset) { _, control in
+                transportControl(control)
+            }
+            // 时间码：按文字实际宽度占位，不吃 10.8% 窗口宽。
+            // 两侧都收紧后，中间的 seekTrack 才能真正撑满剩余空间。
             Text(clock(position)).monospacedDigit()
                 .fixedSize()
                 .padding(.trailing, 8)
@@ -632,9 +862,15 @@ struct OneSkinChrome: View {
                 .fixedSize()
             // 这里以前单独传 `winW * 0.040` 和小一号的字，是同一排里唯一
             // 「框更窄、字形更小」的图标。现在与顶栏同一套：同一颗图标、同一个热区。
-            iconButton(kit.isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                       label: kit.isFullScreen ? L10n.text("Exit Full Screen") : L10n.text("Full Screen")) {
-                kit.toggleFullScreen()
+            //
+            // ★ 只有在用户**没把全屏键排进 Bottom Row** 时才画这颗兜底键。
+            //   排进去了就由 `transportControls` 按他的槽位画，这里再画一颗
+            //   就是「同一个功能两个按钮、还删不掉其中一颗」。
+            if !transportControls.contains(.fullScreen) {
+                iconButton(kit.isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                           label: kit.isFullScreen ? L10n.text("Exit Full Screen") : L10n.text("Full Screen")) {
+                    kit.toggleFullScreen()
+                }
             }
         }
         .font(.system(size: m.caption))
@@ -642,7 +878,7 @@ struct OneSkinChrome: View {
         // 与顶栏同一份边距、同一条对齐线（同样让开左右刘海）。
         .padding(.leading, barLeading)
         .padding(.trailing, barTrailing)
-        .frame(width: winW, height: m.hit)
+        .frame(width: winW, height: m.barHeight)
         // 同顶栏：小窗时 0.928 会把热区顶出下沿；
         // 窗口贴屏幕底时还要让开 Home 指示条 —— 见 `bottomBarY`。
         .position(x: winW / 2, y: bottomBarY)
@@ -720,30 +956,93 @@ struct OneSkinChrome: View {
     // MARK: - 更多菜单
 
     private var moreMenu: some View {
-        Menu {
-            // ★ 严格按 `layout.more` 渲染，但**保留语义分组**（分组壳子固定，条目受控）。
-            //
-            // 以前的写法是四个硬编码 Section，完全不看 `layout.more` ——
-            // 于是设置页里把控件拖进「更多」／拖出来，播放器的更多菜单一点不变，
-            // 用户报的「设置改了没反应」就是这个。
-            //
-            // 现在：每条控件的**是否出现**由 `layout.more.contains` 决定，
-            // **左右顺序**按用户在设置页里拖出来的 `layout.more` 顺序排
-            // （组内排序 = `more` 数组里的相对次序）。
-            // 空组自动隐藏，不会留下一排标题。
-            ForEach(Array(visibleMoreGroups.enumerated()), id: \.offset) { _, group in
-                Section(group.title) {
-                    ForEach(group.controls) { control in
-                        moreItem(control)
-                    }
-                }
-            }
+        // ⛔ 这里**不用系统 `Menu`**，改成「一颗按钮 + 本层自绘面板」。
+        //
+        // 用户报的是：「更多里面会一直导致菜单刷新，按钮下滑不到可视范围，点不到」。
+        // 根因不是某一条目的判定条件（上一轮把 `canMarkAd` 里的 position 拿掉只治了一半），
+        // 而是**容器本身**：系统 `Menu` 的内容归 UIKit 管，而这一层 `body` 每秒都在
+        // 因 `position` 变化重算 —— 每次重算都会重建一次 `Menu` 的内容树，
+        // UIKit 于是把它当成「菜单内容变了」，把已经展开的那张表重新配置一遍。
+        // 表现就是：表一直在跳、滚不到底、「标注广告」那种排在最后的条目点不中。
+        //
+        // 自绘面板没有这个问题：它就是本层的一个普通 `ScrollView`，
+        // 父视图重算不会重置它的滚动位置，也不会把它收起来。
+        Button {
+            withAnimation(.easeOut(duration: 0.16)) { showsMore.toggle() }
         } label: {
             chromeIcon("ellipsis")
         }
         .buttonStyle(.plain)
         .accessibilityLabel(L10n.text("Playback Options"))
         .accessibilityIdentifier("player.oneskinOptions")
+    }
+
+    /// 「更多」面板本体 —— 挂在窗口坐标系里的一层，不进系统菜单。
+    ///
+    /// 为什么必须是**滚动**面板：控件表有十九项（`layout.more` 可以全部收在这里），
+    /// 竖屏选集页的窗口只有 ~244pt 高，一屏放不下。系统菜单滑动会被上面的重绘打断；
+    /// 自绘 `ScrollView` 不会。
+    @ViewBuilder private var morePanel: some View {
+        if showsMore, !fullScreen, !locked, showsTransport {
+            ZStack(alignment: .topTrailing) {
+                // 点空白处关闭。遮罩不做全黑：画面还要看得见。
+                Color.black.opacity(0.24)
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeMore() }
+
+                VStack(spacing: 0) {
+                    // 标题行：左「更多」，右关闭键。
+                    HStack(spacing: 0) {
+                        Text(L10n.text("Playback Options"))
+                            .font(.system(size: m.caption, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                        Spacer(minLength: 6)
+                        Button { closeMore() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: m.caption, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.7))
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(L10n.text("Close"))
+                    }
+                    .padding(.leading, 12).padding(.trailing, 2).padding(.top, 2)
+                    Divider().overlay(Color.white.opacity(0.14))
+
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(visibleMoreGroups.enumerated()), id: \.offset) { _, group in
+                                Text(group.title.uppercased())
+                                    .font(.system(size: max(9, m.caption * 0.84), weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.45))
+                                    .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 2)
+                                ForEach(group.controls) { control in
+                                    moreRow(control)
+                                }
+                            }
+                        }
+                        .padding(.bottom, 8)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                }
+                .frame(width: min(winW * 0.68, 330))
+                .frame(maxHeight: max(120, min(winH - m.edge * 2, 420)))
+                // 纯色底 + 细边：材质压在运动画面上每帧重绘，与 `PlaybackInfoPanel` 同理。
+                .background(.black.opacity(0.80),
+                            in: RoundedRectangle(cornerRadius: max(10, m.glyph * 0.8), style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: max(10, m.glyph * 0.8), style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                }
+                .padding(m.edge)
+            }
+            .frame(width: winW, height: winH)
+        }
+    }
+
+    private func closeMore() {
+        withAnimation(.easeOut(duration: 0.16)) { showsMore = false }
     }
 
     /// 「更多」里按分组切好的可见条目，已按 `layout.more` 的先后排好序。
@@ -753,12 +1052,18 @@ struct OneSkinChrome: View {
     private var visibleMoreGroups: [(title: String, controls: [PlayerControl])] {
         // 语义分组：只决定「这个控件属于哪个标题」，不决定它出不出现。
         let groups: [(String, [PlayerControl])] = [
+            // ⛔ 这张表的**成员资格**必须覆盖 `moreItem` 里所有**有分支**的 case。
+            // 少了哪一个，那个分支就成了死代码：用户把它拖进「更多」，
+            // 面板里什么都不出现 —— 正是本批要消灭的「拖进去 = 凭空消失」。
+            // 传输四项（播放/暂停、±10 秒、全屏）原先不在表里，`moreItem` 里
+            // 为它们写的分支从来没被走到过。
             (L10n.text("Playback"), [.episodes, .previousEpisode, .nextEpisode, .rotate, .lock,
-                                     .pictureInPicture, .miniPlayer, .anotherPlayer]),
+                                     .pictureInPicture, .miniPlayer, .anotherPlayer,
+                                     .playPause, .backTen, .forwardTen, .fullScreen]),
             (L10n.text("Picture"), [.quality, .pictureSize]),
             (L10n.text("Sound"), [.audio, .subtitles, .speed, .danmaku, .speechSubtitles]),
             (L10n.text("Series"), [.autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]),
-            (L10n.text("Ads"), [.markAd]),
+            (L10n.text("Ads"), [.markAd, .adBlock]),
             (L10n.text("Info"), [.videoInfo, .airPlay])
         ]
         // 只有进了 `layout.more` 的才出现；组内顺序跟随 `more` 的数组顺序。
@@ -802,6 +1107,8 @@ struct OneSkinChrome: View {
             }
         case .lock:
             Button {
+                // 与顶栏那颗锁定键同一处理：先收面板，否则解锁后它会自己弹回来。
+                if showsMore { closeMore() }
                 locked = true
                 PlayerOrientation.lock()
             } label: {
@@ -812,7 +1119,9 @@ struct OneSkinChrome: View {
                 Label(kit.pip.active ? L10n.text("Leave Picture in Picture") : L10n.text("Picture in Picture"),
                       systemImage: kit.pip.active ? "pip.exit" : "pip.enter")
             }
-            .disabled(!kit.pip.supported)
+            // 只在「此刻真能起浮」时可点（`possible || active`）：画面层还没登记完时
+            // 按钮灰掉，而不是亮了却点不动。
+            .disabled(!kit.pip.canToggle)
         case .miniPlayer:
             Button { kit.miniPlayer() } label: {
                 Label(L10n.text("Mini Player"), systemImage: "rectangle.inset.bottomright.filled")
@@ -840,7 +1149,7 @@ struct OneSkinChrome: View {
                     Task { await markAdHere() }
                 } label: {
                     Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark This as an Ad"),
-                          systemImage: "megaphone.badge.xmark")
+                          systemImage: "megaphone")
                 }
                 .disabled(markingAd)
             }
@@ -916,6 +1225,11 @@ struct OneSkinChrome: View {
             Toggle(isOn: $showsInfo) {
                 Label(L10n.text("Show Video Info"), systemImage: "info.circle")
             }
+            // One 的 `showPlaybackStats` 与视频信息卡是**两个**开关：一个看码率/分辨率，
+            // 一个只看起播四段耗时。并排放在同一组里，别混成一个。
+            Toggle(isOn: $showsPlaybackStats) {
+                Label("起播耗时", systemImage: "stopwatch")
+            }
         case .airPlay:
             if let channel, let session {
                 PlayOnButton(channel: channel, session: session, browser: playOn) { _ in }
@@ -937,19 +1251,103 @@ struct OneSkinChrome: View {
                     settings.enabled = value
                     session.applySkipSettings(settings)
                 })) {
-                Label(L10n.text("Automatically skip intro and outro"), systemImage: "forward.to.end.alt")
+                Label(L10n.text("Automatically skip intro and outro"), systemImage: "forward.end.alt")
             }
+        case .adBlock:
+            // ── 广告拦截总开关 ──
+            //
+            // 与 `.markAd` 是两件事：那条是「把这一段记下来」，这条是
+            // 「以后认出这类画面就自动跳过」。开关真身在 `AdSkip.key`
+            //（`player.skipAds`），设置页与这里写的是同一个键，改一边两边同步。
+            //
+            // 它此前**只**在「设置 › 播放 › 广告跳过」里有入口 ——
+            // `PlayerControl` 里没有这一项，所以播放器里根本摆不出这个按钮，
+            // 用户看到的就是「广告拦截我设置不了」。
+            Toggle(isOn: $skipsAds) {
+                Label(skipsAds ? L10n.text("Ad Blocking On") : L10n.text("Ad Blocking Off"),
+                      systemImage: skipsAds ? "shield.lefthalf.filled" : "shield.slash")
+            }
+            .toggleStyle(.switch)
         case .skipIntroManual:
             Button { showsSkip = true } label: {
                 Label(L10n.text("Skip intro / outro"), systemImage: "forward.end")
             }
-        case .playPause, .backTen, .forwardTen, .fullScreen:
-            // 这四个属于底栏传输区，由 `bottomBar` 独占，不进「更多」。
-            EmptyView()
+        case .playPause, .backTen, .forwardTen:
+            // 这三个是**传输类**控件，正常情况下由 `bottomBar` 独占渲染。
+            // 但用户可以把它们拖进「更多」—— 那时必须给一条带文字的菜单项，
+            // 否则就是「拖进更多 = 凭空消失」。原来这里一律 `EmptyView()`。
+            Button {
+                switch control {
+                case .playPause: session?.togglePlayback()
+                case .backTen: seek(by: -10)
+                default: seek(by: 10)
+                }
+            } label: {
+                Label(L10n.text(control.title), systemImage: control.symbol)
+            }
+        case .fullScreen:
+            // 全屏键同理：全屏态本来就不画「更多」（菜单整个收掉），
+            // 所以这一条只会在选集页出现，点它就是进全屏。
+            Button { kit.toggleFullScreen() } label: {
+                Label(L10n.text(control.title), systemImage: control.symbol)
+            }
         }
     }
 
-    @ViewBuilder private var playerSection: some View {
+    /// 「更多」里的一行。自绘面板没有系统菜单的行样式，这里统一给。
+    ///
+    /// 只给**外观**，行为仍在 `moreItem` 里 —— 那样顶栏、底栏、更多三处
+    /// 用的是同一份动作实现，不会因为「这里补了、那里没补」而分叉。
+    @ViewBuilder private func moreRow(_ control: PlayerControl) -> some View {
+        HStack(spacing: 8) {
+            moreItem(control)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: max(11, m.caption * 1.08)))
+        .foregroundStyle(.white)
+        .tint(.white)
+        .frame(minHeight: 34)
+        .padding(.horizontal, 12)
+        .contentShape(Rectangle())
+    }
+
+    /// 这四项的图标形态：开/关两种状态直接反映在图标上，
+    /// 顶栏、底栏、更多三处共用这一份判断。
+    private func symbolFor(_ control: PlayerControl) -> String {
+        switch control {
+        case .autoPlayNext:
+            return store.autoPlayNext ? "play.circle.fill" : "play.circle"
+        case .moreInSeries:
+            return "rectangle.stack"
+        case .skipIntroAuto:
+            return (session?.skipSettings.enabled ?? false) ? "forward.end.alt.fill" : "forward.end.alt"
+        case .skipIntroManual:
+            return "forward.end"
+        default:
+            return control.symbol
+        }
+    }
+
+    /// 图标形态按下去做的事 —— 与「更多」里同名条目一一对应。
+    private func perform(_ control: PlayerControl) {
+        switch control {
+        case .autoPlayNext:
+            store.autoPlayNext.toggle()
+        case .moreInSeries:
+            showsSeries = true
+        case .skipIntroAuto:
+            guard let session else { return }
+            var settings = session.skipSettings
+            settings.enabled.toggle()
+            session.applySkipSettings(settings)
+        case .skipIntroManual:
+            showsSkip = true
+        default:
+            break
+        }
+    }
+
+    @ViewBuilder private func playerSection() -> some View {
         Section(L10n.text("Playback")) {
             Button { kit.openEpisodes() } label: { Label(L10n.text("Episodes"), systemImage: "list.bullet.rectangle") }
             if let previous = step(back: true) {
@@ -964,7 +1362,9 @@ struct OneSkinChrome: View {
                 Label(kit.pip.active ? L10n.text("Leave Picture in Picture") : L10n.text("Picture in Picture"),
                       systemImage: kit.pip.active ? "pip.exit" : "pip.enter")
             }
-            .disabled(!kit.pip.supported)
+            // 只在「此刻真能起浮」时可点（`possible || active`）：画面层还没登记完时
+            // 按钮灰掉，而不是亮了却点不动。
+            .disabled(!kit.pip.canToggle)
             Button { kit.miniPlayer() } label: {
                 Label(L10n.text("Mini Player"), systemImage: "rectangle.inset.bottomright.filled")
             }
@@ -1282,7 +1682,80 @@ struct OneSkinChrome: View {
         }
     }
 
-    // MARK: - 手势
+    // MARK: - 起播耗时
+
+    /// 起播耗时浮层，固定在**画面窗口右上角**。
+    ///
+    /// 与 `infoLayer`（左上角的视频信息卡）分开两条：One 的 `showPlaybackStats`
+    /// 是独立的 `showPlaybackStats` 开关，也只关心四个时间戳，
+    /// 混进码率/分辨率那张卡里会互相顶掉。
+    ///
+    /// 只在**这一次尝试结束**（拿到首帧）或**明确卡住**时画 —— 每帧刷一个变化中的
+    /// 数字既扰眼又没有读数价值。`marks.stalledAt` 覆盖「永远没等到首帧」的情形，
+    /// 那正是最需要看的时候。
+    @ViewBuilder private var playbackStatsLayer: some View {
+        if showsPlaybackStats, let line = playbackStatsLine {
+            VStack {
+                HStack {
+                    Spacer(minLength: 0)
+                    Text(line)
+                        .font(.system(size: max(10, winW * 0.028), weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.92))
+                        .padding(.horizontal, winW * 0.024)
+                        .padding(.vertical, winW * 0.012)
+                        // 纯色底不用材质：材质压在运动画面上每帧重绘（与 PlaybackInfoPanel 同理）。
+                        .background(.black.opacity(0.55),
+                                    in: RoundedRectangle(cornerRadius: winW * 0.02, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: winW * 0.02, style: .continuous)
+                                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                        }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(max(m.hit * 0.4, winW * 0.02))
+            .frame(width: winW, height: winH)
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// 「解析 0.42s · 就绪 0.18s · 首帧 1.06s · 共 1.66s · HLS」
+    ///
+    /// 数字全部来自 `PlaybackMarks` 的真实时间戳；缺哪一段就不写哪一段，
+    /// 不补零也不估。整条都算不出来（还没开始）时返回 nil，整层不画。
+    private var playbackStatsLine: String? {
+        let marks = clock.marks
+        var parts: [String] = []
+        if let t = marks.resolutionLatency { parts.append("解析 \(Self.secondsText(t))") }
+        if let t = marks.bufferingLatency { parts.append("就绪 \(Self.secondsText(t))") }
+        if let t = marks.startLatency { parts.append("首帧 \(Self.secondsText(t))") }
+        if let t = marks.timeToFirstFrame { parts.append("共 \(Self.secondsText(t))") }
+        // 走的是 HLS 还是 mp4：看播放地址本身。`Remux.isSegmented` 就是
+        // 「这条 URL 的分片已被重封成 HLS」的唯一判据，不另记一套状态。
+        if let url = session?.player.currentItem?.asset as? AVURLAsset {
+            parts.append(Remux.isSegmented(url.url) ? "HLS" : "mp4")
+        }
+        if parts.isEmpty, let stage = marks.stalledAt {
+            // 没拿到首帧：报停在哪一段，这比一串空值有用。
+            parts.append("停在\(Self.stageText(stage))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private static func secondsText(_ t: TimeInterval) -> String {
+        t < 10 ? String(format: "%.2fs", t) : String(format: "%.1fs", t)
+    }
+
+    /// `PlaybackMarks.Stage` 的中文名。它是 `String` rawValue 的枚举
+    /// （start / resolution / ready / firstFrame），没有现成的本地化文案。
+    private static func stageText(_ stage: PlaybackMarks.Stage) -> String {
+        switch stage {
+        case .start: return "解析"
+        case .resolution: return "就绪"
+        case .ready: return "首帧"
+        case .firstFrame: return "起播"
+        }
+    }
 
     /// 画面手势层。只做不会误触的五件事：
     /// 双击左右 ±10s、双击中间播放/暂停、横滑定位、竖滑左亮度右音量、长按 2×。
@@ -1797,13 +2270,59 @@ struct OneSkinChrome: View {
 
     // MARK: - 控件呈现（One 风格：白线，不用玻璃球）
 
+    /// `enabled` 默认 true；给 false 时按钮灰掉且点不动。
+    /// 画中画那颗用它：画面层还没登记完（`PictureInPicture.current == nil`）时
+    /// 以前是「亮着但点了没反应」，现在直接灰掉，状态与能力一致。
+    /// 底栏一个传输控件。One 的底栏只有一行图标，所以这里统一用小号 chrome 图标；
+    /// 非传输类控件（用户从顶栏拖下来的）按同一尺寸渲染，行为走各自分支。
+    @ViewBuilder private func transportControl(_ control: PlayerControl) -> some View {
+        switch control {
+        case .backTen:
+            iconButton("gobackward.10", label: L10n.text("Back 10 seconds"), enabled: seekable) {
+                session?.skip(-10)
+            }
+        case .forwardTen:
+            iconButton("goforward.10", label: L10n.text("Forward 10 seconds"), enabled: seekable) {
+                session?.skip(10)
+            }
+        case .playPause:
+            iconButton(playing ? "pause.fill" : "play.fill",
+                       label: playing ? L10n.text("Pause") : L10n.text("Play")) {
+                session?.togglePlayback()
+            }
+        case .previousEpisode:
+            if let previous = step(back: true) {
+                iconButton("backward.end.fill", label: L10n.text("Previous Episode"), enabled: !previous.busy) {
+                    previous.go()
+                }
+            }
+        case .nextEpisode:
+            if let next = step(back: false) {
+                iconButton("forward.end.fill", label: L10n.text("Next Episode"), enabled: !next.busy) {
+                    next.go()
+                }
+            }
+        default:
+            // 非传输类控件（用户从顶栏拖到底栏的）走顶栏那套渲染，
+            // 一个分支都不另写 —— 曾经这里是 `EmptyView()`，于是把「画质」「字幕」
+            // 拖到底栏得到的是一个**空槽**：设置里排好了，播放器里什么都没有。
+            //
+            // ⚠️ 这里**必须**是 `controlButton` 而不是 `moreItem`：
+            // `moreItem` 的 `.lock` 分支是「只上锁、不解锁」（菜单里点完就关了，合理），
+            // 而顶栏/底栏那颗是常驻开关，必须能来回切 —— `controlButton(.lock)` 就是 toggle 语义。
+            controlButton(control)
+        }
+    }
+
     private func iconButton(_ symbol: String, label: String,
                             width: CGFloat? = nil, height: CGFloat? = nil, font: CGFloat? = nil,
+                            enabled: Bool = true,
                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             chromeIcon(symbol, width: width, height: height, font: font)
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
         .accessibilityLabel(label)
     }
 
@@ -1856,8 +2375,13 @@ struct OneSkinChrome: View {
     @ViewBuilder private func controlButton(_ control: PlayerControl) -> some View {
         switch control {
         case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual:
-            // 这四项只做菜单条目，没有图标形态（顶栏不放它们）。
-            EmptyView()
+            // ⛔ 此前这四项是 `EmptyView()`，理由写的是「只做菜单条目，顶栏不放它们」。
+            //    但它们**在 `barControls` 里**，设置页的「直接显示」表会列出来、
+            //    也能被拖进顶栏槽位 —— 于是用户在设置里排好，顶栏上是一颗**空位**。
+            //    现在给出与「更多」同源的图标形态（开/关两态），摆哪都能用。
+            iconButton(symbolFor(control), label: L10n.text(control.title)) {
+                perform(control)
+            }
         case .airPlay:
             // AVRoutePickerView 自带一圈内边距，塞进和别人一样大的框里，
             // 字形永远比邻居小一圈 —— 这是「看起来大小不一致」里最明显的一个。
@@ -1873,14 +2397,26 @@ struct OneSkinChrome: View {
             iconButton("list.bullet.rectangle", label: L10n.text("Episodes")) { kit.openEpisodes() }
         case .pictureInPicture:
             iconButton(kit.pip.active ? "pip.exit" : "pip.enter",
-                       label: L10n.text("Picture in Picture")) { kit.pip.toggle() }
+                       label: L10n.text("Picture in Picture"),
+                       enabled: kit.pip.canToggle) { kit.pip.toggle() }
         case .danmaku:
             iconButton(danmakuOn ? "text.bubble.fill" : "text.bubble", label: L10n.text("Danmaku")) {
                 danmakuOn.toggle()
             }
         case .subtitles:
-            iconButton("captions.bubble", label: L10n.text("Subtitles")) {
-                chosenSubtitle = subtitleTracks.first?.id
+            // ⛔ 顶栏这颗必须弹菜单，不能「盲选第一条」。
+            //
+            // 原来写的是 `chosenSubtitle = subtitleTracks.first?.id`：
+            //   · 只有内嵌字幕轨（`kit.tracks.legible`）、没有外挂 .srt 时，
+            //     `subtitleTracks` 是空的 → 点一下**什么都不会发生**（按钮亮着、无反应）；
+            //   · 有外挂字幕时它直接跳到第一条，用户既看不到列表、也关不掉。
+            // 与画质 / 音轨那两颗不一致（它们都弹 `Menu`），
+            // 正是用户说的「有的控件有效、有的无效」。
+            if !subtitleTracks.isEmpty || !(kit.tracks.legible?.options.isEmpty ?? true) {
+                Menu { subtitlePicker } label: { chromeIcon("captions.bubble") }
+                    .buttonStyle(.plain)
+                    .frame(width: m.hit, height: m.hit)
+                    .accessibilityLabel(L10n.text("Subtitles"))
             }
         case .speed:
             iconButton("gauge.with.needle", label: L10n.text("Playback Speed")) { cycleSpeed() }
@@ -1912,10 +2448,17 @@ struct OneSkinChrome: View {
         case .markAd:
             // 顶栏形态：一下就把刚才那 30 秒标成广告。菜单里是带文字的那条（见 `moreItem`），
             // 同一件事两个形态，和别的一样 —— 摆到顶栏就该有按钮，而不是空占位。
-            iconButton("megaphone.badge.xmark", label: L10n.text("Mark Ad")) {
+            iconButton("megaphone", label: L10n.text("Mark Ad")) {
                 Task { await markAdHere() }
             }
             .disabled(markingAd)
+        case .adBlock:
+            // 顶栏形态：一下切换广告拦截总开关。图标直接反映当前状态
+            // （拦着 = 实心盾；关掉 = 带斜线的空盾），不需要再点进菜单确认。
+            iconButton(skipsAds ? "shield.lefthalf.filled" : "shield.slash",
+                       label: skipsAds ? L10n.text("Ad Blocking On") : L10n.text("Ad Blocking Off")) {
+                skipsAds.toggle()
+            }
         case .lock:
             iconButton(locked ? "lock.fill" : "lock.open",
                        label: L10n.text(locked ? "Unlock Controls" : "Lock Controls")) {
@@ -2089,8 +2632,34 @@ private struct ChromeMetrics {
     /// 工具栏图标的字形边长。顶栏、底栏、更多菜单、锁定/解锁全用这个值，没有例外。
     var glyph: CGFloat { (13 * scale).rounded() }
 
-    /// 图标方形热区。字形负责好看，热区负责按得中，两者不是一个数。
-    var hit: CGFloat { min(40, max(26, (glyph * 1.8).rounded())) }
+    /// 图标方形**热区**。字形负责好看，热区负责按得中，两者不是一个数。
+    ///
+    /// ⛔ 下限必须 44pt —— 这是用户报「点不开、点不动」的直接根因。
+    ///
+    /// 原式 `min(40, max(26, glyph*1.8))` 在**所有**比例尺下都低于 44：
+    ///   scale=0.82 → glyph=10.7 → hit=26
+    ///   scale=1.00 → glyph=13.0 → hit=26
+    ///   scale=1.40 → glyph=18.2 → hit=33
+    /// 也就是说无论窗口多大，整排图标（返回 / 旋转 / 更多 / 弹幕 / 画质 / 音轨）
+    /// 的可点区都只有 26–33pt，比苹果最小可点 44pt 小一大截；
+    /// 而这些图标在 `topBar` 里还各贴着 `.frame(height: m.hit)` 排成一排，
+    /// 相邻两颗热区之间没有余量，手指必然落到缝里 —— 落进缝里的点被
+    /// 铺满整个画面的 `gestureLayer` 吃掉，变成「单击显示/隐藏控件」，
+    /// 用户看到的就是「明明点到了却没反应」。
+    ///
+    /// 现在：热区取 44 的规范值，字形不变（视觉大小不动，只放大可点范围）。
+    /// 上限放宽到 52 让大窗时热区跟着长，但不无限膨胀，免得多颗热区互相侵占。
+    var hit: CGFloat { min(52, max(44, (glyph * 1.8).rounded())) }
+
+    /// 顶栏 / 底栏的**条高**。
+    ///
+    /// ⛔ 必须独立于 `hit`：以前两处都用 `m.hit` 当 frame 高度，
+    /// 热区一旦放大到 44，整条也跟着变高、把画面压掉一块；
+    /// 反过来若条高小于热区，`Button` 的热区会被父 frame **裁掉超出部分**，
+    /// 放大了也白放。这里让条高始终 ≥ 热区，热区才真的可点。
+    var barHeight: CGFloat { max(hit, m_glyphLineHeight) }
+
+    private var m_glyphLineHeight: CGFloat { (glyph * 2.2).rounded() }
 
     /// 窗口内边距。顶栏与底栏必须用同一个数，否则两侧对不齐。
     var edge: CGFloat { max(4, winW * 0.012) }

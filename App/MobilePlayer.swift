@@ -315,7 +315,21 @@ struct MobilePlayerView: View {
     @State private var pictureAspect: CGFloat?
     @State private var speed: Float = 1
     @AppStorage(DanmakuArea.key) private var danmakuArea = DanmakuArea.standard
+    /// 广告拦截总开关。与设置页、One 皮肤、HLS 代理**同一个键**（`player.skipAds`）。
+    /// 用 `@AppStorage` 而不是读 `AdSkip.enabled`：后者是计算属性，
+    /// SwiftUI 不知道它变了，开关点了图标不换。
+    @AppStorage(AdSkip.key) private var skipsAds = true
     @State private var showsDanmakuList = false
+    /// 「更多本剧」/「跳过片头片尾」两个 sheet。
+    ///
+    /// 这两项在 One 皮肤里就有，收进 `PlayerControl` 枚举之后，原版播放器的
+    /// 设置页也会把它们列出来 —— 但这里的渲染分支原先一律 `EmptyView()`，
+    /// 用户在原版里把它们摆到控制栏得到的是空槽。现在补齐实现，
+    /// 两套皮肤用同一对上游视图（`SeriesSuggestionSheet` / `EpisodeSkipSettingsView`）。
+    @State private var showsSeries = false
+    @State private var showsSkip = false
+    /// 正在标注广告（防止连点，顺带给按钮一个忙碌态）。
+    @State private var markingAd = false
     /// Set to the stream's address when the viewer asks to hand it to another app.
     @State private var externalPlayerStream: HandoffStream?
     /// The intro or credits segment for this item, once a source has claimed one.
@@ -578,6 +592,12 @@ struct MobilePlayerView: View {
             DanmakuListView(player: session.player, comments: session.danmaku) { showsDanmakuList = false }
                 .danmakuListPresentation()
         }
+        // 广告拦截开关当场生效（见 `PlaybackSession.adBlockingDidChange`）。
+        .onChange(of: skipsAds) { _, enabled in
+            session.adBlockingDidChange(enabled: enabled)
+        }
+        .sheet(isPresented: $showsSeries) { SeriesSuggestionSheet(channel: channel) }
+        .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: session) }
     }
 
     /// What the Lock Screen's Now Playing shows, besides the position the system runs on from the rate.
@@ -1003,14 +1023,59 @@ struct MobilePlayerView: View {
         .simultaneousGesture(TapGesture().onEnded { poke() })
     }
 
-    private var controlsLayout: PlayerControlsLayout { PlayerControlsLayout(stored: controlsOrder) }
+    /// 按**当前形态**读控制栏排布（三形态各自独立，见 `PlayerControlsLayout.Shape`）。
+    ///
+    /// 仍然保留 `@AppStorage(storageKey)`（折叠态那个键）是为了让 SwiftUI 在设置页
+    /// 改动后触发重绘：形态键是动态的，`@AppStorage` 无法动态选键，
+    /// 所以这里用「折叠键变化」当刷新信号，实际值按形态现取。
+    private var controlsLayout: PlayerControlsLayout {
+        _ = controlsOrder   // 建立依赖，让设置页改动能重算
+        return PlayerControlsLayout.current(forSize: sizeForShape)
+    }
+
+    /// 形态判定用的**尺寸**（宽 + 离散的横竖信号）。
+    ///
+    /// ⛔ 原来只给宽度（`current(forWidth:)` → `current(forSize: height: 0)` →
+    /// `currentShape(height: 0)`），而 `currentShape` 在 `height <= 1` 时**直接返回 `.unfolded`**。
+    /// 后果：设置页给了「折叠外屏 / 展开竖持 / 展开横持」三份独立配置，**原版永远只读第二份**。
+    ///
+    /// 现在：宽度取 `appScreenBounds.width`（判窄屏足够 —— 外屏 466 / 内屏 669 / 951 都分得开，
+    /// 且它是静态值，旋转动画期间不抖）；横竖取本文件既有的 `landscapeScreen`
+    /// （离散的 `interfaceOrientation`，不是宽高比连续量，不会在临界点每帧翻转）。
+    ///
+    /// ⚠️ 已知局限（待真机复验）：Duo 内屏不遵守 `supportedInterfaceOrientations`，
+    /// `interfaceOrientation` 在内屏可能恒报 landscape，此时内屏竖持会被判成 `.sideways`。
+    /// 用 `landscapeScreen` 而不是自造一套新判据，是为了与本文件其它地方保持同一口径 ——
+    /// 换判据要么全文件一起换，要么就分叉。这一条已记入交接账本的待复验项。
+    private var sizeForShape: CGSize {
+        let width = UIApplication.shared.appScreenBounds.width
+        guard width > 0 else { return CGSize(width: 400, height: 0) }
+        // 用「高度 = 宽度 ± 1pt」把横竖这个**离散**结论编码给 `currentShape`：
+        // 它只做 `width > height` 比较，不关心真实高度。
+        return landscapeScreen
+            ? CGSize(width: width, height: width - 1)   // 横：宽 > 高
+            : CGSize(width: width, height: width + 1)   // 竖：高 > 宽
+    }
 
     /// Whether a top control applies right now. Contextual controls (quality, audio, subtitles,
     /// danmaku) drop out when there is nothing to choose, and a few depend on the device or shape.
     private func available(_ control: PlayerControl) -> Bool {
         switch control {
-        // 上游播放器的这套行不承载 One 页新增的四个菜单项。
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual: false
+        // 这几项此前一律 `false` —— 设置页把它们列在「直接显示」勾选表里，
+        // 勾上却永远不会出现，是「设置不起作用」里最沉默的一种。
+        // 现在按各自**真实依赖**给判据，而不是拿「这条路径没实现」一句话糊过去。
+        case .autoPlayNext: store.catalog(for: channel) != nil
+        case .moreInSeries: channel.historyContext != nil
+        // 还要能**存下来**：没有 `skipScope` 的频道（设置页手工建的播放 URL）
+        // `applySkipSettings` 会静默返回，开关点了会弹回 —— 那种情况不如不显示。
+        case .skipIntroAuto, .skipIntroManual: !session.isLive && session.hasTimeline && session.canPersistSkipSettings
+        // 广告标注：`PlaybackSession.markAd(at:)` 用的是 `AVAssetImageGenerator`
+        // 对 `item.asset` **离线抓帧**（见 `AdFrameSampler.hashes`），
+        // 不依赖任何自绘层 —— 所以原版这条路本来就能标注。
+        // 此前把它写死 `false` 是错误归因（「AVKit 承载所以抓不到帧」并不成立），
+        // 结果是设置里勾了却永远不出现。判据与 One 皮肤同一套：有时间轴、不是直播、够长。
+        case .markAd: session.hasTimeline && !session.isLive && clock.duration > 60
+        case .adBlock: true
         case .airPlay: true
         case .episodes: !inline && channel.historyContext != nil
         // 设备支持 ≠ 按钮能用：AVKit 承载画面的那条路上我们没有 controller，
@@ -1028,8 +1093,6 @@ struct MobilePlayerView: View {
         case .videoInfo: true
         case .speechSubtitles: speechLanguage != nil
         case .anotherPlayer: true
-        // 广告标注是 One 页的东西；这条播放器路径没有抓帧链路，列出来只会是死键。
-        case .markAd: false
         case .backTen: seekable && !inline
         case .forwardTen: seekable && !inline
         case .playPause: true
@@ -1074,8 +1137,18 @@ struct MobilePlayerView: View {
     /// The round glass button for one top control drawn in the bar.
     @ViewBuilder private func topControlButton(_ control: PlayerControl) -> some View {
         switch control {
-        // 上游播放器的这套行不承载 One 页新增的四个菜单项。
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .markAd: EmptyView()
+        // ⛔ 原先这里是 `EmptyView()`：用户把这几项排进顶栏，得到的是**空槽**。
+        //    现在走与 One 皮肤同一套「这些控件长什么样」的实现（见 `seriesEntry`）。
+        case .markAd: markAdButton(size: 44)
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual:
+            menuEntryButton(control, size: 44)
+        case .adBlock:
+            Button { skipsAds.toggle() } label: {
+                Image(systemName: skipsAds ? "shield.lefthalf.filled" : "shield.slash")
+                    .font(.headline).frame(width: 22, height: 22)
+            }
+            .chromeButton()
+            .accessibilityLabel(L10n.text(skipsAds ? "Ad Blocking On" : "Ad Blocking Off"))
         case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
@@ -1270,8 +1343,16 @@ struct MobilePlayerView: View {
     /// The menu entry for one top control collapsed into More.
     @ViewBuilder private func topControlMenuEntry(_ control: PlayerControl) -> some View {
         switch control {
-        // 上游播放器的这套行不承载 One 页新增的四个菜单项。
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .markAd: EmptyView()
+        // 原先这四项是 `EmptyView()` —— 它们被收进枚举、设置页能排，
+        // 但「更多」里一个都不渲染。现在走与顶栏同一份内容（`seriesEntry`）。
+        case .markAd:
+            Button { Task { await markAdHere() } } label: {
+                Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark This as an Ad"),
+                      systemImage: "megaphone")
+            }
+            .disabled(markingAd)
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .adBlock:
+            seriesEntry(control)
         case .airPlay:
             // AirPlay is represented by the system button; in a menu it has no equivalent, so it
             // stays out of More.
@@ -1516,7 +1597,15 @@ struct MobilePlayerView: View {
     /// A top-row control rendered as a compact transport button (36 pt circle) for the bottom row.
     @ViewBuilder private func compactButton(_ control: PlayerControl) -> some View {
         switch control {
-        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .markAd: EmptyView()
+        case .markAd: markAdButton(size: 36)
+        case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual:
+            menuEntryButton(control, size: 36)
+        case .adBlock:
+            Button { skipsAds.toggle() } label: {
+                Image(systemName: skipsAds ? "shield.lefthalf.filled" : "shield.slash")
+            }
+            .buttonStyle(PlayerCircleStyle(size: 36))
+            .accessibilityLabel(L10n.text(skipsAds ? "Ad Blocking On" : "Ad Blocking Off"))
         case .airPlay:
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
@@ -1620,6 +1709,105 @@ struct MobilePlayerView: View {
         }
     }
 
+    /// 原版播放器里的「标注广告」键。
+    ///
+    /// 走的是 `PlaybackSession.markAd(at:)` —— 它用 `AVAssetImageGenerator`
+    /// 对 `item.asset` 离线抓帧，与自绘层无关，所以原版这条路能标。
+    /// 标注点是 `clock.position`（当前播放位置），边界由 `AdBoundary` 自己找。
+    @ViewBuilder private func markAdButton(size: CGFloat) -> some View {
+        Button { Task { await markAdHere() } } label: {
+            Image(systemName: markingAd ? "megaphone.fill" : "megaphone")
+        }
+        .buttonStyle(PlayerCircleStyle(size: size))
+        .disabled(markingAd)
+        .accessibilityLabel(L10n.text("Mark Ad"))
+    }
+
+    /// 标注一次：把当前位置标成广告，边界自动找，成功后刷新广告库。
+    @MainActor private func markAdHere() async {
+        guard !markingAd else { return }
+        markingAd = true
+        defer { markingAd = false }
+        await session.markAd(at: clock.position)
+    }
+
+    /// 顶栏/底栏上的「自动连播 / 更多本剧 / 自动跳片头片尾 / 跳过片头片尾」图标键。
+    ///
+    /// 这四项都是**二态或一次性动作**，没有对应的 SF Symbol 语义色，所以图标取
+    /// 开/关两种形态；菜单里那条（`seriesEntry`）才是带文字、可读的那份。
+    @ViewBuilder private func menuEntryButton(_ control: PlayerControl, size: CGFloat) -> some View {
+        Button {
+            perform(control)
+        } label: {
+            Image(systemName: symbolFor(control))
+        }
+        .buttonStyle(PlayerCircleStyle(size: size))
+        .accessibilityLabel(L10n.text(control.title))
+    }
+
+    /// 这四项在「更多」菜单里的带文字条目。
+    @ViewBuilder private func seriesEntry(_ control: PlayerControl) -> some View {
+        switch control {
+        case .autoPlayNext:
+            Toggle(L10n.text("Auto-play next episode"), isOn: Binding(
+                get: { store.autoPlayNext }, set: { store.autoPlayNext = $0 }))
+        case .moreInSeries:
+            Button { showsSeries = true } label: {
+                Label(L10n.text("More in This Series"), systemImage: "rectangle.stack")
+            }
+        case .skipIntroAuto:
+            Toggle(L10n.text("Automatically skip intro and outro"), isOn: Binding(
+                get: { session.skipSettings.enabled },
+                set: { value in
+                    var settings = session.skipSettings
+                    settings.enabled = value
+                    session.applySkipSettings(settings)
+                }))
+        case .skipIntroManual:
+            Button { showsSkip = true } label: {
+                Label(L10n.text("Skip intro / outro"), systemImage: "forward.end")
+            }
+        case .adBlock:
+            Toggle(L10n.text("Ad Blocking"), isOn: $skipsAds)
+        default:
+            EmptyView()
+        }
+    }
+
+    /// 图标键按下去做的那件事 —— 与 `seriesEntry` 里同名条目一一对应。
+    private func perform(_ control: PlayerControl) {
+        switch control {
+        case .autoPlayNext:
+            store.autoPlayNext.toggle()
+        case .moreInSeries:
+            showsSeries = true
+        case .skipIntroAuto:
+            var settings = session.skipSettings
+            settings.enabled.toggle()
+            session.applySkipSettings(settings)
+        case .skipIntroManual:
+            showsSkip = true
+        default:
+            break
+        }
+    }
+
+    /// 图标键的图标：开/关两种形态。
+    private func symbolFor(_ control: PlayerControl) -> String {
+        switch control {
+        case .autoPlayNext:
+            return store.autoPlayNext ? "play.circle.fill" : "play.circle"
+        case .moreInSeries:
+            return "rectangle.stack"
+        case .skipIntroAuto:
+            return session.skipSettings.enabled ? "forward.end.alt.fill" : "forward.end.alt"
+        case .skipIntroManual:
+            return "forward.end"
+        default:
+            return control.symbol
+        }
+    }
+
     /// The position and the length, following the picture while it runs.
     private var timeLabel: some View {
         let follows = chromeVisible && !session.paused && clock.scrubbing == nil
@@ -1690,12 +1878,16 @@ struct MobilePlayerView: View {
         OneStylePlayerSurface(
             player: session.player,
             gravity: pictureGravity,
-            // [mi3s] 二开：关掉 AVKit 的「离开 App 自动浮起」。
+            // [mi3s] 二开：和上游一致，**开着**「离开 App 自动浮起」。
             //
-            // 它的语义是「inline 图层离开屏幕」，而我们的图层在折叠、转向、进出全屏、切页面时
-            // 都会被重挂一次，AVKit 每次都当成「用户离开 App」→ 转个屏就飞出一个小窗。
-            // 现在只在视频控件里按画中画按钮才起（One 皮肤走自建 controller 的 `toggle()`）。
-            automaticPiP: false,
+            // 上游原生就是开的（见 `fusion/base` 的 `PictureInPicture.attach`），
+            // 所以「返回主屏出现浮窗」是原生能力。我们曾为躲开「折叠/转向被误判成离开」
+            // 把它关成 false，结果连真离开也不浮了 —— 这就是用户报的现象。
+            //
+            // 现在改为：能力常开，只在这些动作**前后**用
+            // `suspendAutomaticFloating()` / `resumeAutomaticFloating()` 临时挡一下，
+            // 动作结束立刻恢复。既保住能力，又不让重挂载误触发。
+            automaticPiP: true,
             pip: pip
         )
         .pictureBox(scaling, aspect: pictureAspect)
@@ -2227,19 +2419,44 @@ struct PlayerLayerView: UIViewRepresentable {
 
 /// Picture in Picture for the player layer: the button, and carrying on in a floating window when the app is left.
 @MainActor @Observable final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate {
-    let supported = AVPictureInPictureController.isPictureInPictureSupported()
+    /// 平台是否支持 PiP。
+    ///
+    /// ⚠️ 这个值是**判断我们能不能做 PiP 的唯一硬依据**，必须留痕：
+    /// - 模拟器（CoreSimulator）实测返回 **false**（AVKit 原话
+    ///   `+[AVPictureInPicturePlatformAdapter isPictureInPictureSupported] → NO`）
+    /// - **但 Fig VM 上哔哩哔哩能弹出 PiP 悬浮窗** ⇒ VM 平台是支持的。
+    /// 所以在 VM/真机上如果这里仍是 false，那问题在我们的调用方式，不在平台。
+    let supported: Bool = {
+        let v = AVPictureInPictureController.isPictureInPictureSupported()
+        #if DEBUG
+        print("[PiP] isPictureInPictureSupported = \(v)")
+        #endif
+        return v
+    }()
     private(set) var possible = false
     private(set) var active = false
     /// [mi3s] 二开：按钮是否可点。iOS 上画面归 `AVPlayerViewController`，
     /// PiP 能不能起由 AVKit 报；其余平台仍看自建 controller 的 `possible`。
-    var canToggle: Bool {
-        #if os(iOS)
-        // AVKit 不暴露 `isPictureInPicturePossible`，也起不了 PiP；
-        // 有 AVKit 载体时按钮交给它自己（离开 App 自动浮起），不再由我们代劳。
-        if Self.avkitHost != nil { return !supported }
-        #endif
-        return possible || active
+    /// 与上游一致：只看自建 controller 报的 `possible / active`。
+    var canToggle: Bool { possible || active }
+    /// 这套画面「有没有能力」起应用外小窗 —— 退场裁决器（`PlaybackExit`）的 `pipPossible`。
+    ///
+    /// 与 `current != nil` 的区别很关键：`current` 只在 PiP **已经起来过**之后才非 nil
+    /// （唯一赋值点在 `willStartPictureInPicture`），拿它当能力判据等于
+    /// 「以前浮过才允许再浮」。首播时它恒为 nil，于是退场裁决会以为
+    /// 「做不到」而走 ③b 的 `.keep`：离开 App 既不浮窗也不登出，音频在后台空转。
+    ///
+    /// 正确的问法是「平台支持 + 当前画面层已登记内容源」：
+    ///   · `supported` = 平台级能力（模拟器恒 false，真机/VM 为 true）；
+    ///   · `current != nil` = 已经浮着，当然也算可能的。
+    /// 画面层没登记（哔哩哔哩皮肤在修 `BiliSkinPicture.pip` 之前就是这样）时仍返回 false，
+    /// 那样 `.keep` 才是诚实的 —— 但那属于「这个皮肤还没接上」，由使用方自己保证。
+    static var isSupportedForPlayback: Bool {
+        // `supported` 是实例属性（每实例算一次平台判断），静态这里直接问平台；
+        // `AVPictureInPictureController.isPictureInPictureSupported()` 是纯查询、无副作用。
+        AVPictureInPictureController.isPictureInPictureSupported() || current != nil
     }
+
     /// Whether Picture in Picture is running, kept apart from the instance so it survives the iPhone Duo
     /// fold/unfold that tears the player view down and rebuilds it with a fresh `active = false`.
     private(set) static var isActive = false
@@ -2267,9 +2484,18 @@ struct PlayerLayerView: UIViewRepresentable {
     /// The layer the controller was last bound to, so a stopped PiP can bind a fresh controller to the
     /// layer on screen now (the running controller's source layer can't be changed).
     @ObservationIgnored private weak var layer: AVPlayerLayer?
+    /// 「离开 App 自动浮起」当前该开还是该关。
+    ///
+    /// controller 可能晚于用户操作才建出来（首帧才建），所以意图必须单独存一份：
+    /// `suspendAutomaticFloating()` 在 controller 之前跑、就要在建 controller 时生效。
+    @ObservationIgnored private var wantsAutomaticFloating = true
 
     init(adoptsRunningController: Bool = true) {
         self.adoptsRunningController = adoptsRunningController
+        super.init()
+        // 登记到弱表：`suspendAutomaticFloating()` 要能逐个点名关掉
+        // 「离开 App 自动浮起」，否则折叠/转屏时 AVKit 会把重挂载当成离开。
+        Self.registry.add(self)
     }
 
     /// Whether `layer` should render the player right now. While Picture in Picture is up, only the
@@ -2296,24 +2522,38 @@ struct PlayerLayerView: UIViewRepresentable {
             }
             return
         }
-        guard controller == nil else { return }
+        // ⛔ 换了 layer 时**必须把 controller 的 contentSource 指过去**。
+        //
+        // 原来这里是 `guard controller == nil else { return }` —— 已有 controller 就什么都不做。
+        // 但折叠、转向、进/出全屏、切页面都会换 layer，旧 layer 的 view 被销毁后，
+        // controller 仍指着那一块已经不存在的画面：`isPictureInPicturePossible` 变成 false，
+        // 自动浮起也就永远不会触发。用户看到的就是「返回主屏没有浮窗」。
+        //
+        // 上游（GitHub `jo32/tvbox-silicon` main，`PictureInPicture.attach`）正是这样写的：
+        // layer 换了就改 `contentSource`，**不重建 controller**。
+        // 重建会丢掉 PiP 状态与 delegate，改指向则一次到位。
+        if let controller {
+            if controller.contentSource?.playerLayer !== layer, !controller.isPictureInPictureActive {
+                controller.contentSource = .init(playerLayer: layer)
+            }
+            return
+        }
         makeController(for: layer)
     }
 
+    /// 与上游一致：有 controller 就自己起停，不问 AVKit 在不在场。
+    ///
+    /// 曾经这里有两道门（`avkitHost != nil` 就 return），叠加 `canToggle` 的同类门之后，
+    /// 画中画按钮要么不亮、要么亮着点了没反应 —— 而 AVKit 那条自动起浮也早被关掉了。
+    /// 两条路都堵住，就是「返回主屏没有浮窗」。
     func toggle() {
-        // [mi3s] 二开：iOS 上画面由 `AVPlayerViewController` 承载。
-        // AVKit 只给了 `canStartPictureInPictureAutomaticallyFromInline` 这一个开关，
-        // 没有 `startPictureInPicture()`，所以手动按钮这条路上没有 AVKit 的入口。
-        // 自动浮起已经由 carrier 打开（离开 App 就起），这里保持老通道给非 iOS 用。
-        #if os(iOS)
-        // AVKit 承载画面时我们代劳不了 PiP（AVKit 只暴露「离开 App 自动浮起」）。
-        // 但 One 皮肤是自建 `AVPlayerLayer` + 自己的 controller：只要本实例**已经有**
-        // controller，就必须让它走下面那条真开关，不能被别处（小窗 / 通用播放器）
-        // 创建的 `avkitHost` 一并挡死 —— 那会让 One 页的画中画按钮变成死键。
-        if Self.avkitHost != nil, controller == nil { return }
-        #endif
         guard let controller = controller ?? Self.current else { return }
-        if controller.isPictureInPictureActive { controller.stopPictureInPicture() } else { fitContent(); controller.startPictureInPicture() }
+        if controller.isPictureInPictureActive {
+            controller.stopPictureInPicture()
+        } else {
+            fitContent()
+            controller.startPictureInPicture()
+        }
     }
 
     /// [mi3s] 二开：「应用外悬浮小窗」。离开 App 时把画面交给系统 PiP 窗口。
@@ -2325,11 +2565,100 @@ struct PlayerLayerView: UIViewRepresentable {
     /// 只在我们自己判定「用户在播放中离开了 App」时浮起，回来时收回。
     /// [mi3s] 二开：显式把画面交给系统 PiP 窗口。
     ///
-    /// ⚠️ **现在没有自动调用点**：`scenePhase == .background` 时自动浮起已经关掉
-    /// （见 `OneSkinPlayerChrome`），AVKit 的 `canStartPictureInPictureAutomaticallyFromInline`
-    /// 也关着（见 `makeController` 与 `OneStylePlayerSurface(automaticPiP:)`）。
-    /// 用户只在视频控件里手动起停，走 `toggle()`。
-    /// 保留这两个方法是为了「手动按钮之外还需要一次显式起浮」的场景（例如自动化脚本）。
+    /// 自动浮起现在**是开的**，和上游一致：
+    ///   · `makeController` 里 `canStartPictureInPictureAutomaticallyFromInline = true`；
+    ///   · `OneStylePlayerSurface(automaticPiP: true)`。
+    /// 所以正常路径下系统会在离开 App 时自己浮起，这两个方法是给
+    /// 「退场裁决器显式要求起浮」用的补充入口（回归脚本、自动化）。
+    /// 让当前挂载的播放器起悬浮窗。
+    ///
+    /// 现在只有一条路：自建 `AVPictureInPictureController`（`contentSource: playerLayer`）。
+    /// 它本来就支持裸 `AVPlayerLayer`，也支持 AVKit 之外的任何 layer —— 只要 `attach` 时
+    /// 把 `contentSource` 指到当前那一块画面（见 `attach`），这里就能起浮。
+    static func startCurrent() {
+        guard let controller = current, !controller.isPictureInPictureActive,
+              controller.isPictureInPicturePossible else { return }
+        controller.startPictureInPicture()
+    }
+
+    // MARK: - 重挂载期间临时关掉「自动浮起」
+
+    /// 所有**活着的** PiP 协调器。`canStartPictureInPictureAutomaticallyFromInline` 是
+    /// 每个 controller 各自的属性，要临时关必须逐个点名 —— 而正在播的那一个可能是
+    /// 页面里 `@State` 的实例（One / 哔哩哔哩皮肤各一个），也可能是全屏播放器的实例，
+    /// 静态方法拿不到它们，所以在这里登记。
+    ///
+    /// 弱引用：页面销毁后自己消失，不需要显式反注册。
+    private static let registry = NSHashTable<PictureInPicture>.weakObjects()
+
+    /// 重挂载期间被临时关掉的实例快照。恢复时只恢复这一批，
+    /// 不去动这期间新注册的（新实例还没经历过重挂载，它的开关本来就该是 on）。
+    private static var suspended: [PictureInPicture] = []
+    private static var resumeTask: Task<Void, Never>?
+
+    /// 「重挂载窗口」是否开着。
+    ///
+    /// 自建 controller（One / 哔哩哔哩皮肤）走 `setAutomaticFloating` 关得掉，
+    /// 但**原生皮肤的 `AVPlayerViewController` 不在这个 registry 里** ——
+    /// 它的 `canStartPictureInPictureAutomaticallyFromInline` 由
+    /// `OneStylePlayerSurface.updateUIViewController` 每次刷新时按构造参数写回，
+    /// 一个静态函数碰不到那个实例。所以另立一个全局闸：
+    /// `OneStylePlayerSurface` 读它来决定这次要写 true 还是 false。
+    private(set) static var isAutomaticFloatingSuspended = false
+
+    /// 折叠 / 展开 / 转屏 / 进出自绘页前后调用。
+    ///
+    /// ⛔ 这两个函数此前**只存在于注释里**（`makeController` 与 `OneStylePlayerSurface`
+    /// 都写着「由 `suspendAutomaticFloating()` 短暂关闭」），但全仓没有任何定义 ——
+    /// 于是两条自动浮起通路（`canStartPictureInPictureAutomaticallyFromInline = true`
+    /// 与 `OneStylePlayerSurface(automaticPiP: true)`）**恒开**，
+    /// 而 Duo 折叠、展开、转屏、进出全屏都会把画面层重挂一次，
+    /// AVKit 把 `inline layer 离开屏幕` 当成「用户离开 App」，于是浮窗自己飞出来。
+    ///
+    /// 现在真的关：所有活着的实例一起关，`resumeAfter` 之后自动恢复。
+    /// 用延时恢复而不是「等布局稳了再恢复」，是因为重挂载没有可观测的完成信号 ——
+    /// 一段固定的宽限期比「等一个永远不来的回调」可靠。
+    static func suspendAutomaticFloating(resumeAfter delay: TimeInterval = 1.5) {
+        resumeTask?.cancel()
+        var touched: [PictureInPicture] = []
+        for pip in registry.allObjects {
+            touched.append(pip)
+            pip.setAutomaticFloating(false)
+        }
+        suspended = touched
+        isAutomaticFloatingSuspended = true
+        resumeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            resumeAutomaticFloating()
+        }
+        Diagnostics.shared.record(.info, "player",
+            "auto PiP suspended for \(String(format: "%.1f", delay))s (\(touched.count) controllers)")
+    }
+
+    /// 恢复 `suspendAutomaticFloating()` 关掉的那一批。
+    static func resumeAutomaticFloating() {
+        resumeTask?.cancel()
+        resumeTask = nil
+        for pip in suspended { pip.setAutomaticFloating(true) }
+        suspended = []
+        isAutomaticFloatingSuspended = false
+    }
+
+    /// 单个实例的开关。`controller` 还没建出来时只记意图 ——
+    /// `makeController` 建 controller 时会读 `wantsAutomaticFloating`，
+    /// 否则「先 suspend 再建 controller」这一顺序会把 suspend 吃掉（开机首帧正好是这个顺序）。
+    private func setAutomaticFloating(_ on: Bool) {
+        wantsAutomaticFloating = on
+        controller?.canStartPictureInPictureAutomaticallyFromInline = on
+    }
+
+    /// 收回正在跑的悬浮窗。回到 App 且画面已回到页面上时必须调用。
+    static func stopCurrent() {
+        guard let controller = current, controller.isPictureInPictureActive else { return }
+        controller.stopPictureInPicture()
+    }
+
     func startFloating() {
         guard supported else { return }
         guard let controller = controller ?? Self.current else { return }
@@ -2348,7 +2677,6 @@ struct PlayerLayerView: UIViewRepresentable {
     #if os(iOS)
     /// 当前承载画面的 `AVPlayerViewController`。AVKit 自己管 PiP，这里是唯一的入口。
     private(set) static weak var avkitHost: AVPlayerViewController?
-
     /// `AVPlayerViewController` 出现/消失时登记，PiP 按钮与状态都读它。
     func register(host: AVPlayerViewController?) {
         Self.avkitHost = host
@@ -2373,15 +2701,47 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     private func makeController(for layer: AVPlayerLayer) {
+        // ⛔ 建 PiP controller 之前，音频会话必须是「播放」类别且支持 PiP。
+        //
+        // 系统日志实测（模拟器，iOS 27）：
+        //   `AVAudioSession indicates PIP is unavailable for this audio session`
+        // 也就是 controller 建出来了，但这个会话没被标成可承载 PiP 的那一类，
+        // 于是 `isPictureInPicturePossible` 恒 false、自动浮起永不触发。
+        //
+        // `PlaybackView.configure` 里确实配了 `.playback/.moviePlayback`，但那是
+        // **通用播放器**的初始化路径；One/哔哩哔哩皮肤的画面是本文件自己的
+        // `AVPlayerLayer`，它的 controller 可能先于那次配置建立（首帧就建）。
+        // 这里再确认一次是幂等的，也不会打断正在播的声音。
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            if session.category != .playback || session.mode != .moviePlayback {
+                try session.setCategory(.playback, mode: .moviePlayback)
+            }
+            try session.setActive(true)
+        } catch {
+            Diagnostics.shared.record(.warning, "player", "audio session for PiP: \(Diagnostics.describe(error))")
+        }
+        #endif
         let controller = AVPictureInPictureController(contentSource: .init(playerLayer: layer))
         controller.delegate = self
-        // Off on purpose. It reads "when the inline picture leaves the screen", and on this app the inline
-        // picture leaves the screen all the time without the viewer going anywhere: every fold, every turn,
-        // every switch between the watch page and Full Screen re-parents the layer. AVKit took each of those
-        // for "the viewer left the app" and opened a floating window beside the page, so the same episode
-        // played twice — once in the page, once in a PiP window over it. Picture in Picture is still one tap
-        // away on the player's own button.
-        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        // ⛔ 这里要和上游一致：**默认开着**。（旧的「Off on purpose」注释已作废：
+        //    当时关掉它是为了躲「折叠/转向被当成离开 App」，但那连真离开也一起关掉了。）
+        //
+        // 上游原生（`fusion/base`）就是 `= true`，所以「离开 App 浮窗」天生可用。
+        // 我们二开时为了修「折叠/转向/切页面时 AVKit 把重挂载当作离开 App」，
+        // 把它改成了 false —— 代价是**顺带把真离开也关掉了**，于是
+        // 「全屏播放返回主屏幕没有浮窗」。
+        //
+        // 正确的修法不是关掉能力，而是**只在会误判的窗口内临时关**：
+        // 折叠、转向、进/出全屏这些「重挂载」动作前后由 `suspendAutomaticFloating()`
+        // 短暂关闭，动作结束后立刻恢复。这样能力保留，误判也被挡住。
+        //
+        // ⛔ 值来自 `wantsAutomaticFloating`，不是硬编码 true：
+        // 重挂载窗口内 `suspendAutomaticFloating()` 会把它压到 false，
+        // 此时若 controller 恰好在这一帧才建出来，硬编码 true 会让那次 suspend 白做 ——
+        // 而「首帧建 controller + 同帧折叠」正是开机进页时最常见的顺序。
+        controller.canStartPictureInPictureAutomaticallyFromInline = wantsAutomaticFloating
         observe(controller)
         self.controller = controller
     }
@@ -2412,6 +2772,17 @@ struct PlayerLayerView: UIViewRepresentable {
             Self.sourceLayer = self.layer
             self.active = true
             self.onActiveChange?(true)
+            // ★ 探针：PiP 是**谁**、在**什么状态**下起来的。
+            //
+            // 用户报两个问题：「播放中出 PiP 但没有小窗 UI」、「合拢/展开也出小窗」。
+            // 只记 "PiP started" 无法定位 —— 必须带上当时的页面状态与调用栈。
+            let pageState = "\(PlaybackAudioSession.activeCount)"
+            let auto = self.wantsAutomaticFloating ? "auto=on" : "auto=off"
+            let stack = Thread.callStackSymbols.prefix(14)
+                .map { $0.split(separator: " ").dropFirst(2).first.map(String.init) ?? "" }
+                .joined(separator: "<")
+            oneSkinLog("PiP START \(auto) liveSessions=\(pageState) stack=\(stack)")
+            Diagnostics.shared.record(.info, "player", "PiP started")
         }
     }
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
@@ -2423,6 +2794,7 @@ struct PlayerLayerView: UIViewRepresentable {
             self.active = false
             self.onActiveChange?(false)
             self.rebind()
+            Diagnostics.shared.record(.info, "player", "PiP stopped")
         }
     }
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {

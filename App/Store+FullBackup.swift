@@ -47,7 +47,7 @@ extension Store {
         // Custom proxies: endpoints (credentials obfuscated) + routes.
         if categories.contains(.proxies) {
             let endpoints = customProxy.store.endpoints
-            let routes = Self.proxyRoutesSnapshot()
+            let routes = proxyRoutesSnapshot()
             if !endpoints.isEmpty || !routes.isEmpty {
                 backup.proxies = try? JSONEncoder().encode(ProxySnapshot(endpoints: endpoints, routes: routes))
             }
@@ -127,17 +127,18 @@ extension Store {
 
     // MARK: - 快照 / 还原辅助
 
-    /// Reads the current proxy routes out of the store's defaults (the store itself only exposes
-    /// routes by key, not the whole table).
-    static func proxyRoutesSnapshot() -> [String: CustomProxyRoute] {
-        guard let data = UserDefaults.standard.data(forKey: "proxyRoutes.v1"),
-              let routes = try? JSONDecoder().decode([String: CustomProxyRoute].self, from: data) else { return [:] }
-        return routes
-    }
+    /// The current route table, read through the store rather than out of `UserDefaults` directly.
+    ///
+    /// Reading `.standard` here meant a backup taken on a build whose store writes through an
+    /// injected suite silently produced an empty route table — and restoring it deleted the routes
+    /// the viewer had set.
+    func proxyRoutesSnapshot() -> [String: CustomProxyRoute] { customProxy.store.routes }
 
     static func restoreProxies(_ snapshot: ProxySnapshot, defaults: UserDefaults) {
         if let data = try? JSONEncoder().encode(snapshot.endpoints) { defaults.set(data, forKey: "proxyEndpoints.v1") }
-        if let data = try? JSONEncoder().encode(snapshot.routes) { defaults.set(data, forKey: "proxyRoutes.v1") }
+        // The route table goes back through the live store as well: writing the defaults alone left
+        // the running store's in-memory copy stale, so a restore only took effect after a relaunch.
+        CustomProxyStore.shared.replaceRoutes(snapshot.routes)
     }
 
     // MARK: - iCloud 轻量同步
@@ -153,7 +154,7 @@ extension Store {
             vaultValue = decoded
         }
         let endpoints = customProxy.store.endpoints
-        let routes = Self.proxyRoutesSnapshot()
+        let routes = proxyRoutesSnapshot()
         let proxies = (endpoints.isEmpty && routes.isEmpty) ? nil : ProxySnapshot(endpoints: endpoints, routes: routes)
         let prefs = FullBackupPreferences.snapshot(defaults: defaults, playbackDefaults: playbackDefaults)
         return CloudBackupPayload(accounts: FullBackupAccountStore.collect(),

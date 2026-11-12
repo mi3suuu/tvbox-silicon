@@ -632,8 +632,16 @@ struct GlobalSearchView: View {
         #if os(tvOS)
         entering = false
         #endif
+        // ⛔ 这个闭包是**搜索页的主入口**（用户手打关键词、点搜索）。
+        // 「哪些源参与搜索」的开关必须也在这里生效，否则 `searchVideos`（跨源搜索某一部片）
+        // 会尊重开关、而这里不尊重 —— 同一份设置两个入口行为不同，是最难查的那类 bug。
+        let scopeIndex = store.searchScopeIndex()
         model.search(keyword, config: config) { [store] site in
-            store.hiddenSources.contains(site, origin: config.origin) || !store.vault.permits(site: site, fallback: config.origin)
+            if store.hiddenSources.contains(site, origin: config.origin) { return true }
+            if !store.vault.permits(site: site, fallback: config.origin) { return true }
+            return !store.searchScope.permits(site, origin: config.origin,
+                                              groupID: scopeIndex.groupOf(site),
+                                              subscriptionAddress: scopeIndex.addressOf(site))
         }
     }
 }
@@ -1048,9 +1056,17 @@ struct RecommendationsView: View {
                         case .search(let keyword):
                             Button { store.searchVideos(keyword) } label: { PosterCard(recommendation: item) }.cardButton()
                         case .detail(let video):
+                            // 长按菜单（要求 6）：订阅源里这一处海报最常被看到，之前没挂。
+                            // `client` 与 `CatalogDestination` 用的是同一个，保证起播与进详情
+                            // 走的是同一条源、同一套请求头。
+                            let client = CatalogClient(site: loadedSite, origin: config.origin, jarURL: config.spiderURL)
                             RouteLink {
-                                CatalogDestination(video: video, client: CatalogClient(site: loadedSite, origin: config.origin, jarURL: config.spiderURL))
-                            } label: { PosterCard(recommendation: item) }.cardButton()
+                                CatalogDestination(video: video, client: client)
+                            } label: {
+                                PosterCard(recommendation: item)
+                                    .catalogPosterMenu(video, client: client)
+                            }
+                            .cardButton()
                         }
                     }
                 }

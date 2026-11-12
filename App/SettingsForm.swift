@@ -222,6 +222,8 @@ struct FormSettingsView: View {
     /// asked nothing and looked like it had done nothing at all.
     @State private var pendingImport: PendingImport?
     @State private var showsImportDialog = false
+    /// What merging the chosen file would change, computed once when it is opened.
+    @State private var importSummary: Store.ImportSummary?
     @State private var choosesFullBackup = false
     @State private var exportsFullBackup = false
     /// Built only when the exporter opens, so the body never runs the disk reads and JSON encoding on every render.
@@ -695,7 +697,7 @@ struct FormSettingsView: View {
         .confirmationDialog(pendingImportTitle, isPresented: $showsImportDialog, titleVisibility: .visible) {
             switch pendingImport {
             case .config:
-                Button(L10n.text("Merge (keep current, add missing)")) { applyPendingConfig(overwrite: false) }
+                Button(mergeImportTitle) { applyPendingConfig(overwrite: false) }
                 Button(L10n.text("Restore (overwrite with backup)")) { applyPendingConfig(overwrite: true) }
                 Button(L10n.text("Cancel"), role: .cancel) { pendingImport = nil }
             case .backup:
@@ -719,7 +721,10 @@ struct FormSettingsView: View {
 
     /// 语言：和其他设置项一样是**一行跳转**，不在主页展开一整组。
     /// 拆成独立属性，避免 body 里那串表达式过长把类型推断拖超时。
-    private var languageRow: some View {
+    @ViewBuilder private var languageRow: some View {
+        // `LanguageSettingsView` 是 iOS-only。语言选择在 macOS / tvOS 上由系统设置承担，
+        // 这一行在那里本就不该出现。
+        #if os(iOS)
         SettingsGroup(footer: L10n.text("The app language is independent of your device language and applies immediately.")) {
             SettingsLinkRow(symbol: "globe",
                             tint: .blue,
@@ -727,6 +732,7 @@ struct FormSettingsView: View {
                             subtitle: L10n.currentSelectionName,
                             destination: { LanguageSettingsView() })
         }
+        #endif
     }
 
     @ViewBuilder private var heroSection: some View {
@@ -821,9 +827,28 @@ struct FormSettingsView: View {
         }
     }
 
+    /// The merge button says what merging would add, so "keep current, add missing" stops being a
+    /// promise the viewer has to take on faith.
+    private var mergeImportTitle: String {
+        guard let summary = importSummary, !summary.addsNothing else {
+            return importSummary == nil
+                ? L10n.text("Merge (keep current, add missing)")
+                : L10n.text("Merge (nothing new in this file)")
+        }
+        return L10n.text("Merge (add %lld sources)", summary.newSources)
+    }
+
     private var pendingImportMessage: String {
         switch pendingImport {
         case .config:
+            // Say what merging would actually change. Bundles from different rounds overlap heavily,
+            // and a viewer who picked "merge" expecting new sources deserves the number up front.
+            if let summary = importSummary {
+                if summary.addsNothing {
+                    return L10n.text("This file lists %lld subscriptions, but every source in it is already on your list. Merge would add nothing; Restore replaces your list with the file's.", summary.listedSubscriptions)
+                }
+                return L10n.text("Merge adds %lld new sources and %lld live playlists (%lld sources are already here). Restore overwrites names, switches and order to match the file.", summary.newSources, summary.newLivePlaylists, summary.duplicateSources)
+            }
             return L10n.text("Merge adds only subscriptions you don't have yet. Restore overwrites names, switches and order to match the backup.")
         case .backup:
             return L10n.text("This overwrites the matching data on this device with the backup. Sign-in state, history, favourites, settings and proxies are all included.")
@@ -869,6 +894,7 @@ struct FormSettingsView: View {
                 presentImport(.failure(title: L10n.text("Import Configuration"), message: store.importError ?? ""))
                 return
             }
+            importSummary = store.previewImport(config)
             presentImport(.config(config))
         }
     }

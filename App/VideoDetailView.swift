@@ -32,9 +32,25 @@ struct VideoDetailView: View {
     @State private var foldGap: FoldGap?
     /// 横向折痕（书本 / 帐篷半折）。有它 = 半折形态；`nil` = 不是半折或信息不可用。
     @State private var horizontalFold: FoldGap.HorizontalBand?
-    /// 遮挡内缩（贴顶 / 贴底两条）。Duo 展开时遮挡在右上角，
+    /// 遮挡内缩（四边）。Duo 展开时遮挡在右上角，
     /// 统一塞 `safeAreaInsets` 会把内容多推半个屏。
     @State private var occlusionInsets: OcclusionInsets = .zero
+    /// 铰链是否 **partiallyOpen**（`DeviceHinge.status`，iOS 27.1+）。
+    ///
+    /// 这是判「摊开 vs 半折」的**权威**信号：折缝位置会随握持角度漂
+    /// （摊开态实测中心比 0.507 / 0.554 / 0.600 都出现过），
+    /// 用「偏离正中多少」反推必然把摊开误判成半折（P0-1）。
+    /// `nil` = 系统没报；此时才退回几何判据。
+    @State private var hingePartiallyOpen: Bool?
+    /// 上一次 `landscapeScreen` 判定出的**竖向态**（`true` = 上一次是竖持）。
+    /// 传给 `OneSkinShapeResolver.isLandscape(wasPortrait:)` 做滞回：
+    /// 保证 `portraitExit` 那个松阈值真的能被走到，转屏动画扫过临界点时形态不抖。
+    /// `nil` = 尚无上次结论（首次判定）。
+    ///
+    /// ⛔ 只在 `commitLandscapeHysteresis()` 里写，**绝不在 body 求值期间写**。
+    ///    （写法见 `resolvedLandscapeScreen()` 的注释：在计算属性里回写 @State
+    ///    就是「Modifying state during view update」，会让形状判据多跑一轮、来回翻。）
+    @State private var lastPortraitByRatio: Bool? = nil
     /// 详情页的选集抽屉开关。
     ///
     /// ⛔ **不能用 `store.showsEpisodes`**：那个键是上游全屏播放器
@@ -45,13 +61,22 @@ struct VideoDetailView: View {
     @State private var showsAllEpisodes = false
     /// 换源面板。
     @State private var showsCrossSource = false
-    /// 本次离开页面是为了缩成小窗。
+    /// 本次离开页面**已经由本页明确处理过**，`onDisappear` 不要再自己猜。
     ///
-    /// 与 `store.miniPlayerActive` 的分工：那个是**全局展示开关**（`RootView` 读它决定画不画小窗），
-    /// 这个是**本页的一次性意图**，只在 `onDisappear` 里被消费一次。
-    /// 两者分开是因为全局开关会被 `onAppear` 重置（回到页内就要收回小窗），
-    /// 而 pop 过渡期间 `onAppear` 可能再跑一次 —— 用一次性意图才不会被误清。
-    @State private var leavingForMiniPlayer = false
+    /// 两个写入点，语义都是「去向已定，别再动」：
+    ///   · `collapseToMiniPlayer()` —— 会话已登记进坞，`onDisappear` 不能停播；
+    ///   · `exitWatchPage()` —— 已经停播并 pop，`onDisappear` 什么都不该做。
+    ///
+    /// ⛔ 名字原来是 `leaveHandled`（「为缩小窗而离开」）。**退出键复用它之后，
+    /// 名字就与事实相反了** —— 退出键走这条路径恰恰是为了**不进**小窗。留着旧名，
+    /// 下一个人读到 `if leaveHandled { return }` 会以为「进了小窗所以跳过停播」，
+    /// 从而在退出这条路上写出「让它也去登记坞」的错补丁。改名是最小成本的防错。
+    ///
+    /// 为什么必须有这个一次性意图（而不是让 `onDisappear` 每次自己判断）：
+    /// `onDisappear` 在 pop 过渡里可能被跑、`onAppear` 也可能再跑一次；没有这个旗标，
+    /// 「按小窗键 → pop 过渡中 onAppear 又跑一次」会把刚登记好的状态抹掉 ——
+    /// 那正是旧版「点了没反应」的根因。
+    @State private var leaveHandled = false
     /// 哔哩哔哩皮肤的画中画控制器。
     ///
     /// ⛔ 此前哔哩哔哩皮肤**没有自己的 PiP 实例**，画面层 `BiliSkinPicture` 也没接
@@ -97,6 +122,20 @@ struct VideoDetailView: View {
     @State private var showsConfigCenter = false
     #endif
     @State private var requestTask: Task<Void, Never>?
+    /// 线路样本解析的**独立**句柄。
+    ///
+    /// ⛔ 不能和 `requestTask` 共用。上一版把它挂进 `startRequest`，本意是
+    /// 「用户点播放时取消掉线路解析，给播放让路」—— 结果是一个真实的功能回归：
+    /// `startRequest` 会 `previous?.cancel()`，于是**每点一次播放，线路解析整轮被取消**，
+    /// `lineSamples` 永远只填到第一条甚至一条没有。而线路菜单（`OneSkin.lineLatencies`）
+    /// 正是按 `lineSamples` 逐线发 HEAD 的 —— 菜单里除当前线路外每条都显示「不通」。
+    ///
+    /// 正确的分工：
+    ///   · `requestTask` —— 播放请求，后一次取消前一次（用户换集/换线，旧的该废）；
+    ///   · `lineSampleTask` —— 线路摸底，**不因播放而取消**，只随页面消失而取消，
+    ///     并在每次解析前主动等待 `busy`，把脚本线程让给正在起播的那一次。
+    /// 这样「播放不被 4~9 条线路堵住」和「线路菜单有数」同时成立。
+    @State private var lineSampleTask: Task<Void, Never>?
     @State private var detail: Video?
     /// Short labels (第1集) for lines whose episode names are file names, by episode id (#318). Display only.
     @State private var episodeLabels: [Episode.ID: String] = [:]
@@ -125,15 +164,42 @@ struct VideoDetailView: View {
     /// 方向一变立即得到新值，一次到位，也不会卡死。
     #if os(iOS)
     private var layoutSize: CGSize {
-        let b = UIApplication.shared.appWindowScene?.screen.bounds.size ?? UIApplication.shared.appScreenBounds.size
-        // screen.bounds 是物理固定方向，旋转时不产生动画中间态；
-        // 按界面方向交换宽高即得当前逻辑尺寸。
-        return landscapeScreen
-            ? CGSize(width: max(b.width, b.height), height: min(b.width, b.height))
-            : CGSize(width: min(b.width, b.height), height: max(b.width, b.height))
+        // ═══ 绝不测量「视图自身」 ═══
+        //
+        // 这个值参与形态判定 → 决定 stage 布局 → 决定视图 frame。
+        // 若它读「本视图的测量结果」（`liveContainerSize` / `cachedLiveContainer` /
+        // `GeometryReader.proxy.size`），就构成 **frame → 形态 → frame** 闭环。
+        //
+        // 实测代价（真机 Duo 2026-11-12）：
+        //   ROOT dt=1ms（每秒 1000 次重排）；SHAPE 翻转 3141 次
+        //   （split 1570 / fullBleed 1571，各占一半，永远收敛不了）；
+        //   同帧内 ROOT 行 shape=fullBleed 而 stage 行 shape=split。
+        //
+        // 唯一安全来源：**UIKit 自己的 keyWindow.bounds**。
+        // 它由系统窗口管理，不随我们的 SwiftUI 重排变化 —— 没有任何回灌路径。
+        // 方向交换也由系统完成（旋转后 keyWindow.bounds 直接是新的宽高），
+        // 不依赖 `interfaceOrientation`（Duo 内屏那个值是假的）。
+        let win = UIApplication.shared.appWindowScene?.keyWindow?.bounds.size
+        if let win, win.width > 1, win.height > 1 { return win }
+        let b = UIApplication.shared.appWindowScene?.screen.bounds.size
+            ?? UIApplication.shared.appScreenBounds.size
+        return b
     }
     private var containerWidth: CGFloat { layoutSize.width }
     private var containerHeight: CGFloat { layoutSize.height }
+
+    /// 半折折痕的**绝对 y**（容器坐标系，窗口顶 = 0），给 `OneSkinStage` 直接用。
+    ///
+    /// ⛔ 16.5：不要再用「比例」往下传。`topH = box.height × ratio` 是把
+    ///    窗口高的比例乘到**更矮的 box** 上（窗口 951、box 917），
+    ///    边界比真实折痕高 ~17pt，再叠 5% 量化最坏多 ±11pt —— 画面下沿与
+    ///    折缝之间那条错位/黑边就是它。折痕矩形与 stage 共用同一个原点，
+    ///    直接把 y 当高度，误差为零。
+    private var halfFoldSplitY: CGFloat? {
+        guard let band = horizontalFold, band.isHorizontal else { return nil }
+        guard band.centerY > 1 else { return nil }
+        return band.centerY
+    }
 
     /// 半折时**上半个屏**占整高的比例，直接取折痕中心。
     ///
@@ -141,16 +207,50 @@ struct VideoDetailView: View {
     /// 否则上半画面和中途开始的折痕面会错位。没有折痕信息时退回 0.5。
     private var halfFoldSplitRatio: CGFloat {
         guard let band = horizontalFold, band.isHorizontal, containerHeight > 1 else { return 0.5 }
-        let ratio = band.centerY / containerHeight
-        // 夹到 0.25–0.75（与 `splitsContainer` 同一区间）—— 万一读到的值
-        // 越界，宁可按正中央也不产出一个只用 20pt 的画面列。
-        return min(max(ratio, 0.25), 0.75)
+        let raw = band.centerY / containerHeight
+        // 夹到 0.25–0.75（与 `splitsContainer` 同一区间）
+        let clamped = min(max(raw, 0.25), 0.75)
+        // ★ 必须**量化**：`band.centerY` 来自系统 `reservedRegions` 的矩形，
+        // 半折（书本/帐篷）时铰链角度连续变化 → `centerY` 逐帧变 →
+        // `topH = box.height * ratio` 逐帧变 → 画面列与 HalfFoldConsole 的
+        // `.frame(height:)` 每帧变 → **半折形态下整页持续推移**。
+        //
+        // 这是四个形态里**唯一一个输入本身就是连续量**的形态，
+        // 也是实测「每秒 213–479 次重算」最严重的那一档。
+        // 量化到 5% 一档：铰链微小晃动不再改变布局，明显折动仍跟手。
+        return (clamped * 20).rounded() / 20
     }
     #else
     // macOS / tvOS 没有设备旋转，测量回写不构成闭环，保留原行为。
     @State private var containerWidth: CGFloat = 0
     @State private var containerHeight: CGFloat = 0
     #endif
+
+    /// 真实布局容器尺寸（这一帧真正可用的逻辑尺寸）。
+    ///
+    /// **为什么需要它**：`screen.bounds` 在折叠/多窗口设备上不可信 ——
+    ///   · Duo 内屏恒报原生竖持 2007×2853（不随方向交换）；
+    ///   · Fig 虚拟机报设备规格 951×669，而物理窗口只有 466×678；
+    ///   · `interfaceOrientation` 在 Duo 内屏是假值。
+    /// 三者任一为假，形态判据（duoExpanded / landscapePage /
+    /// halfFoldSplitRatio / oneSkinShape）全部失效，表现为「每种形态都不对」。
+    ///
+    /// **为什么不构成反馈环**（这是之前反复踩的坑）：
+    ///   写入用的是 `.onGeometryChange` 量到的 `size`，而布局**不读它做尺寸计算** ——
+    ///   `layoutSize` 只把它当作「容器多大」这一事实，不再据此反推内容高度；
+    ///   且写入前做了 8pt 量化，同一个桶内不重复写状态。
+    @State private var liveContainerSize: CGSize = .zero
+    /// 量到的尺寸先量化再写，避免亚点抖动反复触发 body。
+    private func commitLiveContainer(_ size: CGSize) {
+        guard size.width > 1, size.height > 1 else { return }
+        func q(_ v: CGFloat) -> CGFloat { max(8, (v / 8).rounded(.down) * 8) }
+        let next = CGSize(width: q(size.width), height: q(size.height))
+        guard next != liveContainerSize else { return }
+        liveContainerSize = next
+        // 同步给几何层：`OneSkin.fixedScreenSize()` 是静态方法，
+        // 读这个静态缓存而不是 `screen.bounds`。
+        OneSkin.cachedLiveContainer = next
+    }
     /// The picture's own width-over-height, reported by the player once the stream is known.
     /// 16:9 until then, which is what most sources serve and therefore the least surprising guess.
     @State private var playerAspectRatio: CGFloat = 16.0 / 9.0
@@ -246,9 +346,16 @@ struct VideoDetailView: View {
                     // 读折叠带与遮挡（iOS 27.1 用官方 reservedRegions）。
                     // 挂在这里而不是各皮肤内部：三皮肤共用同一份几何，
                     // 不会出现「One 皮肤知道折痕、哔哩哔哩皮肤不知道」的分叉。
+                    //
+                    // `containerSize` 用 `layoutSize`（keyWindow.bounds）：
+                    // 遮挡矩形的「贴顶/贴底/贴左/贴右」必须按**当前方向的容器**判。
+                    // 以前由探针自己去读 `appScreenBounds.height`（物理屏、不随方向
+                    // 交换），横持时那条判据整个错位 —— P1-8。
                     .readFoldRegion(fold: $foldGap,
                                     horizontalFold: $horizontalFold,
-                                    occlusion: $occlusionInsets)
+                                    occlusion: $occlusionInsets,
+                                    hingePartiallyOpen: $hingePartiallyOpen,
+                                    containerSize: layoutSize)
                     // ★ 摄像头挖孔避让。`occlusionInsets` 由 `FoldRegionReader` 从
                     // iOS 27.1 的 `reservedRegions` 读出（Duo 合盖时挖孔在顶部、
                     // 展开时在右上角），**以前只写不读 —— 探针算完了没人用**，
@@ -268,8 +375,26 @@ struct VideoDetailView: View {
                     // 只补「系统安全区没盖住的那一段」：
                     //   补量 = max(0, occlusion - safe)
                     // 这样 safe 已经够时补 0，occlusion 超出时才补差额。
-                    .occlusionTopUp(occlusionInsets, fullScreen: fullScreen)
+                    // ⛔ 已删除 `.occlusionTopUp(occlusionInsets, fullScreen:)`（16.1）。
+                    //
+                    // 遮挡现在**只有一个消费端**：`OneSkinStage` → `geoDriver` →
+                    // `OneSkinGeometry.box` 扣四边。理由：
+                    //   · 皮肤本体是 `.ignoresSafeArea([.top, .horizontal])`，
+                    //     挂在它外层的 `.safeAreaPadding` 会被忽略安全区连带铺出去；
+                    //     顶/左/右三条补量对内容**完全不生效**，只有底部真压缩高度。
+                    //     同一个量一半生效一半不生效，几何层却以为一点没让位。
+                    //   · 两套机制并行 = 底部被扣两遍、侧边一次没扣。
+                    // 现在遮挡统一进几何：`box` 变小 → 所有皮肤/控件跟着同一个盒走。
                     .watchSystemChrome(fullScreen: fullScreen))
+                    // 退出键：挂在**页面**这一层，不在画面窗口里（用户 2026-11-11）。
+                    //
+                    // ⛔ 不能挂进 `OneSkinChrome.topBar`：那一层被
+                    // `.frame(winW, winH).offset(winX, winY)` 锁在画面窗口内，
+                    // 画在里面的键无论怎么调都在窗口里 —— 那正是用户要求移出来的东西。
+                    //
+                    // 三条渲染分支（One / 哔哩哔哩 / 上游原版）共用这一颗：
+                    // 挂在这里就是「一处画、处处有」，不会出现某个皮肤没有退出键。
+                    .overlay(alignment: .topLeading) { watchPageExitButton }
                     // The upright watch page is immersive and its navigation bar is hidden, so the
                     // edge swipe is its way back. One screen edge only: the player owns the rest.
                     .background { EdgeSwipeBack(enabled: !fullScreen && !duoExpanded) }
@@ -324,6 +449,23 @@ struct VideoDetailView: View {
         }
         #endif
         .safeAreaInset(edge: .bottom) { if !isWatchPage { loadingCard } }
+        // ★ 滞回状态的**唯一写入点**（P1-5）。
+        //
+        // `landscapeScreen` 原来是「计算属性里顺手回写 @State」，而它被
+        // `sideways` → `duoExpanded` → `oneSkinShape` 在**同一次 body 求值里**
+        // 反复调用，等于每次刷新都写状态：多余一轮 pass，滞回值还可能在
+        // 「读到旧值 → 写入新值」之间来回翻。
+        //
+        // 现在把写挪到 `onChange`：body 只读，事件到了才写。
+        // `layoutSize` 是 keyWindow.bounds（UIKit 所有），旋转/折叠时由系统
+        // **离散地**改一次（动画期间会连续经过若干中间值，`onChange` 每次都写，
+        // 但每次都是幂等判断 + 一次赋值，且形态判定本身有滞回带兜着）。
+        // `initial: true` 让页面第一次出现时也落一次，避免首帧没有历史值。
+        #if os(iOS)
+        .onChange(of: layoutSize, initial: true) { _, _ in
+            commitLandscapeHysteresis()
+        }
+        #endif
         .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
             #if os(iOS)
             // ★ iOS：**只读，绝不写状态**。布局尺寸由 `layoutSize` 纯派生，
@@ -339,7 +481,31 @@ struct VideoDetailView: View {
                       String(describing: oneSkinShape))
             }
             #endif
+            // ⛔ 不再写 `liveContainerSize`。它会构成 frame→形态→frame 闭环。
+            // 尺寸唯一来源改成 `layoutSize` 的 keyWindow.bounds（UIKit 所有）。
+            // 这里只保留 POSTURE 探测的读，不写任何布局状态。
             _ = size
+            // ═══════ POSTURE 探测：每次容器尺寸提交后打印一次完整判据 ═══════
+            // 建立 6 形态 × 全屏/非全屏 的实测矩阵，之后据此一次定案判据表。
+            if UserDefaults.standard.bool(forKey: "qaLogPosture") {
+                let sb = UIApplication.shared.appWindowScene?.screen.bounds.size ?? .zero
+                let fg = foldGap
+                let hf = horizontalFold
+                let lc = OneSkin.cachedLiveContainer
+                let ins = OneSkin.safeInsetsForProbe()
+                let lcStr: String = lc.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil"
+                let fgStr: String = fg == nil ? "nil" : (fg!.isVertical ? "vertical" : "horizontal")
+                let hfStr: String = hf == nil ? "nil" : (hf!.isHorizontal ? "horizontal" : "other")
+                let idiomStr: String = (UIDevice.current.userInterfaceIdiom == .phone) ? "phone" : "other"
+                let a = "POSTURE shape=\(oneSkinShape.logName) container=\(Int(size.width))x\(Int(size.height))"
+                let b = " screen=\(Int(sb.width))x\(Int(sb.height)) cachedLive=\(lcStr)"
+                let c = " hSize=\(String(describing: sizeClass)) vSize=\(String(describing: verticalSizeClass)) idiom=\(idiomStr)"
+                let d = " orient=\(UIDevice.current.orientation.rawValue) foldGap=\(fgStr) hFold=\(hfStr)"
+                let e = " duo=\(duoExpanded) side=\(sideways) landPage=\(landscapePage)"
+                let f = " landScreen=\(landscapeScreen) portExp=\(portraitExpanded) fs=\(fullScreen)"
+                let segSafe = " safe=\(Int(ins.top)),\(Int(ins.bottom)),\(Int(ins.leading)),\(Int(ins.trailing))"
+                let _ = oneSkinLog(a + b + c + d + e + f + segSafe)
+            }
             #else
             containerWidth = size.width
             containerHeight = size.height
@@ -426,7 +592,11 @@ struct VideoDetailView: View {
         .onAppear {
             store.watchPageOpen = true
             // 进页面就为每条线路解析一个可测速地址（不阻塞首帧）。
-            Task { await buildLineSamples() }
+            //
+            // ⛔ 用**自己的**句柄，不走 `startRequest`（见 `lineSampleTask` 的说明）。
+            //    重复 onAppear（折叠/展开重建）先取消上一轮，避免两轮同时解析。
+            lineSampleTask?.cancel()
+            lineSampleTask = Task { await buildLineSamples() }
             #if DEBUG
             let switchDelay = UserDefaults.standard.double(forKey: "qaSwitchEpisode")
             oneSkinLog("detail onAppear watchPageOpen=\(store.watchPageOpen) qaSwitchEpisode=\(switchDelay)")
@@ -457,6 +627,22 @@ struct VideoDetailView: View {
         .onDisappear {
             store.watchPageOpen = false
             store.isWatchPageMounted = false
+            // 页面真的走了（不是折叠换版式）—— 按「怎么走的」决定这一集的去向。
+            //
+            // 用户的两条规则（2026-11-11）：
+            //   · 选集页**返回上一层**要关掉音频（要求 4 的前半）；
+            //   · 但**左滑返回**例外，它把画面收进迷你播放器继续播（要求 4 的后半）。
+            //
+            // 判据不是「有没有在播」，而是这一次退出的**意图**：
+            //   · `leaveHandled` —— 用户按了小窗键，会话已经登记进坞，别动；
+            //   · `SwipeBack.isPending` —— 左滑系统手势，同样收进坞；
+            //   · 其余（返回键 / 导航栏 Back / 程序化 dismiss）—— 停掉这一集。
+            //
+            // ⛔ 只在 watchLayout 真在播时处理；折叠/展开也会跑 onDisappear，那两种由
+            // `watchPageLifecycleBody.onDisappear` 单独管（它只清 scope，不停播）。
+            #if os(iOS)
+            settlePlaybackOnLeave()
+            #endif
             // ⛔ 离开观看页必须**归还载体声明**。
             //
             // `presentingPlayer` 的语义是「播放页在前台」。观看页本身就是那个页 —— 它退出时
@@ -467,6 +653,8 @@ struct VideoDetailView: View {
             // 而不是以为画面还在。
             store.presentingPlayer = false
             requestTask?.cancel()
+            lineSampleTask?.cancel()
+            lineSampleTask = nil
             #if os(iOS)
             // The page itself is gone (not just folded/unfolded): leave Full Screen. The video keeps playing,
             // so the floating mini player (RootView) takes over and the viewer can still get back to it.
@@ -497,6 +685,16 @@ struct VideoDetailView: View {
             _ = await (tmdbLookup, related)
         }
         .onChange(of: choosingQuality) { _, open in if !open && !busy { loadingEpisode = nil } }
+        #if os(iOS)
+        // 全屏时把**全局**左滑返回关掉。
+        //
+        // 全屏是沉浸态：左滑该由播放器自己解释（拖进度 / 手势），而不是把整页弹走。
+        // 本页自己那份 `EdgeSwipeBack` 已经有 `enabled: !fullScreen` 这道闸，
+        // 但它只管本页；`GlobalSwipeBack` 是挂在 TabView 上的常驻那一份，
+        // 不给信号它会照样在边缘起手时 pop。离开本页时复位。
+        .onChange(of: fullScreen, initial: true) { _, on in SwipeBack.blocked = on }
+        .onDisappear { SwipeBack.blocked = false }
+        #endif
         #if os(iOS)
         .sheet(isPresented: $showsConfigCenter) { ConfigCenterView { await configCenterAddress() } }
         #endif
@@ -723,9 +921,24 @@ struct VideoDetailView: View {
             #endif
             episodeLabels = await Task.detached(priority: .userInitiated) { EpisodeLabels.labels(episodes) }.value
             detail = value
-            // Start on the line watched last (#362), else on one that can play: not one from a drive the viewer has no
-            // way to sign in to.
-            if selectedFlag == nil { selectedFlag = watchedFlag ?? CloudDrive.preferredFlag(flags) }
+            // 默认线路：走全仓唯一的优先级出口 `LinePreference`，与选集面板同一口径。
+            //
+            // ① 用户这次亲自选的（`selectedFlag` 已被点过就不再动它 —— 这就是「用户选择优先」）
+            // ② 上次看这部剧用的那条（#362）
+            // ③ 第一条现在就能播的（不是没登录的网盘）
+            // ④ 第一条
+            //
+            // ⛔ 上一版这里写 `watchedFlag ?? CloudDrive.preferredFlag(flags)`，而面板那边
+            //    只读历史记录、没有「能播的线」兜底 —— 两套规则算出两条不同的线，
+            //    用户看到「面板高亮 A、实际播 B」。
+            if selectedFlag == nil {
+                selectedFlag = LinePreference.choose(
+                    flags: flags,
+                    picked: nil,          // 走到这里即 `selectedFlag == nil`，没有本次选择
+                    watched: watchedFlag,
+                    playableNow: { CloudDrive.preferredFlag([$0]) != nil }
+                )
+            }
             #if os(tvOS)
             Task { try? await Task.sleep(for: .milliseconds(100)); playFocused = true }
             #endif
@@ -1515,7 +1728,20 @@ struct VideoDetailView: View {
     /// full-bleed layout. The interface orientation is discrete and cannot sit at the width:height
     /// critical point during the unfold/rotate animation, so it is the stable signal that keeps the
     /// two unfolded shapes — landscape column vs portrait full-bleed — independent.
-    private var landscapeScreen: Bool {
+    /// 是否横持（纯读，**不写任何状态**）。
+    ///
+    /// ⛔ 原来这里是「计算属性里顺手回写 `lastPortraitByRatio`」的写法：
+    ///    `body` → `biliSkinBody` / `oneSkinTabReserve` / `splitsWatchPage`
+    ///    → `sideways` → 本属性 ⇒ **每次 body 求值都写一次 @State**。
+    ///    SwiftUI 下那是「Modifying state during view update」：额外一轮 pass，
+    ///    状态还可能被丢弃；而 `oneSkinShape` 在同一次 body 里要被求值好几次，
+    ///    于是滞回值来回翻 —— 转屏时形态抖、控件跳的其中一个来源。
+    ///
+    /// 现在拆成两半：
+    ///   · 本函数（及 `landscapeScreen`）**只读**：窗口 + 界面方向 + 上一次结论；
+    ///   · 回写落在 `commitLandscapeHysteresis()`，只由**离散事件**
+    ///     （窗口尺寸变化 / 页面出现）调用，见 `body` 上的 `.onChange(of: layoutSize)`。
+    private func resolvedLandscapeScreen() -> Bool {
         // ⛔ `interfaceOrientation` 在 **Duo 内屏竖持**时不可靠：实测报 `.landscapeLeft`，
         //    而同一时刻窗口实际是 669×780（竖的）。
         //
@@ -1546,12 +1772,37 @@ struct VideoDetailView: View {
         //    外屏 466、iPhone 393 都小于它。这个量只来自 UIKit 的窗口，与我们的布局无关。
         let window = UIApplication.shared.appWindowScene?.keyWindow?.bounds.size
             ?? UIApplication.shared.appScreenBounds.size
-        let isLargeScreen = min(window.width, window.height) > 600
+        // ⛔ 判「大屏」用**长边**，不是短边。
+        //
+        // 原代码 `min(w,h) > 600` 在真机 Duo 上恒为 false：
+        //   keyWindow.bounds = 678×466（物理屏）→ min = 466 < 600
+        //   ⇒ guard 直接 return declared，`OneSkinShapeResolver` **从未执行**，
+        //     滞回完全失效，形态只能靠 interfaceOrientation（内屏不可靠）——
+        //     这就是「双页判不出来、永远单页」的最后一环。
+        //
+        // 内屏容器实测 672×492 / 594×688，短边 492/594 也 < 600，
+        // 所以无论用物理屏还是容器，短边阈值都不成立。改用**长边**：
+        //   内屏 678/688 > 600 ✓   外屏 466/492 < 600 ✗   iPhone 852 > 600 ✓
+        // 手机 iPhone 竖持长边 852 也会进这个分支，但 `isLargeScreen` 只是
+        // 「允许做容器校正」的开关，普通手机容器宽高比远离阈值，不会被改写。
+        let isLargeScreen = max(window.width, window.height) > 600
         guard isLargeScreen else { return declared }
         return OneSkinShapeResolver.isLandscape(declaredIsLandscape: declared,
-                                               containerSize: window,
-                                               wasPortrait: nil,
-                                               isLargeScreen: true)
+                                                containerSize: window,
+                                                wasPortrait: lastPortraitByRatio,
+                                                isLargeScreen: true)
+    }
+
+    private var landscapeScreen: Bool { resolvedLandscapeScreen() }
+
+    /// 把这次判定结果落进滞回状态，供**下一次**判定用。
+    ///
+    /// 只由离散事件调用（窗口尺寸变化 / 页面出现），不在 body 求值里跑。
+    /// 幂等：值没变就不写，不会自激。
+    private func commitLandscapeHysteresis() {
+        let nextPortrait = !resolvedLandscapeScreen()
+        guard lastPortraitByRatio != nextPortrait else { return }
+        lastPortraitByRatio = nextPortrait
     }
     /// [mi3s] 二开：Duo 摊开后默认**留在竖屏**（单列：画面在上、详情与选集在下）。
     /// 想看双列就把设备转横 —— 不再一展开就强制横屏。
@@ -1707,8 +1958,16 @@ struct VideoDetailView: View {
                 // 竖持：底部浮动胶囊（约 50pt，浮在 34pt Home 指示条之上）。
                 // 与右边同理用 `padding` 而不是 `safeAreaPadding` —— 两条边一个写法，
                 // 免得下次又要在「安全区 vs 内缩」上猜一遍。让位条由下面的 pageBase 垫底。
-                .padding(.bottom, oneSkinTabReserve.bottom)
-                .padding(.trailing, oneSkinTabReserve.trailing)
+                // ⛔ 已移除这里的 `.padding(.bottom, 36)` / `.padding(.trailing, 64)`。
+                //
+                // 让位量已由 `OneSkinGeometryDriver.box` 在**几何层**算进去
+                // （横持扣右 47pt；竖持四边全 0，因为实测内容铺满到 951×669）。
+                // 这里再 padding 一次就是**双重扣减**：内容按满尺寸排、塞进
+                // 小二三十 pt 的容器，所有控件整体错位 ——
+                // 这就是用户报「尺寸完全对不上」的根因。
+                //
+                // 胶囊条是**浮层**（overlay），不占布局。实测截图里右缘 47pt
+                // 就是纯黑留白（x=904..951 最大亮度仅 14–28），胶囊浮在那条带上。
                 // 让位出来的那一条不能露系统页面底色（浅灰一条，比压住内容更难看）。
                 // 用 One 自己的整页底色垫在下面：海报渐变在页边本来就近黑，接缝看不出来。
                 .background(OneSkinPalette.pageBase.ignoresSafeArea())
@@ -1721,9 +1980,46 @@ struct VideoDetailView: View {
                 .background(alignment: .topLeading) {
                     // 用 offset 推到屏幕外而不是 opacity：opacity 极低时 SwiftUI
                     // 可能跳过子树渲染，`onAppear` / `opened:` 就不触发。
+                    //
+                    // ★★ 这里的播放器是「控件每秒推移」这个环的**源头**。
+                    //
+                    // 只写 `.frame(width: 8, height: 8)` 是不够的 —— 那只给**建议尺寸**。
+                    // `oneSkinSessionStage` 里是真正的 `PlaybackView`
+                    // （`AVPlayerViewController` + `AVPlayerLayer`，`videoGravity =
+                    //  ResizeAspect`），UIKit 图层会按**视频自身的比例**报 intrinsic
+                    // size，SwiftUI 拿它当「子视图理想尺寸」，经 `.background`
+                    // 回灌给父级 `oneSkinBody`，再被根部 `GeometryReader` 量到：
+                    //
+                    //   proxy 变 → stage 按 proxy 重排 → 播放器层再算 intrinsic →
+                    //   proxy 再变 → …
+                    //
+                    // 实测日志（Fig，fullBleed 竖持）：
+                    //   ROOT 每秒 344 次、dt=9–24ms；
+                    //   proxy=751x743 → 746x743 → 739x744 → 735x743 → 730x743 → 728x743
+                    //   高度稳定在 743/744，**宽度一路缩**（视频 16:9 在把父级往窄里拉）。
+                    //
+                    // 修法：三件事一起做，缺一个都还在漏尺寸 ——
+                    //   ① `.fixedSize()`     拒绝 intrinsic size 反向影响父级
+                    //   ② `.clipped()`       把任何溢出的图层裁在 8×8 内
+                    //   ③ `.frame(8,8)`      仍给出落点
+                    // ★ 用 `.hidden()` 让 UIKit 子树**真的不渲染**，而不是只挪位置。
+                    //
+                    // 实测（Fig，AX 树）：`.offset(x: -4000)` 之后，AX 里仍有一个
+                    //   w=547.52 h=307.98 (比例 1.7778 = 16:9) x=-448.09
+                    // 的元素 —— 正是 `AVPlayerViewController` 按视频固有比例报出来的
+                    // UIKit 图层。`.fixedSize()` / `.clipped()` 只管 SwiftUI 布局，
+                    // 管不住 UIKit 子视图自身的 frame：它没被移到 -4000，停在 -448，
+                    // 带着 547×308 的 16:9 画面浮在内容层上，把左侧内容盖住。
+                    // 这就是用户报「所有内容都偏左、被盖住」的直接来源。
+                    //
+                    // `.hidden()` 保留视图在层级里（`onAppear` / `opened:` 照常触发，
+                    // 会话仍能建立），但让 UIKit 不再绘制、也不参与命中测试。
                     oneSkinSessionStage
                         .frame(width: 8, height: 8)
+                        .fixedSize()
+                        .clipped()
                         .offset(x: -4000, y: -4000)
+                        .hidden()
                         .allowsHitTesting(false)
                 }
                 // ⛔ 片源比例：One 皮肤此前**从不更新** `playerAspectRatio`（BUG-N）。
@@ -1766,10 +2062,14 @@ struct VideoDetailView: View {
     /// 形态一旦定下就不会因亚点尺寸变化而抖动。
     private var oneSkinShape: OneSkinShape {
         #if DEBUG
-        // VM / 模拟器没有折叠与旋转接口，这两个开关用来无人值守地
-        // 分别拍下「展开宽屏」和「展开横屏」，确认两态确实不同。
+        // QA 覆盖：强制指定形态，用于无人值守验收。
+        // ★ 这里必须覆盖**全部五态** —— 之前只认 wide/sideways，
+        // 而 `effectiveShape` 又只认 column/split，导致 halfFold/fullBleed
+        // 这两态在任何 QA 参数下都无法抵达（「每种形态都不对」的一部分）。
         if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
         if UserDefaults.standard.bool(forKey: "qaOneSkinSideways") { return .split }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold") { return .halfFold }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinColumn") { return .column }
         #endif
         // ★ 半折优先：横向折痕落在容器中部 = 书本 / 帐篷，是第五态。
         //
@@ -1778,15 +2078,73 @@ struct VideoDetailView: View {
         // 是状态栏或手势条，不是折痕，不能误判。
         // 这一支必须排在 duoExpanded 之前：半折时 size class 仍报 regular，
         // 若先走 duoExpanded 会被当成「摊开竖持」，画面铺满整屏而控制台丢失。
-        if let horizontalFold,
-           horizontalFold.splitsContainer(max(containerHeight, 1)) {
+        // ★ 判据单一来源：**容器宽高比**（离散比例分桶）。
+        //
+        // 之前用 sizeClass + containerWidth>600 + interfaceOrientation 三路推断，
+        // 其中两路在 Duo 上不可靠：
+        //   · Duo 内屏横持实际报 `regular × regular`（sizeClass 不翻转）；
+        //   · `interfaceOrientation` 在内屏恒报 landscape（假值）。
+        // 容器宽高比是**这一帧真正可用的几何事实**，无需任何设备信号推断，
+        // 也不会因为 size class 抖动而翻转（配合 8pt 分桶）。
+        let w = max(layoutSize.width, 1)
+        let h = max(layoutSize.height, 1)
+        let ratio = w / h
+
+        // 半折：折缝把容器分成两半。**两种方向都要认**。
+        //
+        // ★★ P0-1：判据顺序必须是「铰链状态 → 几何」。
+        //
+        // 铰链状态（`DeviceHinge.status`，iOS 27.1+）是**权威**的：
+        //   closed / partiallyOpen / fullyOpen 三档，
+        //   半折 ⟺ partiallyOpen，摊开 ⟺ fullyOpen。没有中间解释空间。
+        //
+        // 而折缝**位置**不是判据：代码自己记录的摊开态实测中心比就有
+        //   0.600 / 0.554 / 0.507 三种（斜着拿、手挡住一部分都会变）。
+        // 原来写 `abs(centerRatio - 0.5) > 0.06` 判半折 —— 0.554 和 0.600
+        // 都 > 0.06，于是**摊开竖屏被直接判成半折**：上下两个物理半屏，
+        // 详情和选集整块消失，胶囊条还按另一套假设落位。这是单点影响最大的一个。
+        //
+        // 现在：铰链报了就用铰链；铰链没报（旧系统 / 非折叠设备）才退回几何，
+        // 而且退回时阈值放到 15% —— 宁可把「极端的半折」漏成双列，
+        // 也不能把「正常的摊开」误判成半折（后者会让整页内容消失）。
+        if let hingePartiallyOpen {
+            if hingePartiallyOpen { return .halfFold }
+            // fullyOpen / closed：明确不是半折，跳过下面所有折缝偏移猜测。
+        } else {
+            // 铰链不可用 → 几何兜底（阈值 0.15，理由见上）。
+            if let foldGap, foldGap.width > 0 {
+                let foldCenterRatio = foldGap.centerX / max(w, 1)
+                if abs(foldCenterRatio - 0.5) > 0.15 { return .halfFold }
+            }
+        }
+        // 横折缝（书本/帐篷趴着）：折缝确实是**横穿中部**的带。
+        // 这条只在铰链不可用时才算数 —— 铰链明确说 fullyOpen 就别再猜了。
+        if hingePartiallyOpen == nil,
+           let horizontalFold, horizontalFold.splitsContainer(h) {
             return .halfFold
         }
-        if duoExpanded {
-            // 展开宽屏 vs 展开横屏：只差 `sideways`（设备 interfaceOrientation）。
-            return sideways ? .split : .fullBleed
+
+        // 宽高比 ≥ 1.15 → 横向容器：左右双列。
+        // 不区分「Duo 摊开」还是「手机横持」—— 对排版来说二者只需不同列数，
+        // 差异（内屏要不要右让位）交给几何层的 `shape.isLandscape` 处理。
+        // ★ 判据改严：双页横屏 vs 单页竖屏必须靠**宽高比 + 绝对宽**双条件分开。
+        //
+        // 实测（真机 Duo）：
+        //   双页横屏态 container = 672×492  ratio 1.37  → split
+        //   单页竖屏态 container = 594×688  ratio 0.86  → 非 split
+        // ratio 1.15 这条线本身够用；真正丢判据的是下面那条「w>=500 → fullBleed」，
+        // 它把「内屏竖持」和「外屏竖持」混成同一个 fullBleed，
+        // 于是双页/单页两态看起来一样。改为按**容器宽**区分三档。
+        if ratio >= 1.15 { return .split }
+
+        // 竖持分支：按容器宽度分两档，不再混成一档。
+        //   · 内屏竖持：容器宽 ≈ 594（≥500）→ 宽屏变体，画面全出血 + 详情抽屉
+        //   · 外屏/手机竖持：容器宽 ≈ 466（<500）→ 标准单列
+        if ratio < 1.15 {
+            return w >= 500 ? .fullBleed : .column
         }
-        return landscapePage ? .split : .column
+
+        return .column
     }
 
     @AppStorage(OneSkin.enabledKey) private var oneSkinEnabled = true  // [临时验证] 默认开，QA 参数传不进 Fig-clone
@@ -1902,7 +2260,24 @@ struct VideoDetailView: View {
     /// 拿原始字符串去 HEAD，测的是一个不存在的 URL，数字纯属摆设。
     ///
     /// 每条线路取「当前正在看的这一集」；该线没有这一集时退回它的首集。
-    /// 并发解析、失败即跳过 —— 测不出的线路在菜单里不显示数字，不编造。
+    ///
+    /// ⛔ **这里是「进播放页就变慢、连点播放都受影响」的第一现场**（RCA H1/H9，已判决）。
+    ///
+    /// 上一版对一个 `flags` 里的**每一条线路**同时 `addTask`，没有任何并发上限，而且：
+    ///   1. 它们全部走 `preparePlayback` → 脚本运行时，而 `ScriptThread` 是**单线程串行**的
+    ///      （ScriptRuntime.swift:199-215）。4~9 条线路的插件调用因此排成一队，
+    ///      用户紧接着点播放的那一次 `preparePlayback` **排在这一队后面** ——
+    ///      他看到的「点播放要等很久」就是这么来的。
+    ///   2. 这批解析由裸 `Task {}` 启动（`.onAppear` 里），不进 `requestTask`，
+    ///      所以 `play()` 的 `startRequest` **取消不到它**（:305-313）。
+    ///
+    /// 现在两条约束：
+    ///   · **只在后台、串行、且让位给播放**：一次只解析一条线，且每条之前都看一眼
+    ///     「用户有没有已经在播 / 正在起播」—— 有就立刻收手，把脚本线程还给它。
+    ///   · **按 base 缓存优先**（One 的 `latencyByBase`）：同 host 刚测过的线路不再解析。
+    ///     解析是这一步最贵的动作（要过插件），比一次 HTTP 探针贵得多。
+    ///
+    /// 结果仍然逐条落进 `lineSamples`，所以线路菜单照旧一条条亮起来 —— 只是不再挡路。
     private func buildLineSamples() async {
         guard let episodes = detail?.episodes, !flags.isEmpty else {
             await MainActor.run { lineSamples = [:] }
@@ -1913,32 +2288,52 @@ struct VideoDetailView: View {
         // `subscription` 是主线程隔离的，先在主线程取好快照，再并发解析。
         let base = client
         let playback = store.subscription.map { client.applying($0) } ?? client
+        // 这一轮的身份：换集 / 换线 / 重进页面会开新一轮，旧轮次的解析到这里就该收手。
+        let generation = await MainActor.run { SourceProbeStore.shared.beginProbeGeneration() }
 
-        let resolved = await withTaskGroup(of: (String, OneSkinLineSample?).self) { group in
-            for flag in lines {
-                let onLine = episodes.filter { $0.flag == flag }
-                guard let ep = onLine.first(where: { $0.id == playing?.id }) ?? onLine.first else {
-                    continue
-                }
-                group.addTask {
-                    do {
-                        let plan = try await base.preparePlayback(ep)
-                        guard let choice = plan.choices.first else { return (flag, nil) }
-                        let channel = try await playback.resolvePlayback(plan, choice: choice)
-                        return (flag, OneSkinLineSample(url: channel.url, headers: channel.headers))
-                    } catch {
-                        return (flag, nil)
-                    }
-                }
+        for flag in lines {
+            // ★ 让位给「正在起播」，**不是**让给「已经在播」。
+            //
+            // ⛔ 这里曾经写成 `!busy && watchChannel == nil`，是一个真实的功能回归：
+            //    线路菜单（`OneSkin.lineLatencies`）只在**播放态**的胶囊带里出现，
+            //    而它按 `lineSamples` 逐线发 HEAD。一旦 `watchChannel != nil` 就 break，
+            //    于是播放中打开线路菜单，除当前线路外每条都显示「不通」——
+            //    那不是测出来的，是根本没解析。
+            //
+            // 正确的让位边界只有一个：`busy`（正在解析/起播某一集）。
+            // 那一刻脚本线程要给播放让路，所以先等它结束；已经播起来之后，
+            // 剩余线路逐条串行解析是可以接受的代价（一集只有 4~9 条线，且已去重）。
+            var waited = 0
+            while await MainActor.run(body: { busy }) {
+                // 起播通常 1~3 秒；超过 10 秒说明卡住了，这一轮就收手，
+                // 让用户自己按「重新测速」——不无限占用脚本线程。
+                if waited >= 20 { return }
+                if Task.isCancelled { return }
+                try? await Task.sleep(for: .milliseconds(500))
+                waited += 1
             }
-            var out: [String: OneSkinLineSample] = [:]
-            for await (flag, sample) in group {
-                if let sample { out[flag] = sample }
+            let current = await MainActor.run { SourceProbeStore.shared.isCurrentGeneration(generation) }
+            guard current, !Task.isCancelled else { return }
+
+            let onLine = episodes.filter { $0.flag == flag }
+            guard let ep = onLine.first(where: { $0.id == playing?.id }) ?? onLine.first else { continue }
+
+            // 这一条已经解析过（`lineSamples` 里的成果，比如上一轮或折叠重进页面）就不重复解析。
+            // 解析要过插件运行时，是这一步最贵的动作。
+            if await MainActor.run(body: { lineSamples[flag] != nil }) { continue }
+
+            do {
+                let plan = try await base.preparePlayback(ep)
+                guard let choice = plan.choices.first else { continue }
+                let channel = try await playback.resolvePlayback(plan, choice: choice)
+                let sample = OneSkinLineSample(url: channel.url, headers: channel.headers)
+                // 逐条写回：线路菜单一条条亮起来，而不是等全部解析完才一起出现。
+                await MainActor.run { lineSamples[flag] = sample }
+            } catch {
+                // 解析不出（该线没有这一集 / 源报错）：跳过，不编造。
+                continue
             }
-            return out
         }
-
-        await MainActor.run { lineSamples = resolved }
     }
 
     /// ⛔ 换集修复（2026-11-09）：选集页画面必须绑到「真正在播」的那一个 AVPlayer。
@@ -2898,6 +3293,9 @@ struct VideoDetailView: View {
             busy: busy,
             aspectRatio: BiliAspectMode.effectiveAspect(sourceRatio: playerAspectRatio),
             shape: oneSkinShape,
+            // 遮挡（四边）：唯一消费端是几何层（`box` 扣边），见 16.1。
+            // 位置必须紧跟 `shape`（声明次序），否则 memberwise init 参数错位。
+            occlusion: occlusionInsets,
             // 片源身份：字幕文件、请求头、片头片尾 scope、上下集都靠它（成员顺序在 shape 之后）。
             channel: watchChannel,
             // ⛔ 换集修复：画面与画质菜单都用「真正在播」的会话，
@@ -2907,20 +3305,21 @@ struct VideoDetailView: View {
             session: oneSkinStageSession,
             // One 的进度条两端是「已播 / −剩余」，没有真值就画不出进度。
             // session 是 @Observable，这两个值变化会带着皮肤一起重绘。
-            position: playerSession?.position ?? 0,
-            duration: playerSession?.duration ?? 0,
+            // ⛔ `position` / `duration` 已不再传给 `OneSkinStage`。
+            //
+            // 这两个值来自 `@Observable` 的 `PlaybackSession`，播放时每秒 ~60 次更新。
+            // 原来把它们作为参数传进 `OneSkinStage`，等于让**整个皮肤视图（含根部
+            // `GeometryReader`）每帧重建** —— 这就是「控件一直在推移」的真凶。
+            // 实测：每秒 479 次 ROOT 重算，dt=7–11ms。
+            //
+            // 唯一需要进度的是「继续播放」按钮文字，已收进 `OneContinueHint`，
+            // 由那个叶子视图自己观察 session。父级不再跟着进度重绘。
             // 这里曾传 `picture: { watchStage }`，但 OneSkinStage 从未调用它
             //（画面由 OneSkinPlayerLayer + avPlayer 自绘）。真正的 PlaybackView 是
             // 下面 oneSkinBody 上挂的 `.background(watchStage)`，它负责触发 session.prepare。
-            onBack: {
-                // [mi3s] 二开：返回分两层，和上游 `leavePlayer()` 同义。
-                // 全屏里点返回 = 退出全屏，回到**选集页**继续播（画面、进度、选集都在）；
-                // 只有本来就不在全屏时，才是真的离开这一页。
-                // 原来这里无条件 `dismiss()`，用户在全屏里点返回直接被踢回首页，
-                // 正在播的那一集只剩小窗 —— 就是「返回直接全退」。
-                leavePlayer()
-            },
-            // 一键退全屏：只改状态，不碰页面栈。控件层全屏时的返回走这条路。
+            // ⛔ 不再传 `onBack`（2026-11-11）：控件层里已没有返回键，
+            // 退出由页面层的 `watchPageExitButton` 负责（它一律退出页面并关音频）。
+            // 一键退全屏：只改状态，不碰页面栈 —— 全屏时窗口内那颗还是走这条路。
             onExitFullScreen: { exitFullScreen() },
             onPlay: { episode in
                 Task { await play(episode) }
@@ -2983,6 +3382,16 @@ struct VideoDetailView: View {
             onFavorite: {
                 store.favorites.toggle(videoFavorite())
             },
+            // 「用其他播放器打开」：把当前流地址交给系统，由 VLC / Infuse / nPlayer 接管。
+            // 真机 One 的第三颗图标就是这个（AX label「用其他播放器打开」）。
+            // 没有流地址时静默（未开始播放 / 线路还没解析）。
+            onOpenExternal: {
+                // `Channel.url` 已经是 `URL`，不需要再转。
+                guard let url = watchChannel?.url else { return }
+                #if os(iOS)
+                UIApplication.shared.open(url)
+                #endif
+            },
             onShare: {
                 // One 分享的是稳定链接（TMDB 页），没有就静默（ShareLink 同样会隐藏）。
                 if let link = tmdb.details?.link {
@@ -3007,6 +3416,9 @@ struct VideoDetailView: View {
             // 半折时上半个屏占多少 —— 跟随折痕真实位置，不用固定 0.5。
             // 位置必须与声明次序一致（`activeLine` 之后、`lineSamples` 之前）。
             halfFoldSplitRatio: halfFoldSplitRatio,
+            // 折痕的绝对 y（容器坐标）。`stage` 优先用它算上半屏高度，
+            // 比「比例 × 更矮的 box」少一次误差放大（见 halfFoldSplitY 注释）。
+            halfFoldSplitY: halfFoldSplitY,
             lineSamples: lineSamples,
             onSelectLine: { flag in
                 // 复用上游 watchLines 的换线逻辑：换 flag 后播「续上当前集」的那一集。
@@ -3041,25 +3453,9 @@ struct VideoDetailView: View {
                 PlayerOrientation.set(landscape: !nowLandscape)
             },
             onMiniPlayer: {
-                // 唯一入口：视频控件里的「缩成小窗」。
-                //
-                // ⛔ 顺序与时机都很关键 —— 这里是「按了缩成小窗但小窗没出来」的根因所在：
-                //
-                //   1) `dismiss()` 是**异步**的：它只是把 pop 请求交给导航栈，
-                //      本页的 `onDisappear` 要等下一帧过渡结束才跑。
-                //   2) `miniPlayerActive` 只在 `RootView` 的 `floatsInMiniPlayer` 里被读，
-                //      而那个视图在 `dismiss()` 之前就已经求值过一次（结果是 false，
-                //      因为那时 `miniPlayerActive` 还是 false）—— 之后的赋值必须能触发重算。
-                //   3) `store` 是 `@Observable`，赋值本身会通知；所以问题不在「没触发」，
-                //      而在**有人把它又写回 false**：本页 `onAppear` 里那句
-                //      `store.miniPlayerActive = false` 会在过渡动画期间被再跑一次
-                //      （页面在 pop 动画里仍算 onAppear 过一次），把刚设的 true 清掉。
-                //
-                // 修法：把「这次离开是缩成小窗」记成一次性意图，由页面自己消费，
-                // 不再依赖一个会被 `onAppear` 覆盖的长期布尔。
-                store.miniPlayerActive = true
-                leavingForMiniPlayer = true
-                dismiss()
+                // One 皮肤「缩成小窗」键。与哔哩哔哩皮肤的 `collapseToMiniPlayer()` 是同一件事，
+                // 收成一个具名方法，三处入口（One / 哔哩哔哩 / 菜单项）不再各写一遍顺序。
+                collapseToMiniPlayer()
             },
             onFold: {
                 // 合拢/展开由 OneSkinStage 自己的 `folded` 驱动，这里只留钩子。
@@ -3068,7 +3464,9 @@ struct VideoDetailView: View {
             streamURL: watchChannel?.url,
             streamHeaders: watchChannel?.headers ?? [:],
             // 全屏态：OneSkin 之前完全没接这个状态，皮肤下点全屏没有任何变化。
-            isFullScreen: fullScreen
+            isFullScreen: fullScreen,
+            // 铰链状态：只用来告几何层「折叠态跨档了」，不参与任何坐标计算。
+            hingePartiallyOpen: hingePartiallyOpen
         )
         // 倍速是皮肤自己的开关，但要真的落到播放器上；开关变了才下发，避免每次重绘都设一遍。
         .onChange(of: oneSkinSpeed) { _, value in
@@ -3158,16 +3556,18 @@ struct VideoDetailView: View {
             .onAppear {
                 store.isWatchPageMounted = true
                 store.watchPageScopes.formUnion(watchScopes)
-                // 回到观看页，小窗授权作废 —— 否则从观看页退回后小窗会再次自动弹出。
+                // ⛔ 这里**不再动坞**。
                 //
-                // ⛔ 但不能无条件清：点「缩成小窗」时的顺序是
-                //   `miniPlayerActive = true` → `dismiss()` → pop 过渡 → `onAppear` 可能再跑一次。
-                // 无条件清会把刚设的 true 抹掉，小窗就永远出不来（这正是用户报的现象）。
-                // 所以只在**不是为缩小窗而离开**时才清。
-                if !leavingForMiniPlayer {
-                    store.miniPlayerActive = false
-                }
-                leavingForMiniPlayer = false
+                // 上一版写的是 `store.miniPlayerActive = false`（「回到观看页，小窗授权作废」）。
+                // 单任务时代那等于「收回自己那一个小窗」，语义正好；
+                // 现在 `miniPlayerActive` 是**整个坞**的投影，写它会：
+                //   ① 把别的正在看的迷你播放器全部停掉（要求 5 明确禁止）；
+                //   ② 在「按小窗键 → pop → onAppear 再跑一次」的时序里，
+                //      把刚登记进坞的那一集抹掉 —— 正是旧版那个「点了没反应」。
+                //
+                // 「回到这一页就把**这一集**从坞里摘掉」由 `VideoTaskCenter.take` 完成
+                // （点卡片时已经摘了）；不需要页面再补一刀。
+                leaveHandled = false
                 // ★ 选集页**一律不钉竖屏**。
                 //
                 // 用户的要求是：外屏要能横屏也能竖屏、展开横竖都行、全屏横竖都行。
@@ -3370,7 +3770,38 @@ struct VideoDetailView: View {
     /// page the viewer only enlarged, so closing the page under it dropped them on Home with the video
     /// floating in the mini player. Leaving the page itself is the cover's Back, or the edge swipe.
     private func leavePlayer() {
-        if fullScreen { exitFullScreen() } else { dismiss() }
+        guard !fullScreen else { return exitFullScreen() }
+        exitWatchPage()
+    }
+
+    /// 「退出选集页」的**唯一实现**：彻底退出这一集，然后 pop。三个入口共用。
+    ///
+    /// ★ 2026-11-12 用户裁决（需求 1 vs 需求 4 的冲突，原话）：
+    ///
+    ///   **「返回 = 收进迷你播放器继续播；退出键 = 彻底退出那个视频，不止是关音频。」**
+    ///
+    ///   所以两条路彻底分开，不再有任何「猜意图」的成分：
+    ///     · 返回键 / 导航栏 Back / 左滑 / 程序化 dismiss → `settlePlaybackOnLeave()`
+    ///       一律收进坞继续播；
+    ///     · 退出键（`exitWatchPage`）→ 停播、收尾、退出这一集，坞里**也不留**它的卡片。
+    ///
+    /// 「彻底退出」包含三件事，缺一件都会留下残影：
+    ///   ① `stopPlaying()` —— 跑会话收尾（存进度、断流、停转封装、清弹幕）；
+    ///   ② 把它**从坞里摘掉** —— 若这一集正好也在坞里（从坞点回来又点了退出），
+    ///      只清前台会让它留在坞里继续播，用户以为退出了其实还在；
+    ///   ③ pop 本页。
+    ///
+    /// 顺带确认：`leaveHandled = true` 只挡住 `onDisappear` 的自动收坞，
+    /// 不影响上面三步 —— 顺序必须是「先置旗标，再停播，最后 pop」。
+    private func exitWatchPage() {
+        // ① 先记住要退的是哪一集（停播后 `store.playing` 就变 nil 了）。
+        let leaving = store.playing
+        // ② 告诉 `onDisappear`：这次去向已定，别再自动收进坞。
+        leaveHandled = true
+        // ③ 彻底退出：会话收尾 + 从坞里摘掉那一集。
+        store.quitPlayback(leaving)
+        // ④ 离开本页。
+        dismiss()
     }
 
     /// 收进**应用内小窗**并离开本页（哔哩哔哩皮肤的「小窗」键与菜单项共用）。
@@ -3380,20 +3811,138 @@ struct VideoDetailView: View {
     /// 三个页面 + 菜单项都调它，避免第三处再写一遍并把顺序写错。
     ///
     /// ⛔ 顺序不能换（见 `onMiniPlayer` 里那段完整推导）：
-    /// `miniPlayerActive = true` → `leavingForMiniPlayer = true` → `dismiss()`。
+    /// `miniPlayerActive = true` → `leaveHandled = true` → `dismiss()`。
     /// 先置全局开关再 pop，`RootView.floatsInMiniPlayer` 才来得及在下一帧挂上卡片；
-    /// 而 `leavingForMiniPlayer` 会挡住 `onAppear` 把刚设的 true 清掉。
+    /// 而 `leaveHandled` 会挡住 `onAppear` 把刚设的 true 清掉。
     private func collapseToMiniPlayer() {
-        guard store.playing != nil else {
+        guard let channel = store.playing else {
             // 没有在播就没有可缩小窗的画面 —— 直接退全屏/关页，别留一个空卡片。
             if fullScreen { exitFullScreen() } else { dismiss() }
             return
         }
-        store.miniPlayerActive = true
-        leavingForMiniPlayer = true
+        // ⛔ 顺序不能换：先把**这一集**交给坞（登记 + 摘掉前台槽），再 pop。
+        //
+        // 上一版是先置 `miniPlayerActive = true` 再由 `RootView` 去读 —— 那套只支持一个
+        // 小窗。现在坞是真源：登记必须在 pop 之前完成，否则 `onDisappear` 里那句
+        // 「不是为缩小窗而离开？那就停播」会把这一集直接杀掉（画面进去了，声音没了）。
+        // 同时必须**摘掉前台槽**，否则前台与坞两边指着同一个会话，退出裁决会把它停掉。
+        _ = channel
+        store.dockForeground()
+        leaveHandled = true
         if fullScreen { exitFullScreen() }
         dismiss()
     }
+
+    /// 选集页的**退出键**（用户 2026-11-11：退出按钮要从视频窗口内移到界面上）。
+    ///
+    /// 三个必须写清的取舍：
+    ///
+    /// ① **它不再画在 `OneSkinChrome.topBar` 里。** 那一层被 `pictureColumn` 用
+    ///    `.frame(winW, winH).offset(winX, winY)` 锁在画面窗口内 —— 画在那里的任何键，
+    ///    无论怎么调整位置都在窗口里。界面级按钮只能挂在页面这一层。
+    /// ② **从它退出不进小窗。** 用户明确要求：这条路径是「真的走」。
+    ///    所以它先置 `leaveHandled = true`（挡住 `onDisappear` 里那句
+    ///    「左滑才收坞、否则停播」的判定把它收进坞），再显式 `stopPlaying()`。
+    ///    「收进坞」仍然存在，只是入口只有两个：小窗键、左滑。
+    /// ③ **全屏时它不出现。** 全屏里画面就是整屏，窗口内那颗退全屏键已经落在界面上；
+    ///    再叠一颗「退出页面」会让人误触 —— 全屏按退出键应当只退全屏，这是既有约定。
+    @ViewBuilder private var watchPageExitButton: some View {
+        // ⛔ 只给**没有自带返回键**的皮肤补这一颗。
+        //
+        // One 皮肤与控制栏（`OneSkinChrome`）里的返回键已经按用户要求摘掉了，
+        // 它是这一颗的**唯一目标用户**。而：
+        //   · 哔哩哔哩三个页面（`BiliPortraitPage` / `BiliLandscapePage` / `BiliFullScreenPage`）
+        //     各自在 `playerCard` 顶栏里画着自己的返回键 —— 那是还原 B 站版式的一部分，
+        //     动它就不再是 B 站的样子了；
+        //   · 上游原版播放器（`MobilePlayer.topRow` / `screenTopRow`）同样有自己的返回键。
+        // 不判皮肤就无条件挂，这两套都会变成**两个返回键**（一个在画面里、一个在界面上），
+        // 而且两者行为不同 —— 用户点到哪个都会觉得「有时进小窗、有时不进」。
+        if !fullScreen, oneSkinActive {
+            Button {
+                // 与「小窗键」的区别只有一条：**不停播转小窗，直接走人并关音频**。
+                // 实现收在 `exitWatchPage()`，与哔哩哔哩皮肤的返回键共用同一条路径 ——
+                // 两个皮肤的退出语义必须一致，否则「换个皮肤，返回行为就变了」。
+                exitWatchPage()
+            } label: {
+                Image(systemName: "chevron.backward")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 34, height: 34)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(L10n.text("Leave Watch Page")))
+            .accessibilityIdentifier("watch.exit")
+            // ⛔ 避让必须走**安全区**，不能写死 padding。
+            //
+            // 这一页是 `statusBarHidden(true)` 的沉浸页，但 `safeAreaInsets` 仍然有效
+            // （状态栏/刘海/Home 指示条都会算进去）。写死 `padding(.top, 6)` 的后果是：
+            //   · 竖持：键压在状态栏那一行（Duo 合盖时挖孔在顶部，直接盖住）；
+            //   · 横持：刘海在**左**，`leading` 只有 12pt —— 键整个陷进刘海区，
+            //     点不到（正是 `OneSkinChrome` 里记过的「最边缘不能正常点击」）。
+            // `safeAreaPadding` 由系统算，三种形态一次到位。
+            // ⛔ 这里不再叠任何「遮挡补量」：遮挡只走几何层（16.1），
+            //    页面外层那个 `OcclusionTopUp` 已删除，别再加第二套。
+            .safeAreaPadding(.leading, 12)
+            .safeAreaPadding(.top, 6)
+        }
+    }
+
+    /// 选集页离场时，这一集该去哪 —— 用户的两条规则在这里落地。
+    ///
+    /// 规则（2026-11-11）：
+    ///   · 返回上一层 → **关掉音频**（要求 4）；
+    ///   · 左滑返回 → **继续播**，画面收进迷你播放器（要求 4 的例外 + 要求 1）。
+    ///
+    /// 判据是「怎么走的」，不是「有没有在播」：
+    ///   · `leaveHandled`：用户按了小窗键，`collapseToMiniPlayer` 已经把会话
+    ///     登记进坞了 —— 这里只把一次性意图复位，绝不重复登记（重复登记会多出一张卡片）；
+    ///   · `SwipeBack.isPending`：系统左滑手势，语义与「小窗键」相同 —— 收进坞继续播；
+    ///   · 其余：返回键 / 导航栏 Back / 程序化 dismiss → 停掉这一集。
+    ///
+    /// ⛔ 只处理**本页正在播的那一集**，绝不清整个坞。坞里可能还挂着别的片子
+    /// （要求 5），`store.miniPlayerActive = false` 会把它们一起掐掉。
+    /// 离开选集/全屏播放页时，这一集去哪。
+    ///
+    /// ★★ 2026-11-12 用户明确裁决（覆盖此前「返回＝关音频」的规则）：
+    ///
+    ///   **只要没按「退出」键，离开播放页就一律收进迷你播放器继续播。**
+    ///
+    /// 只要用户在播放页（选集页 / 全屏播放页）上没有点那颗明确的退出按钮，
+    /// 无论是按返回键、导航栏 Back、左滑手势还是程序化 dismiss，
+    /// 都应该把小窗留在坞里 —— 而不是把音频关掉。
+    ///
+    /// 反过来说，「关音频」只有一个入口：`exitWatchPage()`（用户点了退出键）。
+    /// 它先置 `leaveHandled = true`，所以走到这里时 `leaveHandled` 已经是 true，
+    /// 下面的 `guard` 会直接返回，什么都不做（`exitWatchPage` 已自行停播）。
+    ///
+    /// 为什么这条要写这么死：用户的原话是「只要不在播放页…没有按退出，
+    /// 那么都应该展示出迷你播放器」。这是**默认行为**，不是例外分支。
+    private func settlePlaybackOnLeave() {
+        defer { leaveHandled = false }
+        // 明确退出（点了退出键）：`exitWatchPage()` 已经停播并 pop，这里不重复处理。
+        if leaveHandled { return }
+        guard store.playing != nil else { return }
+        // ⛔ 折叠 / 展开（Duo）也会跑 `onDisappear`，那种「本页没走」的情况不该动播放。
+        //
+        // ⚠️ 判据不能用 `watchLayout`：折叠态下它本来就是 false，那条判据会把真正的
+        // 返回也一起挡掉。
+        //
+        // 真正的判据是「坞里已经登记着同一集了吗」。从坞里点卡片回来后，
+        // `VideoTaskCenter.take` 已把它从坞里摘掉、`adoptSession` 交给前台；
+        // 若这一页随后因清栈/重压/形态重建再跑一次 `onDisappear`，无条件
+        // `dockForeground()` 就会把它**重新塞回坞里** —— 坞里凭空多一张卡片
+        // （用户看到「点回来又冒出一张」），而且坞里其他卡片会被一起挤动。
+        //
+        // `dock()` → `add()` 本身按频道去重，所以重复登记不会产生两张同集卡片；
+        // 但「刚回到前台的那一集又被塞回坞」这件事本身就是错的，得在这里拦住。
+        guard !store.floatsInMiniPlayer(store.playing) else { return }
+        // 其余一切离开方式 → 收进坞继续播。
+        _ = SwipeBack.isPending   // 保留读它以免编译器警告；语义上不再分流
+        store.dockForeground()
+    }
+
 
     /// 明确地退出全屏（单向），绝不关页。
     ///
@@ -4159,7 +4708,11 @@ private struct BundleSignIn: Identifiable {
 }
 
 /// Cloud drives whose plugins need a saved login before they can return a stream.
-private enum CloudDrive: String, Identifiable {
+// 由 `private` 放宽为 internal：`EpisodePicker` 的默认线路要复用
+// `CloudDrive.preferredFlag(_:)`（「第一条现在就能播的线」），否则面板与播放页
+// 会各有一套「哪条线能播」的判据 —— 那正是两处默认线路互相打架的根源。
+// 放宽只影响可见性，不改变任何行为；该符号仍只在 App target 内使用。
+enum CloudDrive: String, Identifiable {
     /// Xunlei's sign-in is only for CatPawOpen bundles, which say when it is missing; other sources play their Xunlei
     /// lines without it, so those lines are never held back for it. Baidu comes only from a plugin's error
     /// (`CloudDriveLoginRequired`), never from a line's name: other plugins sign in to it with their own code.

@@ -7,15 +7,89 @@ import TVCore
 /// place. A live preview at the top mirrors the player's chrome as you drag. One layout serves
 /// every player shape (folded outer screen, unfolded upright, unfolded sideways).
 struct PlayerControlsSettingsView: View {
-    @AppStorage(PlayerControlsLayout.storageKey) private var stored = PlayerControlsLayout.standard.stored
+    /// 三形态各自独立配置（见 `PlayerControlsLayout.Shape`）。
+    ///
+    /// 此前只有一个 `playerControlsOrder` 键，所有形态共用一套槽位。
+    /// 外屏顶栏只放得下 2–3 个按钮，横持能放 6 个 —— 共用一套必然有个形态是错的：
+    /// 在外屏删掉的按钮，横持时也没了；为横持加的按钮，外屏会挤成一条。
+    /// 现在每个形态一份，设置页顶部切换。
+    @State private var editing: PlayerControlsLayout.Shape = .folded
+    @AppStorage(PlayerControlsLayout.Shape.folded.storageKey)
+    private var foldedRaw = PlayerControlsLayout.standard.stored
+    @AppStorage(PlayerControlsLayout.Shape.unfolded.storageKey)
+    private var unfoldedRaw = PlayerControlsLayout.standard.stored
+    @AppStorage(PlayerControlsLayout.Shape.sideways.storageKey)
+    private var sidewaysRaw = PlayerControlsLayout.standard.stored
+
+    /// 当前正在编辑的那一份的可写代理。
+    ///
+    /// `@AppStorage` 不能动态选键，所以这里按形态分三支手工转发；
+    /// 三支都写同一个 `String`，读回也是同一个 `String`。
+    private var stored: Binding<String> {
+        switch editing {
+        case .folded:   return $foldedRaw
+        case .unfolded: return $unfoldedRaw
+        case .sideways: return $sidewaysRaw
+        }
+    }
 
     var body: some View {
         SettingsPage(title: L10n.text("Player Controls"), symbol: "slider.horizontal.3") {
+            // ⛔ 这张排布表只对**原版**与 **One** 两套皮肤生效。
+            //
+            // 哔哩哔哩皮肤的底栏/顶栏是照 B 站二进制实测出的**绝对定位**复刻的
+            // （`BiliFullScreenPage.bottomBar` / `BiliPortraitPage` 里全是硬编码偏移，
+            //  `grep "PlayerControlsLayout\|PlayerControl\." App/Bili*.swift` 零命中），
+            // 它读的是自己那套 `BiliMenuConfig`（`biliMenuOrder` / `biliMenuHidden`），
+            // 与本页的十格槽位互不相通。
+            //
+            // 所以这里必须**明说**。不说的话，用户在哔哩哔哩皮肤下把这里拖了个遍、
+            // 播放器纹丝不动，只会得出「设置坏了」—— 而事实是「这一套不适用」。
+            // 把它写出来，是「没有实现清晰」这条需求里最便宜也最实在的一半。
+            if PlaySkin.current == .bilibili {
+                SettingsGroup(footer: L10n.text("This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel.")) {
+                    FormLabel(symbol: "info.circle.fill", tint: .orange,
+                              title: L10n.text("Not used by the Bilibili skin"))
+                }
+            }
+            // 形态切换。三形态各自独立，切过去看到的槽位就是那个形态实际用的。
+            SettingsGroup(footer: L10n.text("Each shape keeps its own layout. A button you remove on the folded outer screen stays on the unfolded one.")) {
+                Picker(selection: $editing) {
+                    ForEach(PlayerControlsLayout.Shape.allCases, id: \.self) { shape in
+                        Text(shape.title).tag(shape)
+                    }
+                } label: {
+                    FormLabel(symbol: "rectangle.split.2x1", tint: .teal,
+                              title: L10n.text("Shape"))
+                }
+                .pickerStyle(.inline)
+            }
             SettingsGroup {
-                PlayerControlsPreview(layout: PlayerControlsLayout(stored: stored))
+                // ⛔ `.id(editing)` 不能省：`PlayerControlsPreview` 与 `PlayerControlsEditor`
+                // 内部都用 `@State` 缓存了一份从 `stored` 解析出来的 layout，
+                // 而 `@State` **只在视图身份变化时重init一次**。切形态时 `stored` 换了键，
+                // 但视图身份没变 → 编辑器里还是上一个形态的 layout。
+                // 后果不是「显示不对」而是**写串**：在 folded 排好 → 切到 sideways →
+                // 拖任意一颗 → 整份 folded 槽位被写进 sideways 的键，两个形态互相污染。
+                PlayerControlsPreview(layout: PlayerControlsLayout(stored: stored.wrappedValue))
+                    .id(editing)
             }
             SettingsGroup(footer: L10n.text("Drag a button onto any slot in the top or bottom row, or into More. Empty slots stay empty.")) {
-                PlayerControlsEditor(stored: $stored)
+                PlayerControlsEditor(stored: stored)
+                    .id(editing)
+            }
+            // 该形态已有自己的配置时，给一个「恢复默认」。
+            // 判据是「这个键真的被写过」，不是「和 standard 相等」——
+            // 用户手动排成和默认一样也算自定义过，不该被当成没改。
+            if PlayerControlsLayout.hasOwnConfiguration(for: editing) {
+                SettingsGroup {
+                    Button(role: .destructive) {
+                        PlayerControlsLayout.reset(editing)
+                        stored.wrappedValue = PlayerControlsLayout.standard.stored
+                    } label: {
+                        Label(L10n.text("Reset This Shape to Default"), systemImage: "arrow.counterclockwise")
+                    }
+                }
             }
         }
     }

@@ -262,10 +262,22 @@ extension Store {
     @discardableResult
     func setHidden(_ hidden: Bool, for sites: [Site]) -> Int {
         guard let config = subscription, !sites.isEmpty else { return 0 }
+        let origin = config.origin
+        // ⛔ 真删的源必须在**写入之前**就剔掉，不能只在返回值里过滤。
+        //
+        // 早先的写法是「先无条件 `hiddenSources.setHidden`，再在 return 里按
+        // `deletedSources` 折算计数」—— 计数对了，但**隐藏标记已经被清掉**，
+        // 而列表过滤只认 `hiddenSources`：于是「显示全部」一按，已删的源当场复活。
+        // 计数正确 + 数据被改坏，比计数错更难查。
+        //
+        // 取消隐藏（hidden == false）时剔除真删；隐藏时可以放行（幂等无害）。
+        let target = hidden ? sites : sites.filter { !deletedSources.contains($0, origin: origin) }
+        guard !target.isEmpty else { return 0 }
         let before = hiddenSources.revision
-        hiddenSources.setHidden(sites, origin: config.origin, hidden: hidden)
+        hiddenSources.setHidden(target, origin: origin, hidden: hidden)
         guard hiddenSources.revision != before else { return 0 }
-        return sites.filter { hiddenSources.contains($0, origin: config.origin) == hidden }.count
+        // 返回值描述「实际改到了几条」，与写入用同一个集合，不再二次折算。
+        return target.count
     }
 
     /// Pins or unpins many sources at once, counting only the ones that changed.

@@ -29,8 +29,15 @@ struct SourceMoveMenu: View {
                 ForEach(targets) { entry in
                     Button(entry.title) { store.reassignSource(site, to: entry.address) }
                 }
+                Divider()
+                // 「移到未分组」：移出所有分组与订阅，但仍留在源列表里。
+                // 与「放回原订阅」是两条不同的去路，不能合并成一条。
+                if !store.isUngrouped(site) {
+                    Button { store.moveSourceToUngrouped(site) } label: {
+                        Label(L10n.text("Move to Ungrouped"), systemImage: "tray")
+                    }
+                }
                 if moved != nil {
-                    Divider()
                     Button { store.reassignSource(site, to: nil) } label: {
                         Label(L10n.text("Move Back"), systemImage: "arrow.uturn.backward")
                     }
@@ -67,6 +74,36 @@ struct SitesView: View {
     @State private var foldBeforeSearch: Set<String>?
     @State private var arranging = false
     @State private var choosingHidden = false
+    /// The group-priority list, opened from the search-order card.
+    @State private var rankingGroups = false
+    /// The sweep-and-file sheet, opened from the toolbar.
+    @State private var showingSpeedLab = false
+    /// Which sources are ticked. Empty = not selecting; the page is browsing, not choosing.
+    @State private var selection: Set<String> = []
+    /// Whether the page is in its choosing state. A separate flag from `selection` because "I ticked
+    /// one card and then unticked it" must not drop the reader back into browsing mid-task.
+    @State private var selecting = false
+    /// The last batch result, said where the buttons are rather than in a sheet.
+    @State private var batchNote: String?
+    /// 正在改名的分组（幂等：非 nil 就弹那个改名框）。
+    @State private var renamingGroup: SourceGroup?
+    /// 正在改名的订阅地址。
+    @State private var renamingSubscription: String?
+    /// 待删除的分组（先弹确认，不直接删）。
+    @State private var deletingGroup: SourceGroup?
+    /// 待删除的子源。带上 origin —— 同一个 site.key 在不同订阅下是两条。
+    @State private var deletingSite: (site: Site, origin: URL)?
+    /// 待改名的子源。
+    @State private var renamingSite: (site: Site, origin: URL)?
+
+    /// 只有用户自建的分组能删。系统组（固定 / 内置 / 来自订阅 / 其他）没有「删除」这件事 ——
+    /// 删订阅请去订阅管理，删内置源没有意义。
+    func deletableGroup(_ group: SourceGroup) -> Bool {
+        if case .custom = group.kind { return true }
+        return false
+    }
+    /// The fold as it was before choosing began; put back when choosing ends.
+    @State private var foldBeforeSelecting: Set<String>?
     /// Seeds the fold before the first frame, so the page never draws every group open and then
     /// fold: restoring in `.task` runs after the first render, which reads as the page flickering.
     /// Picking starts open (see `applyDefaultFold`).
@@ -87,9 +124,32 @@ struct SitesView: View {
                 ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Layout.cardSpacing) {
-                        if pick == nil, query.isEmpty && sites.count > 1 {
+                        // 选择模式下顶部就是操作条：先看清楚选了几个，再决定做什么。
+                        // 放在列表最上面而不是浮在底部，是为了和「选中的卡片」同处一屏——
+                        // 底部浮条会遮住正在勾的那一行。
+                        if selecting {
+                            selectionBar(groups: groups, all: sites)
+                        } else if pick == nil, !groups.isEmpty {
+                            // Both numbers come from the same list: the groups drawn, and the sources
+                            // inside them. Reading the source count off `orderedSites` counted a
+                            // different set whenever hidden sources existed.
+                            listControls(groups: groups.filter { $0.kind != .hidden },
+                                         sources: groups.filter { $0.kind != .hidden }.flatMap(\.sites).count)
+                        }
+                        if pick == nil, query.isEmpty && sites.count > 1, !selecting {
                             VStack(alignment: .leading, spacing: Layout.cardSpacing) {
-                                SourceOrderCard(sites: sites) { arranging = true }
+                                // The sweep card is first among the tools because it is what the other
+                                // two act on: measure, then file the answered ones and sort the rest.
+                                //
+                                // ⛔ 只在非 tvOS 上出现。它打开的是一个 `.sheet`，而那个 `.sheet` 写在
+                                // `#if !os(tvOS)` 里（tvOS 上 sheet 盖在被 push 的页面上不会收拢，#272）。
+                                // 守卫加在消费端却没加在触发端，结果是 tvOS 上有一张**点了没反应的卡** ——
+                                // 比没有这张卡更糟。
+                                #if !os(tvOS)
+                                SpeedAndGroupingCard { showingSpeedLab = true }
+                                #endif
+                                SourceOrderCard(sites: sites, arrange: { arranging = true },
+                                                arrangeGroups: { rankingGroups = true })
                                 HideSourcesCard(hidden: hiddenCount) { choosingHidden = true }
                             }.tvFocusSection()
                         }
@@ -121,6 +181,7 @@ struct SitesView: View {
                 }
                 .sheet(isPresented: $arranging) { SourceOrderEditor(sites: sites, automatic: store.automaticSites(config)) }
                 .sheet(isPresented: $choosingHidden) { HiddenSourcesEditor() }
+                .sheet(isPresented: $rankingGroups) { SourceGroupOrderEditor() }
                 #if DEBUG
                 // `-qaArrangeSources 1` opens the editor for screenshots.
                 .task {
@@ -138,15 +199,51 @@ struct SitesView: View {
         .modifier(SitesTitle(picking: pick != nil))
         #if !os(tvOS)
         .toolbar {
-            // Edit, where people look first to remove a source that stopped working or to bring back one they hid
-            // (#669, #704). It opens the same list as the Hide or Show Sources card.
+            // The sweep belongs here rather than on a settings page: the decision it feeds — which
+            // group a source is in, whether it goes direct or through the relay — is made on this
+            // page, and a measurement you have to leave the page to take is a measurement nobody takes.
+            // Two items in one group rather than two groups: on a phone the navigation bar keeps
+            // both, and a second `.primaryAction` was silently dropped — which is how a feature ships
+            // invisible.
             if pick == nil, store.subscription != nil {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Menu {
+                        Button {
+                            showingSpeedLab = true
+                        } label: {
+                            Label(L10n.text("Speed & Grouping"), systemImage: "speedometer")
+                        }
+                        .accessibilityIdentifier("sources.speedLab")
+                    } label: {
+                        Label(L10n.text("Tools"), systemImage: "ellipsis.circle")
+                    }
+                    .accessibilityIdentifier("sources.tools")
+                    // Edit, where people look first to remove a source that stopped working or to bring back one they hid
+                    // (#669, #704). It opens the same list as the Hide or Show Sources card.
                     Button(L10n.text("Edit")) { choosingHidden = true }.accessibilityIdentifier("sources.edit")
                 }
             }
         }
+        .sheet(isPresented: $showingSpeedLab) {
+            // 勾过的源直接带进测速页：勾完再点一次「测速」是最常见的下一步，
+            // 让它变成同一次动作，而不是回到列表再选一遍。
+            SourceSpeedLab(picked: selectionPickedSites())
+        }
         #endif
+        // 改名：分组与订阅各一个输入框。
+        //
+        // 挂在这里（body 的 Group 之后）而不是 `groupHeader` 内部：分组头是 `LazyVStack`
+        // 里的行，滚出屏幕会被回收，挂在行上的 alert 会跟着消失 —— 与 `VideoDetailView`
+        // 那份「抽屉不能挂在分支内部」是同一个教训（见那里的注释）。
+        //
+        // ⛔ 收进独立的 `ViewModifier`，不要直接写进 body 那条 `.alert(...)` 链。
+        // 这条链已经很长，再加两个带闭包的 alert 会把类型检查推到超时
+        // （实测报 `unable to type-check this expression in reasonable time`）。
+        .modifier(RenameAlerts(renamingGroup: $renamingGroup,
+                               renamingSubscription: $renamingSubscription,
+                               renamingSite: $renamingSite,
+                               deletingGroup: $deletingGroup,
+                               deletingSite: $deletingSite))
         .task(id: store.section) {
             if store.section == .sites && !prepared {
                 applyDefaultFold()
@@ -170,28 +267,56 @@ struct SitesView: View {
     @ViewBuilder
     private func groupHeader(_ group: SourceGroup) -> some View {
         let open = !collapsed.contains(group.id)
-        let header = Button {
-            withAnimation(.snappy(duration: 0.3)) {
-                if open { collapsed.insert(group.id) } else { collapsed.remove(group.id) }
-                // A picking visit folds for its own convenience and leaves the Sources page's saved
-                // fold alone: borrowing a page to choose from must not rearrange it.
-                // [mi3s] 二开：借用选择页时不动 Sources 页自己的折叠记忆
-                if pick == nil { foldState.save(collapsed) }
+        // 选择模式下的分组头：左边照旧是折叠开关，右边多一个「整组勾上」。
+        // 分组是用户已经整理过的批次，所以「这一组全要」比「一个个点」常用得多。
+        let header = HStack(spacing: 8) {
+            Button {
+                withAnimation(.snappy(duration: 0.3)) {
+                    if open { collapsed.insert(group.id) } else { collapsed.remove(group.id) }
+                    // A picking visit folds for its own convenience and leaves the Sources page's saved
+                    // fold alone: borrowing a page to choose from must not rearrange it.
+                    // [mi3s] 二开：借用选择页时不动 Sources 页自己的折叠记忆
+                    if pick == nil { foldState.save(collapsed) }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(L10n.text(group.title)).font(.headline).lineLimit(1)
+                    Text("\(group.sites.count)").font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
+                    if selecting, let ticked = tickedCount(in: group), ticked > 0 {
+                        Text(L10n.text("%lld picked", ticked))
+                            .font(.caption.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(Brand.accent)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Brand.accent.opacity(0.16), in: Capsule())
+                    }
+                    Spacer(minLength: 8)
+                    // One chevron that turns, rather than two symbols swapped.
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                }
+                .contentShape(Rectangle())
             }
-        } label: {
-            HStack(spacing: 8) {
-                Text(L10n.text(group.title)).font(.headline).lineLimit(1)
-                Text("\(group.sites.count)").font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                // One chevron that turns, rather than two symbols swapped.
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(open ? 90 : 0))
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("sources.group." + group.id)
+            if selecting {
+                // 「整组」不是「全选反选」的替代品：组是用户自己整理出来的批次，
+                // 所以要的是「这一组全要 / 都不要」，两个状态一个按钮来回切。
+                let all = group.sites.allSatisfy { selection.contains($0.key) }
+                Button {
+                    toggleGroup(group)
+                } label: {
+                    Text(L10n.text(all ? "Clear This Group" : "Pick This Group"))
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(all ? Brand.accent : Color.white.opacity(0.10), in: Capsule())
+                        .foregroundStyle(all ? Brand.onAccent : Color.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("sources.groupPick." + group.id)
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(.isHeader)
-        .accessibilityIdentifier("sources.group." + group.id)
         #if !os(tvOS)
         if case .subscription(let address) = group.kind, query.isEmpty {
             header
@@ -210,6 +335,10 @@ struct SitesView: View {
                     store.reassignSourceByKey(drag.key, origin: drag.origin, to: address)
                     return true
                 }
+                // 订阅头：改名 + 整订阅是否参与搜索（要求 7）。
+                .contextMenu {
+                    SubscriptionSearchMenu(address: address) { renamingSubscription = address }
+                }
         } else if case .custom(let id) = group.kind, query.isEmpty {
             // Dropping onto one of the viewer's own groups files the source there — the same move the
             // speed page's "移动到…" makes, done one card at a time. Dropping another group's *title*
@@ -227,7 +356,10 @@ struct SitesView: View {
                 }
                 .dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
                     guard query.isEmpty, let drag = items.first else { return false }
-                    store.reassignSourceByKey(drag.key, origin: drag.origin, to: group.id)
+                    // `groupID:`, not `to:`: the page holds a group's id, while a move stores its
+                    // target (`group:<id>`). Handing the bare id to the address form filed the card
+                    // under "Other Sources" and left the group it was dropped on empty.
+                    store.reassignSourceByKey(drag.key, origin: drag.origin, groupID: group.id)
                     return true
                 }
                 .contextMenu {
@@ -239,6 +371,18 @@ struct SitesView: View {
                         Label(L10n.text("Move Group Down"), systemImage: "arrow.down")
                     }
                     .disabled(!store.canMoveCustomGroup(id, by: 1))
+                    // 改名与搜索开关都挂在分组头上（要求 7）：分组是用户自己整理的批次，
+                    // 这两件事都是「对整组做点什么」，放这里比放进设置页更近。
+                    GroupSearchParticipationButton(sourceGroup: group) { renamingGroup = group }
+                    // 删除分组（要求 7）。组内源**不会**跟着消失 —— 它们的 move 指向
+                    // `group:<id>`，组没了就指不到，`SourceGroups.make` 会把它们放回
+                    // 各自的订阅源下。用户要的正是这个：整理可以撤，销毁不行。
+                    Button(role: .destructive) {
+                        deletingGroup = group
+                    } label: {
+                        Label(L10n.text("Delete Group"), systemImage: "trash")
+                    }
+                    .disabled(!deletableGroup(group))
                 }
         } else if group.kind == .other, query.isEmpty {
             // Dropping into "Other Sources" is the way back: the source returns to its own subscription.
@@ -251,21 +395,266 @@ struct SitesView: View {
             header
         }
         #else
-        header
+        // tvOS：拖拽不存在，所以上面那整段（分组头拖拽 + 订阅头/分组头菜单）被排除了。
+        // 但「改名 / 删分组」不能因此没有入口 —— 本项目自己在 `:138` 记过教训：
+        // 「守卫加在消费端却没加在触发端，结果是一张点了没反应的卡」。
+        // 反过来同样糟：`RenameAlerts` 的弹窗三平台都在，触发端却只有 iOS 有。
+        //
+        // tvOS 支持 `.contextMenu`（`WatchNowTV.swift:80/459` 已在用），
+        // 所以这里给它补一份只含「菜单类」动作的分支，拖拽/放置那部分仍然不进来。
+        switch group.kind {
+        case .custom:
+            header.contextMenu {
+                Button { store.moveCustomGroup(group.id, by: -1) } label: {
+                    Label(L10n.text("Move Group Up"), systemImage: "arrow.up")
+                }
+                .disabled(!store.canMoveCustomGroup(group.id, by: -1))
+                Button { store.moveCustomGroup(group.id, by: 1) } label: {
+                    Label(L10n.text("Move Group Down"), systemImage: "arrow.down")
+                }
+                .disabled(!store.canMoveCustomGroup(group.id, by: 1))
+                GroupSearchParticipationButton(sourceGroup: group) { renamingGroup = group }
+                Button(role: .destructive) { deletingGroup = group } label: {
+                    Label(L10n.text("Delete Group"), systemImage: "trash")
+                }
+            }
+        case .subscription(let address):
+            header.contextMenu {
+                SubscriptionSearchMenu(address: address) { renamingSubscription = address }
+            }
+        default:
+            header
+        }
         #endif
     }
 
-    /// Every group folded, or every group open, in one press.
-    private var foldButtons: some View {
-        let allCollapsed = !collapsed.isEmpty && store.sourceGroups(includeHidden: false).allSatisfy { collapsed.contains($0.id) }
-        return Button {
-            setAllCollapsed(!allCollapsed)
-        } label: {
-            Label(allCollapsed ? L10n.text("Expand All") : L10n.text("Collapse All"),
-                  systemImage: allCollapsed ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+    /// Whether every listed group is folded — what decides whether the one press says
+    /// "展开全部" or "全部折叠".
+    private var allFolded: Bool {
+        let ids = store.sourceGroups(includeHidden: false).map(\.id)
+        return !ids.isEmpty && ids.allSatisfy { collapsed.contains($0) }
+    }
+
+    /// The list's own controls: how many groups and sources, one press to fold or unfold them all,
+    /// and the way into choosing.
+    ///
+    /// These live above the list rather than in the toolbar. A phone's navigation bar already had a
+    /// menu silently dropped for being a second `.primaryAction`; more to the point, "fold everything"
+    /// is a property of the list below it, and a control sitting directly over its own list needs no
+    /// explaining. It is also the only place the count of groups is ever stated, which is what makes
+    /// folding them all a thought someone can have.
+    private func listControls(groups: [SourceGroup], sources: Int) -> some View {
+        let all = allFolded
+        let groupCount = groups.count
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.text("%lld groups", groupCount)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(L10n.text("%lld sources", sources)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            // 「一键」是这里的重点：分组一多，逐个点头标是唯一比测速更烦的事。
+            Button {
+                setAllCollapsed(!all)
+            } label: {
+                Label(L10n.text(all ? "Expand All" : "Collapse All"),
+                      systemImage: all ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1).fixedSize()
+                    .padding(.horizontal, 11).padding(.vertical, 6)
+                    .background(Color.white.opacity(0.10), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            // While a search narrows the list, "fold everything" would act on groups the reader
+            // cannot see — the old control refused for exactly this reason.
+            .disabled(!query.isEmpty)
+            .help(all ? L10n.text("Expand All") : L10n.text("Collapse All"))
+            .accessibilityIdentifier("sources.foldAll")
+            // 选择模式的入口放在同一行：这两件事都是「对整个列表做点什么」，
+            // 分开放会让人以为它们属于不同页面。
+            if pick == nil {
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) { beginSelecting() }
+                } label: {
+                    Label(L10n.text("Select"), systemImage: "checkmark.circle")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 11).padding(.vertical, 6)
+                        .background(Brand.accent.opacity(0.18), in: Capsule())
+                        .foregroundStyle(Brand.accent)
+                }
+                .buttonStyle(.plain)
+                .disabled(sources == 0)
+                .accessibilityIdentifier("sources.selectMode")
+            }
         }
-        .disabled(!query.isEmpty)
-        .help(allCollapsed ? L10n.text("Expand All") : L10n.text("Collapse All"))
+        .padding(.horizontal, 4)
+    }
+
+    /// The bar that replaces the list controls while choosing: what is ticked, and everything that
+    /// can be done to it.
+    ///
+    /// The batch actions are here, in one row, on purpose. Grouping, hiding, pinning and routing are
+    /// all "do this to the ones I ticked", and scattering them across a menu makes the reader
+    /// remember which menu holds which — the exact cost this page exists to remove.
+    private func selectionBar(groups: [SourceGroup], all sites: [Site]) -> some View {
+        // The batch acts on everything ticked, not only what the search box currently shows. A tick
+        // that survives a search but not the action would be the worst kind of inconsistency: the
+        // reader sees "3 selected", searches, sees "0 selected", and the three are still ticked.
+        let picked = pickedSites(all: sites)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text(L10n.text("%lld selected", picked.count))
+                    .font(.headline).monospacedDigit()
+                    .accessibilityIdentifier("sources.selectionCount")
+                Spacer(minLength: 8)
+                // Select-all is scoped to what is on screen, and says so when a search is narrowing it.
+                Button(L10n.text(query.isEmpty ? "Select All" : "Select All Shown")) { selectAll(groups: groups) }
+                    .font(.caption.weight(.semibold))
+                    .disabled(visibleSites(groups: groups).allSatisfy { selection.contains($0.key) })
+                Button(L10n.text("Deselect All")) { selection.removeAll() }
+                    .font(.caption.weight(.semibold))
+                    .disabled(selection.isEmpty)
+                Button(L10n.text("Done")) {
+                    withAnimation(.snappy(duration: 0.25)) { endSelecting() }
+                }
+                .font(.caption.weight(.semibold))
+                .accessibilityIdentifier("sources.selectDone")
+            }
+            .buttonStyle(.plain)
+
+            if picked.isEmpty {
+                Text(L10n.text("Tick the sources you want, then choose what to do with them. A group's own button picks everything in it."))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                // 首屏只放四个最常用的：分组、隐藏、置顶、测速。
+                // 路由与「放回原订阅」放进第二个菜单，因为它们要么更少用，要么有副作用要读文字。
+                ViewThatFits(in: .horizontal) {
+                    batchButtons(picked: picked, compact: false)
+                    batchButtons(picked: picked, compact: true)
+                }
+            }
+            if let batchNote {
+                Text(batchNote).font(.caption).foregroundStyle(Brand.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("sources.batchNote")
+            }
+        }
+        .padding(14)
+        .contentPanel(cornerRadius: 20)
+        .accessibilityIdentifier("sources.selectionBar")
+    }
+
+    @ViewBuilder
+    private func batchButtons(picked: [Site], compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            Menu {
+                Section {
+                    Button {
+                        fileSelection(picked, into: nil, label: L10n.text("their own subscriptions"))
+                    } label: {
+                        Label(L10n.text("Back to Their Own Subscription"), systemImage: "arrow.uturn.backward")
+                    }
+                    .disabled(!picked.contains { store.reassignedAddress($0) != nil })
+                }
+                Section {
+                    ForEach(store.sourceGroupBook.groups) { group in
+                        Button(L10n.text("Move to %@", group.name)) { fileSelection(picked, into: group.id, label: group.name) }
+                    }
+                }
+                Section {
+                    ForEach(store.environmentSubscriptions.filter(\.enabled)) { entry in
+                        Button(L10n.text("Move to %@", entry.title)) { fileSelection(picked, into: entry.address, label: entry.title) }
+                    }
+                }
+                Section {
+                    Button {
+                        let created = store.createSourceGroup(named: nextGroupName())
+                        if let created { fileSelection(picked, into: created.id, label: created.name) }
+                    } label: {
+                        Label(L10n.text("New Group…"), systemImage: "plus.rectangle.on.folder")
+                    }
+                }
+            } label: {
+                Label(L10n.text("Group"), systemImage: "folder")
+                    .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityIdentifier("sources.batch.group")
+
+            Button {
+                let hidden = picked.filter { site in
+                    store.subscription.map { store.hiddenSources.contains(site, origin: $0.origin) } ?? false
+                }
+                // 全都已隐藏 ⇒ 这一按是「显示」，否则是「隐藏」。一个按钮两个方向，
+                // 因为它描述的是这批源的状态，不是两个互不相干的功能。
+                let show = hidden.count == picked.count
+                store.setHidden(!show, for: picked)
+                note(show ? L10n.text("Shown %lld sources.", picked.count) : L10n.text("Hidden %lld sources.", picked.count))
+            } label: {
+                Label(L10n.text("Hide"), systemImage: "eye.slash")
+                    .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("sources.batch.hide")
+
+            Button {
+                store.setPinned(true, for: picked)
+                note(L10n.text("Pinned %lld sources.", picked.count))
+            } label: {
+                Label(L10n.text("Pin"), systemImage: "pin")
+                    .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("sources.batch.pin")
+
+            Button {
+                store.startProbing(picked, skippingFresh: store.probeMaxAge)
+                note(L10n.text("Measuring %lld sources…", picked.count))
+            } label: {
+                // 不能用 "Measure" 这个键：它在 zh/ja 里是**名词**「测速范围」，是从测速页的
+                // 作用域选择器借来的。放在这里会让批量按钮写「测速范围」，读起来不是一个动作。
+                Label(L10n.text("Measure Now"), systemImage: "speedometer")
+                    .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.borderless)
+            .disabled(store.probeRun != nil)
+            .accessibilityIdentifier("sources.batch.measure")
+
+            Menu {
+                Button {
+                    let result = store.fileByReachability(picked,
+                                                          into: L10n.text("Reachable"),
+                                                          silentGroup: L10n.text("Unreachable"),
+                                                          alsoMatching: L10n.everyRendering(of: "Reachable"),
+                                                          silentAliases: L10n.everyRendering(of: "Unreachable"))
+                    note(result.unknown > 0
+                         ? L10n.text("Filed %lld answered and %lld silent; %lld have no reading yet.", result.answered, result.silent, result.unknown)
+                         : L10n.text("Filed %lld answered and %lld silent.", result.answered, result.silent))
+                } label: {
+                    Label(L10n.text("File by Result (reachable / unreachable)"), systemImage: "square.grid.2x2")
+                }
+                Button {
+                    let result = store.routeByReachability(picked)
+                    note(L10n.text("%lld to Direct, %lld to Proxy, %lld left unmeasured.", result.direct, result.relay, result.unknown))
+                } label: {
+                    Label(L10n.text("Answered to Direct, Silent to Proxy"), systemImage: "arrow.triangle.branch")
+                }
+                Button {
+                    store.setPinned(false, for: picked)
+                    note(L10n.text("Unpinned %lld sources.", picked.count))
+                } label: {
+                    Label(L10n.text("Unpin"), systemImage: "pin.slash")
+                }
+            } label: {
+                Label(compact ? "" : L10n.text("More"), systemImage: "ellipsis.circle")
+                    .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityIdentifier("sources.batch.more")
+        }
     }
 
     /// Every group open, or every group folded, at once.
@@ -275,6 +664,109 @@ struct SitesView: View {
         // Same rule as a single header: only the Sources page owns the saved fold.
         // [mi3s] 二开：展开/折叠全部后也只由 Sources 页写折叠记忆
         if pick == nil { foldState.save(collapsed) }
+    }
+
+    // MARK: - 选择与批量
+
+    /// The sources currently on screen — the ones a "select all" may tick, so a search narrows it too.
+    private func visibleSites(groups: [SourceGroup]) -> [Site] {
+        groups.flatMap(\.sites)
+    }
+
+    /// The ticked ones, in the order the page lists them. Order matters for the moves below:
+    /// `SourceOrder` keeps first-seen order, so filing in the page's order leaves the group reading
+    /// like the page it came from.
+    ///
+    /// Read from the whole library, not from the groups currently drawn: a search box narrows the
+    /// list but does not un-tick anything, so the count and the batch have to cover the same set.
+    private func pickedSites(all sites: [Site]) -> [Site] {
+        guard !selection.isEmpty else { return [] }
+        var seen = Set<String>()
+        return sites.filter { selection.contains($0.key) && seen.insert($0.id).inserted }
+    }
+
+    /// How many of a group's cards are ticked, for the badge on its header. Nil when none, so the
+    /// header does not grow a badge that says "0 picked".
+    private func tickedCount(in group: SourceGroup) -> Int? {
+        let n = group.sites.filter { selection.contains($0.key) }.count
+        return n == 0 ? nil : n
+    }
+
+    private func beginSelecting() {
+        selecting = true
+        batchNote = nil
+        // Opening every group for the duration of the choosing, and putting the fold back afterwards.
+        // Unfolding permanently would be a side effect nobody asked for: the reader's fold is a
+        // preference they set, and "I ticked some cards" is not a statement about it.
+        foldBeforeSelecting = collapsed
+        collapsed = []
+    }
+
+    private func endSelecting() {
+        selecting = false
+        selection.removeAll()
+        batchNote = nil
+        // Restore, not save: the fold the reader had is what they come back to.
+        if let saved = foldBeforeSelecting { collapsed = saved }
+        foldBeforeSelecting = nil
+    }
+
+    private func toggle(_ site: Site) {
+        if selection.contains(site.key) { selection.remove(site.key) } else { selection.insert(site.key) }
+        batchNote = nil
+    }
+
+    /// Picks a whole group, or clears it when every card in it is already picked.
+    private func toggleGroup(_ group: SourceGroup) {
+        let keys = group.sites.map(\.key)
+        if keys.allSatisfy({ selection.contains($0) }) {
+            selection.subtract(keys)
+        } else {
+            selection.formUnion(keys)
+        }
+        batchNote = nil
+    }
+
+    /// Adds everything on screen to the selection. A union, not an assignment: ticks made before a
+    /// search must survive it, or "3 selected" would silently become "12" and the three would be gone.
+    private func selectAll(groups: [SourceGroup]) {
+        selection.formUnion(visibleSites(groups: groups).map(\.key))
+        batchNote = nil
+    }
+
+    private func note(_ text: String) {
+        batchNote = text
+    }
+
+    /// The ticked sources as a flat list, for the sheet this page opens. Read here rather than passed
+    /// as a closure so the sheet gets a plain array: a sheet holding a live binding to the page's
+    /// selection would change under the reader as they tick and untick behind it.
+    private func selectionPickedSites() -> [Site] {
+        guard !selection.isEmpty, let config = store.subscription else { return [] }
+        return store.orderedSites(config).filter { selection.contains($0.key) }
+    }
+
+    /// The name for a group made by "New Group…": numbered so two presses in a row make two groups,
+    /// and named after what it holds so the list stays readable later.
+    private func nextGroupName() -> String {
+        let taken = Set(store.sourceGroupBook.groups.map(\.name))
+        var n = store.sourceGroupBook.groups.count + 1
+        while taken.contains(L10n.text("Group %lld", n)) { n += 1 }
+        return L10n.text("Group %lld", n)
+    }
+
+    /// Files the ticked sources under `target` (`nil` = back to their own subscription) and reports
+    /// how many moved. The report stays on the bar: a batch that silently did nothing looks like a
+    /// broken button, and a batch that moved 300 cards is a thing to be told about.
+    private func fileSelection(_ sites: [Site], into target: String?, label: String) {
+        guard !sites.isEmpty else { return }
+        let moved = target == nil
+            ? store.returnSourcesToTheirSubscription(sites)
+            : store.fileSources(sites, intoGroupTarget: target)
+        note(L10n.text("Moved %1$lld of %2$lld into %3$@.", moved, sites.count, label))
+        // The move is done and the cards are elsewhere on the page: keeping them ticked would let a
+        // second press move the same batch again, which is never what anyone means.
+        selection.removeAll()
     }
 
     /// Entry to the record of moved sources, shown only while a move is in effect.
@@ -302,7 +794,17 @@ struct SitesView: View {
     /// 原来这一整块内联在 ForEach 里，嵌套四层，编译器报
     /// 「unable to type-check this expression in reasonable time」——抽出来只为降复杂度，行为不变。
     @ViewBuilder private func siteRow(_ site: Site, group: SourceGroup, config: Subscription, sites: [Site]) -> some View {
-                                        if let pick {
+                                        if selecting {
+                                            // 选择模式下整张卡片就是一个勾选框：不跳转、不开详情，
+                                            // 点哪都是切换勾选。这是这个页面唯一「点了不进去」的时候，
+                                            // 而顶部的操作条已经说明了此刻在做什么。
+                                            Button { toggle(site) } label: {
+                                                SiteCard(site: site, dimmed: group.kind == .hidden, chosen: selection.contains(site.key))
+                                            }
+                                            .tileButton()
+                                            .accessibilityAddTraits(selection.contains(site.key) ? .isSelected : [])
+                                            .accessibilityIdentifier("sources.pick." + site.key)
+                                        } else if let pick {
                                             Button { pick(site); dismiss() } label: { SiteCard(site: site, chosen: site.key == picked) }.tileButton()
                                                 .accessibilityAddTraits(site.key == picked ? .isSelected : [])
                                                 .focused($focusedSite, equals: site.key)
@@ -318,6 +820,21 @@ struct SitesView: View {
                                             .contextMenu {
                                                 PinSourceButton(site: site, origin: config.origin)
                                                 HideSourceButton(site: site, origin: config.origin)
+                                                // 子源改名 + 删除（要求 7）。
+                                                // 改名写 `SourceOverrides`（不动订阅文件，刷新后仍在）；
+                                                // 删除写 `deletedSources` + 隐藏，理由见 `Store.deleteSite`。
+                                                Button {
+                                                    renamingSite = (site, config.origin)
+                                                } label: {
+                                                    Label(L10n.text("Rename Source"), systemImage: "character.cursor.ibeam")
+                                                }
+                                                Button(role: .destructive) {
+                                                    deletingSite = (site, config.origin)
+                                                } label: {
+                                                    Label(L10n.text("Delete Source"), systemImage: "trash")
+                                                }
+                                                // 「看得见但这次不搜」——与隐藏正交，见 `SearchParticipationButton`。
+                                                SearchParticipationButton(site: site)
                                                 SourceMoveMenu(site: site)
                                                 SourceRouteMenu(site: site)
                                                 Button { editingSource = site } label: {
@@ -434,7 +951,13 @@ struct SiteCard: View {
     private let focused = false
     #endif
     var body: some View {
-        let label = SourceLabel(site.name)
+        // The card must show the site the viewer actually gets, not the one the feed shipped.
+        // `resolvedSite` applies the rename and the API override; reading `site.name` here was the
+        // third instance of "written under one name, read under another": a rename took effect in the
+        // player and nowhere on this page, so the tile kept the old name and only a "Customized"
+        // badge hinted that anything had changed.
+        let shown = store.subscription.map { store.resolvedSite(site, origin: $0.origin) } ?? site
+        let label = SourceLabel(shown.name)
         let pinned = marksPinned && (store.subscription.map { store.pinnedSources.contains(site, origin: $0.origin) } ?? false)
         let runs = site.isBuiltIn || site.canBrowse(jarURL: store.subscription?.spiderURL)
         let detail = runs ? (label.parts.dropFirst() + [engine].compactMap { $0 }).joined(separator: " · ") : site.compatibility
@@ -445,7 +968,7 @@ struct SiteCard: View {
                 || store.sourceRouting.route(site, origin: sub.origin) != nil
         } ?? false
         HStack(spacing: padding) {
-            SourceIcon(site: site, label: label, size: icon)
+            SourceIcon(site: shown, label: label, size: icon)
                 .opacity(runs ? 1 : 0.45)
                 // A badge on the icon, not another line, so pinned cards keep the grid's height.
                 .overlay(alignment: .bottomTrailing) {
@@ -576,6 +1099,50 @@ struct HideSourceButton: View {
 }
 
 /// Over a hidden source's own page: it says so, and Unhide Source brings it back. Hiding is a single tap in the page's
+/// The way in to the sweep, on the page the decisions happen on.
+///
+/// It is a card rather than only a toolbar item because a toolbar menu on a phone hides its contents
+/// behind one more tap, and the numbers below are the argument for opening it: how many sources have a
+/// reading, how many are stale. Without them the card is a button with no reason to press.
+private struct SpeedAndGroupingCard: View {
+    let open: () -> Void
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        let probes = SourceProbeStore.shared
+        let measured = probes.measuredSourceCount
+        let window = store.probeMaxAge
+        let fresh: Int = {
+            guard window > 0 else { return 0 }
+            let cutoff = Date().addingTimeInterval(-window)
+            return probes.measuredSources().filter { $0.reading.measuredAt >= cutoff }.count
+        }()
+        Button(action: open) {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: "speedometer")
+                    .font(.title3).foregroundStyle(Brand.accent).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.text("Speed & Grouping")).font(.headline)
+                    Text(detail(measured: measured, fresh: fresh, window: window))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("sources.speedLabCard")
+        .glassRow()
+    }
+
+    private func detail(measured: Int, fresh: Int, window: TimeInterval) -> String {
+        guard measured > 0 else { return L10n.text("Measure the sources, then file them by result.") }
+        guard window > 0 else { return L10n.text("%lld measured", measured) }
+        return L10n.text("%lld measured, %lld within the window", measured, fresh)
+    }
+}
+
 /// toolbar or a source's menu, so a mistaken one is undone where it happened rather than on another page (#704).
 struct HiddenSourceBanner: View {
     @Environment(Store.self) private var store
@@ -638,12 +1205,24 @@ struct SourceOrderCard: View {
     @Environment(Store.self) private var store
     let sites: [Site]
     let arrange: () -> Void
+    /// Opens the group-priority list.
+    let arrangeGroups: () -> Void
     private var enabled: Binding<Bool> {
         Binding { store.sourceOrder.enabled } set: { on in withAnimation(.smooth) { store.setCustomSourceOrder(on) } }
     }
     private var detail: String {
         L10n.text(store.sourceOrder.enabled ? "Sources at the top are searched first, and their results are listed first."
                                             : "Mi3s searches quick, reliable sources first.")
+    }
+    /// The group ranking, said as what it does to a search rather than as a setting name: 300 sources
+    /// is a list nobody orders by hand, while six groups is a list anyone can.
+    private var groupDetail: String {
+        let ranked = store.sourceOrder.savedGroupOrder.count
+        let total = store.sourceGroups(includeHidden: false).count
+        guard ranked > 0 else {
+            return L10n.text("Rank whole groups — a feed, or a group you made — so one is asked before another. Sources inside a group keep their own order.")
+        }
+        return L10n.text("%lld of %lld groups ranked. The ones ranked are searched before the rest.", ranked, total)
     }
     var body: some View {
         #if os(tvOS)
@@ -657,6 +1236,11 @@ struct SourceOrderCard: View {
                 .glassRow()
                 .accessibilityIdentifier("sources.order.arrange")
             }
+            Button(action: arrangeGroups) {
+                TVSettingsRowLabel(title: L10n.text("Group Priority"), detail: groupDetail, chevron: true)
+            }
+            .glassRow()
+            .accessibilityIdentifier("sources.order.groups")
         }
         #else
         VStack(alignment: .leading, spacing: 14) {
@@ -690,6 +1274,27 @@ struct SourceOrderCard: View {
                     .buttonStyle(LiftButtonStyle())
                     .accessibilityIdentifier("sources.order.arrange")
                 }
+            }
+            Divider()
+            // 分组优先级与「自定义源顺序」并排，而不是藏在它下面：两者回答的是同一个问题的
+            // 两种粒度（哪一组先问 / 组里哪个先问），关掉后者不该顺带失去前者。
+            HStack(spacing: 14) {
+                IconTile(symbol: "square.stack.3d.up", tint: Brand.teal, size: 34)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.text("Group Priority")).font(.subheadline.weight(.semibold))
+                    Text(groupDetail).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Button(action: arrangeGroups) {
+                    Text(L10n.text("Rank Groups"))
+                        .font(.caption.weight(.semibold)).foregroundStyle(Brand.onAccent)
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Brand.teal, in: Capsule())
+                }
+                .buttonStyle(LiftButtonStyle())
+                .accessibilityIdentifier("sources.order.groups")
             }
         }
         .padding(16)
@@ -1985,7 +2590,15 @@ struct SourceRouteMenu: View {
                 }
                 if store.sourceRouting.route(site, origin: origin) != nil {
                     Divider()
-                    Button { store.setRoute(.auto, for: site) } label: {
+                    // 「跟随订阅」是 `clear`，不是 `set(.auto)`：两者在 `effectiveRoute` 里都会回落到
+                    // 订阅的默认路由，但 `set(.auto)` 会**留下一条显式记录** ——
+                    // 而「Auto」那个档的意思本是「按连通性自动切换」。既然按钮写的是「跟随订阅」，
+                    // 它就该把这条显式选择删掉，让源真正回到订阅的默认行为。
+                    Button {
+                        guard let config = store.subscription else { return }
+                        store.sourceRouting.clear(site, origin: site.origin(or: config.origin))
+                        store.rebuildSubscription()
+                    } label: {
                         Label(L10n.text("Follow Subscription"), systemImage: "arrow.uturn.backward")
                     }
                 }
@@ -2002,5 +2615,181 @@ struct SourceRouteMenu: View {
         case .direct: "bolt"
         case .proxy: "network.badge.shield.half.filled"
         }
+    }
+}
+
+// MARK: - 参与搜索（源 / 分组 / 订阅）
+
+/// 一条源在搜索里的开关。
+///
+/// 与 `HideSourceButton` 并排放在同一张菜单里，但**语义不同、不能合并**：
+/// 隐藏让源在列表里看不见；这个只是「搜索时跳过它」。合并会让用户二选一地丢功能 ——
+/// 把「不参与搜索」做成隐藏，他就再也找不到这条源；把隐藏做成「不参与搜索」，
+/// 他以为只是不搜，结果列表也空了。见 `SearchScope` 头部。
+struct SearchParticipationButton: View {
+    @Environment(Store.self) private var store
+    let site: Site
+    var body: some View {
+        let on = store.participatesInSearch(site)
+        Button { store.setParticipatesInSearch(site, !on) } label: {
+            Label(L10n.text(on ? "Skip in Search" : "Include in Search"),
+                  systemImage: on ? "magnifyingglass.circle" : "magnifyingglass.circle.fill")
+        }
+        .accessibilityIdentifier("source.search." + site.key)
+    }
+}
+
+/// 整组在搜索里的开关（分组头的菜单）。
+struct GroupSearchParticipationButton: View {
+    @Environment(Store.self) private var store
+    /// ⛔ 名字不能叫 `group`：`Darwin` 里有一个全局 `group` 方法，`group.id` 会被解析成
+    /// 「取那个方法」而不是「这个属性」，报 `use of 'group' refers to instance method`。
+    let sourceGroup: SourceGroup
+    /// 改名用。传 nil 时不显示改名项（系统组没有可改的名字）。
+    var rename: (() -> Void)? = nil
+    var body: some View {
+        let id = sourceGroup.id
+        let on = store.groupParticipatesInSearch(id)
+        Button { store.setGroupParticipatesInSearch(id, !on) } label: {
+            Label(L10n.text(on ? "Skip This Group in Search" : "Include This Group in Search"),
+                  systemImage: on ? "magnifyingglass.circle" : "magnifyingglass.circle.fill")
+        }
+        .accessibilityIdentifier("sources.groupSearch." + id)
+        if let rename {
+            Button { rename() } label: {
+                Label(L10n.text("Rename Group"), systemImage: "character.cursor.ibeam")
+            }
+            .accessibilityIdentifier("sources.groupRename." + id)
+        }
+    }
+}
+
+/// 订阅在搜索里的开关 + 改名（订阅头的菜单）。
+struct SubscriptionSearchMenu: View {
+    @Environment(Store.self) private var store
+    let address: String
+    var rename: () -> Void
+    var body: some View {
+        let on = store.subscriptionParticipatesInSearch(address)
+        Button { store.setSubscriptionParticipatesInSearch(address, !on) } label: {
+            Label(L10n.text(on ? "Skip This Subscription in Search" : "Include This Subscription in Search"),
+                  systemImage: on ? "magnifyingglass.circle" : "magnifyingglass.circle.fill")
+        }
+        Button { rename() } label: {
+            Label(L10n.text("Rename Subscription"), systemImage: "character.cursor.ibeam")
+        }
+    }
+}
+
+/// 改名输入框。`.alert` 里只能放 `TextField` / `Button`，所以用 `@ViewBuilder` 包一层。
+///
+/// `initial` 是**当前名字**：打开就带出来，用户按需改，而不是从空框重打一遍。
+private struct RenameField: View {
+    let initial: String
+    let commit: (String) -> Void
+    let cancel: () -> Void
+    @State private var text = ""
+
+    var body: some View {
+        TextField(L10n.text("Name"), text: $text)
+        Button(L10n.text("Save")) { commit(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        Button(L10n.text("Cancel"), role: .cancel) { cancel() }
+        // 首次出现时把当前名字带出来。
+        //
+        // ⛔ 只靠 `onAppear` 不够。同一个 `RenameField` 被 3 个 alert（改名分组 /
+        // 改名订阅 / 改名子源）以相同结构位置实例化，SwiftUI 在两次弹窗之间会复用
+        // 同一份 `@State`；`onAppear` 是否重放取决于 alert 内容的身份稳定性，不能指望。
+        // 不重放的后果很具体：第二次改名带出上一次目标的旧名字，用户按 Save
+        // 就把 A 的名字写进 B。
+        //
+        // `.task(id:)` 在 `initial` 变化时保证重新播种（`initial` 不同 = 换了目标）。
+        Color.clear.frame(height: 0)
+            .onAppear { text = initial }
+            .task(id: initial) { text = initial }
+    }
+}
+
+/// 分组 / 订阅两个改名框。
+///
+/// 单独一个 `ViewModifier` 而不是直接写在 `SitesView.body` 的修饰符链上：那条链已经
+/// 很长（选择模式、折叠、各种 sheet），再加两个带闭包参数的 `alert` 会让 Swift 的类型
+/// 检查超时。拆出来之后每个 `body` 只多一个修饰符，复杂度回到编译器能处理的量级。
+private struct RenameAlerts: ViewModifier {
+    @Environment(Store.self) private var store
+    @Binding var renamingGroup: SourceGroup?
+    @Binding var renamingSubscription: String?
+    /// 子源改名。与上面两个不同：子源没有「身份」可改，只能写 Override。
+    @Binding var renamingSite: (site: Site, origin: URL)?
+    /// 删除确认。破坏性操作一律二次确认 —— 尤其分组：用户会以为「删组=删源」。
+    @Binding var deletingGroup: SourceGroup?
+    @Binding var deletingSite: (site: Site, origin: URL)?
+
+    func body(content: Content) -> some View {
+        content
+            .alert(L10n.text("Rename Group"), isPresented: Binding(
+                get: { renamingGroup != nil },
+                set: { if !$0 { renamingGroup = nil } }
+            )) {
+                RenameField(initial: renamingGroup?.title ?? "") { name in
+                    if let group = renamingGroup, case .custom(let id) = group.kind {
+                        store.renameSourceGroup(id, to: name)
+                    }
+                    renamingGroup = nil
+                } cancel: {
+                    renamingGroup = nil
+                }
+            }
+            .alert(L10n.text("Rename Subscription"), isPresented: Binding(
+                get: { renamingSubscription != nil },
+                set: { if !$0 { renamingSubscription = nil } }
+            )) {
+                RenameField(initial: renamingSubscription.map { store.subscriptionTitle($0) } ?? "") { name in
+                    if let address = renamingSubscription { store.renameSubscription(address, to: name) }
+                    renamingSubscription = nil
+                } cancel: {
+                    renamingSubscription = nil
+                }
+            }
+            // 子源改名。初始值取 `siteTitle`（带已有覆盖），否则每次打开都是原始名，
+            // 用户改过一次再进来会以为没保存。
+            .alert(L10n.text("Rename Source"), isPresented: Binding(
+                get: { renamingSite != nil },
+                set: { if !$0 { renamingSite = nil } }
+            )) {
+                RenameField(initial: renamingSite.map { store.siteTitle($0.site, origin: $0.origin) } ?? "") { name in
+                    if let target = renamingSite { store.renameSite(target.site, origin: target.origin, to: name) }
+                    renamingSite = nil
+                } cancel: {
+                    renamingSite = nil
+                }
+            }
+            // 删分组：确认文案必须说清「源不会跟着删」，否则没人敢按。
+            .alert(L10n.text("Delete Group?"), isPresented: Binding(
+                get: { deletingGroup != nil },
+                set: { if !$0 { deletingGroup = nil } }
+            )) {
+                Button(L10n.text("Delete"), role: .destructive) {
+                    if let group = deletingGroup, case .custom(let id) = group.kind {
+                        store.deleteSourceGroup(id)
+                    }
+                    deletingGroup = nil
+                }
+                Button(L10n.text("Cancel"), role: .cancel) { deletingGroup = nil }
+            } message: {
+                Text(L10n.text("Its sources go back to the subscription they came from. No source is deleted."))
+            }
+            // 删子源：真删，且要说清「刷新订阅也不会回来」——那是 `deletedSources` 的作用。
+            .alert(L10n.text("Delete Source?"), isPresented: Binding(
+                get: { deletingSite != nil },
+                set: { if !$0 { deletingSite = nil } }
+            )) {
+                Button(L10n.text("Delete"), role: .destructive) {
+                    if let target = deletingSite { store.deleteSite(target.site, origin: target.origin) }
+                    deletingSite = nil
+                }
+                Button(L10n.text("Cancel"), role: .cancel) { deletingSite = nil }
+            } message: {
+                Text(L10n.text("This removes the source from this subscription for good. Refreshing the subscription will not bring it back, and it cannot be undone."))
+            }
     }
 }

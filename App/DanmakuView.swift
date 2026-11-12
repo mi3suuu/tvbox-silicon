@@ -78,12 +78,20 @@ final class DanmakuEngine: @unchecked Sendable {
     private static let perFrame = 4, onScreen = 150
 
     func load(_ comments: [Danmaku]) {
+        // 屏蔽词过滤（二进制实证 `danmaku_filter` / `danmaku_block_switch`）。
+        // 在**入口处**过滤，之后所有路径（布局、缓存）都不用再判，
+        // 也避免屏蔽词改了要重排时漏掉。
+        let visible = BiliDanmakuFilter.words.isEmpty
+            ? comments
+            : comments.filter { !BiliDanmakuFilter.isBlocked($0.text) }
+
         lock.withLock {
             // Live comments only grow at the end: keep the layout and what is already on screen.
-            if !self.comments.isEmpty, comments.count > self.comments.count, comments.first == self.comments.first {
-                self.comments = comments; return
+            if !self.comments.isEmpty, visible.count > self.comments.count,
+               visible.first == self.comments.first {
+                self.comments = visible; return
             }
-            self.comments = comments; layout = nil
+            self.comments = visible; layout = nil
         }
     }
 
@@ -145,7 +153,11 @@ final class DanmakuEngine: @unchecked Sendable {
         // player is tall and narrow, and its height made the text twice the size it is when the phone is turned.
         // The chosen text size scales that, and the lanes with it, so larger comments don't overlap.
         fontSize = min(44, max(15, min(size.width, size.height) * 0.04)) * textScale
-        layout = DanmakuLayout(width: size.width, height: size.height * 0.96, laneHeight: fontSize * 1.35, scrollArea: area.share)
+        // 弹幕速度（二进制实证 `danmaku_speed`）：`scrollDuration` 是「横穿屏幕所需秒数」，
+        // 越小越快。之前硬编码默认 9，界面上没有入口。
+        layout = DanmakuLayout(width: size.width, height: size.height * 0.96,
+                               laneHeight: fontSize * 1.35, scrollArea: area.share,
+                               scrollDuration: BiliDanmakuSpeed.current.scrollDuration)
         active = []
         var low = 0, high = comments.count
         while low < high { let mid = (low + high) / 2; if comments[mid].time < time { low = mid + 1 } else { high = mid } }

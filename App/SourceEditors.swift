@@ -197,12 +197,26 @@ struct HiddenSourcesEditor: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
 
+    /// ⛔ 真删的源不算「隐藏」。它写了两条记录（`DeletedSources` + `HiddenSources`），
+    /// 这里只查后者的话，它会以「已隐藏」身份在这个页面列出来 —— 而页面上就有
+    /// 「Show All Sources」，一按就把它放回列表，删除等于没删。
     private func isHidden(_ site: Site) -> Bool {
-        store.subscription.map { store.hiddenSources.contains(site, origin: $0.origin) } ?? false
+        guard let origin = store.subscription?.origin else { return false }
+        return store.hiddenSources.contains(site, origin: origin)
+            && !store.deletedSources.contains(site, origin: origin)
     }
+    /// ⛔ 批量显示 / 隐藏都必须跳过真删的源。
+    ///
+    /// 「Show All Sources」会 `hidden: false` 清掉隐藏标记；真删源的键还在
+    /// `DeletedSources` 里，但列表过滤只认 `HiddenSources` —— 标记一清，源就回来了。
+    /// 用户按「显示全部」不该把已删除的源请回来，那是数据错觉。
     private func setHidden(_ sites: [Site], _ hidden: Bool) {
         guard let config = store.subscription else { return }
-        store.hiddenSources.setHidden(sites, origin: config.origin, hidden: hidden)
+        let origin = config.origin
+        // 取消隐藏时剔除真删项；隐藏时无需剔除（给已删源再隐藏一次无害，且幂等）。
+        let target = hidden ? sites : sites.filter { !store.deletedSources.contains($0, origin: origin) }
+        guard !target.isEmpty else { return }
+        store.hiddenSources.setHidden(target, origin: origin, hidden: hidden)
     }
 
     var body: some View {
@@ -334,3 +348,132 @@ private struct HiddenSourceRow: View {
     }
 }
 #endif
+
+/// Which group search asks first.
+///
+/// Why groups and not sources
+/// --------------------------
+/// The source order (`SourceOrderEditor`) answers "of these two sources, which first" — a fine
+/// instrument that requires dragging 300 rows, which nobody does. A group is the unit the reader
+/// already thinks in ("this feed is good, that one is junk"), it is what they already arranged the
+/// page into, and there are six of them. Ranking six things is a decision someone actually makes;
+/// ranking 300 is a chore disguised as a feature.
+///
+/// What it changes
+/// ---------------
+/// Search asks the ranked groups' sources before the rest, and lists their matches first. Sources
+/// inside a group keep their own order, so this never discards hand-arranged rows — it only decides
+/// which bucket is asked first. Nothing is hidden: an unranked group follows every ranked one rather
+/// than being dropped, because "not ranked yet" is not "please ignore this feed".
+///
+/// The page's own order is untouched. A reader who wants a feed searched first has not thereby asked
+/// for its section to jump to the top of the Sources page.
+struct SourceGroupOrderEditor: View {
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    /// Every group, empty ones included.
+    ///
+    /// An empty group is still a group the viewer made, and it still holds a place in the ranking —
+    /// the Sources page lists it (a group with nothing in it needs somewhere to be dropped onto).
+    /// Filtering empty ones out here would have the first arrow press write a ranking that silently
+    /// drops them, which is the opposite of what `pruneGroupOrder` keeps on purpose.
+    private var groups: [SourceGroup] {
+        store.sourceGroups(includeHidden: false)
+    }
+
+    /// The ranked list first, in its saved order, then everything not ranked yet in page order.
+    private var ordered: [SourceGroup] {
+        let all = groups
+        let ranked = store.sourceOrder.savedGroupOrder
+        let rank = Dictionary(ranked.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
+        return all.enumerated().sorted {
+            let lhs = rank[$0.element.id] ?? Int.max
+            let rhs = rank[$1.element.id] ?? Int.max
+            return lhs == rhs ? $0.offset < $1.offset : lhs < rhs
+        }.map(\.element)
+    }
+
+    private var isBlank: Bool { store.sourceOrder.savedGroupOrder.isEmpty }
+
+    private func move(_ group: SourceGroup, by offset: Int) {
+        withAnimation(.smooth) {
+            store.sourceOrder.moveGroup(group.id, by: offset, among: ordered.map(\.id))
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Array(ordered.enumerated()), id: \.element.id) { index, group in
+                        row(group, rank: index + 1)
+                    }
+                } header: {
+                    Text(L10n.text("Group Priority"))
+                } footer: {
+                    Text(L10n.text("Groups at the top are searched first, and their results are listed first. Sources inside a group keep their own order. A group left here unranked is still searched — it just comes after the ones you ranked."))
+                }
+                Section {
+                    Button(role: .destructive) {
+                        withAnimation(.smooth) { store.sourceOrder.saveGroupOrder([]) }
+                    } label: {
+                        Text(L10n.text("Clear the Ranking"))
+                    }
+                    .disabled(isBlank)
+                } footer: {
+                    Text(L10n.text("Clearing it returns search to the automatic order, which prefers quick, reliable sources. Nothing is ungrouped and no source order is lost."))
+                }
+            }
+            #if os(iOS)
+            .scrollContentBackground(.hidden)
+            .background { Backdrop() }
+            .navigationBarTitleDisplayMode(.inline)
+            .environment(\.editMode, .constant(.active))
+            #endif
+            .navigationTitle(L10n.text("Group Priority"))
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.text("Done")) { dismiss() }.fontWeight(.semibold)
+                        .accessibilityIdentifier("sources.groupOrder.done")
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(width: 480, height: 600)
+        #endif
+    }
+
+    @ViewBuilder
+    private func row(_ group: SourceGroup, rank: Int) -> some View {
+        // Judged by whether this id is in the saved list, not by comparing positions: the saved list
+        // can hold an id this page cannot draw (a hidden-only subscription), and a position compare
+        // would then colour every row below it as unranked.
+        let ranked = store.sourceOrder.savedGroupOrder.contains(group.id)
+        HStack(spacing: 12) {
+            Text(rank, format: .number)
+                .font(.caption.weight(.semibold)).monospacedDigit()
+                .foregroundStyle(ranked ? Color.primary : Color.secondary)
+                .frame(minWidth: 22, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.text(group.title)).font(.body.weight(.medium)).lineLimit(1)
+                Text(L10n.text("%lld sources", group.sites.count))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            // 上下一步的按钮而不是只有拖动：Mac 没有编辑模式、tvOS 没有手势，
+            // 而在一个六行的列表里按两下比拖动更快也更准。
+            HStack(spacing: 2) {
+                Button { move(group, by: -1) } label: { Image(systemName: "chevron.up") }
+                    .buttonStyle(.borderless)
+                    .disabled(rank == 1)
+                    .accessibilityLabel(L10n.text("Move %@ up", group.title))
+                Button { move(group, by: 1) } label: { Image(systemName: "chevron.down") }
+                    .buttonStyle(.borderless)
+                    .disabled(rank == ordered.count)
+                    .accessibilityLabel(L10n.text("Move %@ down", group.title))
+            }
+        }
+        .accessibilityIdentifier("sources.groupOrder.row." + group.id)
+    }
+}

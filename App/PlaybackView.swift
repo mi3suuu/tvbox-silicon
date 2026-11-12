@@ -5,12 +5,70 @@ import TVCore
 @MainActor @Observable final class PlaybackSession {
     /// A queue, so the next episode can wait behind this one and play straight on.
     let player: AVQueuePlayer
+
+    // MARK: - 用户音量（AVAudioMix）
+
+    /// 这一路当前的用户音量（0…1）。与 `isMuted` 分工不同：
+    /// `isMuted` 是播放器级静音开关，`gain` 是解码后的音频增益。
+    private var gain: Float = 1
+    /// 已经装到 `currentItem` 上的 mix。换 item（下一集 / 换源）后要重新装，
+    /// 否则 `AVPlayerItem.audioMix` 会随旧 item 一起被丢掉 —— 音量静默回到 100%。
+    private weak var mixItem: AVPlayerItem?
+
+    /// 按用户值设定这一路的音量。
+    ///
+    /// ⛔ 为什么不用 `player.volume`：Apple 在 `AVPlayer.h` 明确写了
+    /// 「Do not use this property to implement a volume slider for media playback」，
+    /// 它在 iOS 上表达的是「相对其它音频输出的比例」，不是终端用户音量。
+    /// 实测表现就是：`isMuted` 立刻生效、`volume` 改了没反应。
+    ///
+    /// `AVMutableAudioMixInputParameters.setVolume(_:at:)` 是**解码后增益**，
+    /// 与系统音量解耦，才是用户滑块该走的路。
+    ///
+    /// - Parameter volume: 0…1。1 = 原音量。
+    func applyAudioGain(_ volume: Float) {
+        gain = min(max(volume, 0), 1)
+        installMix()
+    }
+
+    /// 把当前 `gain` 装到 `player.currentItem` 上。
+    ///
+    /// 没有音轨（纯视频 / 尚未就绪）时静默跳过：那一路本来就没声音可调，
+    /// 报错只会制造噪音。等 `currentItem` 换上来后由 `rebindAudioMixIfNeeded()` 补。
+    private func installMix() {
+        guard let item = player.currentItem else { return }
+        let tracks = item.asset.tracks(withMediaType: .audio)
+        guard !tracks.isEmpty else {
+            mixItem = item
+            return
+        }
+        let params = AVMutableAudioMixInputParameters(track: tracks[0])
+        params.setVolume(gain, at: .zero)
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = [params]
+        item.audioMix = mix
+        mixItem = item
+    }
+
+    /// 换集 / 换源后补装。播放层在 `currentItem` 变更处调用。
+    func rebindAudioMixIfNeeded() {
+        guard mixItem !== player.currentItem else { return }
+        installMix()
+    }
     /// Upscaling and 60 fps smoothing, drawn over AVKit's picture when switched on in Settings.
     let enhancer: VideoEnhancer
     let catalogDanmaku = CatalogDanmakuModel()
     var history = PlaybackHistory.shared
     var skipDefaults = UserDefaults.standard
     private var historyContext: PlaybackHistoryContext?
+    /// The environment this playback belongs to, captured when the episode **started**.
+    ///
+    /// `PlaybackHistory.activeEnvironmentID` is "whatever environment the screen is showing **now**",
+    /// which is not the same thing: a mini player or PiP outlives a switch in Settings, and every
+    /// later `saveHistory()` would then stamp this episode's progress into the *new* environment —
+    /// the viewer's play record for the old environment leaking into the new one, arriving by the
+    /// write side. Pinning it once here keeps a session in the environment it was started in.
+    private var sessionEnvironmentID: UUID?
     private var pendingResume: Double?
     private var restoringPosition = false
     private(set) var restoredPosition: Double?
@@ -21,6 +79,14 @@ import TVCore
     let subtitles = SubtitleCues()
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
+    /// 这一集是否**能记住**片头片尾标记（按作品存）。
+    ///
+    /// 没有 scope 时 `applySkipSettings` 会静默返回 —— 意思是「跳片头」这个开关
+    /// 在那种频道上**存不下来**。控制栏据此决定要不要给出这颗键：
+    /// 给了一颗点了会弹回的开关，比不给更糟（用户会以为是自己没点准）。
+    /// 设置页手工建的播放 URL 频道就是这种（`Channel(name:url:)` 不带 skipScope）。
+    var canPersistSkipSettings: Bool { skipScope != nil }
+
     private var skipScope: String?
     private var skipPass = EpisodeSkipPass()
     // ── 广告识别 ──
@@ -76,6 +142,22 @@ import TVCore
             Task { @MainActor [weak self] in
                 self?.handleAdHash(hash, at: seconds)
             }
+        }
+    }
+
+    /// 用户在中途拨了「广告拦截」开关。
+    ///
+    /// `startAdDetection` 只在**换集**时（`replaceCurrentItem`）被调，
+    /// 全库没有 `onChange(of: skipsAds)` —— 所以播放中打开开关，这一集
+    /// 仍然不识别（要等下一集）；关掉倒是即时的（`handleAdHash` 每帧 guard）。
+    /// 「开了没用、关了有效」是非对称的，用户只会觉得开关坏了。
+    /// 现在两端都即时：打开就挂采样器，关掉就停。
+    func adBlockingDidChange(enabled: Bool) {
+        guard let item = player.currentItem else { return }
+        if enabled {
+            startAdDetection(for: item)
+        } else {
+            stopAdDetection()
         }
     }
 
@@ -766,10 +848,12 @@ import TVCore
     }
     private func configure(_ channel: Channel, url: URL, generation activeGeneration: UUID) {
         #if !os(macOS)
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch { Diagnostics.shared.failure("player", "audio session", error); self.error = error.localizedDescription }
+        // ⛔ 走引用计数，不直接 setActive(true)。
+        //
+        // 直接写有两个问题：① 与 `stop()` 里的 `setActive(false)` 不对称，别人停一路就把
+        // 这一路的声音带走；② 重复 `setActive(true)` 本身无害，但把它和登记拆开后，
+        // 「谁在占用会话」就无从得知，`leave` 也就没法判断「还有没有别人在播」。
+        PlaybackAudioSession.enter(self)
         #endif
         if !url.isFileURL {
             note(L10n.text("Connecting to %@", Self.server(CloudStreams.transfer(for: url)?.host ?? Remux.transfer(for: url)?.host ?? url.host())))
@@ -780,6 +864,10 @@ import TVCore
         player.allowsExternalPlayback = !Remux.isRemuxed(url)
         player.preventsDisplaySleepDuringVideoPlayback = true
         player.replaceCurrentItem(with: item)
+        // 换集后把用户音量重新挂到新 item 上。
+        // `audioMix` 属于 `AVPlayerItem`，不随播放器走 —— 不补这一行，
+        // 下一集开始音量就静默回到 100%（用户会以为「音量设置一会就没了」）。
+        installMix()
         // 广告识别：换集后重新挂采样。
         //
         // ⛔ 这一行是必需的 —— `startAdDetection` 之前只在定义处存在、
@@ -808,16 +896,30 @@ import TVCore
     private func makeItem(_ channel: Channel, url: URL) -> AVPlayerItem {
         // Some providers require request headers. AVURLAsset's HTTP-header option is
         // best-effort and is not a guarantee for every redirected HLS segment.
-        // When the viewer assigned this source a custom HTTP/HTTPS/SOCKS5 proxy, the asset URL goes
-        // through the local relay, which opens the proxy tunnel and forwards the bytes (TLS intact).
+        //
+        // When the viewer assigned this source (or this line) a custom HTTP/HTTPS/SOCKS5 proxy, the
+        // asset URL goes through the local relay, which opens the proxy tunnel and carries the bytes
+        // — TLS and all. The relay is what makes an `https` source work: AVPlayer would only ever
+        // see plain `http://127.0.0.1`, so the TLS handshake happens inside the relay, not here.
+        //
+        // `baseSync` is nil until the listener is up. Rather than silently going direct — which
+        // looked like the proxy simply did nothing — ask for it to start and log that this item
+        // played direct, so the reason is in the diagnostic log afterwards.
         var assetURL = url
         if let context = channel.historyContext {
             // A line-level route (set on the line chip) wins over the source-level route.
             let flag = context.episodeFlag
             let lineRoute = LineSettings.shared.route(origin: context.origin, sourceKey: context.sourceKey, flag: flag)
             let proxyID = lineRoute?.proxyID ?? CustomProxyStore.shared.route(origin: context.origin, sourceKey: context.sourceKey).proxyID
-            if let proxyID, let base = LocalProxyServer.shared.baseSync {
-                assetURL = LocalProxyServer.proxyURL(base: base, url: url, proxyID: proxyID)
+            if let proxyID {
+                if let base = LocalProxyServer.shared.baseSync {
+                    assetURL = LocalProxyServer.proxyURL(base: base, url: url, proxyID: proxyID)
+                } else {
+                    // Not up yet on the first item after launch: start it so the next item is
+                    // relayed, and say so rather than pretending the route was honoured.
+                    LocalProxyServer.shared.ensureStarted()
+                    Diagnostics.shared.record(.warning, "proxy", "relay not listening yet; this item plays direct source=\(context.sourceKey)")
+                }
             }
         }
         let asset = CloudStreams.asset(for: url) ?? HongguoStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
@@ -1164,6 +1266,12 @@ import TVCore
         }
         return text
     }
+    /// 这一路正在占用进程级音频会话（见 `PlaybackAudioSession`）。
+    ///
+    /// 由 `PlaybackAudioSession.enter` / `leave` 维护，别处不要写。放在主类里而不是
+    /// extension，是因为 Swift 的 extension 不能加存储属性（项目铁律第一条）。
+    @ObservationIgnored var audioIsLive = false
+
     func stop() {
         saveHistory()
         discardUpcoming()
@@ -1209,8 +1317,19 @@ import TVCore
         #if !os(macOS)
         // Let the system reclaim the audio focus so other apps can play sound again,
         // and drop the .moviePlayback routing mode that only matters while playing.
-        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
-        catch { Diagnostics.shared.failure("player", "audio session deactivate", error) }
+        //
+        // ⛔ **必须先去登记，再决定要不要真的停用**。
+        //
+        // `AVAudioSession` 是**进程级单例**：整个 App 只有一个。原来这里无条件
+        // `setActive(false)`，只在「停的这一路就是唯一在播的那一路」时才对；
+        // 多任务迷你播放器上线后，坞里同时挂着好几路，关掉其中任意一路
+        // （用户按 ✕、容量 trim、或长按同一个海报导致的去重分支 `stop()`）
+        // 都会把**别人的**音频会话一起停掉，而恢复它们的 `setActive(true)` 只在
+        // `configure()`（即 `start()`）里跑 —— 于是其余正在播的视频**全部没声音**，
+        // 且不会自己恢复，必须重新起播一次。
+        //
+        // 这正是用户报的「互顶」。判据只能是「还有没有别人在播」，不是「我停了」。
+        PlaybackAudioSession.leave(self)
         #endif
     }
     /// Records where the episode is; `item` is the episode's own, which the queue may already have moved past.
@@ -1219,12 +1338,15 @@ import TVCore
               pendingResume == nil, !restoringPosition, !seekingSegment else { return }
         let length = item.duration.seconds
         let time = completed && length.isFinite ? length : item.currentTime().seconds
-        history.record(context, position: time, duration: length.isFinite ? length : 0)
+        history.record(context, position: time, duration: length.isFinite ? length : 0,
+                       environment: sessionEnvironmentID)
     }
 
     /// Per-episode state: where its history goes, where it resumes, the intro and outro to skip, its danmaku.
     private func begin(_ channel: Channel) {
         historyContext = channel.historyContext
+        // 会话开始时就把环境钉住：切环境后仍在播的这个小窗/PiP 继续写回它原本的环境。
+        sessionEnvironmentID = history.activeEnvironmentID
         requestedResumePosition = channel.resumePosition
         pendingResume = channel.resumePosition.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         restoringPosition = false; restoredPosition = nil; checkingPicture = false
@@ -1283,6 +1405,8 @@ extension PlaybackSession {
         var matroska = false
         /// Every byte passes through the plugin runtime.
         var pluginProxy = false
+        /// 这个地址是回环加速的；离开时要 `release`，否则 `routes` 会一直涨。
+        var accelerated: PlaybackAccelerator.Session?
         #if os(macOS)
         var adapter: HLSProxy?
         #endif
@@ -1383,6 +1507,37 @@ extension PlaybackSession {
             prepared.adapter = adapter
         }
         #endif
+
+        // 在线播放加速：多连接并发拉、单连接顺序喂给 AVPlayer。
+        //
+        // 放在 `prepare()` 的**最后**：这里已经是「最终要播的那个地址」——
+        // 插件代理、云盘直链、重封装、下载回放都已经处理完，再包一层不会有二次包装
+        // （`canAccelerate` 也会否掉 127.0.0.1，所以自己代理自己不会发生）。
+        //
+        // 之所以只在这一处接：`prepare()` 是所有播放界面的唯一汇合点 ——
+        // One 皮肤、哔哩哔哩皮肤、原版详情页、全屏播放器、小窗，全部经由它拿地址。
+        // 在这里接一次，等于全部界面都有了，不需要每个界面各接一遍（那正是
+        // 「有的界面有、有的没有」的成因）。
+        // `adapter` 只在 macOS 存在（那边的 HLSProxy）；iOS 没有这个分支。
+        let hasAdapter: Bool = {
+            #if os(macOS)
+            return prepared.adapter != nil
+            #else
+            return false
+            #endif
+        }()
+        if !hasAdapter, !prepared.matroska, prepared.url.scheme != CloudStreams.scheme,
+           prepared.url.scheme != DownloadLibrary.scheme {
+            let lanes = await MainActor.run { DownloadSettings.shared.tuning.connections }
+            if let session = await PlaybackAccelerator.shared.session(for: prepared.url,
+                                                                     headers: channel.headers,
+                                                                     lanes: lanes) {
+                prepared.url = session.url
+                prepared.accelerated = session
+                Diagnostics.shared.record(.info, "player",
+                    "accelerated host=\(session.origin.host() ?? "-") lanes=\(session.lanes)")
+            }
+        }
         return prepared
     }
 
@@ -1414,6 +1569,10 @@ extension PlaybackSession {
     /// The local HLS adapter, or repackager, of a stream that won't play after all.
     fileprivate static func stopAdapter(_ prepared: Prepared) {
         Remux.stop(prepared.url)
+        // 加速会话登记在回环服务器里，不释放就一直留着（一个 token 一条路由）。
+        if let accelerated = prepared.accelerated {
+            PlaybackAccelerator.shared.release(accelerated)
+        }
         #if os(macOS)
         if let adapter = prepared.adapter { Task { await adapter.stop() } }
         #endif

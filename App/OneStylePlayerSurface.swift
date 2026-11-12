@@ -85,7 +85,15 @@ struct OneStylePlayerSurface: UIViewControllerRepresentable {
         controller.showsPlaybackControls = false
         controller.videoGravity = gravity
         controller.allowsPictureInPicturePlayback = true
-        controller.canStartPictureInPictureAutomaticallyFromInline = automaticPiP
+        // ⛔ 重挂载窗口内（折叠 / 展开 / 转屏 / 进出自绘页）必须压成 false。
+        //
+        // 原生皮肤走 AVKit 的 `AVPlayerViewController`，它的这个开关不在
+        // `PictureInPicture.registry` 里（那是自建 controller），
+        // 所以 `suspendAutomaticFloating()` 关不到它 —— 由全局闸补上。
+        // 不补的话：Duo 折叠一次 = inline layer 离屏一次 = AVKit 判成「用户离开 App」
+        // = 画面在自己家里飞出一个应用外小窗。
+        controller.canStartPictureInPictureAutomaticallyFromInline =
+            automaticPiP && !PictureInPicture.isAutomaticFloatingSuspended
         // Now Playing 由我们自己的 session 负责（它有更完整的标题/集数/进度）。
         controller.updatesNowPlayingInfoCenter = false
         controller.view.backgroundColor = .clear
@@ -97,8 +105,9 @@ struct OneStylePlayerSurface: UIViewControllerRepresentable {
         context.coordinator.pip = pip
         if controller.player !== player { controller.player = player }
         if controller.videoGravity != gravity { controller.videoGravity = gravity }
-        if controller.canStartPictureInPictureAutomaticallyFromInline != automaticPiP {
-            controller.canStartPictureInPictureAutomaticallyFromInline = automaticPiP
+        let wanted = automaticPiP && !PictureInPicture.isAutomaticFloatingSuspended
+        if controller.canStartPictureInPictureAutomaticallyFromInline != wanted {
+            controller.canStartPictureInPictureAutomaticallyFromInline = wanted
         }
         pip.register(host: controller)
     }

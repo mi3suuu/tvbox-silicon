@@ -176,7 +176,14 @@ struct RootView: View {
             // collapses extra sections into More, which a hand-built bar imitated poorly.
             platformTabs
             #if os(iOS)
-                .overlay(alignment: .bottomTrailing) { videoMiniPlayer }
+                .overlay(alignment: .bottomTrailing) {
+                    // 前台已经在演的时候不画坞 —— 否则两层视频叠在一起（用户报的现象）。
+                    // 用 `opacity` 而不是 `if`：坞里的任务不能因为「这一帧被前台盖住」
+                    // 而被销毁重建（那会把正在播的 AVPlayer 一起丢掉，切回来要重新缓冲）。
+                    videoMiniPlayer
+                        .opacity(dockCoveredByForeground ? 0 : 1)
+                        .allowsHitTesting(!dockCoveredByForeground)
+                }
             #endif
             #endif
         }
@@ -195,6 +202,11 @@ struct RootView: View {
         // Music's Continue Playing picks it up.
         .onChange(of: store.playing) { _, channel in if channel != nil { store.music.stop() } }
         .modifier(PlayerPresentation(playing: $store.playing))
+        // ⛔ 这里**不要**再挂 `.globalSwipeBack()`。
+        //
+        // 它原来挂在本文件的这个 `Group` 上（TabView 外层），而那层拿不到
+        // `UINavigationController`，`GlobalSwipeBack.arm()` 第一句 guard 就返回 ——
+        // 整条需求等于没实现。现在挂到每个分区的 `RouteStack` 里（见该处注释）。
         #if os(tvOS) || os(macOS)
         // What another device sent, while it opens.
         .overlay { PlayOnIncoming().animation(.spring(duration: 0.4), value: PlayOnController.shared.incoming?.title) }
@@ -218,7 +230,21 @@ struct RootView: View {
     private var phoneTabs: Bool { PhoneTabs.inUse(horizontal: sizeClass) }
     /// Sections a phone reaches through More, as arranged in the tab bar editor.
     private var inMore: [AppSection] { PhoneTabs(stored: storedTabs).arranged(slots: barSlots, hiding: store.hiddenSections).more }
-    private var barSlots: Int { PhoneTabs.slots(horizontal: sizeClass, vertical: verticalSizeClass) }
+    /// ⛔ 槽位必须**形态无关**，否则切形态会崩。
+    ///
+    /// 实测崩溃（真机 Duo，2026-11-12 01:35–01:36，3 次）：
+    ///   -[__NSArrayM insertObject:atIndex:]            ← 越界插入
+    ///   -[UITabBarController _tabs_rebuildTabBarItemsAnimated:]
+    ///   std::__terminate → abort（SIGABRT）
+    ///
+    /// 成因：`PhoneTabs.slots` 按 sizeClass 返回 4 或 5，而 `tabs` 数组由它派生；
+    /// Duo 放/合时 sizeClass 在 `compact×compact` ↔ `regular×regular` 之间切换，
+    /// `tabs` 长度随之变化，`UITabBarController` 在重建 items 的 block 里
+    /// 按旧长度插入新项 → NSRangeException。
+    ///
+    /// 系统 TabBar 不支持运行中改变项数。槽位固定成 `barSlots`（4+更多），
+    /// 宽屏少显示的那一项改由 `.sidebarAdaptable` 自然收纳，不再改数组长度。
+    private var barSlots: Int { PhoneTabs.barSlots }
     #endif
     private var platformTabs: some View {
         tabView
@@ -286,136 +312,64 @@ struct RootView: View {
     }
 
     #if os(iOS)
-    /// The floating mini player after the watch page closes while the video keeps playing, so the
-    /// viewer can still get back to it. Tap to reopen full screen; ✕ stops playback. Leaving the app
-    /// here carries on in Picture in Picture (the inline layer's controller starts it automatically).
-    @ViewBuilder private var videoMiniPlayer: some View {
-        // [mi3s] 二开：只认「用户在视频控件里按了缩成小窗」。原来只判断「不在观看页」，
-        // 于是折叠 / 展开 / 换向 / 切页面都会把小窗拱出来。
-        if let channel = store.playing, store.floatsInMiniPlayer(channel), !store.presentingPlayer {
-            GeometryReader { geo in
-                // YouTube-style in-app player: sized to the screen, pinch-to-resize and draggable to
-                // any corner. Landscape gets a wider picture; portrait a bit over half the width.
-                let landscape = geo.size.width > geo.size.height
-                let baseWidth = landscape ? min(geo.size.width * 0.34, 320) : min(geo.size.width * 0.62, 240)
-                // Pinch scales the whole thing; clamp so it can't outgrow the screen or vanish.
-                let width = min(max(baseWidth * miniScale, 120), geo.size.width - 24)
-                let session = store.playbackSession(for: channel)
-                // The card takes the stream's own shape instead of a fixed 16:9: a 4:3 or 2.35:1 film
-                // in a 16:9 card is either cropped or padded, and the card is too small to afford either.
-                let sourceSize = session.player.currentItem?.presentationSize ?? .zero
-                let ratio = sourceSize.width > 0 && sourceSize.height > 0 ? sourceSize.width / sourceSize.height : 16.0 / 9
-                let height = width / (ratio.isFinite && ratio > 0.2 && ratio < 6 ? ratio : 16.0 / 9)
-                VStack(alignment: .leading, spacing: 0) {
-                    PlayerLayerView(player: session.player, gravity: pictureScaling.gravity, pip: miniPip)
-                        .frame(width: width, height: height).clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        // Both controls live in the picture's corners, and the bar below carries the
-                        // name alone: a row of buttons under a 16:9 thumbnail turns the picture into
-                        // the smaller half of the card, which is what made the video hard to see.
-                        .overlay(alignment: .topLeading) {
-                            Button { session.togglePlayback() } label: {
-                                Image(systemName: session.paused ? "play.fill" : "pause.fill")
-                                    .contentTransition(.symbolEffect(.replace))
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 28, height: 28)
-                                    .background(.black.opacity(0.5), in: Circle())
-                                    // A hairline, or the button vanishes over a dark frame.
-                                    .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(Text(session.paused ? "Play" : "Pause"))
-                            .padding(6)
-                        }
-                        .overlay(alignment: .topTrailing) {
-                            Button {
-                                store.stopPlaying()
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 28, height: 28)
-                                    .background(.black.opacity(0.5), in: Circle())
-                                    .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(Text("Stop"))
-                            .padding(6)
-                        }
-                        .onChange(of: channel, initial: true) { _, playingChannel in
-                            let session = store.playbackSession(for: playingChannel)
-                            // Sync the current PiP state at once, not just the callback: the mini player can be
-                            // rebuilt (returning from full screen, a Duo fold) while PiP is already active, and a
-                            // rebuild only re-runs onAppear — it never re-fires onActiveChange. Left unset, the queue
-                            // would advance inside the floating window, where AVKit's queued advance is unreliable.
-                            session.queueingDisabled = miniPip.active || PictureInPicture.isActive
-                            miniPip.onActiveChange = { session.queueingDisabled = $0 }
-                            // The floating mini player has no `PlaybackView`, so nothing else starts the session
-                            // when `store.playing` moves on (auto-advance, series suggestion) or when playback begins
-                            // straight from a Home/Search card. Start it here, once per channel.
-                            if !session.isPlaying(playingChannel) { startCatalogPlayback(session, channel: playingChannel, store: store) }
-                        }
-                    Text(channel.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                        .padding(.horizontal, 10).padding(.vertical, 7)
-                        .frame(width: width, alignment: .leading)
-                }
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.1)) }
-                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .onTapGesture {
-                    // [mi3s] 二开：点小窗回到 **One 选集页**，而不是旧全屏播放器。
-                    // 原来无条件 `presentingPlayer = true`，于是从皮肤页缩成小窗再点回来，
-                    // 皮肤就丢了（换成了上游播放器）。现在按目录把那一页重新压进当前分区栈；
-                    // 目录里查不到（云文件 / 直播之类没有详情页）时才退回旧播放器。
-                    if let catalog = store.catalog(for: channel) {
-                        store.pendingRoute = Route {
-                            AnyView(VideoDetailView(video: catalog.video, client: catalog.client))
-                        }
-                    } else {
-                        store.presentingPlayer = true
-                    }
-                }
-                .offset(miniDrag)
-                // Drag moves it by the *delta* each frame (跟手), not the cumulative translation, which
-                // made a slow finger send it flying. Pinch resizes around 1.0.
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 1)
-                        .onChanged { value in
-                            let delta = CGSize(width: value.translation.width - lastDrag.width,
-                                               height: value.translation.height - lastDrag.height)
-                            lastDrag = value.translation
-                            miniDrag.width += delta.width
-                            miniDrag.height += delta.height
-                        }
-                        .onEnded { _ in
-                            lastDrag = .zero
-                            // Snap back inside the safe area so it never parks off-screen.
-                            let halfW = width / 2, halfH = (height + 38) / 2
-                            let minX = -geo.size.width / 2 + halfW + 8
-                            let maxX = geo.size.width / 2 - halfW - 8
-                            let minY = -geo.size.height / 2 + halfH + 8
-                            let maxY = geo.size.height / 2 - halfH - 8
-                            let x = min(max(miniDrag.width, minX), maxX)
-                            let y = min(max(miniDrag.height, minY), maxY)
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { miniDrag = CGSize(width: x, height: y) }
-                        }
-                )
-                .simultaneousGesture(
-                    MagnificationGesture()
-                        .onChanged { value in
-                            miniScale = min(max(value, 0.5), 2.5)
-                        }
-                        .onEnded { value in
-                            miniScale = min(max(value, 0.5), 2.5)
-                        }
-                )
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
-                .padding(12)
-            }
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+    /// 迷你播放器**坞**：观看页/全屏里缩下来的那一集，以及长按海报直接起播的那些，
+    /// 全都挂在这里。点一张回它那一集的选集页；✕ 只停那一个。
+    ///
+    /// 与上一版的差别（用户 2026-11-11 的要求 5）：
+    ///   · 上一版是「一张卡片 + 一个 `store.playing`」，全应用只能有一个小窗；
+    ///   · 现在是 `store.videoTasks.tasks` 一列，可以同时挂多个、随时切换回任意一个。
+    ///
+    /// 拖动与缩放的钳制仍按容器尺寸变化重算一次：合盖 466×678 ⇄ 展开 669×951 时
+    /// `geo.size` 会变，不重钳的话在外屏拖到右下角的小窗，展开后会跑到屏外。
+    /// 坞里有任务、但**当前不该画**的时候。
+    ///
+    /// ⛔ 这是用户报的「竖屏视频里出现两个嵌套视频」的根因：
+    ///
+    /// 坞挂在整个 `platformTabs` 上（`.overlay`），判据只看「坞里有没有任务」。
+    /// 于是用户进到观看页、**前台视频正在播**时，坞里那张卡也还在画、也还在播 ——
+    /// 两张视频叠在同一块区域上，各播各的。
+    ///
+    /// 正确语义：坞表达的是「我正在看、但没占着屏幕」。一旦前台观看页真的在演
+    /// （`playsInWatchPage` 或全屏播放器打开），坞就必须让位 —— 那时候画面已经在页面上。
+    ///
+    /// 注意判据要用 **`playing` 与当前 scope**，不能用 `hasTasks`：
+    /// 坞里可以同时挂好几集，其中一集在前台时，其余几集**应当继续挂在坞里**
+    /// （用户切回来还在），只是不画 —— 所以这里是「隐藏坞的绘制」，
+    /// 不是「清空坞」。`applyMuting()` 那条链路照旧管声音。
+    private var dockCoveredByForeground: Bool {
+        if store.presentingPlayer { return true }
+        let r = store.playsInWatchPage(store.playing)
+        #if DEBUG
+        // 探针：坞该不该让位的判据在真机上到底怎么取值。
+        // 用户报「展开横屏时坞仍画着」——要么这两个判据都是 false，
+        // 要么判出来了但 `.opacity` 没接上。日志能一眼分开。
+        if store.videoTasks.hasTasks {
+            oneSkinLog("DOCKCOVER presenting=\(store.presentingPlayer) inWatch=\(r) playing=\(store.playing?.name ?? "nil") scopes=\(store.watchPageScopes.count)")
         }
+        #endif
+        return r
+    }
+
+    @ViewBuilder private var videoMiniPlayer: some View {
+        VideoTaskDock(gravity: pictureScaling.gravity, pip: miniPip,
+                      coveredByForeground: dockCoveredByForeground,
+                      offset: $miniDrag, scale: $miniScale)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { newSize in
+                guard newSize.width > 1, newSize.height > 1 else { return }
+                // 卡片宽度按坞自己的公式重算，边界用它的一半，才不会把卡片推出屏幕。
+                let baseWidth = newSize.width > newSize.height
+                    ? min(newSize.width * 0.34, 320) : min(newSize.width * 0.62, 240)
+                let halfW = min(max(baseWidth * miniScale, 120), newSize.width - 24) / 2
+                let halfH = halfW * 0.75 + 30
+                let maxX = newSize.width / 2 - halfW - 8
+                let maxY = newSize.height / 2 - halfH - 8
+                let x = min(max(miniDrag.width, -maxX), maxX)
+                let y = min(max(miniDrag.height, -maxY), maxY)
+                if abs(x - miniDrag.width) > 0.5 || abs(y - miniDrag.height) > 0.5 {
+                    miniDrag = CGSize(width: x, height: y)
+                }
+            }
     }
     #endif
 
@@ -584,6 +538,17 @@ private struct PlayerPresentation: ViewModifier {
     #if os(macOS)
     @State private var playerWindow = PlayerWindowController()
     #endif
+    #if os(iOS)
+    /// 上一次的窗口尺寸。宽高互换 = 转屏或 Duo 折叠展开，用来把「版式变化」与「离开 App」分开。
+    @State private var lastSize: CGSize = .zero
+    /// 最近一次版式变化（宽高互换）发生的时刻。
+    ///
+    /// ⛔ 不能用裸 Bool：那个值只会被下一次裁决消费，而裁决只在 `scenePhase` 或
+    /// `miniPlayerActive` 变化时跑。于是「转个屏 → 十分钟后上滑回主界面」时它还是 true，
+    /// 会把本该起的悬浮窗挡掉 —— 正好与要求相反。用时间戳加一个短窗口，
+    /// 只压住「旋转紧接着的那次退场」。
+    @State private var layoutChangedAt: Date = .distantPast
+    #endif
     func body(content: Content) -> some View {
         #if os(macOS)
         content.onChange(of: playing, initial: true) { _, channel in
@@ -606,9 +571,214 @@ private struct PlayerPresentation: ViewModifier {
             // objects, and every video stopped the app there ("No Observable object of type Store found").
             PlaybackView(channel: $0.channel, session: store.playbackSession(for: $0.channel)).environment(store)
         }
+        // 播放退场的统一裁决（见 `PlaybackExit`）。
+        //
+        // 三条要求合成一个判据：
+        //   ① 没有任何可见载体（不在页面上、没有应用内小窗、没有 PiP）→ 真正登出，不许音频空转；
+        //   ② 上滑回主界面 → 起应用外悬浮窗，让画面跟过去；
+        //   ③ 转屏 / 折叠 / 展开 → 什么都不做，绝不能因为它们浮出小窗。
+        //
+        // ①②③ 互斥，此前每处退场各自猜一遍，于是漏出了「音频在跑、界面上什么都没有」这种第四态。
+        // 现在只有这一个地方决定，别处不再各自判断。
+        #if os(iOS)
+        .modifier(PlaybackExitArbiter(layoutChangedAt: layoutChangedAt))
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+            // 版式变化的判据：**尺寸真的变了**，而不是「宽高关系翻了」。
+            //
+            // ⛔ 原来判的是宽高关系翻转（`w>h` 是否变化）。它对转屏成立，
+            // 但对 **合盖外屏 466×678（竖）⇄ 展开竖持 669×951（竖）** 完全不成立 ——
+            // 两次都是 w<h，`rotated` 恒 false，`layoutChangedAt` 不更新，
+            // 于是 `PlaybackExit.decide` 里 `layoutJustChanged == false`。
+            // 而那一刻 `hasInlinePicture` 依赖的 `onAppear/onDisappear` 还没跑，
+            // 载体为空；只要顺手退到后台（合盖正好收起手机），
+            // 就会被判成「离开 App」→ 起一个应用外小窗。
+            // 这恰好是用户最常做的那一对动作，也是「展开一下就飞出小窗」的直接成因。
+            //
+            // 现在改用**逐轴**差分（`OneSkinStageSize.isLayoutChange`）。
+            //
+            // ⛔ 上一版用的是面积差，那个判据对 Duo 最有代表性的一对动作**恒为 false**：
+            // 内屏竖持 669×951 与横持 951×669 面积完全相同（都是 636,219 pt²），
+            // `|after-before| / max` 恒等于 0。于是「竖持 ⇄ 横持」被判成「什么都没变」，
+            // `layoutChangedAt` 不更新 → 只要那一刻恰好在后台，就会被判成「离开 App」
+            // 而浮出应用外小窗。逐轴判就不漏：951↔669 在宽、高各自差 29.6%。
+            let areaChanged: Bool = OneSkinStageSize.isLayoutChange(from: lastSize, to: size)
+            if areaChanged {
+                layoutChangedAt = Date()
+                // ⛔ 同一帧把「离开 App 自动浮起」压住（BUG：转屏/折叠会飞出小窗）。
+                //
+                // 转屏与折叠/展开都会把画面层重挂一次，AVKit 把
+                // 「inline layer 离开屏幕」当成「用户离开 App」，于是浮窗自己飞出来。
+                // `suspendAutomaticFloating()` 关掉所有活着的 PiP 协调器
+                // （含 One / 哔哩哔哩皮肤那两个 @State 实例，以及原生皮肤的 AVKit 宿主），
+                // 1.5s 后自动恢复 —— 能力保留，误判被挡住。
+                // 放在这里而不是各调用点，是因为**所有**版式变化都必然先经过这里，
+                // 一处接线即可覆盖转屏、折叠、展开三种来源。
+                PictureInPicture.suspendAutomaticFloating()
+            }
+            lastSize = size
+        }
+        #endif
         #endif
     }
 }
+
+#if os(iOS)
+/// 按 `PlaybackExit` 的裁决驱动真实副作用。
+///
+/// 单独抽成修饰器是因为它需要读 `scenePhase` 与 PiP 状态，而 `PlayerPresentation` 已经
+/// 是一个 `ViewModifier`；再嵌一层比把七八个状态塞进去更清楚。
+private struct PlaybackExitArbiter: ViewModifier {
+    @Environment(Store.self) private var store
+    @Environment(\.scenePhase) private var scenePhase
+    /// 最近一次版式变化的时刻（见 `PlayerPresentation.layoutChangedAt`）。
+    let layoutChangedAt: Date
+    /// 载体变为空的时刻。宽限窗用来放过 push/pop 与进/退全屏的过渡帧。
+    @State private var carrierEmptySince: Date?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: scenePhase) { _, phase in
+                // 只有真正进 background 才算「离开 App」。
+                //
+                // `.inactive` 不算：下拉通知中心、来电横幅、控制中心都会经过它，
+                // 那些时候用户没走，浮起悬浮窗反而是打扰。
+                if phase == .background {
+                    arbitrate(leavingApp: true)
+                } else if phase == .active {
+                    arbitrate(leavingApp: false)
+                }
+            }
+            .onChange(of: store.miniPlayerActive) { _, _ in
+                // 缩成小窗 / 小窗收起，都会改变「有没有可见载体」。
+                arbitrate(leavingApp: false)
+            }
+            // ⛔ 这是上一版的结构性错误：裁决只挂在 `scenePhase` 与 `miniPlayerActive` 上，
+            // 而**退出页面（pop / 返回上一层）两个都不改** —— 于是「音频空转」那个场景
+            // 的登出判定根本不会跑。用户报的正是它。
+            //
+            // 真正的触发源是「有没有可见载体」本身：它变了就该重新裁决一次。
+            // 用 keypath 化成一个 Bool 来观察，避免每次 `watchPageScopes` 抖动都重算。
+            .onChange(of: carrierKey) { _, _ in
+                arbitrate(leavingApp: scenePhase == .background)
+            }
+            // 坞增删（点 ✕、长按海报新起一个、点卡片回到选集页）同样要重新裁决一次：
+            // `carrierKey` 里已经带了「坞里有没有」，但它只是**有没有**，
+            // 从 2 张变 1 张不会改变 key —— 那种时候载体仍在，不需要重裁决。
+            // 真正需要的是「坞被清空的那一刻」：那会改变 key，上面那条已经覆盖。
+            // 这里不多写一条，避免同一帧裁决两次。
+    }
+
+    /// 「有没有可见载体」的紧凑快照。
+    ///
+    /// 把三个来源（全屏在播 / 观看页在播 / 小窗在播）压成一个字符串：
+    /// `onChange` 只在这个组合真的变了时才触发，页面内部其它状态变化不会惊动裁决。
+    private var carrierKey: String {
+        let inline = store.playing != nil && (store.presentingPlayer || store.playsInWatchPage(store.playing))
+        // ⛔ 小窗载体要问**坞**，不是问 `playing`。
+        //
+        // 坞里的一集已经不在 `playing` 上了（`dockForeground` 会把前台槽摘掉，否则
+        // 两边指着同一个会话，前台一停播就把小窗里的流也停了）。用 `floatsInMiniPlayer(playing)`
+        // 判就会得到恒 false → 裁决认为「没有任何可见载体」→ 0.4 秒后走 `.logOut`
+        // → `miniPlayerActive = false` → **整个坞被清空**。这是坞多个任务时最致命的漏。
+        let mini = store.videoTasks.hasTasks
+        let pip = PictureInPicture.isActive
+        return "\(inline ? 1 : 0)\(mini ? 1 : 0)\(pip ? 1 : 0)"
+    }
+
+    /// 版式变化被视为「刚刚」的窗口长度。
+    ///
+    /// 1.5 秒够覆盖旋转动画与随后的布局重排；超时就不再把退场当成版式变化，
+    /// 否则转完屏之后的所有正常退场都会被误挡。
+    private static let layoutWindow: TimeInterval = 1.5
+
+    /// 「载体为空」要持续这么久才算真的登出（见 `PlaybackExit.decide` 第 ④ 步）。
+    private static let absenceWindow: TimeInterval = 0.4
+
+    private func arbitrate(leavingApp: Bool) {
+        let layoutChanged = Date().timeIntervalSince(layoutChangedAt) < Self.layoutWindow
+
+        // 维护「空态持续了多久」。
+        //
+        // 载体为空 → 开始计时；载体恢复 → 清计时。宽限窗内仍为空不算登出，
+        // 因为 push/pop 动画、进/退全屏、Duo 折叠重挂都会让载体短暂为空。
+        let inlineNow = store.playing != nil && (store.presentingPlayer || store.playsInWatchPage(store.playing))
+        // 同上：坞非空就是「有可见载体」，与 `playing` 无关。
+        let miniNow = store.videoTasks.hasTasks
+        let visible = inlineNow || miniNow || PictureInPicture.isActive
+        if visible {
+            carrierEmptySince = nil
+        } else if carrierEmptySince == nil {
+            carrierEmptySince = Date()
+        }
+        // 0.4 s：够覆盖一次 push/pop 或全屏切换的过渡，又短到用户察觉不出「该停没停」。
+        let settled = carrierEmptySince.map { Date().timeIntervalSince($0) >= Self.absenceWindow } ?? false
+
+        // ⛔ 进 / 退全屏也会改布局尺寸，而它**不是**版式变化意义上的「转屏」，
+        // 但它确实会在 `scenePhase` 不变的情况下让 `carrierKey` 抖一下。
+        // 那种时刻不能登出：用户只是切了全屏。
+        //
+        // 同理，Duo 折叠 / 展开、以及页面 push/pop 过渡的那一两帧，
+        // 载体都会短暂为空 —— 一律用同一个宽限窗挡掉。
+        // 只有在窗口之外、确实没有任何载体时才登出。
+
+        let context = PlaybackExit.Context(
+            isBackground: scenePhase == .background,
+            layoutJustChanged: layoutChanged,
+            // 「页面上有画面」= 观看页在前台且它自己在画。
+            // 全屏播放器由 `presentingPlayer` 表示，观看页由 `playsInWatchPage` 表示，
+            // 两者都不成立时页面里确实没有画面。
+            hasInlinePicture: store.playing != nil && (store.presentingPlayer || store.playsInWatchPage(store.playing)),
+            miniPlayerOn: store.videoTasks.hasTasks,
+            pipActive: PictureInPicture.isActive,
+            // 下载回放不该起 PiP：它不依赖网络，浮到系统层没有意义，
+            // 反而会在用户离开时留下一个「看起来还在播」的窗口。
+            // 画面那侧有没有 PiP 能力。
+            //
+            // 只有一条路：自建 `AVPictureInPictureController(contentSource: .init(playerLayer:))`。
+            // 这是上游的做法，也是最可靠的 —— 它不依赖 AVKit 宿主是否存在，
+            // 只要 `attach` 时把 `contentSource` 指到当前那块 layer 就行。
+            // ⛔ 不能只判 `current != nil`。
+            //
+            // `current` 只在 PiP **已经起来过**之后才非 nil（唯一赋值点在
+            // `willStartPictureInPicture`），所以首播时它恒为 nil。原来的语义等于
+            // 「以前浮过才允许再浮」—— 哔哩哔哩皮肤因此永远走 ③b 分支返回 `.keep`：
+            // 离开 App 不浮窗、也不登出，音频在后台空转（`PlaybackExit` 头部
+            // 声明要消灭的「第四态」）。
+            //
+            // 改成问「这套画面**能不能**浮」：平台支持 + 画面层已登记内容源。
+            // `supported` 是平台级判断；`current != nil` 覆盖「已经浮着」的情况。
+            // 哔哩哔哩皮肤现在也 attach 了（见 `BiliSkinPicture.pip`），这条随之成立。
+            pipPossible: PictureInPicture.isSupportedForPlayback,
+            // 坞里有任务时也允许浮：那时 `playing` 已被摘掉（画面全在坞里），
+            // 用 `playing` 判会恒 false，于是「坞里看着却在后台空转」。
+            pipAllowed: store.playing.map { $0.url.scheme != DownloadLibrary.scheme } ?? store.videoTasks.hasTasks,
+            miniIntent: store.miniPlayerActive,
+            absenceSettled: settled
+        )
+
+        switch PlaybackExit.decide(context, leavingApp: leavingApp) {
+        case .keep:
+            break
+        case .startPictureInPicture:
+            // 交给已挂载的那一份去起：`startFloating` 只在有 AVKit 宿主时有效。
+            PictureInPicture.startCurrent()
+        case .stopPictureInPicture:
+            PictureInPicture.stopCurrent()
+        case .logOut:
+            // 真正登出。三样都清：播放、会话、小窗授权 —— 少清一样就会留下
+            // 「状态说在播、实际没有画面」的残影。
+            //
+            // ⚠️ `miniPlayerActive = false` 现在是「清空**整个**坞」（它是坞的投影）。
+            // 这里安全，因为 `.logOut` 的前提就是 `PlaybackExit` 判出**没有任何可见载体**
+            // （`presentation == .hidden` 且空态已稳定）—— 坞里那时必然是空的。
+            // 若将来有人把 `.logOut` 的判据放宽到「坞非空也登出」，这一行就会
+            // 连带掐掉正在看的小窗，届时要改成只清前台。
+            store.stopPlaying()
+            store.miniPlayerActive = false
+        }
+    }
+}
+#endif
 
 #if os(macOS)
 /// Content-first sidebar: grouped rows, neutral selection, and ⌘1–⌘8 to switch sections.
@@ -773,6 +943,25 @@ private struct RouteStack<Root: View>: View {
                 stack.opener(route)
                 store.pendingRoute = nil
             }
+            // 坞里点某张卡片回「那一集的选集页」：与 `pendingRoute` 同一套机制，
+            // 只是置请求的是 `VideoTaskCenter` 那一侧（它不在任何栈里，拿不到 `openRoute`）。
+            //
+            // ⛔ 必须比 `pendingRoute` 更强势：那里 `opener` 会因「栈里已有页」而拒收，
+            // 而这里用户是**明确要回到某一集**，栈里可能正开着另一个详情页。所以先清栈再压。
+            .onChange(of: store.pendingTaskRoute) { _, route in
+                guard let route, store.section == section else { return }
+                if !stack.path.isEmpty { stack.path = NavigationPath() }
+                stack.opener(route)
+                store.pendingTaskRoute = nil
+            }
+            // ⛔ `.globalSwipeBack()` **不能**挂在这里（NavigationStack 外层）。
+            //
+            // 它挂在 `NavigationStack { }` 的修饰符链上，`background { }` 里的
+            // representable 会成为 NavigationStack 的**兄弟**，而不是栈内的宿主 VC，
+            // `arm()` 第一句 `guard let nav = navigationController` 仍然拿到 nil。
+            // 实测：左滑完全没反应 —— 用户报的正是这个。
+            //
+            // 正解在 `routeDestinations()`：挂到栈内的根视图上。
     }
 }
 
@@ -822,6 +1011,14 @@ extension View {
         #else
         navigationDestination(for: Route.self) { route in
             PushedRouteTabSafeArea { route.build() }
+                // ★ 全局左滑返回挂**在每个被 push 出来的页面上**。
+                //
+                // 这里是栈内（`PushedRouteTabSafeArea` 的宿主在 `UINavigationController`
+                // 的 viewControllers 里），`navigationController` 非 nil，`arm()` 才装得上手势。
+                //
+                // ⛔ 不要改挂到 `NavigationStack` 外层：那里 representable 是栈的兄弟，
+                // 拿不到 nav，整条需求等于没实现（实测左滑无反应）。
+                .globalSwipeBack()
         }
         #endif
     }

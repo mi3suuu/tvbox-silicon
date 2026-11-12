@@ -23,6 +23,14 @@ import TVCore
     @State private var subscriptionLink: SubscriptionImportLink?
     #endif
     init() {
+        #if DEBUG
+        // ★ InjectionIII 热重载（仅 Debug）。
+        // 加载后改 .swift 保存即可注入运行中的 App，无需重装。
+        // 前提：Other Linker Flags 含 -Xlinker -interposable（见 project.yml）。
+        #if os(iOS)
+        Bundle(path: "/Applications/InjectionIII.app/Contents/Resources/iOSInjection.bundle")?.load()
+        #endif
+        #endif
         #if os(macOS)
         // Use thin overlay scrollers app-wide. With "Show scroll bars: Always" or a mouse attached,
         // AppKit otherwise draws wide legacy scrollers that crowd poster grids and the episode rail.
@@ -32,8 +40,13 @@ import TVCore
         #if os(iOS)
         _ = MusicRemoteControl.shared
         DownloadsLifecycle.install()
+        // 观看页皮肤：首次启动把旧版布尔迁移成三态值，之后读到的就是稳定值。
+        PlaySkin.adoptCurrentIfNeeded()
         #endif
         SubtitleTranslationSetup.install()
+        // [mi3s] 出口代理：回环中继必须在播放前起来。此前 `LocalProxyServer.base()` 零调用点，
+        // `baseSync` 恒为 nil，配了代理也只会静默直连——这里在启动时就把它拉起。
+        LocalProxyServer.shared.ensureStarted()
     }
     var body: some Scene {
         WindowGroup {
@@ -96,6 +109,18 @@ import TVCore
                     if phase == .background {
                         Task { _ = await Diagnostics.shared.snapshot(); ErrorReports.shared.save() }
                         store.cloudSync?.flushPending()
+                        // [mi3s] 二开：后台听视频关掉时，进后台就把画面停掉。
+                        // 开着时什么都不做 —— 会话本来就是 .playback 类别、Info.plist 里有 audio
+                        // 后台模式，系统会让它继续出声，画面由系统自己停。
+                        // 不在这里 setActive(false)：那会把正在播的音轨一起掐掉，
+                        // 再回到前台还要重新起一次，接不上。
+                        if !BiliPlayerExtras.shared.backgroundAudio {
+                            // 不裸取 activeSession（它是 private）：按正在播的 channel 问 Store 要，
+                            // channel 一致时它返回的就是那个会话，不会新建。
+                            if let channel = store.playing {
+                                store.playbackSession(for: channel).player.pause()
+                            }
+                        }
                         // [mi3s] 二开：隐私保险库退到后台即重新上锁。一次解锁只对给出它的那一刻有效，
                         // 把手机递给别人时被隐藏的源/订阅不会被看到。没有密码时 lock() 是空操作。
                         store.relockVaultOnBackground()

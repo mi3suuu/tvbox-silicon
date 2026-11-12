@@ -16,8 +16,21 @@
 //     at 0 s when there is nothing saved.
 //
 //  2. Switching lines shows each line's health before committing. Readings are
-//     lazy: only the lines in the visible grid get probed, one at a time, and the
-//     result is cached so reopening the sheet does not re-measure everything.
+//     **lazy**: opening the sheet sends **no probe at all** — it only paints what
+//     the cache already knows. A probe happens when the viewer taps a line chip
+//     (`probeLines([flag])`) or presses 「重新测速」(`probeLines(force: true)`).
+//     The result is cached, so reopening the sheet does not re-measure anything.
+//
+//  ## Probing has one entry point
+//
+//  `probeLines(subset:force:)` is the only way in. It was three near-duplicate
+//  functions (`probeVisibleLines` / `retestLines` / `probe(flag)`): the first two
+//  each copied the same preparation — inject `state.resolve`, build the line list —
+//  and the third skipped both. That third one was a real defect: type 3/4 sources
+//  hand back a *play parameter* (`第1集$abc123`) in `Episode.address`, so measuring
+//  it directly hit `ProbePlanTarget.isRequestable`, which rejects relative URLs, and
+//  returned in silence. 605 of the 756 sources in the current subscription are type 3.
+//  Every path now goes through `probeOne`, which resolves first.
 //
 
 import SwiftUI
@@ -59,22 +72,58 @@ final class EpisodeProbeController {
         videoID: String,
         force: Bool = false
     ) async {
-        guard !line.isEmpty, let url = URL(string: address), !inFlight.contains(line) else { return }
+        // ⛔ 守卫必须是「这个地址能不能当 HTTP 请求发」，不能是 `URL(string:) != nil`：
+        // type 3/4 源的 `Episode.address` 是 play 参数（`第1集$abc123`），`URL(string:)` 会把它
+        // 接受成**相对 URL**，于是这里给一个不存在的地址写一条 `.unreachable`，
+        // 还经 `record` → `note` 覆盖掉解析路径刚写好的好读数，污染源测速页、分组与排序。
+        guard !line.isEmpty, ProbePlanTarget.isRequestable(address),
+              let url = URL(string: address), !inFlight.contains(line) else { return }
         if let host = url.host { bases[line] = host }
         if !force, let known = readings[line] ?? store.probe(sourceKey: sourceKey, videoID: videoID, lineFlag: line),
            !known.isStale(), known.reachability != .unknown {
             readings[line] = known
             return
         }
+        // ★ 按 base 的读数（One `latencyByBase` 的等价物，RCA H4）。
+        //
+        // 上面那条查的是「这个源 · 这部剧 · 这条线」的历史读数 —— 换任何一部剧都会 miss，
+        // 于是每进一部新剧就把全部线路重测一遍。这里补一层 host 级：同 host 刚测过就直接用。
+        // One 的 `latencyByBase` 根本没有剧的维度，正是这个原因。
+        if !force, let byBase = store.baseReading(for: url) {
+            readings[line] = byBase
+            return
+        }
 
         inFlight.insert(line)
         defer { inFlight.remove(line) }
+
+        // ★ 全局名额（One `pendingTests` 的等价物，RCA H5）。
+        //
+        // 这一层面板自己有个 4 路上限，但播放页的 `buildLineSamples`、跨源矩阵、全量扫描
+        // 各自也有自己的上限，它们互不知情 —— 叠起来能同时打出几十个请求，
+        // 抢的正是用户此刻要用来起播的那条链路。全局限流把它们收进同一个池子。
+        //
+        // ⛔ 必须**先**领全局名额、再领 host 名额。反过来时，若 host 名额领到、
+        //    全局名额却没领到就直接返回，那个 host 的在飞计数永远不会归还 ——
+        //    该 host 会被永久判成 saturated，后续每条线都测不动。
+        // ★ 名额抢不到要**排队**，不能静默丢弃。
+        //
+        // ⛔ 原来是 `guard store.claimProbeSlot() else { return }` —— 名额被别的入口
+        //    （播放页摸底、跨源矩阵、全量扫描）占满时，用户点的这一条**静默丢失**：
+        //    界面上既不显示数字也不报错，看起来就是「点了没反应」。
+        //
+        // 现在排队等（上限 20 秒）。排队期间用户改变主意——换线路、关面板——
+        // 会被 `Task` 取消，`waitForProbeSlot` 的取消分支会把自己从队列摘掉并归还。
+        guard await store.waitForProbeSlot() else { return }
+        defer { store.releaseProbeSlot() }
 
         // HostRotation is keyed by host: claim it, then record success/failure/cancel on the same key.
         let base = url.host
         if let base, !store.beginBase(base) { return }
 
-        let result = await SourceProbeRunner.probe(url: url, headers: headers)
+        // ★ light 采样（RCA H2）：面板一弹开就测，是「用户还没决定看哪条」的时刻，
+        //   要的是「哪条是活的」，不是精确吞吐。128 KB 只有常规探针的一半。
+        let result = await SourceProbeRunner.probe(url: url, headers: headers, light: true)
         if Task.isCancelled {
             if let base { store.cancelBase(base) }
             return
@@ -87,7 +136,60 @@ final class EpisodeProbeController {
             }
         }
         readings[line] = result
-        store.record(result, sourceKey: sourceKey, videoID: videoID, lineFlag: line)
+        // 带 url 记，才能同时写进 base 表，让同 host 的其它剧直接复用（见 `baseReading`）。
+        store.record(result, sourceKey: sourceKey, videoID: videoID, lineFlag: line, url: url)
+    }
+
+    /// 把 `Episode.address` 解析成真实流地址。
+    ///
+    /// ⛔ 必须有这一步：type 3/4（CatPaw / 苹果CMS 播放器接口）的 `address`
+    /// 只是一个 play 参数，不是可请求的 URL。旧实现直接拿它去 HEAD，
+    /// 测的是一个不存在的地址 —— 数字纯属摆设，而且会把好线路判成不可达。
+    /// `VideoDetailView.buildLineSamples` 早就这么做了（那里有 `client`），
+    /// 选集面板此前没有，这是两条路径口径不一致的根因。
+    var resolve: (@MainActor (Episode) async -> OneSkinLineSample?)?
+
+    /// 并发测**所有**线路，而不只是当前那条。
+    ///
+    /// 旧注释写「其他线路等用户选了再测，保持打开面板便宜」，实际是死锁：
+    /// 用户要比较速度才选线，而速度只有选了才测 —— 于是永远看不到对比。
+    /// 现在一次并发测完（最多 4 路，由 `SourceProbeStore` 的主机轮换兜住突发），
+    /// 面板一打开就把每条线的速度与画质都摆出来。
+    func probeAll(_ lines: [(flag: String, episode: Episode)], headers: [String: String],
+                  sourceKey: String, videoID: String, force: Bool = false) async {
+        await withTaskGroup(of: Void.self) { group in
+            var next = 0
+            func launch() -> Bool {
+                guard next < lines.count else { return false }
+                let item = lines[next]
+                next += 1
+                group.addTask {
+                    await self.probeOne(item.flag, episode: item.episode, headers: headers,
+                                        sourceKey: sourceKey, videoID: videoID, force: force)
+                }
+                return true
+            }
+            for _ in 0..<4 { if !launch() { break } }
+            for await _ in group { if !launch() { continue } }
+        }
+    }
+
+    /// 一条线路：先解析成真实流地址，再测。
+    private func probeOne(_ line: String, episode: Episode, headers: [String: String],
+                          sourceKey: String, videoID: String, force: Bool) async {
+        guard !line.isEmpty, !inFlight.contains(line) else { return }
+        // 缓存命中就不必解析 —— 解析比一次测速还贵（要过 preparePlayback + resolvePlayback）。
+        if !force, let known = readings[line] ?? store.probe(sourceKey: sourceKey, videoID: videoID, lineFlag: line),
+           !known.isStale(), known.reachability != .unknown {
+            readings[line] = known
+            return
+        }
+        guard let sample = await resolve?(episode) else {
+            // 解析不出来（该线没有真实地址）：不写读数，不编造。
+            return
+        }
+        await probeIfNeeded(line: line, address: sample.url.absoluteString, headers: sample.headers,
+                            sourceKey: sourceKey, videoID: videoID, force: force)
     }
 
     func reading(for line: String) -> SourceProbeResult? { readings[line] }
@@ -140,6 +242,29 @@ struct EpisodePicker: View {
     @State private var pageSize = 50
     @State private var jumping = false
     @State private var jumpDraft = ""
+    /// 选集呈现方式：网格 / 列表。
+    ///
+    /// One 的 `VideoDetailPage` 里有 `rectangle.grid.1x2` 这颗图标 —— 网格看封面、
+    /// 列表看集名，两种场景（找特定一集 / 扫一遍目录）需要的信息不同。
+    /// 读 `UserDefaults` 直取而不是 `@AppStorage`：这里只想让它跟着面板存活，
+    /// 跨启动记忆反而不是用户要的（每次打开按最合适的那一种）。
+    @State private var layout: PickerLayout = .grid
+    /// 正在重测线路。
+    @State private var retesting = false
+    /// `onAppear` 里由 `LinePreference` **自动解析**出来的那条线路。
+    ///
+    /// ⛔ 它是为了让 `activeLine` 与播放页同口径（能播的线兜底），但**不是用户的选择**。
+    ///    `onChange(of: activeLine)` 会把每次变化写回 `store.episodePickerLine` ——
+    ///    如果不加这个标记，自动解析的结果就会冒充「用户选过」，
+    ///    下一部剧、甚至下一次重建面板都拿它当第一优先级，
+    ///    用户「我明明没选过」却被钉在一条线上。
+    @State private var autoResolvedLine: String?
+
+    enum PickerLayout: String, CaseIterable, Identifiable {
+        case grid, list
+        var id: String { rawValue }
+        var symbol: String { self == .grid ? "rectangle.grid.2x2" : "list.bullet" }
+    }
 
     enum PickerFilter: String, CaseIterable, Identifiable {
         case all, unwatched, watched
@@ -184,11 +309,16 @@ struct EpisodePicker: View {
         self.compact = compact
         self.headers = headers
         self.play = play
-        // Reopen on the line that was in use; fall back to the source's first.
-        let saved = resumeContext?.episodeFlag
-        let firstFlags = EpisodePlaylist(video.episodes).flags
-        let first = firstFlags.first ?? ""
-        _activeLine = State(initialValue: saved.flatMap { firstFlags.contains($0) ? $0 : nil } ?? first)
+        // 默认线路：`init` 里只能拿到 view 的参数（`store`/`CloudDrive` 都还不合法），
+        // 所以这里先按「历史记录 → 第一条」定一个初值，**能播的线兜底放在 `onAppear`**
+        // （那里 `@Environment(Store)` 已就绪，`CloudDrive` 也可访问）。
+        //
+        // 优先级链本身只有一处出处：`LinePreference`。这里与 `onAppear` 用的是同一个函数，
+        // 只是 `init` 阶段少传 `picked` 与 `playableNow` 两级。
+        let flags = EpisodePlaylist(video.episodes).flags
+        _activeLine = State(initialValue: LinePreference.choose(
+            flags: flags, picked: nil, watched: resumeContext?.episodeFlag, playableNow: nil
+        ) ?? "")
     }
 
     private var episodesOnActiveLine: [Episode] { playlist.episodes(for: activeLine) }
@@ -197,7 +327,8 @@ struct EpisodePicker: View {
     /// 不能用单条续播点判断 —— 那只代表「上次看到哪一集」。
     private var watchedIDs: Set<String> {
         let scope = EpisodeSkipSettings.scope(origin: origin, source: sourceKey, video: video.id)
-        return Set(PlaybackHistory.shared.entries.compactMap { entry in
+        // 同样只算本环境的：否则 B 环境点「只看未看」会把 A 环境看过的集滤掉，得到空列表。
+        return Set(PlaybackHistory.shared.entries(in: PlaybackHistory.shared.activeEnvironmentID).compactMap { entry in
             guard entry.context.id == scope else { return nil }
             return entry.progress > 0.02 || entry.completed ? entry.context.episodeID : nil
         })
@@ -231,8 +362,10 @@ struct EpisodePicker: View {
         }
     }
 
+    /// 总页数。除零保护与取整规则住在 `TVCore.OneWatchPage.pageCount`（有回归测试）：
+    /// 每页条数被写成 0 时不能崩，空列表也算 1 页（避免「1 / 0」）。
     private var pageCount: Int {
-        max(1, Int(ceil(Double(visibleEpisodes.count) / Double(max(pageSize, 1)))))
+        OneWatchPage.pageCount(itemCount: visibleEpisodes.count, pageSize: pageSize)
     }
 
     /// 当前页。页码越界时夹回（换筛选/搜索后总数变小）。
@@ -305,27 +438,66 @@ struct EpisodePicker: View {
             #endif
         }
         .onAppear {
-            // A Duo fold/unfold rebuilds the picker; restore the line the viewer had just chosen
-            // (held on the store) before falling back, so the selection survives the swap. The choice
-            // is scoped to this video: a flag name is shared by every video of a source, so a line
-            // picked on a different video must not surface here.
-            if store.episodePickerVideoID == video.id, let picked = store.episodePickerLine, flags.contains(picked) {
-                activeLine = picked
+            // ★ 默认线路：走全仓唯一的优先级出口 `LinePreference`，与播放页同一口径。
+            //
+            // ① 用户这次亲自选的那条优先 —— **这就是「默认以用户选择的为先」**。
+            //    Duo 折叠/展开会重建面板，用户刚点的线记在 store 上，必须活在重建之后；
+            //    这个选择按 video 归属：flag 名在一个源里跨剧共用，
+            //    在 A 剧选的线不该在 B 剧冒出来。
+            // ② 上次看这部剧用的那条。
+            // ③ 第一条现在就能播的（跳过要扫码 / 没登录的网盘）—— 与播放页 `loadDetail` 一致。
+            // ④ 第一条。
+            //
+            // ⛔ 上一版这里只做了 ①②，没有 ③ —— 于是播放页选中一条能播的线，
+            //    而面板 chip 停在 `flags.first`（可能是条根本播不了的），
+            //    用户看到「面板高亮 A、实际播 B」。
+            let picked = store.episodePickerVideoID == video.id ? store.episodePickerLine : nil
+            let resolved = LinePreference.choose(
+                flags: flags,
+                picked: picked,
+                watched: resumeContext?.episodeFlag,
+                playableNow: { CloudDrive.preferredFlag([$0]) != nil }
+            )
+            if let resolved, resolved != activeLine {
+                autoResolvedLine = resolved
+                activeLine = resolved
             }
-            // The saved/fallback line can be one the viewer hid after it was last used. If the active
-            // line is no longer visible, step to the first visible line so the grid never shows a
-            // hidden line's episodes with no matching chip.
+
+            // 保存/兜底的那条可能已被用户隐藏。若当前线路不再可见，
+            // 退到第一条可见线路 —— 否则网格会显示一条没有对应 chip 的线路的剧集。
             if !flags.contains(activeLine), let first = flags.first {
                 activeLine = first
             }
         }
         .onChange(of: activeLine) { _, line in
+            // 只把**用户亲手点出来的**选择记进 store。
+            //
+            // ⛔ 自动解析（能播的线兜底）也会改 `activeLine`，那不是用户的选择：
+            //    记进去之后它就成了下一轮的「第一优先级」，用户没选过却被钉死在这条线上。
+            //    `autoResolvedLine` 标记了「这次变化是我自己算出来的」，跳过即可。
+            if autoResolvedLine == line {
+                autoResolvedLine = nil   // 消费掉，只挡这一次
+                return
+            }
             store.episodePickerVideoID = video.id
             store.episodePickerLine = line
         }
         .task(id: activeLine) {
+            // ★ 只读缓存，**一个探针都不发**（用户明确要求：不点线路就不探测）。
+            //
+            // ⛔ 这一行以前还跟着一句全量探测（延后 1.2 秒，即旧的 `probeVisibleLines`），
+            //    仍然是「弹开就替用户把所有线路摸一遍」。而这个面板在 iOS 上是
+            //    **进页面自动弹出来的**（VideoDetailView.opensIntoEpisodes），
+            //    于是用户什么都还没点，4 条线各拉一次采样 × 4~9 条线就把下行吃掉一截，
+            //    紧接着的起播自然慢 —— 这是 RCA H2 的现场。
+            //
+            // 现在这里只做一件事：把已有读数铺上去（缓存命中即时显示「1080P · 120 ms」），
+            // 没有读数的那条显示「点一下测速」。真正的探测只发生在：
+            //   · 用户点某条线路 chip（`lineChip` 的 action → `probeLines([flag])`）；
+            //   · 用户按「重新测速」（`probeLines(force: true)`，忽略缓存）。
+            //
+            // 这样面板打开是**零请求**的，用户选哪条才测哪条。
             await loadReadings()
-            await probeVisibleLines()
         }
     }
 
@@ -436,7 +608,9 @@ struct EpisodePicker: View {
         return Button {
             guard cooling == nil else { return }
             activeLine = flag
-            Task { await probe(flag) }
+            // 只测这一条。走 `probeLines` 才有 `resolve` —— 否则 type 3/4 源的
+            // play 参数会被 `isRequestable` 判掉，点击静默无效。
+            Task { await probeLines([flag]) }
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -475,7 +649,10 @@ struct EpisodePicker: View {
                 Button { store.lineSettings.setRoute(.direct, origin: origin, sourceKey: sourceKey, flag: flag) } label: {
                     Label(L10n.text("Direct"), systemImage: store.lineSettings.route(origin: origin, sourceKey: sourceKey, flag: flag) == .direct ? "checkmark" : "bolt")
                 }
-                if let proxy = store.customProxy.store.endpoints.first {
+                // Every configured proxy is offered, not just the first: with two set up (home and
+                // away, say) only ever naming the first left the second unreachable from the one
+                // place a line's route can be set.
+                ForEach(store.customProxy.store.endpoints) { proxy in
                     Button { store.lineSettings.setRoute(.proxy(proxy.id), origin: origin, sourceKey: sourceKey, flag: flag) } label: {
                         Label(proxy.name, systemImage: store.lineSettings.route(origin: origin, sourceKey: sourceKey, flag: flag)?.proxyID == proxy.id ? "checkmark" : "network")
                     }
@@ -529,10 +706,20 @@ struct EpisodePicker: View {
                     .font(.footnote).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 24)
-            } else {
+            } else if layout == .grid {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
                     ForEach(pagedEpisodes) { episode in
                         episodeCell(episode)
+                    }
+                }
+            } else {
+                // 列表：一行一集，集名完整可读（网格里集名被压成两行）。
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(pagedEpisodes.enumerated()), id: \.element.id) { index, episode in
+                        episodeRow(episode, index: index)
+                        if episode.id != pagedEpisodes.last?.id {
+                            Divider().opacity(0.35)
+                        }
                     }
                 }
             }
@@ -580,6 +767,39 @@ struct EpisodePicker: View {
                     .buttonStyle(.plain)
                 }
                 Spacer(minLength: 0)
+                // 重测线路。
+                //
+                // 读数缓存过期才自动重测，而「过期」是 5 分钟——用户刚发现某条线卡了，
+                // 此时缓存里的数字还是好的。没有这个入口，他只能关掉面板再开（且要等过缓存）。
+                Button {
+                    Task { await probeLines(force: true) }
+                } label: {
+                    if retesting {
+                        ProgressView().controlSize(.mini).frame(width: 30, height: 24)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 30, height: 24)
+                            .background(Capsule().fill(Color.primary.opacity(0.05)))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(retesting)
+                .accessibilityLabel(L10n.text("重新测速"))
+
+                // 网格 / 列表切换（One 的 `rectangle.grid.1x2`）。
+                Button {
+                    layout = layout == .grid ? .list : .grid
+                } label: {
+                    Image(systemName: layout.symbol)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 24)
+                        .background(Capsule().fill(Color.primary.opacity(0.05)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L10n.text(layout == .grid ? "列表" : "网格"))
                 Menu {
                     ForEach([20, 50, 100], id: \.self) { n in
                         Button {
@@ -638,7 +858,13 @@ struct EpisodePicker: View {
             .opacity(page >= pageCount - 1 ? 0.35 : 1)
         }
         .alert(L10n.text("Jump to page"), isPresented: $jumping) {
+            // `keyboardType` is iOS-only: macOS and tvOS have no on-screen keyboard, so the
+            // modifier does not exist there. The field and its binding are shared.
+            #if os(iOS)
             TextField("1", text: $jumpDraft).keyboardType(.numberPad)
+            #else
+            TextField("1", text: $jumpDraft)
+            #endif
             Button(L10n.text("Cancel"), role: .cancel) {}
             Button(L10n.text("Go")) {
                 if let n = Int(jumpDraft), n >= 1 { page = min(pageCount - 1, n - 1) }
@@ -715,6 +941,52 @@ struct EpisodePicker: View {
         return Duration.seconds(Int(position)).formatted(.time(pattern: pattern))
     }
 
+    /// 列表态的一行：集号 + 集名 + 状态（正在播 / 续播进度）。
+    ///
+    /// 与网格格子的信息一致，只是排版不同 —— 网格把集名压成一行省略，
+    /// 列表给足宽度，扫目录时能直接读全名。
+    @ViewBuilder
+    private func episodeRow(_ episode: Episode, index: Int) -> some View {
+        let isResume = episode.id == resumeEpisode?.id
+        let isCurrent = episode.id == currentEpisodeID
+        Button {
+            play(episode)
+        } label: {
+            HStack(spacing: 10) {
+                Text("\(index + 1)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(isCurrent ? Brand.onAccent : Color.secondary)
+                    .frame(minWidth: 26, alignment: .trailing)
+                Text(episode.name)
+                    .font(.footnote.weight(isCurrent ? .semibold : .regular))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                if isCurrent {
+                    Label(L10n.text("Now Playing"), systemImage: "play.fill")
+                        .font(.caption2.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                } else if isResume, let position = resumePosition, position > 1 {
+                    Text(progressText(position))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(minHeight: 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isCurrent ? Brand.accent
+                        : isResume ? Brand.accent.opacity(0.10)
+                        : Color.clear)
+            .foregroundStyle(isCurrent ? Brand.onAccent : Color.primary)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: Probing
 
     /// Cached readings first, so the sheet paints instantly with whatever the
@@ -723,26 +995,59 @@ struct EpisodePicker: View {
         state.loadCached(sourceKey: sourceKey, videoID: video.id)
     }
 
-    /// Probes only the active line's address. Other lines are measured when the
-    /// user actually selects them, which keeps opening the sheet cheap.
-    private func probeVisibleLines() async {
-        if let episode = episodesOnActiveLine.first {
-            await probe(activeLine, address: episode.address)
+    /// 探测入口 —— **唯一**。
+    ///
+    /// 原来这里是三个几乎重复的函数（`probeVisibleLines` / `retestLines` / `probe(flag)`）：
+    /// 前两个各自把「注入 `state.resolve` + 建设探测清单」抄了一遍，第三个干脆两样都没做。
+    ///
+    /// ## 三个缺陷，都在这里一并收掉
+    ///
+    /// **① 点 chip 在 type3/4 源上根本不测（最严重）。**
+    /// `probe(flag)` 直接拿 `episode.address` 去测，而 type 3/4 源的 `address` 是
+    /// play 参数（`第1集$abc123`），`ProbePlanTarget.isRequestable` 会把相对 URL 判掉，
+    /// 于是**静默 return**，界面既不显示数字也不报错。当前订阅 756 个源里 605 个是
+    /// type 3（80%），等于「点线路测速」在绝大多数源上是坏的。
+    /// 现在单条探测也走 `probeOne` → `resolve`，与全量探测同一条路。
+    ///
+    /// **② 重复的准备逻辑。** `resolve` 的注入与清单构建现在只写一次。
+    ///
+    /// **③ 名额抢不到时静默丢弃。** `probeIfNeeded` 里 `claimProbeSlot() == false` 就 `return`；
+    /// 现在改走 `waitForProbeSlot`（排队等，见那边的说明）。
+    ///
+    /// - Parameters:
+    ///   - subset: 只测这些线路（`nil` = 全部可见线路）。
+    ///   - force: 忽略缓存，强制重测（「重新测速」按钮用）。
+    private func probeLines(_ subset: [String]? = nil, force: Bool = false) async {
+        // 解析器一次注好：type 3/4 的 address 只是 play 参数，
+        // 必须过 preparePlayback + resolvePlayback 才变成可测的真实流地址。
+        await state.resolve = { episode in
+            await store.lineSample(for: episode, sourceKey: sourceKey, origin: origin, headers: headers)
         }
+
+        // 每条线取「当前正在看的这一集」，该线没有就退回它自己的首集。
+        // 过滤规则（去重 / 保序 / 剔除失效名字）在 `LinePreference.linesToProbe` 里，
+        // 那一层有单测；这里只负责取集数。
+        let wanted = LinePreference.linesToProbe(flags, subset: subset)
+        let items: [(flag: String, episode: Episode)] = wanted.compactMap { flag in
+            let onLine = playlist.episodes(for: flag)
+            guard let pick = onLine.first(where: { $0.id == currentEpisodeID }) ?? onLine.first else { return nil }
+            return (flag, pick)
+        }
+        guard !items.isEmpty else { return }
+        await state.probeAll(items, headers: headers, sourceKey: sourceKey, videoID: video.id, force: force)
     }
 
-    private func probe(_ flag: String) async {
-        guard let episode = playlist.episodes(for: flag).first else { return }
-        await probe(flag, address: episode.address)
-    }
-
+    /// 单条线路探测 —— **保留但不再被调用**，只作为「拿裸地址去测」这条老路的正确写法留档。
+    ///
+    /// ⛔ 它原本的实现是直接 `probeIfNeeded(address: episode.address)`，而 type 3/4 源的
+    ///    `address` 是 play 参数、会被 `isRequestable` 判掉并静默 return ——
+    ///    这正是「点线路测速在 80% 源上失效」的成因。
+    ///
+    /// 现在它内部改走 `probeLines([flag])`（即经 `resolve` 的正路），
+    /// 于是即使将来有人重新调它，也不会再踩同一个坑。
+    /// 若要彻底删除，请先确认没有任何分支会用到「只测一条、且手里只有 address」的场景。
     private func probe(_ flag: String, address: String) async {
-        await state.probeIfNeeded(
-            line: flag,
-            address: address,
-            headers: headers,
-            sourceKey: sourceKey,
-            videoID: video.id
-        )
+        _ = address   // 裸地址不可信：type 3/4 的 address 只是 play 参数，必须过 resolve。
+        await probeLines([flag])
     }
 }

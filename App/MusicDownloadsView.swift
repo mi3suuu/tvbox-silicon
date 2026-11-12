@@ -10,8 +10,9 @@ struct MusicDownloadsView: View {
     @State private var confirmsDeleteAll = false
     private var library: MusicDownloadLibrary { .shared }
 
-    /// Most recently saved first.
-    private var saved: [MusicDownload] { library.completed.sorted { ($0.finished ?? $0.created) > ($1.finished ?? $1.created) } }
+    /// Most recently saved first, **in the environment on screen only**: songs are stamped with the
+    /// environment they were downloaded in, and another environment's songs are not this one's library.
+    private var saved: [MusicDownload] { library.visibleCompleted.sorted { ($0.finished ?? $0.created) > ($1.finished ?? $1.created) } }
 
     var body: some View {
         let tracks = saved.map(\.track)
@@ -27,7 +28,9 @@ struct MusicDownloadsView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in library.forgetMissing() }
             #endif
             .confirmationDialog(L10n.text("Delete all downloaded songs?"), isPresented: $confirmsDeleteAll, titleVisibility: .visible) {
-                Button(L10n.text("Delete Downloads"), role: .destructive) { library.remove(library.items.map(\.id)) }
+                // 只删本环境的歌：按钮由「本环境有歌」控制显隐，删的却曾是全库 ——
+                // 在 B 环境点一次会把 A 环境的歌一起删掉。两个作用域必须一致。
+                Button(L10n.text("Delete Downloads"), role: .destructive) { library.remove(library.visibleItems.map(\.id)) }
             }
             #if DEBUG
             // `-qaPlayDownloaded 1` plays the newest saved song as soon as there is one.
@@ -54,11 +57,11 @@ struct MusicDownloadsView: View {
     }
 
     private func list(_ tracks: [MusicTrack]) -> some View {
-        let pending = library.pending
+        let pending = library.visiblePending
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: MusicLayout.rowSpacing) {
                 header(tracks).padding(.bottom, 20)
-                if library.items.isEmpty {
+                if library.visibleItems.isEmpty {
                     ContentUnavailableView(L10n.text("No Downloaded Songs"), systemImage: "arrow.down.circle",
                                            description: Text(L10n.text("Download a song, album or playlist from its menu to listen without a connection.")))
                         .frame(maxWidth: .infinity).padding(.vertical, 60)
@@ -84,11 +87,11 @@ struct MusicDownloadsView: View {
                         ForEach(pending) { MusicPendingRow(item: $0) }
                     }
                 }
-                shelf(L10n.text("Playlists"), library.collections.filter { $0.collection.kind == .playlist })
-                shelf(L10n.text("Albums"), library.collections.filter { $0.collection.kind == .album })
+                shelf(L10n.text("Playlists"), library.visibleCollections.filter { $0.collection.kind == .playlist })
+                shelf(L10n.text("Albums"), library.visibleCollections.filter { $0.collection.kind == .album })
                 if !saved.isEmpty {
-                    if !pending.isEmpty || !library.collections.isEmpty {
-                        SectionHeader(title: L10n.text(library.collections.isEmpty ? "Downloaded" : "Songs")).padding(.top, 24).padding(.bottom, 8)
+                    if !pending.isEmpty || !library.visibleCollections.isEmpty {
+                        SectionHeader(title: L10n.text(library.visibleCollections.isEmpty ? "Downloaded" : "Songs")).padding(.top, 24).padding(.bottom, 8)
                     }
                     ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
                         MusicTrackRow(track: track) { store.music.play(MusicQueue(tracks: tracks, start: index, source: Self.title)) }
@@ -130,7 +133,8 @@ struct MusicDownloadsView: View {
             #if os(macOS)
             if !embedded { Text(Self.title).font(.largeTitle.weight(.bold)) }
             #endif
-            Text([L10n.text("%lld songs", tracks.count), DownloadFormat.size(library.size)].joined(separator: " · "))
+            // `library.size` 是全库合计；这里说「本环境占了多少」，必须用 visibleSize。
+            Text([L10n.text("%lld songs", tracks.count), DownloadFormat.size(library.visibleSize)].joined(separator: " · "))
                 .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Group {
@@ -145,7 +149,7 @@ struct MusicDownloadsView: View {
                 }
                 .disabled(tracks.isEmpty)
                 // In plain sight rather than in the toolbar: it also clears songs still on their way.
-                if !library.items.isEmpty {
+                if !library.visibleItems.isEmpty {
                     Button { confirmsDeleteAll = true } label: { Label(L10n.text("Delete Downloads"), systemImage: "trash").labelStyle(.iconOnly) }
                         .controlButton()
                         .help(L10n.text("Delete Downloads"))
@@ -431,11 +435,11 @@ struct MusicDownloadsLink: View {
     }
 
     private func details(_ library: MusicDownloadLibrary) -> String {
-        var parts = [L10n.text("%lld songs", library.completed.count)]
+        var parts = [L10n.text("%lld songs", library.visibleCompleted.count)]
         // Failed songs wait for Retry on the page; only those on their way count here.
-        let running = library.pending.filter { $0.status != .failed }.count
+        let running = library.visiblePending.filter { $0.status != .failed }.count
         if running > 0 { parts.append(L10n.text("%lld downloading", running)) }
-        if library.size > 0 { parts.append(DownloadFormat.size(library.size)) }
+        if library.visibleSize > 0 { parts.append(DownloadFormat.size(library.visibleSize)) }
         return parts.joined(separator: " · ")
     }
 }
@@ -446,7 +450,9 @@ struct MusicDownloadMenuItems: View {
 
     var body: some View {
         let library = MusicDownloadLibrary.shared
-        let saved = tracks.compactMap { library.item(for: $0) }
+        // [mi3s] 二开：只能看**本环境**名下的歌。用 item(for:) 会把另一个环境下过的那首也算成
+        // 「已下载」，于是这里显示「Remove Download」，一按就把别的环境的文件和封面删了。
+        let saved = tracks.compactMap { library.visibleItem(for: $0) }
         if tracks.contains(where: { $0.source != nil }) {
             // A source's episode (#289) downloads from its video page.
             EmptyView()
@@ -461,6 +467,13 @@ struct MusicDownloadMenuItems: View {
             Button(role: .destructive) { library.remove(saved.map(\.id)) } label: {
                 Label(L10n.text(saved.allSatisfy { $0.status == .completed } ? "Remove Download" : "Cancel Download"), systemImage: "trash")
             }
+        } else if tracks.contains(where: { library.isSavedInAnotherEnvironment($0) }) {
+            // 一首歌全机只存一份（见 `visibleItems`）：另一个环境已经存过时，`download` 会直接
+            // 跳过。与其让按钮点了没反应，就直说它已经在别的环境里，并且不可点。
+            Button {} label: {
+                Label(L10n.text("Saved in another environment"), systemImage: "checkmark.circle")
+            }
+            .disabled(true)
         } else {
             Button { library.download(tracks) } label: { Label(L10n.text("Download"), systemImage: "arrow.down.circle") }
         }
@@ -477,12 +490,17 @@ struct MusicDownloadButton: View {
 
     var body: some View {
         let library = MusicDownloadLibrary.shared
-        let items = tracks.compactMap { library.item(for: $0) }
+        // 同上：只认本环境的记录，否则另一个环境下过的专辑在这里会一直显示「Downloaded」。
+        let items = tracks.compactMap { library.visibleItem(for: $0) }
         // Songs saved one by one before still leave the button on until the album or playlist is kept too.
         let kept = collection.map { library.collection(id: $0.id) != nil } ?? true
         let queued = kept && !tracks.isEmpty && items.count == tracks.count && !items.contains { $0.status == .failed }
         let done = queued && items.allSatisfy { $0.status == .completed }
-        let label = L10n.text(done ? "Downloaded" : queued ? "Downloading" : "Download")
+        // 整张专辑的歌都已经在另一个环境里存过：这里既不该显示 Download（点了什么都不会发生，
+        // 还会在本环境插一张 0 首歌的空专辑卡片），也不该装作 Downloaded。
+        let elsewhere = !tracks.isEmpty && items.isEmpty && tracks.allSatisfy { library.isSavedInAnotherEnvironment($0) }
+        let label = L10n.text(done ? "Downloaded" : elsewhere ? "Saved in another environment"
+                                  : queued ? "Downloading" : "Download")
         Button { library.download(tracks, from: collection) } label: {
             Label(label, systemImage: done ? "checkmark.circle" : queued ? "arrow.down.circle.dotted" : "arrow.down.circle")
                 #if !os(tvOS)
@@ -490,7 +508,7 @@ struct MusicDownloadButton: View {
                 #endif
                 .frame(width: side, height: side)
         }
-        .disabled(tracks.isEmpty || queued)
+        .disabled(tracks.isEmpty || queued || elsewhere)
         .help(label).accessibilityLabel(label)
     }
 }

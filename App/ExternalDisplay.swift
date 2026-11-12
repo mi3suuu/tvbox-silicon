@@ -20,6 +20,39 @@ extension UIApplication {
         }
         return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     }
+
+    /// App 实际所在那块屏的静态 bounds。
+    ///
+    /// ⛔ 不要在布局里直接写 `UIScreen.main.bounds`：iPhone Duo 有**两块屏**，
+    /// `UIScreen.main` 指向的是**外屏 466×678**，而 App 展开后跑在内屏 669×951 上。
+    /// 用 `UIScreen.main` 算出来的面板宽高在展开态一律偏小（实测：哔哩哔哩全屏
+    /// 设置面板在展开横持下算成 231pt，应为 336pt，右边一整排按钮被裁掉）。
+    ///
+    /// 与 `OneSkin.fixedScreenSize()` 同一口径：读 `screen.bounds` 而不是
+    /// `window.bounds`，因为前者在旋转动画期间**不逐帧变化**，用它算出的布局不会抖。
+    var appScreenBounds: CGRect {
+        appWindowScene?.screen.bounds ?? UIScreen.main.bounds
+    }
+
+    /// **当前方向下**的逻辑屏幕尺寸（宽 = 正在使用的那条边）。
+    ///
+    /// ⛔ `appScreenBounds` 是 `UIScreen.bounds` 语义：**物理自然方向、不随旋转交换**。
+    ///    Duo 外屏恒报 466×678、内屏恒报 669×951 —— 横持时它给出的宽高是反的：
+    ///      · 全屏底栏宽度按 466 排 → 铺在 678 上，右边空 212pt（内屏空 282pt）；
+    ///      · 设置面板高度按 951 算 → 塞进 669 的容器，上半截被顶出屏幕。
+    ///    这两个都是「UI 坐标与预期不符」的典型：算术本身没错，基准选错了方向。
+    ///
+    /// `keyWindow.bounds` 由系统在旋转时**一次性交换**宽高，正是这一帧真正可用的
+    /// 逻辑尺寸；它归 UIKit 所有，不会被我们的重排改变（不成环）。
+    /// 取不到窗口时才退回 `appScreenBounds`（至少方向不会更差）。
+    var appOrientedScreenSize: CGSize {
+        if let size = appWindowScene?.keyWindow?.bounds.size,
+           size.width > 1, size.height > 1 {
+            return size
+        }
+        let b = appScreenBounds
+        return b.size
+    }
 }
 #endif
 

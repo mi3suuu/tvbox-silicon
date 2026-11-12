@@ -320,7 +320,8 @@ private struct MusicHome: View {
         }
         let liked = store.favorites.musicTracks.count
         if liked > 0 { MusicLikedLink(count: liked).padding(.bottom, 20) }
-        let downloads = !MusicDownloadLibrary.shared.items.isEmpty
+        // 只按本环境判：另一个环境下的歌不该在这里点亮「下载」入口。
+        let downloads = !MusicDownloadLibrary.shared.visibleItems.isEmpty
         if downloads { MusicDownloadsLink().padding(.bottom, 20) }
         if !browse.sections.isEmpty {
             MusicBrowseShelves(sections: browse.sections).padding(.bottom, 28)
@@ -423,7 +424,8 @@ struct MusicTrackRow: View {
                 // A slot for the download state on every row, saved or not, and lengths at least as wide
                 // as "00:00", trailing: the marks and the lengths each stay in a column.
                 Group {
-                    if let saved = MusicDownloadLibrary.shared.item(for: track) { DownloadState(status: saved.status, fraction: saved.fraction) }
+                    // 只显示本环境的下载状态：另一个环境下过的那首在这里不该出现进度标记。
+                    if let saved = MusicDownloadLibrary.shared.visibleItem(for: track) { DownloadState(status: saved.status, fraction: saved.fraction) }
                 }
                 .frame(width: DownloadState.size * 1.2)
                 if showsFavoriteMark, store.favorites.contains(.music(track)) {

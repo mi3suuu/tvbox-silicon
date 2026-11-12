@@ -52,6 +52,59 @@ enum QALaunch {
         if let address = UserDefaults.standard.string(forKey: "qaAListServer"), let url = try? WebAddress.resolve(address) {
             if let server = await AList.probe(url) { _ = try? AListServers.add([server]) }
         }
+        // ⚠️ 这一段必须写在**门控之前**。
+        //
+        // 下面的 `guard` 只要 section / page / qaPlay / qaDownload / qaPlayLive / qaPlayURL
+        // 一个都没有就 return —— 而换皮参数不属于其中任何一个。第一版写在 guard 之后，
+        // 结果 `-qaBiliSkin 1` 单独传入时整段被跳过（截图与不传一模一样，就是这个原因）。
+        //
+        // 换皮走 UserDefaults 而不是只认启动参数：`apps.launch` 的 args 只有首次冷启动
+        // 会进 argument domain，之后 relaunch 全部读不到（本仓库已实测过三次）。
+        // 换皮只在 iOS 存在（`PlaySkin` 定义在 BiliSkin.swift 的 `#if os(iOS)` 里）。
+        // 不加守卫时，tvOS / macOS 的 QA 包在这里直接编译失败。
+        #if os(iOS)
+        if UserDefaults.standard.object(forKey: "qaBiliSkin") != nil {
+            UserDefaults.standard.set(true, forKey: "qaBiliSkin")
+            UserDefaults.standard.set(PlaySkin.bilibili.rawValue, forKey: PlaySkin.key)
+        } else {
+            // ⚠️ 必须**双向**写，和下面 `qaBiliFullScreen` 的做法一致。
+            //
+            // 只写不清的后果（真机实测踩到）：某次用 `-qaBiliSkin 1` 截过图之后，
+            // `playSkin` 就被永久写成 `bilibili`；这个键是持久化的，之后每次
+            // 正常启动都读到 `bilibili` —— 用户看到的是「整个 App 都变成哔哩哔哩，
+            // One 界面不见了」。而 `PlaySkin.adoptCurrentIfNeeded()` 只在键
+            // 不存在时才写，救不回来。
+            //
+            // 所以这里必须把 `qaBiliSkin` 关掉，并把 `playSkin` 交还给
+            // `PlaySkin.current` 的自然推断（没有显式选择时不落盘，
+            // 由 `adoptCurrentIfNeeded` 按旧布尔决定 one / native）。
+            UserDefaults.standard.set(false, forKey: "qaBiliSkin")
+            if UserDefaults.standard.string(forKey: PlaySkin.key) == PlaySkin.bilibili.rawValue {
+                UserDefaults.standard.removeObject(forKey: PlaySkin.key)
+            }
+        }
+        #endif
+        // `-qaBiliFullScreen 1`：直接进全屏，用来看全屏控件与右侧设置面板。
+        //
+        // ⚠️ 必须**双向**写。`watchFullScreen` 是 @AppStorage 持久键，只写不清的后果：
+        // 截过一次全屏之后，之后每次不带参数启动都直接进全屏，而全屏控件几秒后自动
+        // 收起 —— 实测连续三张截图全是同一块纯色(9,11,13)，看起来像「三态都没生效」，
+        // 实际是三次都在全屏黑底上。
+        if UserDefaults.standard.object(forKey: "qaBiliFullScreen") != nil {
+            UserDefaults.standard.set(true, forKey: "watchFullScreen")
+        } else {
+            UserDefaults.standard.set(false, forKey: "watchFullScreen")
+        }
+        // `-qaBiliSettings 1`：起播后自动展开设置面板，给截图用。
+        //
+        // ⚠️ 每次启动都要**按本次参数重设，并在没传时清掉**。第一版只写不清，
+        // 于是下一次不带参数启动，面板仍然自动展开 —— 实测把双列与全屏两张图
+        // 都盖成了同一张设置面板，看起来像「三态没生效」。
+        if UserDefaults.standard.object(forKey: "qaBiliSettings") != nil {
+            UserDefaults.standard.set(true, forKey: "qaBiliOpenSettings")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "qaBiliOpenSettings")
+        }
         guard section != nil || page != nil || UserDefaults.standard.string(forKey: "qaPlay") != nil
                 || UserDefaults.standard.string(forKey: "qaDownload") != nil
                 || UserDefaults.standard.string(forKey: "qaPlayLive") != nil
@@ -249,7 +302,28 @@ enum QALaunch {
         if page == "resume-last", let entry = store.playbackHistory.entries.first {
             await store.resumeHistory(entry)
         }
-        if page == "player", let url = URL(string: "http://127.0.0.1:8765/clip.mp4") {
+        // ⛔ 地址必须是 **guest 能访问到的宿主**，不能写 `127.0.0.1`。
+        //
+        // `127.0.0.1` 在 guest 里指的是 guest 自己 —— vphone 的虚拟机里没有这个服务，
+        // 于是 AVPlayer 拿到的 item 永远停在「暂时播放不了」。后果不只是没画面：
+        // **AVPlayer 没进入播放态，App 就拿不到后台保活资格，一切到后台立刻被系统杀掉**
+        // （实测 `devicectl info processes` 里进程数直接变 0），PiP 自然起不来。
+        //
+        // `192.168.64.1` 是宿主在 Virtualization.framework 的 NAT 网段里的地址；
+        // fixture 服务用 `--bind 0.0.0.0` 就能被 guest 访问。
+        // 环境变量 `QA_FIXTURE_HOST` 可以覆盖（模拟器上仍可用 127.0.0.1）。
+        let fixtureHost = UserDefaults.standard.string(forKey: "qaFixtureHost") ?? "192.168.64.1"
+        // `-qaClipPath <path>` 直接播设备上的本地文件。
+        //
+        // 为什么需要它：vphone 的 guest 网络打不到宿主（试过 192.168.64.1 / 192.168.124.6 /
+        // 10.211.55.2，fixture 日志全空），所以 `http://<host>:8765/clip.mp4` 在 VM 上取不到流。
+        // 拿不到流 → AVPlayer 不进播放态 → 截图静止、后台立刻被回收 → PiP 无从验证。
+        //
+        // 用 `pymobiledevice3 afc push` 把片段放进 guest（`/var/mobile/Media`）后，
+        // 用 `-qaClipPath /var/mobile/Media/DCIM/clip.mp4` 就能真播起来。
+        if page == "player", let clip = UserDefaults.standard.string(forKey: "qaClipPath") {
+            store.playing = Channel(name: "测试频道 01", url: URL(fileURLWithPath: clip))
+        } else if page == "player", let url = URL(string: "http://\(fixtureHost):8765/clip.mp4") {
             store.playing = Channel(name: "测试频道 01", url: url)
         }
         if page == "player-error", let url = URL(string: "http://127.0.0.1:8765/missing.mp4") {
@@ -272,8 +346,14 @@ enum QALaunch {
 
     /// The pushed page to show as the section's root, so detail screens can be captured without taps.
     @MainActor @ViewBuilder static func page(for section: AppSection, store: Store) -> some View {
+        // `-qaPage one-preview -qaOneShape <column|split|fullBleed|halfFold>`:
+        // One 皮肤按**真实窗口尺寸**渲染一份固定 mock 数据，用来和真 One 截图逐像素比对。
+        // 不读订阅、不连网络，所以不受「本机没配订阅 / 网络慢」影响 —— 这是唯一能
+        // 稳定复现四种形态版式的入口（真机折叠只能手掰，模拟器又要先过播放链路）。
+        if page == "one-preview" {
+            OneSkinQAHost(shapeKey: UserDefaults.standard.string(forKey: "qaOneShape") ?? "column")
         // Pages that need no subscription, so an App Store build (`-qaAppStore 1`) can show them before one is added.
-        if section == self.section, store.subscription == nil, page == "cloud-accounts" {
+        } else if section == self.section, store.subscription == nil, page == "cloud-accounts" {
             CloudDriveView()
         } else if section == self.section, page == "subtitle-style" {
             SubtitleStyleView()
@@ -281,6 +361,11 @@ enum QALaunch {
             // `-qaPage speed-test`: opens the speed / grouping page straight away, so a build can be
             // checked for opening it without driving the settings list.
             SourceSpeedTestView()
+        } else if page == "speed-lab" {
+            // `-qaPage speed-lab`: the sheet the Sources page opens — incremental sweeps, per-group
+            // measurement, batch filing and batch routing. It is a sheet on that page, so a deep link
+            // is the only way to land on it without a tap.
+            SourceSpeedLab()
         } else if section == self.section, let page, let config = store.subscription {
             let parts = page.split(separator: ":", maxSplits: 2).map(String.init)
             switch parts.first {
@@ -395,7 +480,7 @@ enum QALaunch {
 
     static func overrides(_ section: AppSection) -> Bool {
         guard section == self.section, let page else { return false }
-        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add"].contains(page.split(separator: ":").first.map(String.init) ?? "")
+        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add", "one-preview"].contains(page.split(separator: ":").first.map(String.init) ?? "")
     }
 }
 

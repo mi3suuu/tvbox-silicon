@@ -44,6 +44,13 @@ import TVCore
     let playbackDefaults: UserDefaults
     let pinnedSources: PinnedSources
     let hiddenSources: HiddenSources
+    /// 用户**真删**掉的子源。与 `hiddenSources` 一起写：那个负责「不出现在列表里」，
+    /// 这个负责「不出现在已隐藏里」—— 只有前者的话，删掉的源会以「已隐藏」的形式
+    /// 又冒出来一次，用户会以为删除没生效。
+    let deletedSources: DeletedSources
+    /// 谁参与搜索（源 / 分组 / 订阅三层）。与 `hiddenSources` 正交：那个让源**看不见**，
+    /// 这个让它**看得见但不搜**（见 `SearchScope` 头部）。
+    let searchScope: SearchScope
     let sourceOrder: SourceOrder
     /// Per-source direct/proxy choices and the automatic connectivity fallback.
     let sourceRouting: SourceRouting
@@ -99,7 +106,20 @@ import TVCore
     private static let aiTranslationKey = "aiSubtitleTranslation"
     private static let environmentsKey = "environments"
     private static let skipSourcesKey = "skipSegmentSources"
-    private static let resourceRankingKey = "resourceRanking"
+    private static let resourceRankingBaseKey = "resourceRanking"
+    /// 资源排序是用户手选的**偏好**，按环境分键：默认环境用原 key（升级不丢），其余 `<base>.<uuid>`。
+    private var resourceRankingKey: String { environments.scopedKey(Self.resourceRankingBaseKey) }
+    /// 当前内存里这份 `resourceRanking` 是从哪个环境的 key 读出来的。
+    ///
+    /// `saveVault()` 会写 `resourceRankingKey`，而那个 key 跟着 `environments.activeID` 走。
+    /// 三条切换路径都是「先 activate 再 saveVault」：那一刻 activeID 已经是新环境，于是
+    /// **上一个环境的排序被写进了新环境的 key**（新环境本该是一张白纸），删除时还会覆盖
+    /// 回落到默认环境的那份。存住归属环境，`saveVault` 只写回它自己的 key 就堵住了。
+    @ObservationIgnored private var resourceRankingEnvironmentID: UUID?
+    /// `init` 里用的静态版本（那时 `self` 还没就绪）。与上面的实例版口径必须一致。
+    private static func resourceRankingKey(_ environments: Environments) -> String {
+        environments.scopedKey(resourceRankingBaseKey)
+    }
     /// Whether the keychain auto-backup leg is on. Persisted like the other optional toggles. Off by
     /// default: it costs a keychain write on every change and, unlike the manual file, restores
     /// everything (including subscriptions) without the viewer choosing what comes back.
@@ -112,7 +132,13 @@ import TVCore
         if let blob = try? JSONEncoder().encode(aiTranslation) { playbackDefaults.set(blob, forKey: Self.aiTranslationKey) }
         if let blob = try? JSONEncoder().encode(environments) { playbackDefaults.set(blob, forKey: Self.environmentsKey) }
         if let blob = try? JSONEncoder().encode(skipSources) { playbackDefaults.set(blob, forKey: Self.skipSourcesKey) }
-        if let blob = try? JSONEncoder().encode(resourceRanking) { playbackDefaults.set(blob, forKey: Self.resourceRankingKey) }
+        // 写回**这份值所属的环境**，不是「此刻屏幕上的环境」——两者在切换的瞬间并不相同。
+        if let blob = try? JSONEncoder().encode(resourceRanking) {
+            let owner = resourceRankingEnvironmentID ?? environments.activeID
+            playbackDefaults.set(blob, forKey: EnvironmentScopedKey.key(Self.resourceRankingBaseKey,
+                                                                       environment: owner,
+                                                                       default: environments.defaultID))
+        }
         // Every environment change (add/remove/activate) funnels through here, so this is the one
         // place to keep the player's shared history pointed at the environment on screen.
         playbackHistory.activeEnvironmentID = environments.activeID
@@ -214,6 +240,92 @@ import TVCore
     func rebuildForActiveEnvironment() {
         rebuildSubscription(resetting: true)
     }
+
+    /// [mi3s] 二开：把所有「按环境分键」的偏好 store 指向 `environments` 当前环境，并重读各自那一份。
+    ///
+    /// 环境隔离的第一版只覆盖了带 `environmentID` 字段的数据。置顶 / 隐藏 / 源排序 / 源改派 /
+    /// 自定义分组都是**偏好**，没有记录可打戳，key 里只有 `origin + sourceKey` 或纯 id —— 于是
+    /// 切环境后，上一个环境的置顶行、隐藏源、排序、分组照样作用在新环境上，这就是「点播源里还
+    /// 残留着之前环境的东西」的来路。
+    ///
+    /// 切换与删除都只走这一个入口：只改一部分 store 就是「有的串台有的不串」的下一个 bug。
+    func applyEnvironmentToPreferenceStores(_ environments: Environments) {
+        Self.applyEnvironment(environments, pinned: pinnedSources, hidden: hiddenSources,
+                              deleted: deletedSources,
+                              order: sourceOrder, reassignment: sourceReassignment,
+                              groups: sourceGroupBook, overrides: sourceOverrides,
+                              lines: lineSettings, routing: sourceRouting, search: searchScope)
+        // 资源排序是 Store 上的一个值而不是 store 对象，静态方法拿不到实例，只能在这里重读。
+        // key 已经跟着 environments 走（`resourceRankingKey`）。
+        if let blob = playbackDefaults.data(forKey: resourceRankingKey),
+           let decoded = try? JSONDecoder().decode(ResourceRanking.self, from: blob) {
+            resourceRanking = decoded
+        } else {
+            resourceRanking = .standard
+        }
+        // 重读之后，内存里这份值就属于新环境了；`saveVault` 依此写回正确的 key。
+        resourceRankingEnvironmentID = environments.activeID
+    }
+
+    /// The work behind `applyEnvironmentToPreferenceStores`, callable from `init` (where `self` is not
+    /// usable yet) as well as from the UI's switch, create and delete.
+    static func applyEnvironment(_ environments: Environments,
+                                 pinned: PinnedSources, hidden: HiddenSources,
+                                 deleted: DeletedSources,
+                                 order: SourceOrder, reassignment: SourceReassignment,
+                                 groups: SourceGroupBook, overrides: SourceOverrides,
+                                 lines: LineSettings, routing: SourceRouting,
+                                 search: SearchScope) {
+        let defaultID = environments.defaultID
+        let activeID = environments.activeID
+        // 先写归属，再让每个 store 按新 key 重读：顺序反过来就会读到上一个环境的那份。
+        pinned.defaultEnvironmentID = defaultID; pinned.environmentID = activeID
+        hidden.defaultEnvironmentID = defaultID; hidden.environmentID = activeID
+        deleted.defaultEnvironmentID = defaultID; deleted.environmentID = activeID
+        order.defaultEnvironmentID = defaultID; order.environmentID = activeID
+        reassignment.defaultEnvironmentID = defaultID; reassignment.environmentID = activeID
+        groups.defaultEnvironmentID = defaultID; groups.environmentID = activeID
+        // 源改名 / 改 API、线路开关、源路由同样是偏好：不分环境的话，A 环境改的名字与线路
+        // 在 B 环境照样生效（同一份订阅两处 `origin + sourceKey` 完全一致）。
+        overrides.defaultEnvironmentID = defaultID; overrides.environmentID = activeID
+        lines.defaultEnvironmentID = defaultID; lines.environmentID = activeID
+        routing.defaultEnvironmentID = defaultID; routing.environmentID = activeID
+        // 「谁参与搜索」也是偏好：不分环境的话，A 环境关掉的源在 B 里也被静默跳过，
+        // 表现是「切了个环境，搜索结果少了一半」。
+        search.defaultEnvironmentID = defaultID; search.environmentID = activeID
+        pinned.reloadForEnvironment()
+        hidden.reloadForEnvironment()
+        deleted.reloadForEnvironment()
+        order.reloadForEnvironment()
+        reassignment.reloadForEnvironment()
+        groups.reloadForEnvironment()
+        overrides.reloadForEnvironment()
+        lines.reloadForEnvironment()
+        routing.reloadForEnvironment()
+        search.reloadForEnvironment()
+    }
+
+    /// 删掉一个环境时，把它名下的偏好 key 一并清掉。数据侧的删除由调用方各自负责
+    /// （历史 / 收藏 / 订阅 / 下载），这里只管偏好。
+    func deletePreferences(of environment: UUID) {
+        let defaults = playbackDefaults
+        let defaultID = environments.defaultID
+        PinnedSources.delete(environment: environment, defaults: defaults, default: defaultID)
+        HiddenSources.delete(environment: environment, defaults: defaults, default: defaultID)
+        DeletedSources.delete(environment: environment, defaults: defaults, default: defaultID)
+        SourceOrder.delete(environment: environment, defaults: defaults, default: defaultID)
+        SourceReassignment.delete(environment: environment, defaults: defaults, default: defaultID)
+        SourceGroupBook.delete(environment: environment, defaults: defaults, default: defaultID)
+        SourceOverrides.delete(environment: environment, defaults: defaults, default: defaultID)
+        LineSettings.delete(environment: environment, defaults: defaults, default: defaultID)
+        SourceRouting.delete(environment: environment, defaults: defaults, default: defaultID)
+        SearchScope.delete(environment: environment, defaults: defaults, default: defaultID)
+        // 排序也按环境分键，删环境要连它那份一起清，否则孤儿 key 永久残留。
+        if environment != defaultID {
+            defaults.removeObject(forKey: EnvironmentScopedKey.key(Self.resourceRankingBaseKey,
+                                                                  environment: environment, default: defaultID))
+        }
+    }
     /// Copies one subscription into another environment (sandbox). The address, name, switch and
     /// routing are carried over; the copy is stamped with the target environment and switched on.
     func copySubscription(_ entry: SubscriptionEntry, to environment: UUID) {
@@ -284,6 +396,27 @@ import TVCore
     /// iPhone and iPad that alert closed the Add Subscription sheet over it and took the viewer out of the form (#357).
     var importError: String?
     var notice: String?
+    /// While true, `reassignSource` records the move but does not rebuild the merged list. Only
+    /// `performBatch` sets it: a batch of moves must rebuild once at the end, not once per source.
+    /// Nothing stored depends on it — the rebuild is a cache refresh, so a suppressed batch ends in
+    /// exactly the state the same moves made one at a time would reach.
+    @ObservationIgnored var suppressRebuild = false
+    /// 上一轮扫描测到的源，收尾整理据此只动测过的那批。`@ObservationIgnored`：它只是收尾用的
+    /// 临时清单，不是页面要观察的状态。
+    @ObservationIgnored var probeSwept: [Site]?
+    /// 收尾整理做了什么的一句话，展示给用户（「已归入可连 41 / 不通 12」）。
+    var lastTidyNote: String?
+    /// 一轮扫描结束后自动做什么（重排 / 归组 / 改路由）。默认只重排 —— 见 `PostSweepTidy`。
+    /// 存在主类里是因为 `@Observable` 的存储属性不能放 extension。
+    var postSweepTidy: PostSweepTidy {
+        get {
+            guard let raw = playbackDefaults.object(forKey: "postSweepTidy") as? Int else {
+                return .standard
+            }
+            return PostSweepTidy(rawValue: raw)
+        }
+        set { playbackDefaults.set(newValue.rawValue, forKey: "postSweepTidy") }
+    }
     /// Whether the full-screen player is presented (vs. the floating mini player). Toggled by the
     /// mini player (tap to go full screen) and the full-screen cover (close to return to the mini player).
     var presentingPlayer = false
@@ -319,14 +452,82 @@ import TVCore
     ///   - 视频控件里的「缩成小窗」→ `true`（`PlayerView.miniplayer()` / One 皮肤同名按钮）
     ///   - 点小窗回全屏、停止播放、重新进观看页 → `false`
     /// 折叠/旋转/切页面都不写这个值，所以它们不可能触发小窗。
-    var miniPlayerActive = false
+    ///
+    /// ⛔ 现在是**坞的投影**，不再是一个独立布尔。
+    ///
+    /// 原来它是「小窗现在画不画」的唯一真源，配一个 `store.playing` 的单值 ——
+    /// 那套结构只能表达「一集在坞里」。用户这次要求坞里能同时挂多个、且新开的不
+    /// 影响已有的，于是真源换成 `videoTasks.tasks`：**坞非空 = 小窗在画**。
+    ///
+    /// 保留这个名字有三个理由：① `PlaybackExit` 的 `miniIntent` / `miniPlayerOn`
+    /// 仍按它读；② 一律改成读坞会让两份状态在同一帧里不同步（写入是同步的，读到的是
+    /// 上一次计算的值）；③ 它现在不可能与坞不一致 —— 它就是坞的读法。
+    ///
+    /// 写入语义：`= false` 表示「收掉整个坞」（登出、用户关掉所有小窗）。
+    /// ⚠️ 所以**不要**在「回到某个观看页」时写它 —— 那会把别的正在看的小窗一起杀掉。
+    /// 回到某一页只该摘掉那一页自己的任务（`VideoTaskCenter.take` 已经负责）。
+    var miniPlayerActive: Bool {
+        get { videoTasks.hasTasks }
+        set { if !newValue { videoTasks.removeAll() } }
+    }
+    /// [mi3s] 二开：**多任务播放的坞**（见 `VideoTasks.swift`）。
+    ///
+    /// 与 `playing` / `miniPlayerActive` 的分工必须分清，否则会互相踩：
+    ///   · `playing` 与 `playbackSession(for:)` 是**前台**那一集（观看页 / 全屏播放器），只能有一个；
+    ///   · 本对象是**坞里**的那些，可以同时有好几个，各自一个 `PlaybackSession`。
+    ///
+    /// 一集要么在前台、要么在坞里，永不两边同时存在。放在主类是因为 Swift 的 extension
+    /// 不能加存储属性（项目铁律第一条）。
+    let videoTasks = VideoTaskCenter()
+    /// 坞里最近一次「回到选集页」请求要压的那一页。
+    ///
+    /// 与 `pendingRoute` 同一套机制：坞是挂在 `RootView` 上的全局浮层，不在任何分区的
+    /// `NavigationStack` 里，拿不到那个分区的 `openRoute`，只能置一个请求由栈接住。
+    var pendingTaskRoute: Route?
+
+    /// Mac 侧栏在漫画阅读器占满窗口时收起。
+    ///
+    /// `MangaReaderView` 在 `onAppear` / `onDisappear` 里成对写它（`150`/`151` 行）。上游
+    /// `c8578eb` 给 Store 加过这个成员，我们这份 Store 里没有 —— macOS 因此报
+    /// 「value of type 'Store' has no member 'hidesSidebar'」，漫画阅读器的「阅读时折叠侧栏」
+    /// 整段失效。它只是一个布尔，放在主类里是因为 Swift extension 不能加存储属性。
+    var hidesSidebar = false
+
     var playing: Channel? {
         // An episode of a listening source (audiobooks, radio, songs) plays in the music player instead (#289).
         didSet {
             if let channel = playing, let queue = listeningQueue(for: channel) { playing = nil; listen(queue, from: channel); return }
+            // ⛔ 新起播放时的「载体声明」—— 但**不能无条件写**。
+            //
+            // 背景：`RootView` 的弹层判据是 `(playsInWatchPage || !presentingPlayer)`，
+            // 而 `presentingPlayer` 在页面主动写它之前一直是 false。于是「从设置页的 QA
+            // 深链起播」这类路径：弹层被判 nil（页面不出来），同时退场裁决器看到
+            // 「没有任何可见载体」，宽限窗一过就把播放停掉。
+            //
+            // ⚠️ 但也不能一律置 true：观看页（`VideoDetailView`）里 `store.playing = …`
+            // 是在**它自己**的上下文里赋值的，而 `watchPageScopes` 由 `onAppear` 维护 ——
+            // 页面刚推入、`onAppear` 还没跑的那一帧，`playsInWatchPage` 会是 false。
+            // 那种时刻置 true 就会把全屏播放器盖到观看页上面，正是要避免的事。
+            //
+            // 所以只在**明确不属于任何观看页作用域**时才声明：
+            // 观看页自己会在 `onAppear` 里把 scope 加进去，之后 `playsInWatchPage` 为真，
+            // 这条分支自然不再触发。而「scope 还没登记」的那一帧，用 `watchPageScopes`
+            // 的非空与否判断并不可靠 —— 所以这里宁可**不写**，把声明留给调用方：
+            // `QALaunch`、`Store.play(_:)`、跨源换源这些「不在页面里起播」的路径会显式声明。
+            if playing != nil, presentingPlayer == false,
+               !playsInWatchPage(playing), !isWatchPageMounted {
+                presentingPlayer = true
+            }
             // The session playing survives an iPhone Duo fold/unfold. It is dropped when playback stops, or when
             // a different channel starts playing.
-            if playing == nil { activeSession = nil; activeSessionChannel = nil; presentingPlayer = false; miniPlayerActive = false }
+            //
+            // ⛔ 这里**只清前台**，不碰坞（`videoTasks`）。
+            // 原来这一行写的是 `miniPlayerActive = false`，那在单任务时代等于「小窗收掉」；
+            // 现在 `miniPlayerActive` 是坞的投影，写它 = 把坞里**所有**正在看的迷你播放器
+            // 一起停掉。而 `playing = nil` 的常见来源是「关掉前台的这一集」、
+            // 「换一集起播」—— 两者都不该波及别的任务。清坞只发生在两处：
+            // 用户按卡片上的 ✕，或整个坞被显式清空（`miniPlayerActive = false`）。
+            if playing == nil { activeSession = nil; activeSessionChannel = nil; presentingPlayer = false }
             // A queued advance already moved the session on to the new channel: keep that same session (and its
             // streams) instead of handing out a fresh, never-started one on the next fold/unfold or stop.
             else if let session = activeSession {
@@ -354,6 +555,18 @@ import TVCore
         activeSessionChannel = channel
         return session
     }
+    /// 把一个**已经在播**（或刚在坞里播着）的会话交给前台，不新建。
+    ///
+    /// 与 `playbackSession(for:)` 的区别就是「新建」那一句：
+    ///   · `playbackSession(for:)` 遇到新频道会**新建一个空会话** —— 从坞里回到选集页
+    ///     若走它，画面会重新取流、从零加载，用户看到的是「点一下回到播放，进度条跳回开头」；
+    ///   · 本方法只写那一对槽，`playing` 之后由调用方赋值，两边就是同一个 `AVPlayer`。
+    ///
+    /// 这也是坞（`VideoTaskCenter`）与前台之间唯一允许的交接口。
+    func adoptSession(_ session: PlaybackSession, for channel: Channel) {
+        activeSession = session
+        activeSessionChannel = channel
+    }
     /// Stop playback cleanly: run the session's own teardown (history save, stream/remux stop, danmaku
     /// clear) before dropping the channel. `playing = nil` alone skips that teardown and leaks the
     /// background resources the session owns.
@@ -366,7 +579,25 @@ import TVCore
     /// The videos whose iPhone watch page is on screen (`PlaybackHistoryContext.id`): their episodes play at the top
     /// of the page instead of in the full-screen player.
     var watchPageScopes: Set<String> = []
+    /// 观看页此刻是否**挂着**（不管它登记的是哪一个视频）。
+    ///
+    /// 与 `watchPageScopes` 的分工：那是「哪些视频的观看页在屏幕上」，用于判断
+    /// 「这一集该在页面里播还是全屏播」；这个是「有没有任何观看页在场」，
+    /// 用于回答一个更早、更粗的问题：**这次起播是不是页面内起播**。
+    ///
+    /// 存在的理由：`watchPageScopes` 由 `onAppear` 异步维护，页面刚推入的那一帧还是空的；
+    /// 只看它会把「页面内起播」误判成「全局起播」，进而弹出全屏层盖住观看页。
+    /// 这个标志由页面 `onAppear` / `onDisappear` 同步维护，不受 scope 内容影响。
+    @ObservationIgnored var isWatchPageMounted = false
     var playbackCatalog: PlaybackCatalog?
+    /// [mi3s] 二开：跨源换源的状态（见 `Store+CrossSource.swift`）。
+    ///
+    /// 两个都必须在这里而不是 extension：Swift 不能给 extension 加存储属性。
+    /// 这也是本项目唯一的二开侵入点形态 —— 主类只加字段，逻辑全在 extension。
+    /// 搜索结果跨「换源面板 → 详情页 → 播放页」存活，页面一重建就丢等于每次重搜。
+    var crossSourceStorage = CrossSourceState()
+    /// 换源时的在飞任务；换一次就取消上一次，避免连点两下起两条流。
+    @ObservationIgnored var crossSourceSwitchTask: Task<Void, Never>?
     /// Set when the last episode of a line ends: what the end screen should offer.
     /// Nil while nothing has finished, which is also what dismisses the screen.
     var seriesEnd: SeriesEnd?
@@ -461,11 +692,31 @@ import TVCore
     @ObservationIgnored private var orderedCache: [Site]?
     @ObservationIgnored private var recommendationCache: [Site]?
     @ObservationIgnored private var groupsCache: [Bool: [SourceGroup]] = [:]
+    /// Which group each source is listed in, by `Site.id`, for search's group priority. Built from the
+    /// same cached grouping the page draws, so it cannot disagree with what the viewer sees.
+    @ObservationIgnored private var groupOfSiteCache: [String: String]?
     /// What the cached rows were built from: the merged subscription, which subscriptions are on, and the viewer's pins, hides, and order.
+    ///
+    /// `environments.activeID` is in here on purpose. Switching environments changes what the rows
+    /// should be, but two environments can agree on every other field — a fresh one has no pins, no
+    /// hides, no order, and (once the same subscription is copied to it) the same merged sites — so
+    /// without the environment id the stamp would match and the Sources page would keep drawing the
+    /// **previous** environment's cached rows. That is the "点播源里还残留着之前环境的东西" symptom
+    /// arriving by a path the per-store key partition cannot fix.
     private func currentSiteListStamp() -> String {
         let imported = subscription?.importedAt.timeIntervalSince1970 ?? 0
         let entries = environmentSubscriptions.map { "\($0.address)=\($0.enabled)" }.joined(separator: "\n")
-        return "\(subscription?.origin.absoluteString ?? "")|\(imported)|\(subscription?.sites.count ?? 0)|\(entries)|\(pinnedSources.revision)|\(hiddenSources.revision)|\(vault.revision)|\(sourceOrder.revision)|\(sourceReassignment.revision)|\(sourceGroupBook.revision)"
+        // ⛔ 每一个会改变「一个源怎么显示、怎么排序、怎么取数」的 store 的 revision 都必须在这里。
+        // 漏一个，改完那项设置就会静默不生效：缓存戳没变，`groupsCache` / `orderedCache` 继续发旧的
+        // `Site`，要等到别的戳碰巧变化才刷新。`sourceRouting`（直连/代理要重写 api）与
+        // `sourceOverrides`（改名/改 api）曾经就漏在这里，于是「改路由没反应」和「改名只在播放器里
+        // 生效」——两处都是这一类。
+        // ⛔ `deletedSources.revision` 也必须在里面。删源时我们同时写了 `hiddenSources`
+        // （它的 revision 会变，戳因此也会变），所以**当前看着不坏**——但这是靠同一条路径的
+        // 副作用兜住的。一旦将来某处只动 `deletedSources`（例如恢复/撤销、或忘了同步写 hidden），
+        // 缓存戳不动，`groupsCache` / `orderedCache` 会继续发旧 `Site`，删除静默失效。
+        // 用户刚踩过 `sourceRouting` / `sourceOverrides` 这两个同款坑，不要再留第三个。
+        return "\(environments.activeID.uuidString)|\(subscription?.origin.absoluteString ?? "")|\(imported)|\(subscription?.sites.count ?? 0)|\(entries)|\(pinnedSources.revision)|\(hiddenSources.revision)|\(deletedSources.revision)|\(vault.revision)|\(sourceOrder.revision)|\(sourceReassignment.revision)|\(sourceGroupBook.revision)|\(sourceRouting.revision)|\(sourceOverrides.revision)|\(searchScope.revision)"
     }
     private var persistsChanges: Bool {
         #if DEBUG
@@ -491,6 +742,8 @@ import TVCore
         #endif
         pinnedSources = PinnedSources(defaults: playbackDefaults)
         hiddenSources = HiddenSources(defaults: playbackDefaults)
+        deletedSources = DeletedSources(defaults: playbackDefaults)
+        searchScope = SearchScope(defaults: playbackDefaults)
         #if os(macOS) || os(iOS)
         WebSniff.install(WKWebSniffer())
         #endif
@@ -542,12 +795,31 @@ import TVCore
         // Favourites are partitioned the same way, and for the same reason.
         favorites.defaultEnvironmentID = loadedEnvironments.all.first?.id
         favorites.activeEnvironmentID = loadedEnvironments.activeID
+        // [mi3s] 二开：下载也按环境隔离。下载记录自带 `environmentID`（nil 归默认环境），
+        // 音乐下载同理。`DownloadLibrary.shared` / `MusicDownloadLibrary.shared` 是全局单例
+        // （下载队列跑在 App 上、不持有 Store），所以这里必须写进同一个实例，否则页面与
+        // 「这一集下过没有」的判断会各读一套。
+        DownloadLibrary.shared.defaultEnvironmentID = loadedEnvironments.all.first?.id
+        DownloadLibrary.shared.activeEnvironmentID = loadedEnvironments.activeID
+        MusicDownloadLibrary.shared.defaultEnvironmentID = loadedEnvironments.all.first?.id
+        MusicDownloadLibrary.shared.activeEnvironmentID = loadedEnvironments.activeID
+        // [mi3s] 二开：偏好式数据（置顶 / 隐藏 / 源排序 / 源改派 / 自定义分组）没有记录可打戳，
+        // 按 storage key 分环境。这里先把当前环境灌进去，各处 init 读的就是当前环境的那一份。
+        // init 里 `self` 还没整体就绪，只能走静态形式、把几个 store 显式传进去。
+        Self.applyEnvironment(loadedEnvironments, pinned: pinnedSources, hidden: hiddenSources,
+                              deleted: deletedSources,
+                              order: sourceOrder, reassignment: sourceReassignment,
+                              groups: sourceGroupBook, overrides: sourceOverrides,
+                              lines: lineSettings, routing: sourceRouting, search: searchScope)
         if let blob = playbackDefaults.data(forKey: Self.artworkLanguageKey),
            let decoded = try? JSONDecoder().decode(ArtworkLanguage.self, from: blob) { artworkLanguage = decoded }
         if let blob = playbackDefaults.data(forKey: Self.skipSourcesKey),
            let decoded = try? JSONDecoder().decode(SkipSegmentSources.self, from: blob) { skipSources = decoded }
-        if let blob = playbackDefaults.data(forKey: Self.resourceRankingKey),
-           let decoded = try? JSONDecoder().decode(ResourceRanking.self, from: blob) { resourceRanking = decoded }
+        if let blob = playbackDefaults.data(forKey: Self.resourceRankingKey(loadedEnvironments)),
+           let decoded = try? JSONDecoder().decode(ResourceRanking.self, from: blob) {
+            resourceRanking = decoded
+            resourceRankingEnvironmentID = loadedEnvironments.activeID
+        }
         if let blob = playbackDefaults.data(forKey: Self.vaultKey),
            let saved = try? JSONDecoder().decode(PrivacyVault.self, from: blob) {
             vault = saved
@@ -624,6 +896,9 @@ import TVCore
             }
         }
         searchModel.order = sourceOrder
+        // Search's group priority needs the same grouping the page draws; ask this store rather than
+        // rebuilding it there, so a group the viewer renamed or reordered is honoured at once.
+        searchModel.groupOf = { [weak self] site in self?.groupID(listing: site) ?? "" }
         DownloadLibrary.shared.resolver = { [weak self] item in
             guard let self else { throw CancellationError() }
             return try await self.resolveDownload(item)
@@ -901,8 +1176,24 @@ import TVCore
         for entry in removed {
             let stillUsed = subscriptions.contains { $0.address == entry.address }
             if !stillUsed {
+                // ⛔ 落地地址必须在 `documents[entry.address] = nil` **之前**取，否则永远读到 nil。
+                // 这是本函数的经典踩点：先清文档、再去问文档要 origin。
+                let landedOrigin = documents[entry.address]?.origin
                 documents[entry.address] = nil; subscriptionErrors[entry.address] = nil
                 if persistsChanges { try? FileManager.default.removeItem(at: Self.file(for: entry)); ImportedFiles.remove(entry.address) }
+                // 删订阅要连它名下的「真删子源」记账一起清掉。
+                // 不清的话，将来重新加回同一地址时那些源仍然记着「已删除」，
+                // 于是又隐形又不报错 —— 看起来像「重新导入少了一批源」。
+                // ⛔ 两个地址都要试：`entry.address` 是用户输入的那个，而键里存的是
+                // `site.origin(or:)`（= `provenance.origin`，重定向/镜像/协议升级后的落地地址）。
+                // 两者不等时只传其一会漏账，后果是「删订阅再重加，源永远不回来」。
+                var origins: [URL] = []
+                if let typed = URL(string: entry.address) { origins.append(typed) }
+                if let landedOrigin { origins.append(landedOrigin) }
+                deletedSources.forget(origins: origins)
+                // 隐藏标记也要一起清。只清真删的话，源回来时是隐藏态、落在「已隐藏」里，
+                // 用户看到的是「重新导入少了一批源」—— `deleteSite` 注释承诺的「源自然全部回来」不成立。
+                hiddenSources.forget(origins: origins)
             }
         }
         saveSubscriptionList()
@@ -942,11 +1233,55 @@ import TVCore
         documents.removeAll()
         Task { await restoreSubscription() }
     }
+    /// What merging one file would change, counted by source identity, so the import dialog can say
+    /// it before the viewer picks a mode instead of surprising them afterwards.
+    struct ImportSummary: Sendable {
+        var newSubscriptions = 0
+        var newSources = 0
+        var duplicateSources = 0
+        var newLivePlaylists = 0
+        /// How many subscriptions the file itself lists.
+        var listedSubscriptions = 0
+        /// Nothing in the file is missing from this device.
+        var addsNothing: Bool { newSubscriptions == 0 }
+    }
+
+    func previewImport(_ config: SubscriptionConfig) -> ImportSummary {
+        guard config.isValid else { return ImportSummary() }
+        var summary = ImportSummary()
+        summary.listedSubscriptions = config.subscriptions.count
+        var offered = Set<String>(), offeredLives = Set<URL>()
+        for entry in environmentSubscriptions where entry.enabled {
+            guard let document = documents[entry.address] else { continue }
+            offered.formUnion(document.fingerprints)
+            offeredLives.formUnion(document.lives.map(\.url))
+        }
+        let known = Set(environmentSubscriptions.map(\.address))
+        for synced in config.subscriptions.sorted(by: { ($0.rank, $0.entry.address) < ($1.rank, $1.entry.address) })
+        where !known.contains(synced.entry.address) {
+            guard let document = synced.document else { summary.newSubscriptions += 1; continue }
+            let fresh = document.fingerprints.subtracting(offered)
+            let freshLives = document.lives.filter { !offeredLives.contains($0.url) }
+            summary.duplicateSources += document.sites.count - fresh.count
+            guard !fresh.isEmpty || !freshLives.isEmpty else { continue }
+            summary.newSubscriptions += 1
+            summary.newSources += fresh.count
+            summary.newLivePlaylists += freshLives.count
+            offered.formUnion(fresh)
+            offeredLives.formUnion(freshLives.map(\.url))
+        }
+        return summary
+    }
+
     /// Merges a configuration file in. `overwrite` decides what happens to an address that is
     /// already present: by default (merge) it is left untouched, so re-importing never duplicates or
     /// overwrites; with `overwrite` the file's name, enabled state and routing win, so a backup
     /// restores the exact state it was exported in. In both modes the list is reordered to the
     /// file's rank, and a fresh entry that carries a content snapshot is restored without a fetch.
+    ///
+    /// Merge mode also skips a new subscription whose sources are all on screen already, compared by
+    /// `Site.fingerprint` rather than by address: bundles from different rounds list the same providers
+    /// under different addresses, and adding them all made one site answer three searches.
     func importConfig(_ config: SubscriptionConfig, overwrite: Bool = false) {
         guard config.isValid else {
             importError = L10n.text("This isn't a Mi3s configuration file.")
@@ -968,13 +1303,40 @@ import TVCore
             subscriptions.removeAll { $0.address == entry.address && environments.shows($0.environmentID) }
             let stillUsed = subscriptions.contains { $0.address == entry.address }
             if !stillUsed {
+                // ⛔ 与 `removeSubscriptions` 同款：导入配置会**删掉不在文件里的订阅**，
+                // 那条路径也必须清它的「真删子源」记账。漏了就是：用户导入一份不含某订阅的
+                // 配置 → 该订阅被移除、记账还留着 → 之后再把那个订阅加回来，
+                // 那批源永远不出现，而 `undeleteSite` 已删，**没有任何入口能救**。
+                // 落地地址要在清 documents 之前取。
+                let landedOrigin = documents[entry.address]?.origin
                 documents[entry.address] = nil; subscriptionErrors[entry.address] = nil
                 if persistsChanges { try? FileManager.default.removeItem(at: Self.file(for: entry)); ImportedFiles.remove(entry.address) }
+                var origins: [URL] = []
+                if let typed = URL(string: entry.address) { origins.append(typed) }
+                if let landedOrigin { origins.append(landedOrigin) }
+                deletedSources.forget(origins: origins)
+                // 隐藏标记也要一起清。只清真删的话，源回来时是隐藏态、落在「已隐藏」里，
+                // 用户看到的是「重新导入少了一批源」—— `deleteSite` 注释承诺的「源自然全部回来」不成立。
+                hiddenSources.forget(origins: origins)
             }
         }
 
         var added: [SubscriptionEntry] = []
         var restored: [(SubscriptionEntry, Subscription)] = []
+        /// What the environment already offers, by source identity rather than by address. Merge mode
+        /// keeps every subscription already on screen, so a bundle that repeats them would otherwise
+        /// add a subscription per address while the merged list holds each provider once — a file that
+        /// adds nothing but duplicates used to grow the list on every import. A subscription whose
+        /// sources are all here already is not added at all.
+        var offered = Set<String>(), offeredLives = Set<URL>()
+        if !overwrite {
+            for entry in environmentSubscriptions where entry.enabled {
+                guard let document = documents[entry.address] else { continue }
+                offered.formUnion(document.fingerprints)
+                offeredLives.formUnion(document.lives.map(\.url))
+            }
+        }
+        var skipped = 0
 
         for synced in incoming {
             if var entry = current[synced.entry.address] {
@@ -990,6 +1352,13 @@ import TVCore
                 // A subscription the file has and this device does not. It used to be collected and
                 // never inserted, which is why a fresh install could not restore anything. Stamped to
                 // the active environment so an import lands in the sandbox on screen.
+                if !overwrite, let document = synced.document {
+                    let fresh = document.fingerprints.subtracting(offered)
+                    let freshLives = document.lives.filter { !offeredLives.contains($0.url) }
+                    guard !fresh.isEmpty || !freshLives.isEmpty else { skipped += 1; continue }
+                    offered.formUnion(fresh)
+                    offeredLives.formUnion(freshLives.map(\.url))
+                }
                 let stamped = stamping(synced.entry)
                 subscriptions.append(stamped)
                 added.append(stamped)
@@ -998,7 +1367,9 @@ import TVCore
         }
 
         guard !added.isEmpty || overwrite || removedCount > 0 else {
-            notice = L10n.text("Every subscription in this file is already imported; nothing was added.")
+            notice = skipped > 0
+                ? L10n.text("Nothing new: the %lld subscriptions in this file list only sources you already have.", skipped)
+                : L10n.text("Every subscription in this file is already imported; nothing was added.")
             return
         }
 
@@ -1015,6 +1386,9 @@ import TVCore
             notice = L10n.text("Imported %lld subscriptions.", added.count)
         } else {
             notice = L10n.text("Removed %lld subscriptions that this file does not list.", removedCount)
+        }
+        if skipped > 0, !overwrite {
+            notice = (notice.map { $0 + " " } ?? "") + L10n.text("Skipped %lld: everything they list is already here.", skipped)
         }
     }
 
@@ -1085,8 +1459,39 @@ import TVCore
         documents[entry.address] = value
         subscriptionErrors[entry.address] = nil
         if persistsChanges, let data = try? JSONEncoder().encode(value) { try? Self.save(data, to: Self.file(for: entry)) }
+        // [mi3s] 二开：接管配置里夹带的测速读数。
+        //
+        // 外部生成的订阅（`*-ranked.json`）会把测速结果写进每个源的 `raw`：
+        // `_route` / `_speedKBps` / `_mbps` / `_quality`。此前我们**完全不读**这些字段，
+        // 于是 341 个源里那 38 个已经测过的等于白测，用户还得自己再跑一遍全量。
+        //
+        // 放在 `keep()` 而不是各个下载/解析分支里：这是所有订阅内容的唯一写入口
+        // （本地导入、远端刷新、云同步三路都过它），一处接线就全覆盖。
+        importBundledReadings(value)
     }
-    private func saveSubscriptionList() {
+
+    /// 把一份订阅里自带的测速读数交给探测库。
+    ///
+    /// 判定（两个速度字段是否矛盾、`_route` 怎么说）全在 `SourceProbeImport`，
+    /// 这里只负责遍历与汇总 —— 判定逻辑留在 TVCore 才有测试钉着。
+    ///
+    /// 不覆盖更新的自测读数由 `importReadings` 自己保证，所以反复刷新不会把
+    /// 用户刚测的实时数据冲回导出那一刻的旧值。
+    private func importBundledReadings(_ value: Subscription) {
+        var found: [String: SourceProbeResult] = [:]
+        for site in value.sites {
+            guard let reading = SourceProbeImport.reading(from: site.raw) else { continue }
+            found[site.sourceKey] = reading
+        }
+        guard !found.isEmpty else { return }
+        let written = SourceProbeStore.shared.importReadings(found)
+        guard written > 0 else { return }
+        Diagnostics.shared.record(.info, "probe",
+            "imported \(written) readings from \(value.origin.host() ?? value.origin.absoluteString)")
+    }
+    /// 放宽到 `internal`：`Store+SearchScope.swift`（另一个文件里的 extension）要用它改订阅名。
+    /// 与 `remember(_:client:for:)` 同一个理由 —— 复制一份写盘逻辑必然与这里走散。
+    func saveSubscriptionList() {
         guard persistsChanges else { return }
         defaults.set(try? JSONEncoder().encode(subscriptions), forKey: "subscriptions")
         cloudSync?.changed("subscriptions")
@@ -1101,6 +1506,7 @@ import TVCore
         guard let sync = cloudSync else { return }
         let favorites = favorites, history = playbackHistory, pinned = pinnedSources, hidden = hiddenSources, order = sourceOrder
         let routing = sourceRouting, overrides = sourceOverrides, lines = lineSettings, reassignment = sourceReassignment
+        let deleted = deletedSources
         sync.register("favorites", current: { favorites.syncValues }, apply: { favorites.adopt($0) })
         sync.register("history", delay: .seconds(30), current: { Dictionary(history.entries.map { ($0.environmentKey, $0) }, uniquingKeysWith: { first, _ in first }) },
                       apply: { history.adopt($0.map(\.value)) })
@@ -1108,9 +1514,25 @@ import TVCore
         sync.register("pinnedSources", current: { CloudSync.ranks(pinned.savedKeys) }, apply: { pinned.adopt(CloudSync.ordered($0)) })
         sync.register("hiddenSources", current: { Dictionary(hidden.savedKeys.map { ($0, true) }, uniquingKeysWith: { first, _ in first }) },
                       apply: { hidden.adopt($0.sorted { ($0.stamp, $0.id) < ($1.stamp, $1.id) }.map(\.id)) })
+        // 真删的子源也要跟着走。不注册的话，另一台设备只收到 `hiddenSources`，
+        // 删掉的源在那边以「已隐藏」出现并带 Unhide —— 删除语义被降级成隐藏。
+        sync.register("deletedSources", current: { Dictionary(deleted.savedKeys.map { ($0, true) }, uniquingKeysWith: { first, _ in first }) },
+                      apply: { deleted.adopt($0.sorted { ($0.stamp, $0.id) < ($1.stamp, $1.id) }.map(\.id)) })
         sync.register("sourceOrder", current: { CloudSync.ranks(order.savedKeys) }, apply: { order.adopt(CloudSync.ordered($0)) })
         // Only "on" is an item: a new device's default (off) is no change, so it can't switch the order off everywhere.
         sync.register("sourceOrderOn", current: { order.enabled ? ["on": true] : [:] }, apply: { if order.enabled == $0.isEmpty { order.enabled = !$0.isEmpty } })
+        // The group ranking follows the viewer too: it is a ranking they set up over an hour, and a
+        // new device that fell back to the automatic order would quietly disagree with the old one.
+        sync.register("sourceGroupOrder", current: { CloudSync.ranks(order.savedGroupOrder) }, apply: { order.saveGroupOrder(CloudSync.ordered($0)) })
+        // 自定义分组也要跟人走。它是唯一一个此前既不跨设备、也不跨环境的偏好 store：
+        // 在这台机器上把 300 个源分好组，换一台打开是一片散沙 —— 而分组正是最费时的那项整理。
+        // `adopt` 按名合并（不产生两个同名组），所以两台各建过组也不会互相覆盖。
+        let groupBook = sourceGroupBook
+        sync.register("sourceGroups",
+                      current: { Dictionary(groupBook.groups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) },
+                      // `complete: true`：这份列表是远端的全部。不带它，「删掉一个分组」
+                      // 在同步里永远不生效 —— 只增不删的合并会留着本地那条，下一轮又推回云端。
+                      apply: { groupBook.adopt($0.map(\.value), complete: true) })
         // The source-level edits follow the viewer too. They were left out of the first pass, so a
         // rename, an API override, a hidden line or a moved source only lived on the device that made it.
         sync.register("sourceRouting", current: { routing.savedValues }, apply: { routing.adopt(Self.dictionary($0)) })
@@ -1133,7 +1555,11 @@ import TVCore
         history.onChange = { sync.changed("history"); self.persistKeychainBackup() }
         pinned.onChange = { sync.changed("pinnedSources") }
         hidden.onChange = { sync.changed("hiddenSources") }
-        order.onChange = { sync.changed("sourceOrder"); sync.changed("sourceOrderOn") }
+        // 没有这一行，上面那条 `register("deletedSources")` 永远不会被推上去：
+        // `DeletedSources.onChange` 声明了却没人挂，删源在别的设备上完全不可见。
+        deleted.onChange = { sync.changed("deletedSources") }
+        order.onChange = { sync.changed("sourceOrder"); sync.changed("sourceOrderOn"); sync.changed("sourceGroupOrder") }
+        sourceGroupBook.onChange = { sync.changed("sourceGroups") }
         routing.onChange = { sync.changed("sourceRouting") }
         overrides.onChange = { sync.changed("sourceOverrides") }
         lines.onChange = { sync.changed("lineSettings") }
@@ -1164,8 +1590,18 @@ import TVCore
         guard next != subscriptions else { return }
         let kept = Set(next.map(\.address))
         for entry in subscriptions where !kept.contains(entry.address) {
+            // 与另外两条删订阅路径同款：清掉该订阅名下的「真删子源」记账，
+            // 否则本机永久留孤儿（那批源以后即使同一个订阅回来也永不显示）。
+            let landedOrigin = documents[entry.address]?.origin
             documents[entry.address] = nil; subscriptionErrors[entry.address] = nil
             try? FileManager.default.removeItem(at: Self.file(for: entry))
+            var origins: [URL] = []
+            if let typed = URL(string: entry.address) { origins.append(typed) }
+            if let landedOrigin { origins.append(landedOrigin) }
+            deletedSources.forget(origins: origins)
+            // 隐藏标记也要一起清。只清真删的话，源回来时是隐藏态、落在「已隐藏」里，
+            // 用户看到的是「重新导入少了一批源」—— `deleteSite` 注释承诺的「源自然全部回来」不成立。
+            hiddenSources.forget(origins: origins)
         }
         subscriptions = next
         saveSubscriptionList()
@@ -1173,15 +1609,26 @@ import TVCore
         else { rebuildSubscription() }
     }
     /// Shows every enabled subscription that has a copy, merged in list order.
-    private func rebuildSubscription(resetting: Bool = true) {
+    /// Not private: the grouping and routing batches in Store+SourceGrouping write through it.
+    func rebuildSubscription(resetting: Bool = true) {
         if resetting { searchModel.reset(); recommendationModel.reset() }
         subscription = Subscription.merge(environmentSubscriptions.filter(\.enabled).compactMap { documents[$0.address] })?.withCloudSources(extrasUnlocked ? cloudDocument : nil)
         if let subscription { applySourceRouting(subscription) }
         refreshCloudSources()
         if let subscription {
             Self.registerPlugins(subscription)
-            hiddenSources.restoreBuiltIns(subscription.sites, origin: subscription.origin)
-            hiddenSources.restoreAutoHidden(subscription.sites, origin: subscription.origin, health: .shared)
+            // ⛔ 这两句会**移除隐藏标记**。它们不看 `deletedSources` ——
+            // 而 `deletedSources` 只在隐藏计数里被读，列表过滤只认 `hiddenSources`。
+            // 于是「真删」的内置源 / 曾失败过的源会在这一句里被重新显示出来：
+            // 删了、刷新一下、又回来了 —— 用户看到的就是「删除失效」。
+            //
+            // 修法：先把真删的源从入参里剔掉，再交给这两个一次性迁移。
+            // 它们本来就是「把历史遗留的隐藏恢复一遍」的补丁，没有理由去碰用户刚刚删掉的源。
+            let restorable = subscription.sites.filter {
+                !deletedSources.contains($0, origin: subscription.origin)
+            }
+            hiddenSources.restoreBuiltIns(restorable, origin: subscription.origin)
+            hiddenSources.restoreAutoHidden(restorable, origin: subscription.origin, health: .shared)
             #if os(iOS) || os(tvOS)
             // Converts the visible JAR sources' likely classes while the app sits idle (issue #274).
             let visible = subscription.sites.filter { !hiddenSources.contains($0, origin: subscription.origin) }
@@ -1190,6 +1637,28 @@ import TVCore
             #endif
         }
         adoptLegacyMoves()
+        pruneGroupOrder()
+        // 真删记账只增不减会跟着同步/备份无限膨胀。按现存订阅地址回收一次 ——
+        // 放在这里而不是删订阅处，是因为「哪些订阅还活着」只有重建后才是最终答案。
+        var live = Set(environmentSubscriptions.map(\.address))
+        if let landed = subscription?.origin.absoluteString { live.insert(landed) }
+        deletedSources.prune(live: live)
+    }
+
+    /// Forgets ranking entries that no longer name anything: a deleted custom group, a removed
+    /// subscription. Without it a stale id keeps a place in the ranking for ever, and a real group
+    /// sits permanently below a group that does not exist.
+    ///
+    /// The five kinds of id a source group can carry are all that can be named, so this keeps exactly
+    /// those plus the ids of the viewer's own groups.
+    private func pruneGroupOrder() {
+        guard sourceOrder.hasGroupOrder else { return }
+        var known: Set<String> = ["pinned", "builtIn", "other", "hidden"]
+        // Only switched-on subscriptions have a section (`SourceGroups.make` skips disabled ones),
+        // so a switched-off address must not hold a ranking slot the page cannot show or adjust.
+        known.formUnion(environmentSubscriptions.filter(\.enabled).map(\.address))
+        known.formUnion(sourceGroupBook.groups.map(\.target))
+        sourceOrder.pruneGroupOrder(keeping: known)
     }
 
     /// Folds moves saved by a build that keyed them by the subscription's origin into the record the
@@ -1323,7 +1792,26 @@ import TVCore
         let targetName = target?.title ?? address.flatMap { sourceGroupBook.group(forTarget: $0)?.name } ?? ""
         sourceReassignment.reassign(site, address: own, origin: origin,
                                     to: address, targetName: targetName)
-        rebuildSubscription()
+        // A batch suppresses this and rebuilds once; see `Store.performBatch`.
+        if !suppressRebuild { rebuildSubscription() }
+    }
+
+    /// Takes one source out of every group and subscription — 「未分组」.
+    ///
+    /// 与 `reassignSource(site, to: nil)` 的区别：nil 是「放回原订阅」，而这是「放到不属于任何
+    /// 订阅的未分组里」。两者都是显式去路，用户需要能区分，否则「我把它移出去」做不到 ——
+    /// 唯一的「移出」动作会把它送回原处。
+    func moveSourceToUngrouped(_ site: Site) {
+        reassignSource(site, to: CustomSourceGroup.ungroupedTarget)
+    }
+
+    /// 这个源当前是不是「未分组」。
+    func isUngrouped(_ site: Site) -> Bool {
+        guard let config = subscription else { return false }
+        return sourceReassignment.destination(address: entryAddress(of: site) ?? site.origin(or: config.origin).absoluteString,
+                                              sourceKey: site.sourceKey,
+                                              origin: site.provenance?.origin)
+            .map(CustomSourceGroup.isUngrouped) ?? false
     }
 
     /// Sets one source's route; `.auto` follows connectivity, the others pin it.
@@ -1382,6 +1870,10 @@ import TVCore
         let sourceKey: String
         let videoID: String
         let rows: [ProbeRow]
+        /// 阶段 1 在这一批之前筛掉了多少源。只有批次里的**第一个**带它（其余为 0），
+        /// 让消费方能把进度分母从「全部源」校正为「真正要细测的源」——
+        /// 否则 350 个源筛掉 200 个时，进度条会停在 150/350 然后凭空消失。
+        var screenedOut = 0
     }
 
     /// Starts measuring every listed source — built-in ones included.
@@ -1390,43 +1882,142 @@ import TVCore
     /// deadline. It used to run on the main actor, one source after another, waiting for a plugin to
     /// compile and a dead host to time out at every step: the app looked frozen because it was. The
     /// reader can stop it, and the progress is visible while it runs.
-    func startProbingAllSources() {
+    /// 全量探测。
+    ///
+    /// - Parameter fast: true 时用 `.bulk` 调度（阶段 2 并发 16 而不是 4）。
+    ///
+    /// ⛔ `standard` 的 4 路并发是按「插件编译抢 CPU」定的，对**纯 HTTP 线路测速**过于保守：
+    /// 340 个源 4 路要排 85 轮、每轮约 3 秒 → 4 分钟以上，这就是「探测缓慢」的来源。
+    /// `.bulk` 开到 16 路，同样 340 源约 21 轮、1 分钟内跑完。
+    func startProbingAllSources(fast: Bool = true) {
         guard let config = subscription else { return }
-        runProbe(probeTargets(config))
+        runProbe(probeTargets(config, skippingFresh: probeMaxAge),
+                 schedule: fast ? .bulk : .standard)
+    }
+
+    /// How old a reading may be before a sweep counts it as stale. Ten minutes by default: pressing
+    /// the button twice costs nothing, and a source that broke an hour ago is still re-checked. 0 on
+    /// the speed page means never skip.
+    var probeMaxAge: TimeInterval {
+        get {
+            // 默认值与 `SourceProbeResult.isStale` 的容差同源：两处回答的是同一个问题
+            //（「多旧的读数还算数」），各写一个常数就会对同一条读数给出相反结论。
+            playbackDefaults.object(forKey: "sourceProbeMaxAge") == nil
+                ? sourceProbeStaleness : playbackDefaults.double(forKey: "sourceProbeMaxAge")
+        }
+        set {
+            playbackDefaults.set(newValue, forKey: "sourceProbeMaxAge")
+            probeSkipped = nil
+        }
+    }
+
+    /// 上一轮被**阶段 1 筛掉**（连不上 / 服务器报错）而没进入细测的源数。
+    /// 和 `probeSkipped`（读数还新）是两回事，页面要说清是哪一种。
+    private(set) var probeScreenedOut: Int?
+    /// What the last sweep left out because its reading was still good. A button that measured 12 of
+    /// 353 sources must say so, or it reads as broken.
+    private(set) var probeSkipped: Int?
+
+    private func needsProbing(_ sourceKey: String, maxAge: TimeInterval) -> Bool {
+        guard maxAge > 0 else { return true }
+        guard let reading = SourceProbeStore.shared.latest(sourceKey: sourceKey) else { return true }
+        return reading.measuredAt.timeIntervalSinceNow < -maxAge
     }
 
     /// Measures just these sources — the ones in one group, or the ones the reader ticked. A full
     /// sweep of 350 sources takes minutes; re-checking the twenty that survived is the common case.
     func startProbing(_ sites: [Site]) {
-        guard let config = subscription else { return }
-        var seen = Set<String>()
-        let targets = sites
-            .filter { seen.insert($0.id).inserted }
-            .map { ProbeTarget(site: $0, origin: $0.origin(or: config.origin), jarURL: config.spiderURL) }
-        runProbe(targets)
+        startProbing(sites, skippingFresh: 0)
     }
 
-    private func runProbe(_ targets: [ProbeTarget]) {
+    /// The same, incremental: a source measured within maxAge seconds is left alone, and what was
+    /// skipped is reported so the page can say so. 0 forces a fresh reading for every source.
+    func startProbing(_ sites: [Site], skippingFresh maxAge: TimeInterval, fast: Bool = true) {
+        guard let config = subscription else { return }
+        var seen = Set<String>()
+        let chosen = sites.filter { seen.insert($0.id).inserted }
+        let targets = chosen.map { ProbeTarget(site: $0, origin: $0.origin(or: config.origin), jarURL: config.spiderURL) }
+        // The bulk schedule, by default, for the same reason "measure everything" uses it: a reader
+        // who tapped "measure this subscription" is watching a progress bar, and the standard
+        // schedule is four times more polite about concurrency than that moment calls for.
+        let schedule: ProbeSchedule = fast ? .bulk : .standard
+        guard maxAge > 0 else {
+            probeSkipped = nil
+            runProbe(targets, schedule: schedule)
+            return
+        }
+        let fresh = targets.filter { needsProbing($0.site.sourceKey, maxAge: maxAge) }
+        probeSkipped = targets.count - fresh.count
+        runProbe(fresh, schedule: schedule)
+    }
+
+    private func runProbe(_ targets: [ProbeTarget], schedule: ProbeSchedule = .standard) {
         guard probeTask == nil, !targets.isEmpty else { return }
         probeRun = ProbeRun(done: 0, total: targets.count)
+        // 收尾整理要知道「这一轮测了哪些源」——只整理测过的，没测的不该被顺手移动。
+        probeSwept = targets.map(\.site)
         let token = UUID()
         probeToken = token
         probeTask = Task { [weak self] in
             var done = 0
-            for await batch in Self.probeBatches(targets) {
+            // 分母先按「全部源」建，第一条批次到了再按阶段 1 的结果校正 ——
+            // 否则被筛掉的那些永远等不到自己的 done，进度条走不满就消失。
+            var total = targets.count
+            for await batch in Self.probeBatches(targets, schedule: schedule) {
                 if !batch.videoID.isEmpty {
                     SourceProbeStore.shared.record(batch.rows.map { ($0.result, $0.flag) },
                                                    sourceKey: batch.sourceKey, videoID: batch.videoID)
                 }
+                if batch.screenedOut > 0 {
+                    total = max(0, total - batch.screenedOut)
+                    self?.probeScreenedOut = batch.screenedOut
+                }
                 done += 1
                 guard self?.probeToken == token else { return }
-                self?.probeRun = ProbeRun(done: done, total: targets.count)
+                self?.probeRun = ProbeRun(done: done, total: max(done, total))
                 if Task.isCancelled { break }
             }
             guard self?.probeToken == token else { return }
             self?.probeRun = nil
             self?.probeTask = nil
+            // ★ 测完就按结果重排优先顺序（用户的第二项要求）。
+            //
+            // 此前 `sortScore` 只在显示层用来上色，**从没写过顺序** ——
+            // 于是「测完速」对搜索顺序与列表顺序毫无影响，用户还得自己拖。
+            // 改成：一轮扫描结束后按得分降序写回 `SourceOrder`，下一次搜索就按新顺序问源。
+            if let swept = self?.probeSwept {
+                self?.lastTidyNote = self?.tidyAfterSweep(swept, tidy: self?.postSweepTidy ?? .standard)
+            }
         }
+    }
+
+    /// 按最新测速得分重排源的优先顺序。
+    ///
+    /// 只动**测过**的源；没测过的原地垫后（没测过≠坏）。
+    /// `pinned` 里钉住的永远排最前 —— 用户钉过的意图高于任何测量。
+    @MainActor
+    func reorderSourcesByProbeResult() {
+        guard let config = subscription else { return }
+        // 只重排当前可见的源：隐藏/保险库里的源不参与，也不该被排出顺序。
+        let sites = sourceGroups(includeHidden: false)
+            .filter { $0.kind != .hidden }
+            .flatMap(\.sites)
+        guard !sites.isEmpty else { return }
+        // 钉住的源按 `PinnedSources.contains(_:origin:)` 判定，再折算成键集合
+        // （`reorderByProbe` 要的是键，因为它写的就是键数组）。
+        let pinned = Set(sites.filter { pinnedSources.contains($0, origin: config.origin) }
+            .map { EpisodeSkipSettings.scope(origin: $0.origin(or: config.origin),
+                                             source: $0.sourceKey, video: "") })
+        // `reorderByProbe` 内部已经 bump `revision` 并触发 `onChange`，这里不要再动它
+        // （`revision` 是 `private(set)`，外部写不进也只该有一个写入点）。
+        _ = sourceOrder.reorderByProbe(
+            sites,
+            origin: config.origin,
+            // ⛔ 收的是 `Site`，不是键：`SourceOrder` 内部的键是 scope-JSON，
+            // 拿它查以裸 `sourceKey` 为键的探针库必然全 nil，重排就成了空操作。
+            score: { site in SourceProbeStore.shared.latest(sourceKey: site.sourceKey)?.sortScore },
+            pinnedKeys: pinned
+        )
     }
 
     /// Stops a running sweep. Results already measured stay.
@@ -1440,37 +2031,69 @@ import TVCore
     /// Every source the page lists, once each: pinned, built-in, then each subscription's, in the
     /// order they are drawn. Built-in sources are as much a part of "probe everything" as the rest,
     /// and used to be left out because the sweep only walked the automatic list.
-    private func probeTargets(_ config: Subscription) -> [ProbeTarget] {
+    private func probeTargets(_ config: Subscription, skippingFresh maxAge: TimeInterval = 0) -> [ProbeTarget] {
         var seen = Set<String>()
         var targets: [ProbeTarget] = []
+        var skipped = 0
         for group in sourceGroups(includeHidden: false) where group.kind != .hidden {
             for site in group.sites where seen.insert(site.id).inserted {
-                targets.append(ProbeTarget(site: site, origin: config.origin, jarURL: config.spiderURL))
+                // The incremental part: a reading newer than the window is trusted, so pressing the
+                // button again after a sweep costs almost nothing instead of re-measuring 350 sources.
+                if maxAge > 0, !needsProbing(site.sourceKey, maxAge: maxAge) {
+                    skipped += 1
+                    continue
+                }
+                // `site.origin(or:)`, not `config.origin`: a merged subscription's `origin` is only
+                // the first feed's (`Subscription.merge` keeps `first.origin`), so probing every
+                // source against it resolves the second feed's relative api against the wrong host —
+                // and a source whose API then 404s is recorded as unreachable when it is fine.
+                // `startProbing` has always used the per-source origin; this is the same rule.
+                targets.append(ProbeTarget(site: site, origin: site.origin(or: config.origin), jarURL: config.spiderURL))
             }
         }
+        probeSkipped = maxAge > 0 ? skipped : nil
         return targets
     }
 
     /// The sweep, as a stream of per-source batches. The producer runs detached, so neither a slow
     /// host nor a plugin's first compile can hold the main actor.
-    private nonisolated static func probeBatches(_ targets: [ProbeTarget]) -> AsyncStream<ProbeBatch> {
+    private nonisolated static func probeBatches(_ targets: [ProbeTarget],
+                                                schedule: ProbeSchedule = .standard) -> AsyncStream<ProbeBatch> {
         AsyncStream { continuation in
             let task = Task.detached(priority: .utility) {
+                // ── 阶段 1：廉价筛 ───────────────────────────────────────────────
+                //
+                // 对能直接打 HTTP 的源各发一次 2 KB 请求，先判掉「连不上 / 服务器报错 /
+                // 慢到不值得细测」的那一批。旧实现对所有源都直接走重路径（抓主页 + 4 条线路
+                // 各 256 KB），一个死源也要花 25 秒超时 + 1 MB 流量才能得出
+                // 「它不可用」这个本来一个请求就能知道的结论。
+                //
+                // 插件源筛不了，`SourceScreen` 会返回 `.unknown` 并**放行** ——
+                // 把它们判死会得到「插件没启动所以超时」的假负结论，比不筛更糟。
+                let (survivors, dropped) = await screen(targets, schedule: schedule)
+                // 筛掉的源不产出批次，第一条批次把它带出去，供消费方校正进度分母。
+                var pendingScreenedOut = dropped
+
                 await withTaskGroup(of: ProbeBatch?.self) { group in
-                    // Two sources at a time: enough to keep the network busy without a burst of
-                    // plugin compiles competing for the same device.
-                    let width = 2
+                    // 阶段 2 的并发受插件编译限制：比阶段 1 低得多。
+                    // 阶段 1 纯 HTTP，所以那里可以开到 `schedule.screenWidth`。
+                    let width = schedule.measureWidth
                     var next = 0
                     func launch() -> Bool {
-                        guard next < targets.count, !Task.isCancelled else { return false }
-                        let target = targets[next]
+                        guard next < survivors.count, !Task.isCancelled else { return false }
+                        let target = survivors[next]
                         next += 1
                         group.addTask { await probe(target) }
                         return true
                     }
                     for _ in 0..<width { if !launch() { break } }
                     for await batch in group {
-                        if let batch { continuation.yield(batch) }
+                        if let batch {
+                            var batch = batch
+                            batch.screenedOut = pendingScreenedOut
+                            pendingScreenedOut = 0
+                            continuation.yield(batch)
+                        }
                         if !launch() { continue }
                     }
                     continuation.finish()
@@ -1480,23 +2103,139 @@ import TVCore
         }
     }
 
+    /// 阶段 1：并发筛。返回值得细测的源。
+    ///
+    /// 并发用 `schedule.screenWidth`（默认 16）：这一阶段不发插件调用、不编译脚本，
+    /// 只发 HTTP，瓶颈在网络与主机轮换。旧的 2 路并发是按「插件编译会抢 CPU」定的，
+    /// 对纯 HTTP 的筛来说过于保守 —— 341 个源按 2 路筛要跑几十秒，按 16 路只要几秒。
+    private nonisolated static func screen(_ targets: [ProbeTarget],
+                                          schedule: ProbeSchedule) async -> (kept: [ProbeTarget], dropped: Int) {
+        guard !targets.isEmpty else { return ([], 0) }
+        var kept: [(Int, ProbeTarget)] = []
+        await withTaskGroup(of: (Int, ProbeTarget)?.self) { group in
+            var next = 0
+            func launch() -> Bool {
+                guard next < targets.count, !Task.isCancelled else { return false }
+                let index = next
+                let target = targets[index]
+                next += 1
+                group.addTask {
+                    // 筛不了的（插件源、内置源）直接放行。
+                    guard SourceScreen.screenable(target.site, jarURL: target.jarURL) else {
+                        return (index, target)
+                    }
+                    // ⛔ 必须把源自己的请求头带上。`source.raw["header"]` 是源声明的
+                    // Referer / UA —— 要它的 CDN 对裸请求回 403，而 403 在这里判 `.drop`，
+                    // 于是「有头的源」被系统性筛掉、整轮不细测。细测路径（`CatalogClient`
+                    // 走 `preparePlayback`）本来就带这组头，所以那道缝只在筛阶段存在。
+                    let declared = target.site.raw["header"]?.object?.compactMapValues(\.string) ?? [:]
+                    let verdict = await SourceScreen.screen(target.site, origin: target.origin,
+                                                            headers: declared, schedule: schedule)
+                    if verdict.verdict.shouldMeasure {
+                        Diagnostics.shared.record(.info, "probe",
+                            "screen keep \(target.site.sourceKey) \(verdict.detail) \(verdict.milliseconds ?? -1)ms")
+                        return (index, target)
+                    }
+                    Diagnostics.shared.record(.info, "probe",
+                        "screen drop \(target.site.sourceKey) \(verdict.verdict.rawValue) \(verdict.detail)")
+                    return nil
+                }
+                return true
+            }
+            for _ in 0..<schedule.screenWidth { if !launch() { break } }
+            for await row in group {
+                if let row { kept.append(row) }
+                if !launch() { continue }
+            }
+        }
+        // 恢复原始顺序：并发完成的顺序是随机的，而扫描进度与「第几个源」要可对齐。
+        let survivors = kept.sorted { $0.0 < $1.0 }.map(\.1)
+        // 被筛掉的源要能被报告出来。此前它们既不产出 batch、也不进 `probeSkipped`，
+        // 于是进度条永远走不满就消失，而页面不会说「为什么少测了 200 个」。
+        return (survivors, targets.count - survivors.count)
+    }
+
     /// One source: its home page for a representative video, then that video's lines.
+    ///
+    /// Each line is **resolved** through `preparePlayback` → `resolvePlayback` before it is measured —
+    /// the two steps the episode picker and the cross-source panel already take. That is not a
+    /// nicety: for a type 3/4 source an `Episode.address` is a *play parameter* ("第1集$abc123"),
+    /// not a URL. Probing it directly measured an address that does not exist, so every such source
+    /// came out unreachable, and 「按测速结果分组」filed working sources into 「不通」.
+    /// `URL(string: "abc123")` returns a *relative* URL rather than nil, which is why the old
+    /// `URL(string: $0.address) != nil` filter let every one of them through.
+    ///
+    /// Resolving also yields `channel.headers`. A CDN that wants a Referer answers 403 to a bare
+    /// request, so a source that plays fine from the picker was measured dead here.
     private nonisolated static func probe(_ target: ProbeTarget) async -> ProbeBatch {
         let client = CatalogClient(site: target.site, origin: target.origin, jarURL: target.jarURL)
         let empty = ProbeBatch(sourceKey: target.site.sourceKey, videoID: "", rows: [])
         guard let page = await withDeadline(seconds: 25, { try await client.home() }),
               let video = page.videos.first else { return empty }
-        let lines = video.episodes.filter { !$0.flag.isEmpty && URL(string: $0.address) != nil }
+        // One episode per line is enough to judge the line: probing every episode would multiply the
+        // work by the episode count without changing the verdict.
+        var firstPerFlag: [(flag: String, episode: Episode)] = []
+        var seenFlags = Set<String>()
+        for episode in video.episodes where !episode.flag.isEmpty {
+            if seenFlags.insert(episode.flag).inserted { firstPerFlag.append((episode.flag, episode)) }
+        }
         var rows: [ProbeRow] = []
         await withTaskGroup(of: ProbeRow?.self) { group in
             var next = 0
             func launch() -> Bool {
-                guard next < lines.count, !Task.isCancelled else { return false }
-                let episode = lines[next]
+                guard next < firstPerFlag.count, !Task.isCancelled else { return false }
+                let (flag, episode) = firstPerFlag[next]
                 next += 1
                 group.addTask {
-                    guard let url = URL(string: episode.address) else { return nil }
-                    return ProbeRow(flag: episode.flag, result: await SourceProbeRunner.probe(url: url))
+                    // Resolve first: the address may be a play parameter, and the answer carries the
+                    // headers the CDN actually wants. A line that will not resolve is left unmeasured
+                    // rather than filed as dead — the same rule the picker follows.
+                    guard let target = await ProbePlanTarget.resolve(episode, client: client) else { return nil }
+                    let url = target.url
+                    // ⛔ 不要在这里跳过非 HTTP 地址。云盘 / 红果 / DASH 给出的是
+                    // `tvbox-cloud://` 之类，它们同样能测 —— `SourceProbeRunner.probe` 内部会把它们
+                    // 解析成 App 内的字节流，用同一套两段计时量真实吞吐。在这里拦掉，
+                    // 等于让这三类源永远没有读数。
+                    // ★ 每个 host 的在飞上限（`LineRotation.maxConcurrent`，默认 4）。
+                    //
+                    // 这一层才是「别把某个站打急」的真正闸门：源级 `measureWidth`
+                    // 只管「同时测多少个源」，而本函数内部还会对同一源的每条线路并发，
+                    // 两层相乘才是实际打到某个 host 的并发数
+                    // （改前是 16 × 4 = 64，而论证里写的是 16）。
+                    //
+                    // `beginBase` 同时也是退避闸门：被判 saturated 或正在冷却的 host
+                    // 会返回 false，这里**跳过这条线路**（不是判它死）——
+                    // 与 `EpisodePicker.probeIfNeeded` 的用法一致。
+                    // 原先它只有 EpisodePicker 一处在用、扫描路径完全绕过。
+                    // 全局名额（One `pendingTests` 的等价物，RCA H5）：把各入口的并发收进
+                    // 同一个池子，别让批量扫描把用户此刻正在播的那条链路占满。
+                    //
+                    // ⛔ 必须先领全局、再领 host：反过来时若 host 领到而全局没领到就直接
+                    //    返回，该 host 的在飞计数永不归还，会被永久判成 saturated。
+                    //
+                    // ★ 这里**故意用 claim 而不是 wait**：批量扫描（340 源 × 4 线）的
+                    //   每个请求都在和同批的其它请求争名额，让它们排队会把整轮扫描
+                    //   拖成串行，进度条几分钟不动。跳过并计入"本轮未测"才是诚实的。
+                    //   （交互路径——用户点了一条线——才该排队，见 `waitForProbeSlot`。）
+                    guard await SourceProbeStore.shared.claimProbeSlot() else { return nil }
+                    // ⛔ 每条提前返回的路径都必须显式归还。
+                    //    不用 `defer { Task { ... } }`：那个 Task 是异步的，归还晚一拍，
+                    //    密集扫描时名额会被自己饿住（连续几轮全被 claim 失败挡掉）。
+                    let base = url.host
+                    if let base, !(await SourceProbeStore.shared.beginBase(base)) {
+                        await SourceProbeStore.shared.releaseProbeSlot()
+                        return nil
+                    }
+                    let result = await SourceProbeRunner.probe(url: url, headers: target.headers)
+                    await SourceProbeStore.shared.releaseProbeSlot()
+                    if let base {
+                        switch result.reachability {
+                        case .reachable, .slow: await SourceProbeStore.shared.succeedBase(base)
+                        case .unreachable: await SourceProbeStore.shared.failBase(base)
+                        case .unknown: await SourceProbeStore.shared.cancelBase(base)
+                        }
+                    }
+                    return ProbeRow(flag: target.flag, result: result)
                 }
                 return true
             }
@@ -1618,6 +2357,28 @@ import TVCore
         orderedCache = nil
         recommendationCache = nil
         groupsCache = [:]
+        groupOfSiteCache = nil
+    }
+
+    /// The `SourceGroup.id` a source is listed under, for search's group priority. Empty when no
+    /// grouping is available (no subscription yet), which `SourceOrder` reads as "unranked".
+    func groupID(listing site: Site) -> String {
+        let stamp = currentSiteListStamp()
+        // The cache is consulted before asking about the particular source: a source in no group at
+        // all (privacy-hidden, or not browsable) is absent from the map, and testing for it first sent
+        // every such lookup back through a full rebuild — once per comparison in `arrange`.
+        if stamp == siteListStamp, let cached = groupOfSiteCache { return cached[site.id] ?? "" }
+        var map: [String: String] = [:]
+        // Read with `includeHidden: true`, which does **not** build the "Hidden Sources" section:
+        // `SourceGroups.make` only adds it when hidden sources are being filtered out, and with them
+        // included a hidden source stays in its own group. So a hidden source is reported under its
+        // own group here — which is what matters, since search never asks a hidden source anyway.
+        // "group:id" is what `SourceGroup.id` yields for the viewer's own groups.
+        for group in sourceGroups(includeHidden: true) {
+            for member in group.sites where map[member.id] == nil { map[member.id] = group.id }
+        }
+        groupOfSiteCache = map
+        return map[site.id] ?? ""
     }
 
     /// The sources page's sections: pinned, built-in, then one per subscription.
@@ -1626,7 +2387,12 @@ import TVCore
         if stamp == siteListStamp, let cached = groupsCache[includeHidden] { return cached }
         guard let config = subscription else { return [] }
         let pins = pinnedSources.arrange(config.sites, origin: config.origin).filter { pinnedSources.contains($0, origin: config.origin) }
-        var groups = SourceGroups.make(entries: environmentSubscriptions, documents: documents, builtIns: config.sites.filter(\.isBuiltIn), builtInOrigin: config.origin, mergedSites: config.sites, pinOrder: pins, userHidden: { hiddenSources.contains($0, origin: config.origin) }, includeHidden: includeHidden, jarURL: config.spiderURL, privacyHidden: { !vault.permits(site: $0, fallback: config.origin) }, reassign: { site, address in
+        var groups = SourceGroups.make(entries: environmentSubscriptions, documents: documents, builtIns: config.sites.filter(\.isBuiltIn), builtInOrigin: config.origin, mergedSites: config.sites, pinOrder: pins, userHidden: { hiddenSources.contains($0, origin: config.origin) }, includeHidden: includeHidden, jarURL: config.spiderURL, privacyHidden: { !vault.permits(site: $0, fallback: config.origin) },
+            // 真删的源：列表过滤仍由 `hiddenSources` 完成（它们同时写进了那份），
+            // 这里只负责把它们**挡在「已隐藏」分区之外** —— 那边有 Unhide，
+            // 让删掉的源出现在那儿正是要消灭的「删除失败」错觉。
+            deletedHidden: { deletedSources.contains($0, origin: config.origin) },
+            reassign: { site, address in
             // Address first: the subscription keeps the address the viewer added, so a refresh that
             // lands on a new mirror keeps every move. The origin is only for older records.
             sourceReassignment.destination(address: address, sourceKey: site.sourceKey, origin: site.provenance?.origin)
@@ -1655,7 +2421,12 @@ import TVCore
     }
 
     /// The video and its episode list, for the player's episode buttons and the next episode.
-    private func remember(_ video: Video, client: CatalogClient, for channel: Channel) {
+    /// 把这一部剧挂成当前的播放目录（catalog）。
+    ///
+    /// 权限从 `private` 放宽到 `internal`：`Store+CrossSource` 换源时也要挂，
+    /// 而复制一份出来必然与这里走散（它还要写 MediaCache、还要异步补集名标签）。
+    /// 放宽可见性比复制逻辑安全。
+    func remember(_ video: Video, client: CatalogClient, for channel: Channel) {
         guard let context = channel.historyContext else { return }
         if let data = try? JSONEncoder().encode(video) {
             // Cache the catalog off the main actor: writing the episode list to disk (and MediaCache's
@@ -2007,12 +2778,27 @@ extension Store {
         playing = saved.map { CloudFiles.channel(file, in: folder.drive, folder: folder.id, folderName: folder.name, resumePosition: $0.resumePosition, subtitles: folder.subtitles) } ?? channel
     }
 
-    func nextFile(after channel: Channel) -> Channel? { file(1, from: channel) }
-    func previousFile(before channel: Channel) -> Channel? { file(-1, from: channel) }
+    func nextFile(after channel: Channel) -> Channel? { file(1, from: channel, in: filesFolder) }
+    func previousFile(before channel: Channel) -> Channel? { file(-1, from: channel, in: filesFolder) }
+
+    /// 云文件目录的「下一集/上一集」，**由调用方指定目录**。
+    ///
+    /// 供坞里的任务用：`filesFolder` 是 Store 上的单值，坞里同时播放两个不同目录的文件时
+    /// 它只会指向最后开始的那一个。任务各自带着自己的目录来问，才不会串。
+    func nextFile(after channel: Channel, in folder: CloudFilesFolder?) -> Channel? {
+        file(1, from: channel, in: folder)
+    }
+    func previousFile(before channel: Channel, in folder: CloudFilesFolder?) -> Channel? {
+        file(-1, from: channel, in: folder)
+    }
 
     /// The file `offset` places from the playing one in its folder, for the player's Previous and Next.
-    private func file(_ offset: Int, from channel: Channel) -> Channel? {
-        guard let context = channel.historyContext, context.sourceKey == CloudFiles.sourceKey, let folder = filesFolder,
+    ///
+    /// `folder` 由调用方给（前台给 `filesFolder`，坞里的任务给自己的那一份）。
+    /// 三重比对（`drive.key` / `folder.id` / 文件名都在同一个 context 里）保证
+    /// **拿错目录只会返回 nil，绝不会播到别的目录里的片子**。
+    private func file(_ offset: Int, from channel: Channel, in folder: CloudFilesFolder?) -> Channel? {
+        guard let context = channel.historyContext, context.sourceKey == CloudFiles.sourceKey, let folder,
               folder.drive.key == context.episodeFlag, folder.id == context.videoID,
               let index = folder.files.firstIndex(where: { $0.id == context.episodeID }),
               folder.files.indices.contains(index + offset) else { return nil }

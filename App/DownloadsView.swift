@@ -11,6 +11,8 @@ import BackgroundTasks
 struct DownloadsView: View {
     @Environment(Store.self) private var store
     @State private var deleting: DownloadShow?
+    /// The whole-list confirmation, which is a different question from deleting one show.
+    @State private var confirmingAll = false
     /// Videos or songs, once there are songs; videos first unless only songs are saved.
     @State private var kind = Kind.videos
     private var library: DownloadLibrary { .shared }
@@ -22,10 +24,8 @@ struct DownloadsView: View {
     /// visible: the vault can only hide what it can name.
     private var visibleItems: [DownloadItem] {
         // 隐私保险库过滤（隐藏源的剧集不显示）+ 多环境隔离过滤（只看当前环境）。
-        let vaulted = store.vault.visibleDownloads(library.items)
-        let active = store.environments.activeID
-        let defaultID = store.environments.all.first?.id ?? active
-        return vaulted.filter { ($0.environmentID ?? defaultID) == active }
+        // 环境过滤收在 `DownloadLibrary.visibleItems()` 里，与详情页「这一集下过没有」用同一口径。
+        store.vault.visibleDownloads(library.visibleItems())
     }
 
     var body: some View {
@@ -42,6 +42,19 @@ struct DownloadsView: View {
             }
         }
         .modifier(DownloadKindBar(shown: hasMusic, kind: $kind))
+        // One 的二次确认原文：「确认清空所有下载文件？」/「清空所有下载」。
+        // 比原来那句「Delete every downloaded episode? The files leave this device.」多说一件事：
+        // 打断点数据也算在里面（`removeAll()` 会清掉每个任务的 `plan.json`），
+        // 所以清完再下是**从零开始**，不是续下。
+        .confirmationDialog(L10n.text("Clear every downloaded file? Finished episodes, unfinished downloads and their resume data all go."),
+                            isPresented: $confirmingAll, titleVisibility: .visible) {
+            Button(L10n.text("Clear All Downloads"), role: .destructive) {
+                // The reason this is not one `remove(ids)`: it also clears folders the list lost track of,
+                // which is where the storage goes on a device that has been crashing.
+                library.removeAll()
+                MusicDownloadLibrary.shared.removeAll()
+            }
+        }
         .onAppear { if visibleItems.isEmpty && hasMusic { kind = .music } }
         .screenBackdrop()
         .tabTitle(L10n.text("Downloads"))
@@ -50,7 +63,7 @@ struct DownloadsView: View {
         #if os(macOS)
         // Space in one line under the window title, as Finder's status bar has it: beside a whole disk the
         // downloads were a sliver on a bar that was nearly all "Other".
-        .navigationSubtitle(library.items.isEmpty || (hasMusic && kind == .music) ? "" : storageSummary)
+        .navigationSubtitle(visibleItems.isEmpty && MusicDownloadLibrary.shared.visibleItems.isEmpty ? "" : storageSummary)
         // Files may have been deleted or moved in Finder while the app was in the background.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await library.measure() }
@@ -73,8 +86,65 @@ struct DownloadsView: View {
         }
     }
 
+    /// 点一集已下载的片：起播，并**把全屏播放器真正推上来**。
+    ///
+    /// ⛔ 只写 `store.playing` 是不够的 —— 那就是「从下载入口点进去没反应」的原因。
+    ///
+    /// `RootView` 的 `fullScreenCover` 判据是
+    /// `(playsInWatchPage(playing) || !presentingPlayer) ? nil : …`：
+    /// 从下载页起播时观看页不在前台（`playsInWatchPage` 为 false），
+    /// 而 `presentingPlayer` 是 `false`（它只由小窗点击 / 播放器关闭写），
+    /// 于是 `!presentingPlayer` 为真 → 整个表达式为真 → 弹层被判成 nil。
+    /// `playing` 变了、会话也建了，**但没有东西被展示** —— 用户看到的就是点了没反应。
+    ///
+    /// 所以这里必须显式置 `presentingPlayer = true`。全 App 只有两处会写它：
+    /// 小窗点击（RootView:377）与这里。两处都是「用户要求现在就看」。
+    private func playDownloaded(_ item: DownloadItem) {
+        store.presentingPlayer = true
+        store.playing = library.channel(for: item)
+    }
+
     /// Songs are saved apart, in Music; this page leads there too.
-    private var hasMusic: Bool { !MusicDownloadLibrary.shared.items.isEmpty }
+    private var hasMusic: Bool { !MusicDownloadLibrary.shared.visibleItems.isEmpty }
+
+    /// 「保存位置：文件 App › 我的 iPhone › 顾及」+ 一键跳转。
+    ///
+    /// One 把这一行放在下载页底部（`保存位置：文件 App › 我的 iPhone › One`）与设置页各一份。
+    /// 我们放在存储卡下面 —— 它和「占了多少空间」是同一个问题的两面：
+    /// 「这些字节到底在哪」。
+    ///
+    /// 跳转用 `UIApplication.open` 打 `shareddocuments://`，这是「文件」App 唯一
+    /// 公开可用的入口；它不接受路径参数，所以直接落到「最近」而不是目标文件夹。
+    /// 只给 iOS/tvOS：macOS 上「文件」App 不存在，那边用「Show in Finder」那一套。
+    @ViewBuilder private var saveLocationCard: some View {
+        #if os(iOS)
+        let folder = DownloadLibrary.defaultRoot.lastPathComponent
+        HStack(spacing: 12) {
+            Image(systemName: "folder")
+                .foregroundStyle(Brand.accent)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.text("Save To")).font(.subheadline.weight(.medium))
+                Text(L10n.text("Files app › On My iPhone › %@", folder))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if let url = URL(string: "shareddocuments://") {
+                Button {
+                    UIApplication.shared.open(url)
+                } label: {
+                    Text(L10n.text("Open")).font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Brand.accent)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.06)) }
+        #endif
+    }
 
     #if os(macOS)
     private var storageSummary: String {
@@ -89,16 +159,25 @@ struct DownloadsView: View {
             VStack(alignment: .leading, spacing: Layout.sectionSpacing) {
                 #if !os(macOS)
                 StorageCard(usage: library.usage, songs: MusicDownloadLibrary.shared.size)
+                saveLocationCard
                 #endif
                 if !pending.isEmpty { queue(pending) }
                 if !shows.isEmpty {
                     VStack(alignment: .leading, spacing: Layout.headerSpacing) {
-                        SectionHeader(title: L10n.text("Downloaded"))
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            SectionHeader(title: L10n.text("Downloaded"))
+                            Spacer(minLength: 8)
+                            Button(role: .destructive) { confirmingAll = true } label: {
+                                Label(L10n.text("Clear All"), systemImage: "trash").lineLimit(1).fixedSize()
+                            }
+                            .controlButton()
+                            .accessibilityLabel(L10n.text("Clear All Downloads"))
+                        }
                         // Not lazy: the remote only moves focus to views that exist, and below a download queue
                         // as tall as the screen a lazy stack had built none, so Down stopped at the queue.
                         VStack(spacing: Layout.cardSpacing) {
                             ForEach(shows) { show in
-                                ShowPanel(show: show) { store.playing = library.channel(for: $0) } delete: { deleting = show }
+                                ShowPanel(show: show) { playDownloaded($0) } delete: { deleting = show }
                             }
                         }
                     }.tvFocusSection()
@@ -116,15 +195,8 @@ struct DownloadsView: View {
                 Text(L10n.text("Downloading")).font(.title3.weight(.semibold))
                 Text("\(pending.count)").font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
                 Spacer(minLength: 12)
-                Menu {
-                    Picker(L10n.text("At a Time"), selection: Binding(get: { library.simultaneous }, set: { library.simultaneous = $0 })) {
-                        ForEach(1...4, id: \.self) { Text(L10n.text("%lld at a time", $0)).tag($0) }
-                    }
-                    .pickerStyle(.inline).labelsHidden()
-                } label: {
-                    Text(L10n.text("%lld at a time", library.simultaneous))
-                }
-                .menuStyle(.button).buttonStyle(.borderless).fixedSize()
+                SpeedMenu(compact: true)
+                Divider().frame(height: 12)
                 Divider().frame(height: 12)
                 if paused.count == pending.count {
                     Button(L10n.text("Resume All")) { library.resumeAll() }.buttonStyle(.borderless)
@@ -152,15 +224,7 @@ struct DownloadsView: View {
                 SectionHeader(title: L10n.text("Downloading"))
                 Text("\(pending.count)").font(.headline).monospacedDigit().foregroundStyle(.secondary)
                 Spacer(minLength: 12)
-                Menu {
-                    Picker(L10n.text("At a Time"), selection: Binding(get: { library.simultaneous }, set: { library.simultaneous = $0 })) {
-                        ForEach(1...4, id: \.self) { Text(L10n.text("%lld at a time", $0)).tag($0) }
-                    }
-                } label: {
-                    Label(L10n.text("%lld at a time", library.simultaneous), systemImage: "square.stack.3d.down.right")
-                        .lineLimit(1).fixedSize()
-                }
-                .controlButton()
+                SpeedMenu(compact: false)
                 if paused.count == pending.count {
                     Button { library.resumeAll() } label: { Label(L10n.text("Resume All"), systemImage: "play.fill").lineLimit(1).fixedSize() }.controlButton()
                 } else {
@@ -282,8 +346,12 @@ private struct EmptyDownloads: View {
     let available: Int64?
     let browse: () -> Void
     var body: some View {
+        // One 的空态文案：「暂无下载内容」+「点一下直接播放，不用联网。」
+        // 第二句比原来那句「去详情页点下载」多给了**为什么值得下** ——
+        // 空态页是用户第一次来到这个 tab 的地方，只教操作不解释价值，
+        // 大多数人都不会去点。两句都保留。
         EmptyPage(symbol: "arrow.down", title: L10n.text("No Downloads"),
-                  message: L10n.text("Choose Download on a video's page to save episodes for watching offline."),
+                  message: L10n.text("Choose Download on a video's page to save episodes for watching offline. Tap one to play it straight away, no network needed."),
                   action: L10n.text("Browse Sources"), actionSymbol: AppSection.sites.icon, perform: browse) {
             if let available {
                 Label(L10n.text("%@ available on this device", DownloadFormat.size(available)), systemImage: "internaldrive")
@@ -359,6 +427,86 @@ private struct StorageCard: View {
 }
 
 /// A download in the queue: progress, speed and its controls.
+/// The three knobs the download engine reads, in one menu: how many files download at once, how many
+/// connections each file opens, and how many megabytes each connection asks for.
+///
+/// They are one control rather than three because they only make sense together: the sockets a download
+/// opens is files × connections, and the label says that product so the setting is not a guess.
+private struct SpeedMenu: View {
+    /// Drops the icon and says only the numbers, for the Mac's header line.
+    let compact: Bool
+    private var settings: DownloadSettings { .shared }
+    private var tuning: DownloadTuning { settings.tuning }
+
+    var body: some View {
+        Menu {
+            Section(L10n.text("Files at Once")) {
+                Picker(L10n.text("Files at Once"), selection: Binding(get: { tuning.parallel },
+                                                                    set: { settings.set(parallel: $0) })) {
+                    ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
+                }
+                .pickerStyle(.inline).labelsHidden()
+            }
+            Section(L10n.text("Connections per File")) {
+                Picker(L10n.text("Connections per File"), selection: Binding(get: { tuning.connections },
+                                                                         set: { settings.set(connections: $0) })) {
+                    ForEach([1, 2, 4, 6, 8, 12, 16], id: \.self) { Text("\($0)").tag($0) }
+                }
+                .pickerStyle(.inline).labelsHidden()
+            }
+            Section(L10n.text("Each Range")) {
+                Picker(L10n.text("Each Range"), selection: Binding(get: { tuning.chunkMB },
+                                                                  set: { settings.set(chunkMB: $0) })) {
+                    ForEach([1, 2, 4, 8, 16], id: \.self) { Text("\($0) MB").tag($0) }
+                }
+                .pickerStyle(.inline).labelsHidden()
+            }
+            Divider()
+            Text(L10n.text("%lld connections at most", tuning.sockets))
+            Text(L10n.text("A link that throttles each connection goes faster the more there are. Past what the server allows, the extra ones only wait."))
+                .font(.caption)
+            // One 的两条说明，逐字对应它设置页里的文案：
+            // 「连接数：所有下载任务加起来最多用这么多条，不是每个任务各用这么多条」
+            // 与「只跑一个任务 / 同时跑几个任务」的分配规则。此前只有一行
+            // 「N connections at most」，用户无法从界面判断到底是「每个文件 N 条」
+            // 还是「全局 N 条」—— 这正是 One 用整段文案解释的那件事。
+            Text(L10n.text("The pool is shared by every download, not one pool each: one task at a time takes all of them; several tasks split what is left, and a running task keeps its share until you pause and resume it."))
+                .font(.caption).foregroundStyle(.secondary)
+            Text(L10n.text("Changes apply to the next download."))
+                .font(.caption2).foregroundStyle(.tertiary)
+
+            Divider()
+
+            // 「下载时保持屏幕常亮」（One 同名开关）。放在这一组里，与三个连接参数并排：
+            // 它们都只影响「下载能不能跑完」，用户调它们时是同一个动机。
+            Toggle(isOn: Binding(get: { settings.keepScreenAwake },
+                                 set: { settings.keepScreenAwake = $0 })) {
+                Label(L10n.text("Keep the Screen Awake While Downloading"), systemImage: "sun.max")
+            }
+            Text(L10n.text("Leave the app open while downloading: in the background the system gives it only a short time. Progress is saved, and it carries on when you come back."))
+                .font(.caption).foregroundStyle(.secondary)
+        } label: {
+            label
+        }
+        #if os(macOS)
+        .menuStyle(.button).buttonStyle(.borderless)
+        #else
+        .controlButton()
+        #endif
+        .accessibilityLabel(L10n.text("Download Speed"))
+        .help(L10n.text("How many files download at once, and how many connections each one opens."))
+    }
+
+    @ViewBuilder private var label: some View {
+        let text = L10n.text("%lld at a time · %lld each", tuning.parallel, tuning.connections)
+        if compact {
+            Text(text).lineLimit(1).fixedSize()
+        } else {
+            Label(text, systemImage: "square.stack.3d.down.right").lineLimit(1).fixedSize()
+        }
+    }
+}
+
 private struct QueueRow: View {
     let item: DownloadItem
     let rate: Double?
@@ -486,6 +634,9 @@ private struct QueueRow: View {
                 parts.append(DownloadFormat.rate(rate))
                 if let expected = item.expected, expected > item.received { parts.append(DownloadFormat.remaining(Double(expected - item.received) / rate)) }
             }
+            // The socket count is what makes the rate legible: the same speed from 1 connection and
+            // from 8 mean different things about the link, and only one of them has headroom left.
+            if item.connections > 1 { parts.append(L10n.text("%lld connections", item.connections)) }
             return parts.joined(separator: " · ")
         case .finishing: return L10n.text("Finishing…")
         case .paused: return L10n.text("Paused") + " · \(percent)%" + (compact ? "" : " · " + amount)
@@ -664,6 +815,9 @@ struct DownloadPicker: View {
     var dark: Bool = false
     /// 宽屏（Duo 展开 / iPad）直接满高，与选集抽屉一致；窄屏先半屏。
     var startsLarge: Bool = false
+    /// 打开时预先勾上的集。One 的 `EpisodeCard` 自带下载钮，点哪一集就只下那一集 ——
+    /// 抽屉打开时那颗不该让用户再选一次。`nil` 时保持原来「全不选」的行为。
+    var preselect: Set<String> = []
     var added: (Int) -> Void = { _ in }
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -673,7 +827,12 @@ struct DownloadPicker: View {
     @State private var detent: PresentationDetent = .medium
     private var library: DownloadLibrary { .shared }
     private func source(_ episode: Episode) -> DownloadSource { DownloadSource(site: site, videoID: video.id, episode: episode, origin: origin) }
-    private var available: [Episode] { episodes.filter { library.item(for: source($0)).map { $0.status == .failed } ?? true } }
+    /// 本环境下还能下的集：本环境没有记录，或本环境那条失败了。
+    ///
+    /// 必须走 `visibleItem`。用 `item(for:)` 会把另一个环境下过的同一集算成本环境也已下，
+    /// 于是这一集在这里被锁成「Downloaded」、连勾都勾不上 —— 从一个空环境导入同一订阅后
+    /// 整部剧一集也下不下来。
+    private var available: [Episode] { episodes.filter { library.visibleItem(for: source($0)).map { $0.status == .failed } ?? true } }
     #if os(macOS)
     /// The checklist's natural height, so the sheet fits a few episodes instead of a fixed, mostly empty box.
     @State private var listHeight: CGFloat = 0
@@ -738,7 +897,13 @@ struct DownloadPicker: View {
         .presentationBackground(dark ? AnyShapeStyle(Color(white: 0.07)) : AnyShapeStyle(.regularMaterial))
         .preferredColorScheme(dark ? .dark : nil)
         .environment(\.glassControls, true)
-        .onAppear { if startsLarge || sizeClass == .regular { detent = .large } }
+        .onAppear {
+            if startsLarge || sizeClass == .regular { detent = .large }
+            // 单集下载入口预选的集；只留 `available` 里还存在的（已下完/在下的不再勾）。
+            if !preselect.isEmpty {
+                selection = preselect.intersection(Set(available.map(\.id)))
+            }
+        }
         #else
         .frame(maxWidth: 1300).frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { Backdrop() }
@@ -833,7 +998,7 @@ struct DownloadPicker: View {
     }
 
     private func macRow(_ episode: Episode) -> some View {
-        let existing = library.item(for: source(episode))
+        let existing = library.visibleItem(for: source(episode))
         let locked = existing.map { $0.status != .failed } ?? false
         let selected = selection.contains(episode.id)
         return Button { toggle(episode) } label: {
@@ -854,7 +1019,7 @@ struct DownloadPicker: View {
     }
 
     private func macChip(_ episode: Episode) -> some View {
-        let existing = library.item(for: source(episode))
+        let existing = library.visibleItem(for: source(episode))
         let locked = existing.map { $0.status != .failed } ?? false
         let selected = selection.contains(episode.id)
         return Button { toggle(episode) } label: {
@@ -905,7 +1070,7 @@ struct DownloadPicker: View {
     }
 
     private func row(_ episode: Episode) -> some View {
-        let existing = library.item(for: source(episode))
+        let existing = library.visibleItem(for: source(episode))
         let locked = existing.map { $0.status != .failed } ?? false
         let selected = selection.contains(episode.id)
         return Button {
@@ -956,6 +1121,12 @@ extension View {
         #if os(iOS)
         DownloadLibrary.shared.onStart = { started() }
         MusicDownloadLibrary.shared.onStart = { started() }
+        // 开关一改立刻生效：关掉时若队列还在跑，`applyScreenAwake()` 会立刻放开锁屏；
+        // 打开时同理立刻压住。不等下一次 start。
+        DownloadSettings.shared.onKeepAwakeChange = { _ in applyScreenAwake() }
+        // 队列由跑到空时**必须**回一次这里，否则压住自动锁屏的那次调用永远不会撤销。
+        DownloadLibrary.shared.onActivityChange = { _ in queueChanged() }
+        MusicDownloadLibrary.shared.onActivityChange = { _ in queueChanged() }
         #endif
     }
     static func enteredBackground() {
@@ -971,6 +1142,12 @@ extension View {
         MusicDownloadLibrary.shared.wake()
         started()
     }
+    /// The queue emptied, or everything was paused or removed: let the screen sleep again.
+    ///
+    /// 与 `started()` 成对。`schedule()` 每次跑完都会回到这里（`running.isEmpty` 时）
+    /// 或继续跑（有活时），所以这是一个「队列真实状态」的采样点，
+    /// 不是「某个按钮按了」的猜测 —— 漏消息也不会把屏幕常亮留在 true。
+    static func queueChanged() { applyScreenAwake() }
     static var hasWork: Bool {
         DownloadLibrary.shared.items.contains(where: \.isActive) || MusicDownloadLibrary.shared.items.contains(where: \.isActive)
     }
@@ -987,6 +1164,25 @@ extension View {
     private static func started() {
         #if os(iOS)
         if #available(iOS 26.0, *) { ContinuedDownloads.begin() }
+        applyScreenAwake()
+        #endif
+    }
+
+    /// 「下载时保持屏幕常亮」（One 的同名开关）。
+    ///
+    /// 挂在队列活动状态上而不是挂在下载页上：下载页可以关掉、可以切到别的 tab，
+    /// 但任务还在跑时锁屏会立刻把下载掐掉。判据与 `hasWork` 同一个 ——
+    /// 有任务在跑就压住自动锁屏，队列空了立刻放开，绝不长期占用。
+    ///
+    /// 只碰 `isIdleTimerDisabled`，不与阅读器的同名设置冲突：那边只在阅读页
+    /// onAppear/onDisappear 里改，两者都遵循「进入时置位、离开时复位」，
+    /// 而这里的判据是队列状态，队列空了不会留下 true。
+    static func applyScreenAwake() {
+        #if os(iOS)
+        let wanted = DownloadSettings.shared.keepScreenAwake && hasWork
+        if UIApplication.shared.isIdleTimerDisabled != wanted {
+            UIApplication.shared.isIdleTimerDisabled = wanted
+        }
         #endif
     }
     private static var continuing: Bool {

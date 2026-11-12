@@ -154,7 +154,9 @@ struct HomeView: View {
 
     private func placeholders(_ config: Subscription) -> some View {
         VStack(alignment: .leading, spacing: Layout.sectionSpacing) {
-            if showsContinueWatching, !store.playbackHistory.entries.isEmpty {
+            // 占位骨架也要按当前环境判空：直读 `playbackHistory.entries` 会让一个空环境先闪出
+            // 上一个环境才有的那一行，然后再消失。
+            if showsContinueWatching, !store.visibleHistory.isEmpty {
                 loadingSection(HomeSection.continueWatching.title, action: { openSection(.history) }) { cardRow }
             }
             if showsPinnedSources, !store.pinnedSources.isEmpty {
@@ -168,7 +170,9 @@ struct HomeView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(L10n.text("Loading…"))
             }
-            if showsFavorites, !store.favorites.items.isEmpty {
+            // 门控与正文同源：`favorites.items` 过了环境但没过保险库，用它判空会让骨架
+            // 先画出来再消失（正文用的是 `visibleFavorites`）。
+            if showsFavorites, !store.visibleFavorites.isEmpty {
                 loadingSection(HomeSection.favorites.title, action: { openSection(.favorites) }) { cardRow }
             }
             if showsLiveTV, !config.lives.isEmpty {

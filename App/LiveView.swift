@@ -415,11 +415,14 @@ struct FavoritesView: View {
     /// The kind the chips show alone, e.g. only live channels (#480); empty shows every kind.
     @AppStorage("favoritesFilter") private var filterKind = ""
     /// The chosen kind while there are favorites of it; else everything, so the page is never empty.
+    /// 可见收藏里出现过的种类。裸 `favorites.kinds` 含保险库藏起来的那一类，
+    /// 会多出点开却空无一物的 chip。
+    private var visibleKinds: Set<FavoriteKind> { Set(visible.map(\.kind)) }
     private var filter: FavoriteKind? {
-        FavoriteKind(rawValue: filterKind).flatMap { store.favorites.kinds.contains($0) ? $0 : nil }
+        FavoriteKind(rawValue: filterKind).flatMap { visibleKinds.contains($0) ? $0 : nil }
     }
     private func shows(_ kind: FavoriteKind) -> Bool {
-        (filter == nil || filter == kind) && !store.favorites.items(kind).isEmpty
+        (filter == nil || filter == kind) && !visible(kind).isEmpty
     }
     // [mi3s] 二开：多环境隔离下的可见收藏。上游直接用 `store.favorites.items`，
     // 看不到「隐私保险库」与当前环境的过滤；这三个属性是本页的取数入口。
@@ -438,7 +441,7 @@ struct FavoritesView: View {
                         if let error = store.favorites.persistenceError {
                             StatusNotice(text: L10n.text("Unable to save favorites: %@", error))
                         }
-                        if store.favorites.kinds.count > 1 { filterBar }
+                        if visibleKinds.count > 1 { filterBar }
                         if shows(.live) { liveSection }
                         if shows(.video) { filmSection }
                         if shows(.episode) { episodeSection }
@@ -459,7 +462,7 @@ struct FavoritesView: View {
             GlassGroup(spacing: 8) {
                 HStack(spacing: 8) {
                     Chip(title: L10n.text("All"), selected: filter == nil) { filterKind = "" }
-                    ForEach(store.favorites.kinds, id: \.self) { kind in
+                    ForEach(Array(visibleKinds).sorted { $0.rawValue < $1.rawValue }, id: \.self) { kind in
                         Chip(title: title(kind), selected: filter == kind) { filterKind = kind.rawValue }
                             .accessibilityIdentifier("favorites.filter.\(kind.rawValue)")
                     }

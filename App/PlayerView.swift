@@ -477,9 +477,14 @@ struct PlaybackView: View {
     /// Unlike `exit`, this leaves the watch page even from Full Screen (its own toggle button still
     /// shrinks back to the page), and closes the full-screen cover when there is no watch page.
     private func miniplayer() {
-        // [mi3s] 二开：这是小窗**唯一**的正当入口 —— 置了手动开关，小窗才允许浮出来。
-        // 折叠 / 旋转 / 切页面都不写这个值，所以它们不会触发小窗。
-        store.miniPlayerActive = true
+        // [mi3s] 二开：缩成小窗**唯一**的正当入口（原版播放器 / 全屏播放器那一侧）。
+        //
+        // 上一版这里写的是 `store.miniPlayerActive = true` —— 那套只有一个全局布尔 +
+        // 一个 `store.playing`，只能挂一个小窗。现在坞是真源（要求 5）：
+        // `miniPlayerActive` 已是坞的只读投影，赋值 true 是空操作，必须显式登记。
+        // `dockForeground()` 会把这**一集**放进坞并摘掉前台槽，坞里别的卡片不受影响。
+        store.dockForeground()
+        // 有观看页时由页面自己 pop；没有（全屏播放器）就关掉这一层覆盖。
         guard let watch else { return dismiss() }
         watch.leave()
     }
@@ -778,6 +783,9 @@ private struct PlayerSurface: NSViewRepresentable {
     static private var holdsPortrait = false
     /// The viewer locked the controls: the app stays in exactly one orientation and the gyroscope can't move it.
     static private(set) var isLocked = false
+    /// 锁定那一刻的横竖。由 `lock()` 写入，版面层在收到 `lockStateDidChange` 时读它，
+    /// 而不是自己去读 `window.bounds`（那是连续量，会读到转向动画的中间帧）。
+    static private(set) var lockedLandscape = false
 
     /// The scene's current orientation, or nil when there is none to read.
     static var currentOrientation: UIInterfaceOrientation? {
@@ -809,11 +817,18 @@ private struct PlayerSurface: NSViewRepresentable {
 
         // A locked player stays put whatever the rotate button or a full-screen toggle asks.
         if !isLocked {
-            // ★ 全屏态：**不看 `holdsPortrait`**。
-            // 之前这里写的是 `landscape ? .landscape : holdsPortrait ? .portrait : .allButUpsideDown`
-            // —— 于是「竖屏点全屏」会先请求横屏，然后被 holdsPortrait 拉回竖屏。
+            // ★ 全屏态：**不看 `holdsPortrait`**，而且**横竖两侧都要钉住**。
+            //
+            // 原来竖的那一侧写的是 `.allButUpsideDown`（= 放开不管）：
+            //   · `mask` 放开后，陀螺仪可以在全屏里把画面翻走；
+            //   · `geometry` 放开后，`requestGeometryUpdate(.allButUpsideDown)` 只是
+            //     「除倒置外都行」，**落点是系统按物理握持自己挑的** ——
+            //     用户横着拿手机点「旋转到竖屏」时，系统照样挑 landscape。
+            // 表现就是「全屏只能横着，转不回竖」；反之从竖屏进全屏后也守不住。
+            // 用户明确要求「全屏也要能横屏也能竖屏」，所以两侧对称地钉当前方向。
+            // 横的一侧本来就已经钉成 `.landscape`，这里只是把竖的一侧补齐。
             if fullScreenOwnsOrientation {
-                mask = landscape ? .landscape : .allButUpsideDown
+                mask = landscape ? .landscape : .portrait
             } else {
                 mask = landscape ? .landscape : holdsPortrait ? .portrait : .allButUpsideDown
             }
@@ -823,17 +838,14 @@ private struct PlayerSurface: NSViewRepresentable {
         // requested `landscape` here turned the phone even while locked (the gyroscope "lock" that let the
         // film flip when the viewer changed their grip). While locked, keep the orientation it was pinned in.
         //
-        // 全屏态下即使 `landscape == false` 也不强制回到 `.portrait`：
-        // 退全屏时页面自己会按 `holdsPortrait` 重新决定，这里强行 portrait 会跟它打架。
-        let geometry: UIInterfaceOrientationMask
-        if isLocked {
-            geometry = mask
-        } else if fullScreenOwnsOrientation {
-            geometry = landscape ? .landscape : .allButUpsideDown
-        } else {
-            geometry = landscape ? .landscape : .portrait
-        }
-        apply(mask, scene: scene, geometry: geometry)
+        // 全屏态下 `landscape == false` 也必须显式请求 `.portrait`：
+        // 传 `.allButUpsideDown` 等于「你随便挑」，系统会按物理朝向留在横屏，
+        // 用户点的「转到竖屏」就像没生效。
+        let geometry: UIInterfaceOrientationMask = isLocked
+            ? mask
+            : (landscape ? .landscape : .portrait)
+        // 进 / 退全屏是用户显式点的，必须立刻转过去 → turn: true。
+        apply(mask, scene: scene, geometry: geometry, turn: true)
     }
 
     /// Pins the app to the viewer's current orientation; the gyroscope can no longer turn the picture.
@@ -842,6 +854,14 @@ private struct PlayerSurface: NSViewRepresentable {
         // The full-screen player never asked for device-orientation notifications (only the watch page
         // does), so `UIDevice.current.orientation` would otherwise read `.unknown` or a stale value and
         // `lockPin` would pin the wrong way. Start them before the pin reads the physical grip.
+        //
+        // ⛔ 必须与 `unlock()` 里的 `endGenerating…` 配对。
+        //
+        // 这两句原本只有 begin、全仓没有一处 end：锁一次之后整个进程**永久**在采样
+        // 加速度计/陀螺仪，直到 App 被杀。用户的要求正好相反 ——
+        // 「锁屏防误触模式下屏蔽握持态陀螺仪感应」。
+        // 采样不停就意味着「设备朝向一直被读」，而锁定存在的意义恰恰是不再理会握持。
+        // 现在：只在 `lock()` 读一次物理握持（pin 的那一下确实需要），`unlock()` 立刻停表。
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
         isLocked = true
         // The grip the phone is physically held in is what "this orientation" means to a viewer, and it
@@ -851,8 +871,27 @@ private struct PlayerSurface: NSViewRepresentable {
         // moment the grip changes, exactly the bug a lock exists to stop. Only when the device is flat or
         // still settling (no sideways grip to honour) does the lock fall back to the interface direction.
         mask = singleMask(lockPin)
-        apply(mask, scene: scene, geometry: mask)
+        // 点「锁定」是用户意图，要把画面钉到当前朝向 → turn: true。
+        apply(mask, scene: scene, geometry: mask, turn: true)
+        // pin 已经完成，握持采样到此为止 —— 之后无论设备怎么转都不再读它。
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        // 广播给版面层：锁定后要冻结横竖判定（见 `VideoDetailView.sideways`）。
+        // 内屏不遵守方向掩码，所以「不再理会握持」是内屏上唯一能兑现的防误触手段，
+        // 而它需要版面层知道「现在锁了」。
+        //
+        // ⛔ 随广播**带上锁定这一刻的横竖**（`lockedLandscape`）。
+        //
+        // 原来的做法是让版面层在 `onChange` 里现读 `landscapeScreen`，但那读的是
+        // `window.bounds` —— 一个**连续量**。点「锁定」会先 `apply(turn: true)` 请求转向，
+        // 下一帧读到的是转向动画的中间帧（669×951 → 951×669 途中约 810×810，
+        // 宽高比 1.0 ≤ portraitEnter 1.15）→ 判成横持 → **冻结值写反且永久保留**。
+        // 在 lock() 内部取快照就没有这个窗口：此刻 `mask` 已定，横竖就是这次锁定的意图。
+        lockedLandscape = mask == .landscape
+        NotificationCenter.default.post(name: PlayerOrientation.lockStateDidChange, object: nil)
     }
+
+    /// 锁定状态变化广播。版面层据此冻结/恢复横竖判定。
+    static let lockStateDidChange = Notification.Name("PlayerOrientation.lockStateDidChange")
 
     /// The single orientation a lock should pin: the physical grip first, the interface direction as a
     /// fallback when the device is flat or mid-turn. `.unknown` / `.faceUp` / `.faceDown` are not real
@@ -883,7 +922,10 @@ private struct PlayerSurface: NSViewRepresentable {
         isLocked = false
         mask = holdsPortrait ? .portrait : .allButUpsideDown
         guard let scene = UIApplication.shared.appWindowScene else { return }
-        apply(mask, scene: scene, geometry: mask)
+        // 解锁只是「放开限制」，不该改变当前朝向 → turn: false。
+        apply(mask, scene: scene, geometry: mask, turn: false)
+        // 解锁 → 版面层解除冻结，立刻回到跟随真实空间。
+        NotificationCenter.default.post(name: PlayerOrientation.lockStateDidChange, object: nil)
     }
 
     /// Turns the picture to a chosen orientation by hand; the controls follow. A locked player stays
@@ -892,7 +934,8 @@ private struct PlayerSurface: NSViewRepresentable {
         guard !isLocked, let scene = UIApplication.shared.appWindowScene else { return }
         let single = singleMask(orientation)
         mask = single
-        apply(single, scene: scene, geometry: single)
+        // 点旋转键是用户意图 → turn: true。
+        apply(single, scene: scene, geometry: single, turn: true)
     }
 
     /// Turns the picture to an orientation once, without pinning it there: the supported-orientation
@@ -902,13 +945,44 @@ private struct PlayerSurface: NSViewRepresentable {
     static func turn(to orientation: UIInterfaceOrientation) {
         guard !isLocked, let scene = UIApplication.shared.appWindowScene else { return }
         let single = singleMask(orientation)
-        apply(mask, scene: scene, geometry: single)
+        // 这个方法名字就是「转一次」，是显式意图 → turn: true。
+        apply(mask, scene: scene, geometry: single, turn: true)
     }
 
-    private static func apply(_ mask: UIInterfaceOrientationMask, scene: UIWindowScene, geometry: UIInterfaceOrientationMask) {
+    /// 声明方向的唯一出口。`turn` 决定这次要不要**主动请求**系统转过去。
+    ///
+    /// ## 为什么必须把「声明」和「请求」分开（旋转来回弹的根因）
+    ///
+    /// One 1.7.0 的做法（`One_1.7.0` 静态实证）：
+    ///   · `One.AppDelegate` 只实现 **一个** 方向回调
+    ///     `application:supportedInterfaceOrientationsForWindow:`，返回固定 mask；
+    ///   · 全二进制**没有任何一处**调用 `requestGeometryUpdateWithPreferences:`
+    ///     （`nm` 零命中，只有一个 selref 字符串，且没有类实现它）。
+    ///   ⇒ One 只**声明允许哪些方向**，从不命令系统往哪转。转不转由设备和系统决定。
+    ///
+    /// 我们此前每发生一次形态变化（折叠 / 展开 / 进全屏 / 退全屏）都调一次
+    /// `requestGeometryUpdate(.iOS(interfaceOrientations:))` —— 那是**命令**系统转。
+    /// 在 Duo 上这会形成自激环：
+    ///   1. 折叠 → 页面按 `duoExpanded` 写 `holdPortrait(true)` → 我们命令「转竖屏」；
+    ///   2. 系统转完，几何回调触发 → 又读到方向变了 → 再写一次；
+    ///   3. 展开 → 写 `holdPortrait(false)` → 命令「转横屏」；
+    ///   4. 系统转完又触发几何回调 …
+    /// 用户看到的就是**转过去又转回来**。One 不做这件事，所以它不会弹。
+    ///
+    /// 现在：默认只 `setNeedsUpdateOfSupportedInterfaceOrientations()` 让系统按新 mask
+    /// 重算（设备物理朝向决定落点），只有**用户显式点旋转键 / 进全屏**才 `turn: true`
+    /// 真去命令系统转 —— 那是用户意图，必须立刻生效。
+    private static func apply(_ mask: UIInterfaceOrientationMask,
+                              scene: UIWindowScene,
+                              geometry: UIInterfaceOrientationMask,
+                              turn: Bool) {
         var controller = scene.keyWindow?.rootViewController
         while let next = controller?.presentedViewController { controller = next }
         controller?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        // 只声明、不命令：系统按设备物理朝向落在 mask 允许的那个方向上。
+        // 这一步是 Duo 上唯一正确的日常路径 —— 折叠/展开不改变设备朝向，
+        // 所以重算 mask 之后落点不变，不会出现「转过去又转回来」。
+        guard turn else { return }
         // UIKit calls the error handler on a background queue. @Sendable keeps it off the main actor;
         // without it Swift 6 checks the closure's main-actor isolation at entry and traps (issue #247).
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: geometry)) { @Sendable error in
@@ -922,25 +996,42 @@ private struct PlayerSurface: NSViewRepresentable {
     /// when it disappears while folded shut — closing the player on an unfolded Duo, or leaving the
     /// page from Full Screen, left the whole app pinned upright for the rest of the session.
     static func release() {
+        // ⛔ 必须先记下「本来锁着没有」再清。
+        //
+        // `PlaybackView.onDisappear` **无条件**调本函数，而折叠/展开会拆掉 PlaybackView ——
+        // 于是「锁定 → 合盖」这条路上锁会被静默清掉。上一版这里不发广播，
+        // 版面层的 `lockedForShape` 仍为 true、冻结值仍在 ⇒
+        // **控件显示未锁定、方向真的未锁、但版面永久冻结**，用户只能退页重建。
+        // （并行审查的子代理第 2 项抓到的死锁：此后点锁钮走的是 lock()，
+        //  即便走到 unlock() 也有 `guard isLocked else { return }` 早退，广播永远不发。）
+        let wasLocked = isLocked
         isLocked = false
         holdsPortrait = false
         if mask == .landscape { set(landscape: false) }
-    }
-
-    /// iPhone Duo closed onto the inner display: it ignores orientations, so drop a landscape
-    /// lock while closed. Reopening (`restore()`) puts the outer display back to landscape.
-    static func suspend() {
-        if mask == .landscape { set(landscape: false) }
-    }
-
-    /// Reopened onto the outer display: the iPhone Duo's outer screen is landscape by default, so a
-    /// playback that ran on the inner display comes back landscape — unless the viewer explicitly
-    /// held portrait (a watch page, or a portrait lock), which stays upright.
-    static func restore() {
-        if !isLocked {
-            set(landscape: !holdsPortrait)
+        // 锁状态真的变了才广播 —— 无条件发会让每次离开播放页都触发一次版面重算。
+        if wasLocked {
+            NotificationCenter.default.post(name: PlayerOrientation.lockStateDidChange, object: nil)
         }
     }
+
+    /// iPhone Duo 折叠/展开时的方向承接。
+    ///
+    /// ⛔ 这两个函数现在**什么都不做**，这是有意的。
+    ///
+    /// 旧语义建立在「外屏默认横屏、内屏忽略方向」这个假设上：
+    ///   · `suspend()`：展开到内屏时把横屏锁降回竖屏；
+    ///   · `restore()`：折回外屏时按 `holdsPortrait` 重新把外屏设成横屏。
+    /// 但用户明确要求「外屏要能横屏也能竖屏」，而 `suspend()` 恰恰会在**展开**那一刻
+    /// 把用户刚设好的横屏锁抹掉（`if mask == .landscape { set(landscape: false) }`），
+    /// `restore()` 又会按页面习惯强推一个方向 —— 两者都在替用户决定方向。
+    ///
+    /// 折叠/展开不改变物理握持，方向就该跟着握持走，不需要页面插一手。
+    /// 保留空实现（而不是删掉调用点）是为了让调用方语义清楚：
+    /// 「这里曾经有个方向策略，现在它被取消了」。
+    static func suspend() {}
+
+    /// 见 `suspend()`：折回外屏不再强推任何方向。
+    static func restore() {}
 
     /// Full Screen 进行中：**任何人都不得改写方向锁**。
     ///
@@ -971,11 +1062,15 @@ private struct PlayerSurface: NSViewRepresentable {
         guard !isLocked else { return }
         mask = hold ? .portrait : .allButUpsideDown
         guard let scene = UIApplication.shared.appWindowScene else { return }
-        // Holding turns the interface upright (the folded outer display). Releasing unpins it and lets
-        // the system follow the device — the unfolded inner display comes back landscape, and closing
-        // the page leaves the outer display portrait — instead of forcing portrait in both. Forcing it
-        // on release is what turned the expanded two-column page upright.
-        apply(mask, scene: scene, geometry: hold ? .portrait : .allButUpsideDown)
+        // ⛔ `turn: false` —— 这里是「转过去又转回来」的头号元凶。
+        //
+        // `holdPortrait` 由页面在**形态变化**时调用（`onChange(of: duoExpanded)` 等）。
+        // 以前它走 `apply(..., geometry:)` → `requestGeometryUpdate`，等于每次折叠/展开
+        // 都命令系统转一次；系统转完几何回调又触发下一次写入，形成自激环。
+        // 折叠/展开并不改变设备物理朝向，所以正确做法只是**改 mask 允许集**，
+        // 让系统按物理朝向自然落位（One 就是这么做的：只声明，从不 request）。
+        // 用户手上的旋转键与全屏按钮仍然走 `turn: true`，那是显式意图。
+        apply(mask, scene: scene, geometry: hold ? .portrait : .allButUpsideDown, turn: false)
     }
 }
 #else
@@ -1777,7 +1872,11 @@ private struct CatalogEpisodePanel: View {
             // The resume progress and the episode playing now come from the history, so the grid can
             // draw a progress bar on the "resume here" cell and a distinct mark on the one already
             // playing.
-            let history = PlaybackHistory.shared.entries.first { $0.id == context.id }
+            // 按当前环境取：`context.id` 不含环境，同一部片在两个环境都看过时，
+            // 裸 `entries` 会取到较新那条 —— 于是 B 环境的选集器画上了 A 环境的进度。
+            let history = PlaybackHistory.shared
+                .entries(in: PlaybackHistory.shared.activeEnvironmentID)
+                .first { $0.id == context.id }
             EpisodePicker(
                 video: catalog.video,
                 sourceKey: context.sourceKey,

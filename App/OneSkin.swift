@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 import AVFoundation
 import QuartzCore
 import TVCore
@@ -24,6 +25,16 @@ enum OneSkin {
     static let fillKey = "oneSkinFill"
     /// 画面填充模式（适应/填充/铺满/拉伸）。旧 `fillKey` 布尔仍兼容读取。
     static let fitModeKey = "oneSkinFitMode"
+    /// 「自动全屏」开关（参考截图里那颗蓝底蓝字的 chip）。
+    /// 开启后**开播即进全屏**；关掉只影响自动行为，手动全屏键照旧。
+    static let autoFullScreenKey = "oneSkinAutoFullScreen"
+
+    /// 竖持时「视频 + 所有控件」整体下移的额外留白（pt）。
+    ///
+    /// 用户要求：「视频播放器和其他控件一起 往下移动一些」。
+    /// 因为画面层与控件层共用 `OneSkinStage.portraitTopInset`，改这一个数
+    /// 就能让两者同步下移，不会错位。
+    static let portraitExtraDrop: CGFloat = 16
 
     /// 双列 / 合拢开关。One 用的是 `@AppStorage("one.actor.twoColumn", store: UserDefaults)`
     /// 的 Bool —— 即这是**用户手动切换并持久化的偏好**，不按屏幕尺寸自动判断。
@@ -82,8 +93,149 @@ enum OneSkin {
     /// （466×678），App 却跑在 669×951 的内屏上，短边上限会被取成 466，
     /// 把整个展开宽屏连同控件错误缩到 70% 宽（实测只占左半边）。
     /// `appWindowScene?.screen` 指向 App 实际所在的那块屏，且仍是静态值。
+    /// POSTURE 探测用：当前安全区（一次读全四条边）。
+    @MainActor static func safeInsetsForProbe() -> EdgeInsets {
+        let win = UIApplication.shared.appWindowScene?.windows.first { $0.isKeyWindow }
+            ?? UIApplication.shared.appWindowScene?.windows.first
+        let ins = win?.safeAreaInsets ?? .zero
+        return EdgeInsets(top: ins.top, leading: ins.left, bottom: ins.bottom, trailing: ins.right)
+    }
+
     @MainActor static func fixedScreenSize() -> CGSize {
-        UIApplication.shared.appWindowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
+        // ★★★ 几何基准必须是**可用区域**，不是 `screen.bounds`。
+        //
+        // 用户指出的关键：外屏「溢出状态栏」。坐实如下 ——
+        //   `screen.bounds` 是**含状态栏 + Home 指示条**的物理全屏：
+        //     外屏竖持 466×678，其中状态栏 59 + Home 34 = 93pt 不可用于内容
+        //     内屏 951×669，状态栏 24 + Home 20 = 44pt
+        //   而 `oneSkinBody` 上的 `.ignoresSafeArea(edges: [.top, .horizontal])`
+        //   **只忽略上边和左右，底部没忽略**，再叠 `.padding(.bottom, 36)`。
+        //
+        //   于是按 `screen.bounds.height` 排版的内容，比真实可用区**高出**
+        //   （底部安全区 + 36pt padding），必然「内容 > 容器」→ 重协商 → 环。
+        //   外屏竖持最严重：678 的内容塞进 549 可用，**溢出 129pt**。
+        //
+        // 正解：把底部不可用部分从高度里扣掉。顶部已在 `.ignoresSafeArea(.top)`
+        // 里被忽略，所以**只扣底部**（左右同理，`.horizontal` 已忽略，不扣宽）。
+        //
+        // 这是**纯静态计算**（window + safeAreaInsets 都是离散量），不读容器，
+        // 因此不构成环 —— 与 B 站 `setupModule(window:)` 同一路数。
+        // 只返回**物理全屏**；安全区由 `availableScreenSize()` 单独处理，
+        // 因为「扣哪条边」取决于形态（竖持扣底、横持扣右）。
+        // ⛔ 绝不在这里读 `cachedLiveContainer`（容器实测值）！
+        //
+        // 实测证据（Fig, 2026-11-12，加了这个读法之后）：
+        //   proxy  = 22153 × 13432      ← 物理屏 466×678 的 51 倍
+        //   screen = 23872 × 13752      ← 51.2 倍 / 20.3 倍（宽高倍数不同 ⇒ 正反馈发散）
+        //   dt     = 12–21ms            ← 每秒 50–80 次重排
+        //
+        // 成因是完整闭环：
+        //   cachedLiveContainer → fixedScreenSize() → box → 视图 frame
+        //        ↑                                              ↓
+        //        └────────── .onGeometryChange 量 frame ─────────┘
+        // 而 `.onGeometryChange` 量的是**视图最终 frame**，该 frame 又被这里决定，
+        // 于是每轮放大一次 —— 正是本项目早先那条警告说的：
+        //   「不许把 onGeometryChange 挂在这个 body 上 … 用它驱动布局，
+        //     等于把内容尺寸又喂回布局，环照旧」。
+        //
+        // `screen.bounds` 虽不精确（内屏恒报原生竖持），但它是**离散静态量**，
+        // 绝不参与 feedback ⇒ 不可能成环。精度问题改在其他地方解决。
+        // ★★ 决定性修正：读**窗口**尺寸，不读 `scene.screen.bounds`。
+        //
+        // 真机日志铁证（2026-11-12，Duo，ROOT 行交替出现）：
+        //   帧A screen=592x680 → shape=split
+        //   帧B screen=672x488 → shape=fullBleed
+        //   帧C screen=592x680 → shape=split      ← 1.3ms 一轮，永不收敛
+        // `screen.bounds` 本应是常量，却在两个值之间跳 —— 因为
+        // `appWindowScene` 在 Duo 两块屏之间切换（两屏都报 foregroundActive，
+        // 取到的那块不同，screen 就不同）。而 screen 又经 availableSize 影响
+        // stage 尺寸 → 视图 frame → 影响谁成为 keyWindow → scene 再跳。
+        //
+        // `keyWindow.bounds` 是**当前承载内容那个窗口**的尺寸，
+        // 不受"哪块屏自居 active"的竞争影响，是这一帧真实可用的逻辑尺寸。
+        // 仍不参与 feedback（UIKit 所有，不被 SwiftUI 重排改变）。
+        let win = UIApplication.shared.appWindowScene?.keyWindow?.bounds.size
+        if let win, win.width > 1, win.height > 1 { return win }
+        return UIApplication.shared.appWindowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
+    }
+
+    /// 由 `VideoDetailView` 的 `.onGeometryChange` 写入的最近容器尺寸。
+    /// 静态是为了让 `fixedScreenSize()`（静态方法）能读到；
+    /// 只在主线程写，且已量化到 8pt 桶。
+    @MainActor static var cachedLiveContainer: CGSize?
+
+    /// 按形态给出**真正可用于排版的尺寸**（已扣掉该形态下让给系统/标签栏的边）。
+    ///
+    /// `oneSkinBody` 上的 `.ignoresSafeArea(edges: [.top, .horizontal])`：
+    ///   · 顶部与左右**已被忽略** → 这两条边不用扣
+    ///   · **底部没有被忽略** → 底部安全区 + 标签栏预留必须扣掉
+    ///
+    /// 竖持：底边让给 Home 指示条 + 底部浮动胶囊 → 扣 `bottom`
+    /// 横持：底边只有 Home 条（高度很小），主要让位在**右缘**竖排胶囊 → 扣 `right`
+    ///
+    /// 这是纯静态计算，不读容器 ⇒ 不构成环。
+    @MainActor static func availableScreenSize(landscape: Bool) -> CGSize {
+        let scene = UIApplication.shared.appWindowScene
+        let b = scene?.screen.bounds.size ?? UIScreen.main.bounds.size
+        let ins = scene?.windows.first?.safeAreaInsets ?? .zero
+        // `screen.bounds` 在 Duo 上不随方向交换，先按物理长/短边归位。
+        let long = max(b.width, b.height), short = min(b.width, b.height)
+
+        // ⛔ 横持**不能扣 `ins.right`**。
+        //
+        // 实测（Duo 内屏横持）：`ins.right = 71pt`，`951 − 71 = 880`，
+        // 于是 stage box 只有 880×592，而真机截图里内容是从 x=0 铺到 x=951 的。
+        // 全部右栏控件因此左移 71pt —— 这就是「坐标完全对不上」。
+        //
+        // 原因：`oneSkinBody` 上有 `.ignoresSafeArea(edges: [.top, .horizontal])`，
+        // **左右已经被忽略**，`ins.right` 那 71pt 早已让出来了，再扣一次就是重复。
+        // 顶部同理已忽略，不扣。
+        // 真正没被忽略、必须让的只有**底部**（Home 条 + 浮动胶囊）。
+        if landscape {
+            // 横持：长边为宽，只用底部让位。
+            let w = long
+            let h = short - ins.bottom
+            return CGSize(width: max(w, 1), height: max(h, 1))
+        } else {
+            // 竖持：短边为宽，底部让位（Home 条 + 浮动胶囊）。
+            let w = short
+            let h = long - ins.bottom
+            return CGSize(width: max(w, 1), height: max(h, 1))
+        }
+    }
+
+    /// 把尺寸量化成**离散桶**（对应哔哩哔哩折叠屏适配里的 `lastHingeStatus`）。
+    ///
+    /// 参考：哔哩哔哩 9.18.0 用 `HingeStatus` 枚举 + `lastHingeStatus` 缓存，
+    /// 只有折叠状态**真的改变**才重排（`_foldableRelayoutForOcclusion` /
+    /// `_foldableUpdateMiniScreenFrame` 都由状态变化驱动）。
+    /// 我们这边没有 hinge 枚举，但几何诉求相同：**连续抖动不该变成连续重排**。
+    ///
+    /// 做法：四舍五入到 `step` 的整数倍。
+    ///   · 容器抖 ±7pt 以内 → 同一个桶 → `stage` 收到完全相同的值 → 不重建
+    ///   · 真正旋转/折叠 → 跨桶 → 立刻跟上
+    ///
+    /// `step` 取 8 是有意的：
+    ///   · 太小（1–2）吸收不了实测的抖动幅度（每帧 2–14pt）
+    ///   · 太大（≥16）会让形态切换看出「跳一下」
+    static func stableBucket(_ size: CGSize, step: CGFloat) -> CGSize {
+        guard step > 0, size.width.isFinite, size.height.isFinite else { return size }
+        // 桶下限 step：绝不让可用空间塌成 0（那会让整页不可见）。
+        // 宽度也必须**向下**取整：`rounded()` 会让 669→672（+3），
+        // 桶比容器**宽**，等于主动制造 «内容超出容器» → 触发重协商。
+        // 高度早已是 floor，宽度漏了 —— 这条独立于任何形态都会生效。
+        let w = max(step, (size.width / step).rounded(.down) * step)
+        // ★ 高度**不独立取整**，而是先算出「宽方向取整带来的余量」，让高度
+        //   把余量吃掉，保证 <= 原值且总和不变。
+        //
+        // 为什么：半折形态把可用高度按 `halfFoldSplitRatio` 切成上下两半，
+        // 若宽高各自独立四舍五入，两半可能变成 952 而容器只有 951 ——
+        // 折痕正好在视觉中心，1–4pt 的缝或压边一眼就能看出来。
+        //
+        // 取 `floor` 而非 `rounded`：宁可少 1–7pt（多出的由 ZStack 居中吸收），
+        // 也绝不超过容器（超出才会触发父容器重新协商 → 环）。
+        let h = max(step, (size.height / step).rounded(.down) * step)
+        return CGSize(width: w, height: h)
     }
 
     /// 量化到 0.5pt：旋转 / 折叠动画里的亚点抖动不该触发整页重排。
@@ -92,35 +244,88 @@ enum OneSkin {
                height: (size.height * 2).rounded() / 2)
     }
 
+    /// 注：**没有 `landscape` 参数**（2026-11-12 移除）。
+    /// 方向与尺寸来自不同信号，同帧不保证一致；钳制只该看「是否超出物理屏」。
     @MainActor static func availableSize(proxy: CGSize, screen: CGSize, fullScreen: Bool = false) -> CGSize {
+        // 语义：`proxy` 是**本次排版想用的空间**（调用方已按形态整形过），
+        // `screen` 只做「不超出物理屏」的兜底。**绝不放大，只夹小。**
+        //
+        // ⛔ 三个已踩过的坑，别回头：
+        //   ① 只夹宽不夹高 → proxy 高 839 漏过去，内容 839 铺 678 容器 → 成环
+        //   ② 用 `screen.height` 夹高 → Duo 内屏 screen.bounds 物理固定 951×669
+        //      不随方向交换，竖持 proxy=669×951 会被砍成 669×669（丢 282pt）
+        //   ③ `max(proxy.width, screenShort)` → 恒等于 proxy.width，
+        //      宽度钳制变成空操作（`min(x, max(x,a)) ≡ x`），侧栏 977 防护归零
+        //
+        // 现在：**按形态把上限分到两条轴上**，两维都 `min`，都真的能夹。
         guard proxy.width > 1, proxy.height > 1 else {
             return quantize(screen.width > 1 && screen.height > 1 ? screen : proxy)
         }
-        // ⛔ 伪全屏修复：全屏态侧栏已隐藏、proxy 就是真实可视区，不再拿
-        // `screen`（VM 上报告错误的外屏值）去做短边上限缩放，否则全屏窗口
-        // 会被缩成一小块、四周巨黑边。直接铺满 proxy。
-        if fullScreen { return quantize(proxy) }
-        // ★ 只夹**宽度**，不夹高度，也不做等比缩放。
+        let screenLong = max(screen.width, screen.height)
+        let screenShort = min(screen.width, screen.height)
+        guard screenLong > 1 else { return quantize(proxy) }
+        // 全屏与分栏共用同一套上限：只是「不超出物理屏」，
+        // 全屏「不缩放」的原意由调用方（proxy 已铺满）保证，不靠这里绕开。
         //
-        // 原来这一段的写法是：
-        //   shortSide = min(proxy.w, proxy.h);  limit = min(screen.w, screen.h)
-        //   若 shortSide > limit*1.12 → 整页等比缩到 limit
-        // 它的初衷是「防侧栏把内容区撑宽」（横屏双列时 proxy 报 951 宽）。
-        // 但在**竖屏**下它是灾难：
-        //   实测 proxy=577×576、screen=466×678 → shortSide=576、limit=466
-        //   576 > 466×1.12=522 → 成立 → scale=466/576=0.809
-        //   → 整页被压成 467×466，而屏幕高 678。
-        // 后果就是用户报的那一串：画面列只剩 309pt 高、控件全挤在上半截、
-        // 底栏全屏键落在错误位置点不到、旋转后几何又基于这个假尺寸抖动。
+        // ★ 2026-11-12 修正：原来两维上限都用**屏幕长边**，于是
+        //   竖持（951 长边）时高度那一维的钳制恒为真 —— `proxy.height ≤ 951`
+        //   在正常竖持下永远成立，那行 `min` 是**空操作**，注释里承诺的
+        //   「两维都真的能夹」只兑现了一半；宽度那一维反过来又放到 951，
+        //   竖持 669 宽的容器根本用不到，等于没防住横向溢出。
         //
-        // 正确语义：**只有宽度需要被屏幕约束**（侧栏/分栏只会加宽，不会加高）。
-        // 高度永远用 proxy 自己的 —— 它是系统真正分给这个视图的空间。
-        // 而且不再等比缩放：等比会把高度也一起拖下水。
-        let limit = screen.width > 1 ? screen.width : proxy.width
-        // 留 12% 余量再判定，避免 1pt 的正常误差触发夹取。
-        guard limit > 0, proxy.width > limit * 1.12 else { return quantize(proxy) }
-        // 宽度超限：只压宽度，高度保持 proxy 原值（不乘比例）。
-        return quantize(CGSize(width: limit, height: proxy.height))
+        // 正确做法是把上限**按形态分轴**，与 `OneSkinGeometry.box` 同一公式：
+        //   · 横持：宽 = 长边，高 = 短边
+        //   · 竖持：宽 = 短边，高 = 长边
+        // 两种情况都恰好等于 `box` 的标称宽高，所以正常路径**一个字都不会被夹**
+        // （不会在转屏中间帧突然缩一截）；只有 proxy 被外部撑大时才生效：
+        //   · 侧栏把内容区撑到 977 宽 → 横持夹回 951 ✓
+        //   · 竖持 proxy 高 1100 → 夹回长边 ✓（旧代码这里其实也能夹，因为长边就是 951）
+        // ★★ 2026-11-12 纯代码审查修正：**不再用 `landscape` 分轴**。
+        //
+        // 旧实现 capW/capH 由 `landscape` 决定，而 `landscape`
+        // （`stageIsLandscape`，源自 `shape` 参数）与尺寸（`proxy.size`，
+        // 源自容器）是两个独立信号，**没有机制保证同帧一致**：
+        //   · `shape` 由父视图传入，先变；
+        //   · `proxy.size` 要等系统重新布局才变。
+        // 形态切换的过渡帧必然出现「横持判据 + 竖持尺寸」的组合：
+        //   proxy=669x951 + landscape=true  → capH=screenShort → 高度被砍
+        //   proxy=951x669 + landscape=false → capW=screenShort → 宽度被砍
+        // 两种都塌成 669x669，下游 box 缩小 → 分栏基准错 → 全部坐标缩水。
+        //
+        // 新实现：**只按"是否超出物理屏"钳制，与方向无关**。
+        //   上限 = max(屏幕长边, proxy 短边)
+        //   · proxy 短边以内一律放行（内容按物理屏排版，窗口只是显示区）
+        //   · 只有真正撑出物理屏长边才夹（原始防护：sideways 撑到 977）
+        //
+        // 四类验算（screen=951x669）：
+        //   (951,669)->(951,669)  (669,951)->(669,951)
+        //   (678,466)->(678,466)  (977,669)->(951,669) 夹
+        _ = screenShort
+        let floorDim = min(proxy.width, proxy.height)
+        let cap = max(screenLong, floorDim)
+        let clamped = CGSize(width: min(proxy.width, cap),
+                            height: min(proxy.height, cap))
+        return quantize(clamped)
+    }
+
+    /// 用**真实容器**给盒子做上限（16.8）。
+    ///
+    /// 场景：Split View / Slide Over / PiP / 侧栏把内容区砍掉一大块，
+    /// 而几何只读 `keyWindow`（窗口 951），系统实际只给 475 —— 内容溢出 476pt。
+    ///
+    /// 三条防成环的护栏（缺一条就会把「容器测量」重新拉回成布局输入）：
+    ///   ① 容器尺寸必须是 **8pt 桶**（`commitLiveContainer` 已量化）；
+    ///   ② 只在容器**明显更小**（>16pt）时才夹 —— 正常态容器 = 盒子，
+    ///      相差的只有底部安全区取整那几 pt，绝不能参与运算；
+    ///   ③ 容器与盒子**方向必须一致** —— 转屏瞬间 `cachedLiveContainer` 还是上一方向，
+    ///      拿它夹会把横屏宽 951 夹成竖屏的 669。
+    @MainActor static func cappedToContainer(_ box: CGSize, container: CGSize?) -> CGSize {
+        guard let c = container, c.width > 1, c.height > 1 else { return box }
+        guard (c.width > c.height) == (box.width > box.height) else { return box }
+        let w = c.width < box.width - 16 ? c.width : box.width
+        let h = c.height < box.height - 16 ? c.height : box.height
+        guard w != box.width || h != box.height else { return box }
+        return stableBucket(CGSize(width: w, height: h), step: 8)
     }
 
     @MainActor static func windowSize() -> CGSize {
@@ -161,6 +366,116 @@ enum OneSkin {
         let encoded = url.absoluteString
             .addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
         return URL(string: scheme.replacingOccurrences(of: "{url}", with: encoded))
+    }
+}
+
+/// 「用外部播放器打开」面板 —— 真机是**右侧滑出的深色竖排**。
+///
+/// 几何来自桌面截图 OCR（「展开横屏双栏 暂停选触发按钮」，951×669）：
+///   · 面板贴右缘，文字 x=760（右栏 523..951 的 55% 处）
+///   · 每行行距 **41.7pt**，行高 44
+///   · 每行 = 左侧图标 + 文字，白字 15pt
+///   · 深色底 `#1A1A1C`，圆角 14
+///
+/// 只列**已安装**的外部播放器（`canOpenURL` 判定）——真机也是这个行为，
+/// 没装的 App 不出现，避免用户点了没反应。
+struct OneSkinExternalPanel: View {
+    let streamURL: URL?
+    let onCopy: () -> Void
+    let onDismiss: () -> Void
+
+    /// 真机行距实测 41.7，取 42 便于对齐。
+    private let rowHeight: CGFloat = 42
+    private let panelWidth: CGFloat = 236
+
+    private var installed: [(name: String, target: URL)] {
+        guard let u = streamURL else { return [] }
+        return OneSkin.externalPlayers.compactMap { entry in
+            guard let t = OneSkin.externalURL(entry.scheme, u),
+                  UIApplication.shared.canOpenURL(t) else { return nil }
+            return (entry.name, t)
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            // 遮罩：点空白关掉（真机也有）
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .onTapGesture { onDismiss() }
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("用其他播放器播放")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(OneSkinPalette.tertiary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .padding(.bottom, 8)
+
+                ForEach(installed, id: \.name) { item in
+                    Button {
+                        UIApplication.shared.open(item.target)
+                        onDismiss()
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "play.rectangle.fill")
+                                .font(.system(size: 15))
+                                .foregroundStyle(OneSkinPalette.secondary)
+                                .frame(width: 22)
+                            Text("用 \(item.name) 播放")
+                                .font(.system(size: 15))
+                                .foregroundStyle(OneSkinPalette.primary)
+                            Spacer(minLength: 0)
+                        }
+                        .frame(height: rowHeight)
+                        .padding(.horizontal, 16)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if installed.isEmpty {
+                    Text("未检测到已安装的外部播放器")
+                        .font(.system(size: 13))
+                        .foregroundStyle(OneSkinPalette.tertiary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+
+                Divider().overlay(OneSkinPalette.buttonStroke).padding(.vertical, 4)
+
+                Button {
+                    onCopy()
+                    onDismiss()
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 15))
+                            .foregroundStyle(OneSkinPalette.secondary)
+                            .frame(width: 22)
+                        Text("复制视频链接")
+                            .font(.system(size: 15))
+                            .foregroundStyle(OneSkinPalette.primary)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: rowHeight)
+                    .padding(.horizontal, 16)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 12)
+            }
+            .frame(width: panelWidth)
+            .background(OneSkinPalette.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(OneSkinPalette.buttonStroke, lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
+            .padding(.trailing, 12)
+            .padding(.vertical, 12)
+        }
     }
 }
 
@@ -251,11 +566,25 @@ private enum OneSkinLogSink {
     }()
     static let queue = DispatchQueue(label: "oneskin.log")
 
+    /// 单文件硬上限 4MB：超过就整体轮转（删旧、留最后 2MB）。
+    /// 之前无上限，实测一次环路就能写到 8.4MB —— 既是取日志的障碍，
+    /// 也反过来成了「是否成环」的量化指标：正常使用几小时才几百 KB。
+    static let maxBytes = 4 * 1024 * 1024
+    static let keepBytes = 2 * 1024 * 1024
+
     static func log(_ s: String) {
+        // 同时走 os_log，真机可用 `devicectl device console` 实时抓。
+        #if os(iOS)
+        os_log("%{public}@", log: OSLog(subsystem: "wda.prdc.yingxia", category: "OneSkin"), type: .debug, s)
+        #endif
         queue.async {
             let line = s + "\n"
             if let h = try? FileHandle(forWritingTo: url) {
                 h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+                if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+                   size > maxBytes, let all = try? Data(contentsOf: url) {
+                    try? all.suffix(keepBytes).write(to: url)
+                }
             } else {
                 try? Data(line.utf8).write(to: url)   // 首次创建
             }
@@ -396,9 +725,24 @@ struct OneSkinPreferencePanel: View {
 
 private extension View {
     /// 状态栏只有 iOS/tvOS 有；macOS 上什么都不做。
-    @ViewBuilder func oneSkinStatusBarHidden() -> some View {
+    /// 只在**横持或全屏**时隐藏状态栏；竖持选集页保留。
+    ///
+    /// 参考哔哩哔哩 9.18.0（实测反汇编）：
+    ///   · `BBPhoneMPZonePlayerVC`（外屏竖屏页）**既不实现** `prefersStatusBarHidden`
+    ///     **也不实现** `prefersHomeIndicatorAutoHidden` —— 竖屏时状态栏保留，
+    ///     内容铺到状态栏下方、顶部控件自己按 safeArea 内缩。
+    ///   · `BBPhoneMPZoneFullScreenPlayerVC`（全屏兄弟类）两个都实现 —— 全幅。
+    ///
+    /// ⛔ 竖持不能无条件隐藏：状态栏一藏，`safeAreaInsets.top` 会塌成 0
+    ///    （或只剩开孔高度），顶栏瞬间跳到物理顶边 —— 用户看到的就是「坐标不对 / 跳一下」。
+    ///
+    /// One 原版的竖持版式留白是 `屏高 × 0.091`（外屏 61.7pt / 内屏 86.5pt，
+    /// 与 `OneSkinWindowGeometryCore` 注释里的实测值逐位吻合），
+    /// **不是** iOS 的安全区（内屏 safeArea.top 只有 24pt，差 62.5pt）。
+    /// 所以必须保留状态栏、再由 0.091 显式留白，两者不能互相顶替。
+    @ViewBuilder func oneSkinStatusBarHidden(hidden: Bool) -> some View {
         #if os(iOS)
-        statusBarHidden(true)
+        statusBarHidden(hidden)
         #else
         self
         #endif
@@ -612,6 +956,17 @@ struct OneSkinStage: View {
     /// 三态之一，由调用方按上游 `splitsWatchPage` / `portraitExpanded` 算好传进来。
     var shape: OneSkinShape = .column
 
+    /// 系统报的遮挡（挖孔 / 摄像头 / 系统胶囊），四边内缩。
+    ///
+    /// ★ 16.1：遮挡**只允许有一个消费端**。这里选几何层 ——
+    ///   `OneSkinGeometryDriver.occlusionDidChange` 把它写进 `box`，
+    ///   于是所有内容（画面列、详情列、控件、胶囊条）一起避开，
+    ///   不存在「算出来了、皮肤却按原高排」的半套实现。
+    ///   页面上那个 `.occlusionTopUp(.safeAreaPadding)` 已删除：
+    ///   两个皮肤本体都是 `.ignoresSafeArea([.top, .horizontal])`，
+    ///   那几条补量本来就不生效，只剩底部会莫名压缩内容高度。
+    var occlusion: OcclusionInsets = .zero
+
     /// 当前频道。字幕文件、请求头、片头片尾 scope、上下集都从它取。
     /// 之前 OneSkin 不认识 `Channel`，于是字幕/片头片尾/外播/上下集这些
     /// 「需要片源身份」的控件根本无从接线。
@@ -628,8 +983,21 @@ struct OneSkinStage: View {
 
     /// 已播秒数与总时长。One 的进度条两端是「已播 / 剩余」，
     /// 没有真值就画不出正确的进度，所以由调用方从 `PlaybackSession` 传入。
-    var position: Double = 0
-    var duration: Double = 0
+    // ⛔ `position` / `duration` 已从本视图移除。
+    //
+    // 它们是「控件每秒推移」的真凶：父视图用 `playerSession?.position ?? 0`
+    // 每帧喂进来（`PlaybackSession` 是 @Observable，播放时每秒 ~60 次更新），
+    // 于是**整个 `OneSkinStage.body` 每帧重建 → 根部 `GeometryReader` 重跑
+    // → proxy 抖动 → 用户看到控件一直在推**。
+    //
+    // 实测（Fig 外屏竖持，修复前）：每秒 479 次 ROOT，dt=7–11ms；
+    // proxy 宽 473→469→466→462→459→455 平滑递减。
+    //
+    // 唯一需要进度的地方是「继续播放」按钮的文字，已收进 `OneContinueHint`，
+    // 由它单独观察 —— 叶子重绘，父级不动。
+    //
+    // 若将来要在画面层加进度条，也必须在**独立的叶子视图**里读 session，
+    // 不能把 `position` 加回这个 struct 的参数表。
 
     // 曾有一个 `@ViewBuilder var picture: () -> Picture` 参数，但全文件从未调用过它
     //（唯一出现是在注释里）。调用方为此白白构造了一棵 never-rendered 的视图树。
@@ -637,10 +1005,15 @@ struct OneSkinStage: View {
     // 挂在 oneSkinBody 上的 `.background(watchStage)`，与这个参数无关。
     // 已删除，别再加回来。
 
-    var onBack: () -> Void
-    /// 只退全屏、不离开页面。`onBack` 会按页面的 `fullScreen` 分流，而皮肤有一份自己的
-    /// 镜像（`fullScreenNow`）；两份状态不同步时返回会被误判成「离开页面」。
-    /// 全屏下的返回必须走这条单向通道。缺省值让老调用方不用改。
+    /// 只退全屏、不离开页面。
+    ///
+    /// ⛔ 这里**没有** `onBack` 了（2026-11-11）。选集页的退出键已迁到页面层
+    /// （`VideoDetailView.watchPageExitButton`）—— `OneSkinChrome` 被
+    /// `.frame(winW, winH).offset(winX, winY)` 锁在画面窗口内，画在里面的键出不了窗口，
+    /// 而用户要的正是「退出按钮离开视频窗口、落到界面上」。
+    ///
+    /// 皮肤自己仍留一个镜像 `fullScreenNow`，全屏时页面那份与它可能不同步；
+    /// 所以全屏里的返回必须走这条单向通道（只退全屏），不能落到 `dismiss()` 上。
     var onExitFullScreen: () -> Void = {}
     var onPlay: (Episode) -> Void
     var onTogglePlay: () -> Void
@@ -655,6 +1028,9 @@ struct OneSkinStage: View {
     var onDownload: () -> Void = {}
     /// 收藏/取消收藏当前视频。`isFavorite` 决定红心是空还是实心红。
     var onFavorite: () -> Void = {}
+    /// 「用其他播放器打开」—— 把当前流地址交给系统（`UIApplication.open`），
+    /// 由用户装的 VLC / Infuse / nPlayer 等接管。真机 One 的第三颗就是它。
+    var onOpenExternal: () -> Void = {}
     /// 分享当前视频（One 是分享稳定链接，不是临时播放地址）。
     var onShare: () -> Void = {}
     var isFavorite: Bool = false
@@ -672,6 +1048,15 @@ struct OneSkinStage: View {
     /// struct init（memberwise），中间插一个参数会让 VideoDetailView 的
     /// 整个调用点参数错位（实测报「extra arguments at positions #25/#26/…」）。
     var halfFoldSplitRatio: CGFloat = 0.5
+    /// 半折折痕的**绝对 y**（容器坐标系，窗口顶 = 0），单位 pt。
+    ///
+    /// ⛔ 16.5：`topH = box.height × (band.centerY / 容器高)` 是把「窗口高的比例」
+    ///    乘到**更矮的 box** 上 —— 窗口高 951、`box.height` 917 时，
+    ///    边界会比真实折痕高 `(951−917)×0.5 ≈ 17pt`；再叠 5% 量化最坏再多 ±11pt，
+    ///    画面下沿与折缝之间出现一条肉眼可见的错位/黑边。
+    ///    折痕矩形与 `stage` 共用同一个坐标原点（都是窗口顶），所以直接用它当高度，
+    ///    不做比例换算、也就没有误差放大。
+    var halfFoldSplitY: CGFloat? = nil
     /// 每条线路的测速样本（线路名 → 该线首集的播放地址与请求头）。
     ///
     /// 只有拿到**每条线路自己的地址**才谈得上「多线路分别测延迟」：
@@ -700,11 +1085,17 @@ struct OneSkinStage: View {
     /// 皮肤层照样画双列 + 胶囊条，所以「点全屏」在皮肤下没有任何视觉变化。
     var isFullScreen: Bool = false
 
+    /// 铰链是否 partiallyOpen。`nil` = 系统没报。
+    /// 只用于告诉几何层折叠态跨档了（B 站 `hingeObserver` 的模式）。
+    var hingePartiallyOpen: Bool? = nil
+
     /// 片源比例**只影响窗口内部怎么留黑边**（`videoGravity`），不影响窗口尺寸。
     /// 原先每 400ms 轮询 presentationSize 改这个 state，既没有消费者，
     /// 又会让整页在开播后反复重绘 —— 一并删除（见 OneSkinWindowGeometry）。
     @AppStorage(OneSkin.speedKey) private var speed: Double = 1
     @AppStorage(OneSkin.loopKey) private var loop = false
+    /// 参考截图里那颗「自动全屏」：默认开（One 截图里它就是蓝底蓝字的高亮态）。
+    @AppStorage(OneSkin.autoFullScreenKey) private var autoFullScreen = true
     /// 「填充」只切 AVPlayerLayer 的裁切方式，**不参与窗口几何**。
     /// OneSkinWindowGeometry 不读它，所以点填充永远不会改变窗口尺寸或位置。
     @State private var showsSpeedMenu = false
@@ -783,7 +1174,7 @@ struct OneSkinStage: View {
     /// 布局停在旧形态上，窗口与控件按旧方向排，用户看到「旋转后 UI/控件漂移，
     /// 重启 App 才恢复」。用 onChange 把它镜像进 @State，再由本地值驱动布局。
     @State private var shapeNow: OneSkinShape = .column
-    /// 冻结的布局盒（只存内存 @State，不跨启动持久化）。
+    /// 冻结的布局盒。
     ///
     /// ⛔ 三次回归的教训，记全别再反复：
     ///   ① box 每帧由 `screen.bounds` 现算 → 旋转动画里 screen.bounds 连续变
@@ -791,10 +1182,24 @@ struct OneSkinStage: View {
     ///      「横竖屏切换控件疯狂推移」复发。
     ///   ② box 冻进 @State 但**写 UserDefaults 跨启动缓存** → 缓存把外屏旧值
     ///      带回内屏页面、或把旧方向 box 取回，形态变了仍读旧值。
-    ///   ③ 正确做法：box 只在**离散事件**（onAppear / 形态切换）时重算一次，
-    ///      存内存 @State，动画期间冻结；不写 UserDefaults，页面身份重建时
-    ///      onAppear 按当前屏幕重新算（此时 screen 已稳定，不是动画中间态）。
-    @State private var frozenBox: CGSize = .zero
+    ///   ③ 正确做法：box 只在**离散事件**（形态/折叠/遮挡/屏幕跨档）时重算一次，
+    ///      存内存 @State，动画期间冻结。
+    ///
+    /// 这份职责现在归 `geoDriver`（`OneSkinGeometryDriver`）：它把形态、折叠态、
+    /// 遮挡、屏幕尺寸全部收成离散量，过三道幂等门后吐一个 `OneSkinGeometry` 快照。
+    /// 原来这里还有一个 `frozenBox: CGSize`，只写不读（`stage` 里 `box = size`），
+    /// 且两处写入源不同 —— 已在 16.8/16.10 删除，别再复活第二份。
+    /// 哔哩哔哩架构的几何驱动：布局只吃它吐出的离散枚举 + 缓存值。
+    /// 见 `OneSkinGeometryDriver.swift` 顶部的实测依据。
+    @StateObject private var geoDriver = OneSkinGeometryDriver(shape: .column)
+    /// 安全区：直接读窗口，不测量容器（哔哩哔哩架构）。
+    /// 见 `body` 里关于「几何基准只用窗口」的说明。
+    private var measuredSafeArea: EdgeInsets {
+        guard let ins = UIApplication.shared.appWindowScene?.windows.first?.safeAreaInsets
+        else { return EdgeInsets() }
+        return EdgeInsets(top: ins.top, leading: ins.left,
+                          bottom: ins.bottom, trailing: ins.right)
+    }
     /// DEBUG：强制不进全屏，用于在双列态验证触摸链路（QA 用）。
     private var debugBlockFullScreen: Bool {
         #if DEBUG
@@ -808,7 +1213,9 @@ struct OneSkinStage: View {
     /// 切换合拢态：本地立即生效，同时写回持久化。
     private func toggleFold() {
         let next = !foldedNow
-        withAnimation(.smooth(duration: 0.25)) { foldedNow = next }
+        // ⛔ 同上：`foldedNow` 是形态开关，不是可插值的视觉量。
+        // 用 `withAnimation` 包它会让「合拢/展开」过程每帧重排（实测 0.25s ≈ 15 帧）。
+        foldedNow = next
         twoColumn = !next
     }
 
@@ -851,11 +1258,29 @@ struct OneSkinStage: View {
     /// ⛔ 禁止再在 `stage` / `makeLayout` / 控件层里写 `size.width > size.height`：
     /// 那些地方拿到的都是旋转动画中的连续尺寸，会在临界点反复翻转，
     /// 两种展开态因此混成一态，窗口与控件绝对坐标每帧重排。
-    private var effectiveShape: OneSkinShape {
-        let forcePortrait = UserDefaults.standard.bool(forKey: "qaOneSkinPortrait") || portraitNow
-        let forceLandscape = !forcePortrait && UserDefaults.standard.bool(forKey: "qaOneSkinLandscape")
-        if forcePortrait { return .column }
-        if forceLandscape { return .split }
+    /// 形态（唯一读取点）。
+    ///
+    /// ★★ 2026-11-12：**必须接受 `override`**。
+    ///
+    /// `stage` 收到 `shapeOverride`（由 `GeometryReader.geo.size` 算出的真实形态）后，
+    /// 只把 `landscapeNow` 改了，而 `effectiveShape` 仍返回旧的 `shape` ——
+    /// 于是出现「横着排（land=true）但走单列分支（shape=column）」的矛盾。
+    /// 现在所有分支与日志都走这一个方法，override 一处生效、全局一致。
+    private func shape(_ override: OneSkinShape? = nil) -> OneSkinShape {
+        if let override { return override }
+        // ★ QA 强制必须覆盖**全部五态**（之前只认 portrait/landscape，
+        // 于是 halfFold / fullBleed 在任何 QA 参数下都到不了，
+        // 这正是「每种形态都不对」里半折、宽屏两态完全不可达的原因）。
+        if UserDefaults.standard.bool(forKey: "qaOneSkinColumn") { return .column }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinLandscape") { return .split }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold") { return .halfFold }
+        // ⛔ 删掉 `portraitNow` 对形态的干预。
+        //
+        // 它是「屏幕上是否是竖持」的独立判断，与 `shape` 参数（父视图按容器宽高比
+        // 算出的形态）**不同源**。两者打架时，stage 用一套、控件用另一套，
+        // 就是「同帧里 ROOT 行 shape=fullBleed、stage 行 shape=split」的来源。
+        // 形态只信 `shape` 一个来源（它在 VideoDetailView 里已按容器宽高比算好）。
         // ★ 直接读**传入参数** `shape`，不读镜像出来的 `shapeNow`。
         //
         // `shapeNow` 是 `onChange(of: shape)` 里写进来的 @State，读它意味着
@@ -867,7 +1292,56 @@ struct OneSkinStage: View {
         return shape
     }
     /// 是否走横向双列。fullBleed（展开宽屏）是**竖持**，必须返回 false。
-    private var stageIsLandscape: Bool { effectiveShape.isLandscape }
+    ///
+    /// ★ 半折是例外：它不是「横屏版式」（没有左右双列），但 `box`/上限钳制问的是
+    ///   「屏幕现在哪条边长」。机器转 90° 后半折，容器是 951×669，
+    ///   按竖持给 669×951 会宽少 282、高多 282（16.4）。
+    ///   所以这一支跟 `OneSkinGeometry.layoutLandscape` 用**同一个判据**：
+    ///   屏幕实测宽 > 高。
+    /// 屏幕方向（1=横 / 0=竖 / -1=未知），由 `.onChange(of: OneSkin.fixedScreenSize())`
+    /// 维护。它**只用于触发重算**：转屏时 `geo.size` 要等 UIKit 动画结束（实测 520~840ms）
+    /// 才更新，而 `screen.bounds` 在动画**开始时**就变了。有了这个状态，
+    /// body 会在转屏当帧重跑，`geoShape` 里的「screen 预判」分支才来得及生效。
+    @State private var screenIsLandscapeNow: Bool?
+
+    private var stageIsLandscape: Bool {
+        let sh = shape()
+        guard sh == .halfFold else { return sh.isLandscape }
+        let s = OneSkin.fixedScreenSize()
+        guard s.width > 1, s.height > 1 else { return false }
+        return s.width > s.height
+    }
+
+    /// 本帧真正采用的几何快照。
+    ///
+    /// ⛔ 16.7：`geoDriver` 用 `shape: .column` 建立，`onAppear` 才改成真实形态。
+    ///    横屏/展开宽屏直接进页面时，第一帧 `box` 是 669×951，而 `stage` 已按横屏排
+    ///    —— 首帧越界、闪一下。这里发现 driver 还没跟上（形态或全屏标记不同），
+    ///    就按当前值**现算**一份（纯算术，不写状态、不成环）；
+    ///    `onAppear` / `onChange` 落地后两者自然一致。
+    private var liveGeometry: OneSkinGeometry {
+        let g = geoDriver.geometry
+        guard g.shape != shape() || g.fullScreen != fullScreenNow else { return g }
+        return geoDriver.preview(shape: shape(), fullScreen: fullScreenNow)
+    }
+
+    /// 竖持「列顶 → 窗口顶」的整段留白（**画面层与控件层唯一来源**）。
+    ///
+    /// 2026-11-12：原来是两处内联表达式各写一遍（`pictureColumn` / `pictureControls`），
+    /// 改一处忘另一处就立刻错位。现在收成一个静态函数，两处都调它。
+    ///
+    /// 基准是**物理屏高**（`ratioBase.height`），不是 `colH`（画面区高度）。
+    /// 比例分设备（真机实测）：
+    ///   · 外屏/窄屏（<500pt 宽）：43.00 / 678 = 0.0634
+    ///   · 内屏（≥500pt 宽）    ：85.67 / 951 = 0.091
+    ///
+    /// `extraDrop`：用户要求的**整体下移量**（视频与所有控件一起往下）。
+    /// 加大它就是整块内容往下挪，画面层和控件层同步 —— 不会只动一半。
+    static func portraitTopInset(ratioBase: CGSize, colSize: CGSize) -> CGFloat {
+        let base = ratioBase.height > 1 ? ratioBase.height : colSize.height
+        let ratio: CGFloat = colSize.width < 500 ? 0.0634 : 0.091
+        return base * ratio + OneSkin.portraitExtraDrop
+    }
 
     private var shown: Video { detail ?? video }
     /// 当前线路的集。线路为空（单线源）时退回全集，兼容没传 lines 的旧调用。
@@ -879,13 +1353,19 @@ struct OneSkinStage: View {
     }
     private var playingEpisode: Episode? { current ?? episodes.first }
 
-    /// 进度条比例。时长未知时给 0，不假装有进度。
-    private var progress: CGFloat {
-        guard duration.isFinite, duration > 0, position.isFinite else { return 0 }
-        return CGFloat(min(max(position / duration, 0), 1))
-    }
+    // ⛔ 已删除 `progress` / `timeText` / `remainText`：
+    //   三者全仓零消费者（唯一用到时间文字的是 `OneContinueHint`，
+    //   它自己算）。它们却是 `position` / `duration` 被拖进 `OneSkinStage`
+    //   的唯一理由 —— 留着就会继续把播放进度变成整页重绘的触发器。
 
     /// One 左端显示「已播」，右端显示「−剩余」——实测样板是 `0:00:01` / `-1:58:04`。
+    /// 大数字压缩成 One 的写法（`1215k` / `16k` / `8484k`）。
+    /// 真机 AX 实测：「1215k 次观看 · 收藏 16k · 评论 237」——用 k 不用万。
+    static func compactCount(_ n: Int) -> String {
+        if n >= 1000 { return "\(n / 1000)k" }
+        return "\(n)"
+    }
+
     private static func clock(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let total = Int(seconds.rounded())
@@ -894,10 +1374,71 @@ struct OneSkinStage: View {
                      : String(format: "%d:%02d", m, s)
     }
 
-    private var timeText: String { Self.clock(position) }
-    private var remainText: String {
-        guard duration.isFinite, duration > 0 else { return "" }
-        return "-" + Self.clock(max(duration - position, 0))
+    /// 仅供「继续播放」按钮显示文字用。
+    ///
+    /// 独立成一个 `View` 是有意为之：它单独观察 `position`（每帧变），
+    /// 而**父级 `OneSkinStage` 不再碰 `position`**，于是根部 `GeometryReader`
+    /// 不会因为播放进度而重算 —— 这是「控件每秒推移」的根治点。
+    /// `GeometryProxy` 的最小替身。
+    ///
+    /// body 内部原来直接用 `proxy.size` / `proxy.safeAreaInsets`，
+    /// 换成 `onGeometryChange` 之后没有真 proxy 了，用这个结构承接同样两个字段，
+    /// 让 body 里的其余代码**一行都不用改**。
+    struct OneSkinStageProxy {
+        let size: CGSize
+        let safeAreaInsets: EdgeInsets
+    }
+
+    private struct OneContinueHint: View {
+        /// 直接持有 `@Observable` 的会话 —— **只有这个叶子视图**订阅 `position`。
+        let session: PlaybackSession?
+        let episodeNumber: Int
+
+        private var position: Double { session?.position ?? 0 }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(position > 0 ? "继续播放" : "播放")
+                    .font(.system(size: 20, weight: .semibold))
+                if position > 0 {
+                    Text("第 \(episodeNumber) 集 · \(OneSkinStage.clock(position))")
+                        .font(.system(size: 13))
+                        .opacity(0.72)
+                }
+            }
+        }
+    }
+
+    /// 胶囊条下面那行「① 已定位到上次看到的 2:52 …… 从头播放」。
+    ///
+    /// 参考截图六态里都有这一行（竖持/横持/外屏、暂停/未播），我们之前完全没做。
+    /// 它是**叶子视图**：只有它订阅 `position`，父级 `OneSkinStage` 不跟着重绘 ——
+    /// 与 `OneContinueHint` 同一条纪律。
+    private struct OneResumeLine: View {
+        let session: PlaybackSession?
+        let onRestart: () -> Void
+
+        private var position: Double { session?.position ?? 0 }
+
+        var body: some View {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 12))
+                Text("已定位到上次看到的 \(OneSkinStage.clock(position))")
+                    .font(.system(size: 14))
+                    .lineLimit(1)
+                Spacer(minLength: 10)
+                Button(action: onRestart) {
+                    Text("从头播放")
+                        .font(.system(size: 14))
+                        .foregroundStyle(OneSkinPalette.autoBlue)
+                }
+                .buttonStyle(.plain)
+            }
+            .foregroundStyle(OneSkinPalette.tertiary)
+            // 没有续播位置时整行隐形（仍占位，避免底部块跳动）。
+            .opacity(position > 0 ? 1 : 0)
+        }
     }
 
     var body: some View {
@@ -912,124 +1453,396 @@ struct OneSkinStage: View {
         //     (466×678)，而真实容器是横屏 678×466，导致 winY 按 678 算，
         //     画面窗口被推到屏幕中部（实测 y646 vs One 的 y357）。
         // 根部 GeometryReader 量的就是系统分给这个视图的空间，不会被骗，也不会自激。
-        GeometryReader { proxy in
-            // ★ 用**真实屏幕**而不是父容器。
+        // ★★★ 用 `onGeometryChange` 取代 `GeometryReader` —— 这是环的终点。
+        //
+        // 参考（联网查证，见本轮文档）：
+        //   · philz.blog/swiftui-geometry-modifiers-ongeometrychange/
+        //     「GeometryReader 作为 background/overlay 插入会**增加视图图复杂度**，
+        //       让布局与命中测试变慢」
+        //   · fatbobman.com/en/snippet/how-to-obtain-view-dimensions-in-swiftui/
+        //     「onGeometryChange 只用于**监测**几何，**不影响布局结构**」
+        //   · rebeloper（iPad split view 同一个 bug）：
+        //     「feedback loop when split view changed the scroll container size，
+        //       解法是 **把 viewport 尺寸与 content 尺寸分开**」
+        //
+        // 差别是本质性的：
+        //   `GeometryReader` **参与布局** —— 它自己占空间、并把提议尺寸传给子视图。
+        //   于是「量 → 排 → 量」必然成环：子视图按量到的值排版，改变了内容尺寸，
+        //   父容器重新提议，GeometryReader 再量到新值 …
+        //   实测 Fig 内屏横持 split：proxy 宽 1087→1078→…→799（每帧 -8pt，
+        //   连续 37 帧）→ 瞬间跳回 1354 → 再来一轮，每秒 213 次 ROOT。
+        //
+        //   `onGeometryChange` **不参与布局** —— 它挂在视图外层当观察者，
+        //   只在尺寸真的变化时把值写进 `@State`，布局用那个 State 走。
+        //   视图图里没有「测量者」，环就没有闭合路径。
+        //
+        // ⛔ 不要退回 GeometryReader。也不要在这里再加 `.frame` 去「钉住」——
+        //   那只是让内容和容器互相拉扯（第 11 轮已实测：每秒 397 次）。
+        // ★★★ 哔哩哔哩架构：几何基准只用「窗口/屏幕」，**不测量容器**。
+        //
+        // 参考实现（B 站 9.18.0，strings 实测）：
+        //   setupModule isFoldable:%d capable:%d isWideScreen:%d sizeClass:%ld window:%@
+        //
+        // 它一次拿齐五个**离散/半离散**信号，其中 `window` 是几何主源。
+        // 关键点是：**它从不问「我这个视图被分到多大」** ——
+        // 一旦去问，答案就取决于内容尺寸，内容又取决于答案，成环。
+        //
+        // 我们照抄这套：
+        //   · 几何 = screen（窗口尺寸，外部常量，不由内容决定）
+        //   · 形态 = shape（离散枚举，由 size class / duoExpanded / 折痕带判定）
+        //   · 二者都不依赖本视图的内容尺寸 ⇒ 视图图里没有反馈边
+        //
+        // ⛔ 彻底不用 `GeometryReader`，也不用 `onGeometryChange`：
+        //   前者参与布局必然成环（实测每秒 213–479 次）；
+        //   后者虽然不参与布局，但量到的是「本视图最终 frame」，
+        //   而这个 frame 会被内容撑大（实测 raw 宽 1621，屏幕只有 951），
+        //   等于把内容尺寸又喂回布局，环照旧。
+        //
+        // One 的界面完全保留：`stage` 里那套绝对坐标版式一行没动，
+        // 只是**几何输入的来源**从「量容器」换成「读窗口」。
+        // ★★★ 几何 = **按形态整形后的屏幕**，不是物理 screen.bounds。
+        //
+        // `screen.bounds` 在 Duo 上是物理固定值，**永不随方向交换**
+        // （本项目已坐实：内屏恒报 951×669，横竖都一样）。
+        // 直接拿它当 box，竖持时就是 952×664 铺在 669 宽的容器上
+        // —— **横向溢出 283pt**，画面右侧被推出屏外、下方 287pt 全空。
+        // 这就是用户报的「一进页面尺寸就不对」。
+        //
+        // 正解：按**形态**把屏幕整形一次：
+        //   · 横持（split / 全屏横屏）→ 长边为宽：951×669
+        //   · 竖持（column / fullBleed）→ 短边为宽：669×951
+        // 形态是离散枚举，整形结果因此也是离散的 —— 不依赖任何测量，
+        // 不与内容尺寸互为因果，**不构成环**。
+        // ★ 几何 = driver 缓存的离散快照（哔哩哔哩架构）。
+        // 它只在「形态 / 折叠态 / 遮挡 / 屏幕尺寸」跨档时重算一次，
+        // 且过三道幂等门；body 重算时**读的是缓存，不重新推导**。
+        // ⚠️ `proxy` 只用于 body 里少数读 `proxy.safeAreaInsets` 的地方；
+        // 真正参与排版的尺寸是 `stage(useAvail)` 的 `useAvail`（来自 GeometryReader）。
+        // 2026-11-12：`liveGeometry.box` 与 `geo.size` 实测会不一致
+        // （594x432 vs 678x466），所以 body 层不再用它做任何几何决策。
+        let proxySize = liveGeometry.box
+        let proxy = OneSkinStageProxy(size: proxySize, safeAreaInsets: measuredSafeArea)
+        // ★ 用**真实屏幕**而不是父容器。
+        //
+        // 实测（Fig-clone 678×466pt）：这里量到的是 951×669 —— 宽了 273pt，
+        // 那正好是右侧 `.sidebarAdaptable` 边栏的宽度。播放页是 push 进
+        // NavigationStack 的、仍在 TabView 里，边栏没折叠，把内容区撑大了。
+        // 于是 colL 算成 951×0.5334=507（应为 361），播放器窗口 473×260
+        // （One 基准 338×186），而且边栏直接压住右栏按钮 —— 用户报的
+        // 「点不进去」和「尺寸不对」都是这一个原因。
+        //
+        // 父容器宽度不可信，就以屏幕为准：取 proxy 与屏幕的**较小值**，
+        // 保证内容永远不超出真实可视区。屏幕比 proxy 大时（正常情况）仍用 proxy。
+        // ★ 屏幕类 API 在这个 VM 上都不可信（实测全部报竖屏 466×678，
+        // 而实际截图是横屏 2034×1398）。唯一可信的是「根视图被分配到的
+        // 局部坐标空间」—— 它跟着父容器走，父容器若是横的，它就是横的。
+        // 因此直接用 proxy.size，只做一次「谁是可视区」的安全夹取。
+        // ⛔ 绝不用 `cachedLiveContainer`！它是 `.onGeometryChange` 量的「视图最终 frame」，
+        // 而该 frame 又由这里的 `screen` 经 `availableSize` 钳制后决定 —— 完整闭环。
+        // 实测（真机 Duo 2026-11-12）：ROOT dt=1ms、SHAPE 翻转 3141 次（split/fullBleed 各半）。
+        // `screen.bounds` 是离散静态量，绝不参与 feedback。
+        //
+        // 之前这里恒读 `screen.bounds`（内屏报 951×669 / 外屏报 678×466），
+        // 而形态判定读容器 → 两套基准，`availableSize` 用 screen 钳制容器，
+        // 实测出现 container 高 688 > screen 高 466（钳制失效）。
+        // 现在两者同源，钳制才真正有效。
+        let screen = OneSkin.fixedScreenSize()
+        #if DEBUG
+        // 一次性打齐所有几何来源，定位 294 是谁给的（只打前 3 帧，避免刷屏）。
+        // ⛔ 必须写成 `let _ = { … }()` 而不是裸 `if` ——
+        //    `ViewBuilder` 会把语句级 `if` 当成**条件视图**，返回 `()`
+        //    就要报 "type '()' cannot conform to 'View'"（实测踩过）。
+        let _ = {
+            guard ROOTRecomputeProbe.n <= 3 else { return }
+            let wp = (UIApplication.shared.appWindowScene?.windows.first?.bounds.size) ?? .zero
+            let sc = (UIApplication.shared.appWindowScene?.screen.bounds.size) ?? .zero
+            oneSkinLog("GEO proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) win0=\(Int(wp.width))x\(Int(wp.height)) scr=\(Int(sc.width))x\(Int(sc.height)) safe=\(Int(proxy.safeAreaInsets.top)),\(Int(proxy.safeAreaInsets.bottom))")
+        }()
+        #endif
+        // ⛔ 伪全屏修复：`availableSize` 的短边上限缩放是给**双列态**防
+        // 侧栏把内容区撑大用的（951×669 那个坑）。但全屏态侧栏已经
+        // `.persistentSystemOverlays(.hidden)` 隐藏、proxy 本应就是真实可视区，
+        // 再拿 `UIScreen.main.bounds`（VM 上报告错误的外屏竖屏值）去缩，
+        // 全屏窗口就缩成一小块、四周巨黑边 —— 用户报的「伪全屏」。
+        // 全屏态由 `fullScreen:` 参数跳过缩放，直接用 proxy.size 铺满。
+        // ★★★ 哔哩哔哩式「量化桶」—— 本文件最关键的一处。
+        //
+        // 参考实现：哔哩哔哩 9.18.0 的折叠屏适配（MachO strings 实测）：
+        //   setupModule isFoldable:%d capable:%d isWideScreen:%d sizeClass:%ld window:%@
+        //   _TtC13HingeObserver13HingeObserver / HingeStatus 枚举
+        //   Tq,N,V_lastHingeStatus        ← 缓存上一次状态
+        //   _foldableBoundsLimitWith: / _foldableRelayoutForOcclusion
+        //
+        // 它的要害不是「怎么算几何」，而是 **几何只在离散状态变化时才重算**：
+        // 折叠态是一个枚举，上一次的值被缓存成 `lastHingeStatus`，
+        // 状态没变就完全不碰布局。所以 B 站播放页在折叠/旋转时不会每帧重排。
+        //
+        // 我们的问题正相反：根部 `GeometryReader` 每帧给出一个**连续**的
+        // `proxy.size`，直接喂给 `stage` 排版。于是：
+        //   · 容器因为任何原因（动画、播放进度、UIKit 图层）抖 1pt
+        //   · `avail` 就变 → `stage` 重新排 → 控件移动
+        //   · 实测每秒 479 次 ROOT 重算，dt=7–11ms，proxy 宽 473→455 递减
+        //
+        // 修法：把 `avail` **量化到整数桶**（8pt 一档，够粗到吸收抖动、
+        // 够细到形态切换时能跟手）。桶不变 → 传给 `stage` 的值不变 →
+        // SwiftUI 认为子视图无需重建 → 环断在这里。
+        //
+        // ⛔ 不要改成「量化到 1pt」或「不量化」：那等于没做，抖动仍是逐帧变化。
+        // ⛔ 不要量化 `screen`：它是静态值，量化没有意义，还会让边界判断变糊。
+        // ⛔ 不再传 `landscape`：见 `availableSize` 注释（方向与尺寸不同源）。
+        let rawAvail = OneSkin.availableSize(proxy: proxy.size, screen: screen,
+                                            fullScreen: fullScreenNow)
+        // ★ 横持跳过 8pt 量化：951 不是 8 的倍数（floor8→944），会把正立帧三段
+        //   467.667+55.333+428=951.000 压成 944，右栏凭空少 7pt。
+        //   geoDriver 已是离散缓存、横持无逐帧回灌边（A3 ①），去掉横持量化
+        //   不会重引入自激环；竖持/外屏仍保留 8pt 桶吸抖。
+        //   ⚠ 需真机复验「横切竖」瞬间是否有 3.79pt 台阶跳变。
+        let avail = stageIsLandscape ? rawAvail : OneSkin.stableBucket(rawAvail, step: 8)
+        // ⛔ 不要在这里「冻结尺寸」。
+        //
+        // 试过 `StableStageSize`：在 body 里读 `proxy.size`，喂给它，
+        // 它再写 `@State` 决定用哪个尺寸排版。这是**反馈环**：
+        //   改 State → 重排 → proxy.size 变 → 再改 State → …
+        // 表现就是用户报的「横转竖后控件无限推移，得重启 App 才恢复」。
+        // 而且它是「只在稳定后提交」，一旦某一帧被判成稳定、后续又变了，
+        // 几何就永久卡在旧值 —— 全屏点不动也是它连带的。
+        // 真正的正解是：**几何只由离散形态决定，不依赖连续尺寸**（见 shape 的说明）。
+        // ★ 重算频率探针：带单调递增序号 + 毫秒时间戳。
+        // 单看 body 被调用次数无法区分「用户操作触发」与「自反馈环」；
+        // 序号间隔（dt）能直接读出环的速度：dt≈16ms = 每帧一次 = 环。
+        #if DEBUG
+        // ★ 必须包在 #if DEBUG 里。
+        // 它每帧写一次 `Documents/oneskin.log`；实测环里每秒 397 次，
+        // 放进 Release 就是每秒 397 次磁盘写 + 日志无限增长
+        // （之前那份 42.9 万行的 log 就是这么来的）。
+        let _ = {
+            ROOTRecomputeProbe.n += 1
+            let now = Date().timeIntervalSince1970
+            let dt = ROOTRecomputeProbe.last > 0 ? Int((now - ROOTRecomputeProbe.last) * 1000) : -1
+            ROOTRecomputeProbe.last = now
+            // ★ 决定性探针：把「入参 shape」与「镜像 shapeNow」并列打印。
+            //   effectiveShape 现在直接返回入参 shape，但 ROOT 行打的是 shapeNow（@State 镜像）。
+            //   两者不一致 ⇒ 镜像滞后（onChange 晚一帧），正是 body 反复重算的原因之一。
+            let mirror = (shapeNow == shape) ? "same" : "LAG(shapeNow=\(shapeNow.logName))"
+            oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) shape=\(shape.logName) mirror=\(mirror) folded=\(foldedNow) portrait=\(portraitNow)")
+        }()
+        #endif
+        // ★ 整页底色必须**单独一层、不跟着内容内缩**。
+        //
+        // `stage` 内部是 `Group`，而 Group 上的修改器是**逐个子视图**生效的：
+        // `.padding(.top, 8)` 连那一层整页底色一起缩了进去。`.ignoresSafeArea()`
+        // 只按「安全区」外扩，横屏顶部安全区是 0（状态栏已隐藏），补不回来 ——
+        // 于是屏幕最上沿露出的是更亮的 `OneSkinBackdropLayer`（实测 87,110,143，
+        // 内容区 11,9,10），横贯整屏一条，就是用户报的「色彩不一致的顶部条」。
+        // 放在这里（stage 外、padding 外）才是真正的全屏底色：条带被同色填满，
+        // 同时不用动那 8pt —— 它是 One 逐像素实测的下移量，`OneSkinWindowGeometry`
+        // 的 usableH / winY 都按它算，改数字整页几何就漂。
+        // ═══════════════════════════════════════════════════════════════
+        // ★★ 2026-11-12 根治：尺寸源改用 GeometryReader（对齐 B站皮肤做法）
+        //
+        // 此前 One 皮肤**完全不用 GeometryReader**（怕反馈环），改用
+        // `fixedScreenSize()` → `geoDriver.geometry.box` 这条链。
+        // 但 `fixedScreenSize()` 在 Fig 上返回 951×669（AX 的缩放坐标系），
+        // 而真实容器只有 678×466 ⇒ 所有坐标被放大 1.403 倍后被窗口裁掉。
+        //
+        // 我方 B站皮肤（`App/BiliLandscapePage.swift:67`）用
+        //   `GeometryReader { geo in ... geo.size.width ... }`
+        // 同一台 Fig 上显示正常 —— 证明 `geo.size` 是**真实容器尺寸**。
+        //
+        // 反馈环的真正成因不是 GeometryReader，而是
+        //   量到值 → 写 @State → 喂回布局
+        // 这里 `geo.size` 就地使用、不写任何 State ⇒ 无环。
+        //
+        // 原有结构（HStack 双栏 / 比例常量 / 播放器几何 / 右栏控件）全部保留，
+        // 只把**尺寸源**换成 `geo.size`。
+        // ═══════════════════════════════════════════════════════════════
+        // ★★ 2026-11-12 实测修正：`.ignoresSafeArea()` 必须加在 **GeometryReader 外层**。
+        //
+        // 加在 stage 上无效（实测 proxy 仍 379×644）—— 安全区在 GeometryReader
+        // 拿到 proxy.size **之前**就被扣掉了，下游再加 ignoresSafeArea 拿不回。
+        //
+        // 真 One 外屏竖持（466×678）实测：
+        //   视频 x=16  w=350  ⇒  466 − 16(左) − 100(右) = 350 ✓
+        // 即它按**整屏 466** 排版（播放器满宽到状态栏），不扣安全区。
+        // 我方按 379 排 ⇒ 视频只有 376 宽、x=0。
+        GeometryReader { geo in
+            // ★★★ 2026-11-12 需求3：**形态判定下沉到这一层**，与渲染同源。
             //
-            // 实测（Fig-clone 678×466pt）：这里量到的是 951×669 —— 宽了 273pt，
-            // 那正好是右侧 `.sidebarAdaptable` 边栏的宽度。播放页是 push 进
-            // NavigationStack 的、仍在 TabView 里，边栏没折叠，把内容区撑大了。
-            // 于是 colL 算成 951×0.5334=507（应为 361），播放器窗口 473×260
-            // （One 基准 338×186），而且边栏直接压住右栏按钮 —— 用户报的
-            // 「点不进去」和「尺寸不对」都是这一个原因。
+            // 问题：上层 `VideoDetailView.oneSkinShape` 用 `layoutSize`(=keyWindow.bounds)
+            // 做判定，而真正排版用的是这里的 `geo.size`。Duo 内屏竖持时
+            // keyWindow 可能仍报横值（951×669），于是 ratio≥1.15 → 判成 split，
+            // 「展开竖屏」与「展开横屏」合并成同一形态 —— 用户报的正是这个。
             //
-            // 父容器宽度不可信，就以屏幕为准：取 proxy 与屏幕的**较小值**，
-            // 保证内容永远不超出真实可视区。屏幕比 proxy 大时（正常情况）仍用 proxy。
-            // ★ 屏幕类 API 在这个 VM 上都不可信（实测全部报竖屏 466×678，
-            // 而实际截图是横屏 2034×1398）。唯一可信的是「根视图被分配到的
-            // 局部坐标空间」—— 它跟着父容器走，父容器若是横的，它就是横的。
-            // 因此直接用 proxy.size，只做一次「谁是可视区」的安全夹取。
-            let screen = OneSkin.fixedScreenSize()
-            #if DEBUG
-            // 一次性打齐所有几何来源，定位 294 是谁给的（只打前 3 帧，避免刷屏）。
-            // ⛔ 必须写成 `let _ = { … }()` 而不是裸 `if` ——
-            //    `ViewBuilder` 会把语句级 `if` 当成**条件视图**，返回 `()`
-            //    就要报 "type '()' cannot conform to 'View'"（实测踩过）。
-            let _ = {
-                guard ROOTRecomputeProbe.n <= 3 else { return }
-                let wp = (UIApplication.shared.appWindowScene?.windows.first?.bounds.size) ?? .zero
-                let sc = (UIApplication.shared.appWindowScene?.screen.bounds.size) ?? .zero
-                oneSkinLog("GEO proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) win0=\(Int(wp.width))x\(Int(wp.height)) scr=\(Int(sc.width))x\(Int(sc.height)) safe=\(Int(proxy.safeAreaInsets.top)),\(Int(proxy.safeAreaInsets.bottom))")
+            // 现在用 `geo.size`（这一帧真实容器）重新判一次，只覆盖**方向类**
+            // 判定（split / fullBleed / column）；halfFold 由折缝决定，不在此处推翻。
+            let _t0 = Date().timeIntervalSince1970
+            let geoShape: OneSkinShape = {
+                // ① QA 强制优先（无人值守验收用，必须原样尊重，不能被几何推翻）
+                if UserDefaults.standard.bool(forKey: "qaOneSkinColumn") { return .column }
+                if UserDefaults.standard.bool(forKey: "qaOneSkinLandscape") { return .split }
+                if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
+                if UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold") { return .halfFold }
+                // `-qaPage one-preview -qaOneShape <shape>` 也属于强制，
+                // 由 QAHost 直接传进 `shape`；此时**不要再按尺寸改判**。
+                if UserDefaults.standard.string(forKey: "qaOneShape") != nil { return shape }
+                // ② 半折由折缝决定，不按宽高比推翻
+                if shape == .halfFold { return .halfFold }
+                // ②′ **转屏预判**：`screen.bounds` 在 UIKit 转屏动画**开始时**就变了，
+                //    而 `geo.size` 要等动画结束（实测 520~840ms）才更新。
+                //    用 screen 的宽高比先判一步，转屏当帧就切版式，视觉上立刻响应。
+                //    `screen` 只在**方向真的变了**时才与 geo 不一致，所以不会误判：
+                //    两者一致时走下面的 geo 判断，结果相同。
+                // 读 `screenIsLandscapeNow` 让 body 在转屏时重算（见其声明处说明）。
+                let _ = screenIsLandscapeNow
+                let scr = OneSkin.fixedScreenSize()
+                if scr.width > 1, scr.height > 1 {
+                    let screenLandscape = scr.width > scr.height
+                    let geoLandscape = geo.size.width > geo.size.height
+                    if screenLandscape != geoLandscape {
+                        // screen 已翻向、geo 还没跟上 ⇒ 以 screen 为准（转屏进行中）
+                        return screenLandscape
+                            ? .split
+                            : (max(scr.width, scr.height) >= 500 ? .fullBleed : .column)
+                    }
+                }
+                // ③ 真实运行：按 One 的原始判据 —— **`w > h` 一次比较**。
+                //
+                // 依据（RULES.md §一，勿再推翻）：
+                //   One 的 `VideoDetailPage` 只有 `__pageSize: State<CGSize>` 一个尺寸源，
+                //   横竖 = `width > height`；没有阈值、没有宽高比、没有滞回。
+                //   证据：`One-1.7.1.interface.swift:1630/3271`，`LargeCanvas` 无像素字段。
+                //
+                // 下方「竖持再分 fullBleed / column」是**我方对 Duo 的扩展**
+                //   （One 没有「外屏 vs 内屏竖持」的区分，它靠 __division 判折缝）。
+                //   这里按短边分档，因为外屏 466 与内屏 669 的竖持版式确实不同。
+                let w = max(geo.size.width, 1)
+                let h = max(geo.size.height, 1)
+                if w > h { return .split }                   // 横：双栏
+                return w >= 500 ? .fullBleed : .column       // 竖：内屏宽版 / 外屏单列
             }()
-            #endif
-            // ⛔ 伪全屏修复：`availableSize` 的短边上限缩放是给**双列态**防
-            // 侧栏把内容区撑大用的（951×669 那个坑）。但全屏态侧栏已经
-            // `.persistentSystemOverlays(.hidden)` 隐藏、proxy 本应就是真实可视区，
-            // 再拿 `UIScreen.main.bounds`（VM 上报告错误的外屏竖屏值）去缩，
-            // 全屏窗口就缩成一小块、四周巨黑边 —— 用户报的「伪全屏」。
-            // 全屏态由 `fullScreen:` 参数跳过缩放，直接用 proxy.size 铺满。
-            let avail = OneSkin.availableSize(proxy: proxy.size, screen: screen, fullScreen: fullScreenNow)
-            // ⛔ 不要在这里「冻结尺寸」。
-            //
-            // 试过 `StableStageSize`：在 body 里读 `proxy.size`，喂给它，
-            // 它再写 `@State` 决定用哪个尺寸排版。这是**反馈环**：
-            //   改 State → 重排 → proxy.size 变 → 再改 State → …
-            // 表现就是用户报的「横转竖后控件无限推移，得重启 App 才恢复」。
-            // 而且它是「只在稳定后提交」，一旦某一帧被判成稳定、后续又变了，
-            // 几何就永久卡在旧值 —— 全屏点不动也是它连带的。
-            // 真正的正解是：**几何只由离散形态决定，不依赖连续尺寸**（见 shape 的说明）。
-            // ★ 重算频率探针：带单调递增序号 + 毫秒时间戳。
-            // 单看 body 被调用次数无法区分「用户操作触发」与「自反馈环」；
-            // 序号间隔（dt）能直接读出环的速度：dt≈16ms = 每帧一次 = 环。
-            let _ = {
-                ROOTRecomputeProbe.n += 1
-                let now = Date().timeIntervalSince1970
-                let dt = ROOTRecomputeProbe.last > 0 ? Int((now - ROOTRecomputeProbe.last) * 1000) : -1
-                ROOTRecomputeProbe.last = now
-                oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) shape=\(shapeNow.logName) folded=\(foldedNow) portrait=\(portraitNow)")
-            }()
-            // ★ 整页底色必须**单独一层、不跟着内容内缩**。
-            //
-            // `stage` 内部是 `Group`，而 Group 上的修改器是**逐个子视图**生效的：
-            // `.padding(.top, 8)` 连那一层整页底色一起缩了进去。`.ignoresSafeArea()`
-            // 只按「安全区」外扩，横屏顶部安全区是 0（状态栏已隐藏），补不回来 ——
-            // 于是屏幕最上沿露出的是更亮的 `OneSkinBackdropLayer`（实测 87,110,143，
-            // 内容区 11,9,10），横贯整屏一条，就是用户报的「色彩不一致的顶部条」。
-            // 放在这里（stage 外、padding 外）才是真正的全屏底色：条带被同色填满，
-            // 同时不用动那 8pt —— 它是 One 逐像素实测的下移量，`OneSkinWindowGeometry`
-            // 的 usableH / winY 都按它算，改数字整页几何就漂。
+            let _ = oneSkinLog("GEOSRC geo=\(Int(geo.size.width))x\(Int(geo.size.height)) screen=\(Int(screen.width))x\(Int(screen.height))")
+            let _ = oneSkinLog("SWITCH geo=\(Int(geo.size.width))x\(Int(geo.size.height)) shape=\(geoShape.logName) t=\(String(format: "%.0f", _t0*1000))")
+            let liveAvail = OneSkin.availableSize(
+                proxy: geo.size,
+                screen: OneSkin.fixedScreenSize(),
+                fullScreen: fullScreenNow
+            )
+            let useAvail = stageIsLandscape ? liveAvail : OneSkin.stableBucket(liveAvail, step: 8)
+            let _ = oneSkinLog("GEOSRC liveAvail=\(Int(liveAvail.width))x\(Int(liveAvail.height)) useAvail=\(Int(useAvail.width))x\(Int(useAvail.height)) geoShape=\(geoShape.logName)")
             ZStack(alignment: .topLeading) {
                 OneSkinPalette.pageBase.ignoresSafeArea()
-                stage(avail, fitMode: fitMode, playerAspect: aspectRatio)
+                // ⛔ 不再经 `@State` 中转。
+                //
+                // 原实现写 `geoShapeNow` 再由 stage 读，而 `@State` 的值要**下一帧**
+                // 才生效 ⇒ 每次转屏多一轮渲染，且偶尔「状态没变化」
+                // （本帧 stage 仍读旧值）。现在直接把 `geoShape` 作为参数传入，
+                // 同一次求值内生效，零延迟。
+                stage(useAvail,
+                      ratioBase: CGSize(width: useAvail.width, height: useAvail.height),
+                      fitMode: fitMode, playerAspect: aspectRatio,
+                      liveShape: geoShape)
             }
-            //
-            // 原来的写法是「每个方向各取一次较小值」：
-            //   width  = min(max(proxy.w, proxy.h), max(screen.w, screen.h))
-            //   height = min(min(proxy.w, proxy.h), min(screen.w, screen.h))
-            // 两个方向取的**不是同一个来源**，结果恒等于「长边当宽、短边当高」：
-            //   · 竖屏手机 393×852   → avail = 852×393（横的）
-            //   · Duo 展开竖持 2007×2853 → avail = 2853×2007（横的）
-            // 于是 `landscapeNow = measured.width > measured.height` 恒为真 ——
-            // 不管怎么拿，页面都是横屏双列，Duo 展开也永远等不到竖屏单列。
-            // 更糟的是全屏：把这块「横着的」包围盒铺到竖屏上，画面按横屏窗口排、
-            // 上下留巨黑边、控件按横屏坐标落位 —— 就是用户报的「伪全屏」。
-            //
-            // 现在只做**等比**收缩：保留 proxy 自己的横竖，仅在 proxy 被父容器
-            // 撑大（VM 上那 1.4 倍边栏）时整体缩到屏幕短边，绝不交换宽高。
-            // 放在 static 方法里：ViewBuilder 里写 `if` 会被当成条件视图，编不过。
-            // screen 只用来取「短边上限」，必须是静态值：keyWindow.bounds 在
-            // 旋转动画里每帧变，会让这个缩放因子一直抖（控件坐标漂移）。
-            // 形态本身已由离散的 effectiveShape 决定，不参与这里的计算。
         }
+        .ignoresSafeArea()
+        // ⛔ 这里**不能**再 `.frame(width:) + .clipped()`。
+        //
+        // 2026-11-12 实测：加了这两个之后 `geo` 从 466 被压到 376
+        //   `min(fixedScreenSize().width=466, avail.width=376)` = 376
+        //   ⇒ 宽度凭空少 90pt，正是「内容比真机窄 26pt」的直接原因。
+        // 而 `.clipped()` 又把 ignoresSafeArea 拓出来的部分切掉，
+        // 等于把「满屏」抵消两次。
+        //
+        // 原来的写法是「每个方向各取一次较小值」：
+        //   width  = min(max(proxy.w, proxy.h), max(screen.w, screen.h))
+        //   height = min(min(proxy.w, proxy.h), min(screen.w, screen.h))
+        // 两个方向取的**不是同一个来源**，结果恒等于「长边当宽、短边当高」：
+        //   · 竖屏手机 393×852   → avail = 852×393（横的）
+        //   · Duo 展开竖持 2007×2853 → avail = 2853×2007（横的）
+        // 于是 `landscapeNow = measured.width > measured.height` 恒为真 ——
+        // 不管怎么拿，页面都是横屏双列，Duo 展开也永远等不到竖屏单列。
+        // 更糟的是全屏：把这块「横着的」包围盒铺到竖屏上，画面按横屏窗口排、
+        // 上下留巨黑边、控件按横屏坐标落位 —— 就是用户报的「伪全屏」。
+        //
+        // 现在只做**等比**收缩：保留 proxy 自己的横竖，仅在 proxy 被父容器
+        // 撑大（VM 上那 1.4 倍边栏）时整体缩到屏幕短边，绝不交换宽高。
+        // 放在 static 方法里：ViewBuilder 里写 `if` 会被当成条件视图，编不过。
+        // screen 只用来取「短边上限」，必须是静态值：keyWindow.bounds 在
+        // 旋转动画里每帧变，会让这个缩放因子一直抖（控件坐标漂移）。
+        // 形态本身已由离散的 effectiveShape 决定，不参与这里的计算。
+        // ⛔ 不许把 `.onGeometryChange` 挂在这个 body 上。
+        //
+        // 实测（Fig 内屏横持，屏幕 951×669）：
+        //   GEOCH raw=1621x940 / 1486x849 / 1457x848 / 1194x700 / 466x700 …
+        //   —— 宽度最大 1621，是屏幕的 1.7 倍。
+        //
+        // 原因：`onGeometryChange` 量的是**这个视图最终的 frame**。
+        // 而这个 body 的内容（HStack 两列 + 绝对定位）会被自身内容撑大，
+        // 量到的就不是「容器给了多少」，而是「内容想要多少」——
+        // 用它驱动布局，等于把内容尺寸又喂回布局，环照旧。
+        //
+        // 正确位置见 `body` 外面的 `OneSkinViewportProbe`：那里只放一个
+        // 中性的、不参与内容计算的容器来量尺寸。
         .background(
             OneSkinBackdropLayer(image: posterImage).ignoresSafeArea()
         )
         .foregroundStyle(OneSkinPalette.primary)
         // ★ 形态切换的**视觉**过渡。
         //
-        // 几何本身是离散的（`frozenBox` 一步到位，不做插值 —— 插值会产生
+        // 几何本身是离散的（`liveGeometry.box` 一步到位，不做插值 —— 插值会产生
         // 「box 是新尺寸、landscapeNow 还是旧形态」的中间帧，那正是「推移」的来源）。
         // 但**离散 ≠ 硬跳**：用户看到的是控件瞬间换位，观感上是「滞后一拍再猛跳」。
         //
         // 这里把动画加在**渲染层**而不是几何层：
-        //   · `frozenBox` / `effectiveShape` 立即变成终值（无中间态、无环）
+        //   · `liveGeometry` / `effectiveShape` 立即变成终值（无中间态、无环）
         //   · 屏幕上的位置由 SwiftUI 的隐式动画补间（smooth 曲线，0.28s）
         // 于是既有确定的终点，又有顺滑的过渡。
         // 只对 `.animation` 生效，不参与布局计算，因此不会反向影响 proxy。
-        .animation(.smooth(duration: 0.28), value: effectiveShape)
-        .animation(.smooth(duration: 0.28), value: frozenBox)
-        .oneSkinStatusBarHidden()
+        // ⛔ 已移除：`.animation(.smooth, value: effectiveShape)`。
+        //
+        // 加它是想做「旋转过渡顺滑」，但它挂在 `body` 最外层、
+        // 而 `body` 内部就是根部 `GeometryReader`。`effectiveShape` 是**计算属性**，
+        // 每次 body 求值都会产出一个新值参与动画比较 —— 动画被反复重启，
+        // 每一帧都触发一次隐式动画重绘，等于给整个页面加了一个 60fps 定时器。
+        //
+        // 实测对比（同一页面，Fig）：
+        //   加动画前 dt=28–40ms（≈30fps）
+        //   加动画后 dt=9–14ms（≈75–110fps，每秒 296 次 ROOT）
+        // 重算次数翻了三倍，把原本「能被用户感知的慢漂移」变成了「明显推移」。
+        //
+        // 过渡顺滑应该由**几何本身离散、只切换一次**来保证（见 `geoDriver` 的注释），
+        // 不能靠给整页挂隐式动画。等环根治后再考虑在**叶子控件**上做局部动画。
+        .oneSkinStatusBarHidden(hidden: fullScreenNow || shape().isLandscape)
         .task(id: shown.poster) { await refreshBackdrop() }
         // 片源比例不再轮询：窗口是固定版式比例，画面在窗口内 letterbox。
         // 把构造参数镜像进本地状态：泛型视图的参数变化不保证重绘（见 fullScreenNow 的说明）。
         .onAppear {
-            fullScreenNow = debugBlockFullScreen ? false : isFullScreen
+            // `-qaOneSkinFullScreen 1`：强制进全屏，用于验证全屏态版式
+            // （顶部是否铺满、控件是否被顶下去）。
+            let qaFS = UserDefaults.standard.bool(forKey: "qaOneSkinFullScreen")
+            fullScreenNow = debugBlockFullScreen ? false : (qaFS ? true : isFullScreen)
             shapeNow = shape
-            // 页面身份（重新）建立时，按「当前形态 + 当前屏幕」重算一次冻结盒。
-            // 此时 screen 已稳定（onAppear 不是旋转动画中间帧），现算安全。
-            let raw = OneSkin.fixedScreenSize()
-            let land = CGSize(width: max(raw.width, raw.height), height: min(raw.width, raw.height))
-            let port = CGSize(width: min(raw.width, raw.height), height: max(raw.width, raw.height))
-            frozenBox = shape.isLandscape ? land : port
+            // ★ 必须传 **effectiveShape**（含 QA 强制形态），不能传父视图的 `shape`。
+            //
+            // 实测（模拟器外屏 + -qaOneSkinLandscape YES）：driver 认为 .column
+            // （ROOT 打 shape=column、box 不扣 47 让位），而 stage 按 .split 排三栏
+            // → GEOM 自检报 dX=2(expect 47)，右栏被推出容器。
+            // QA 只是放大器，真机上「方向判定晚一帧」也会造成同样的两套形态并存。
+            geoDriver.shapeDidChange(to: shape())
+            // 全屏标记同源传给几何层（`box` 的底部扣减依赖它）。
+            // `onChange(of: fullScreenNow)` 也会传，但页面**以全屏态建立**时
+            // 那次赋值不一定产生一次 onChange —— 这里补一次，幂等。
+            geoDriver.fullScreenDidChange(to: fullScreenNow)
+            // 遮挡同源传给几何层（唯一消费端，见 `occlusion` 的说明）。
+            geoDriver.occlusionDidChange(to: occlusion.geometryInsets)
+            // 铰链状态同源落地（`onChange` 只覆盖页面已存在的后续变化）。
+            geoDriver.hingeDidChange(to: hingePartiallyOpen.map { $0 ? .halfOpen : .flat } ?? .unavailable)
+            // ⛔ 已删除 `frozenBox` 的写入（16.8 / 16.10）。
+            //
+            // 这个 @State 只写不读：`stage` 里 `let box = size`（几何驱动的盒），
+            // DEBUG 日志里那个 `frozen=` 于是恒等于「上一次离散事件写下的大小」，
+            // 与真正参与排版的 `box` 毫无关系 —— 排查时照着它比对只会被带偏。
+            // 冻结盒的职责已经由 `geoDriver` + `liveGeometry` 承担（离散缓存、
+            // 三道幂等门），这里再留一份没有任何消费者。
             // 用户确认的目标版式：竖屏片源在固定横向窗口里**居中成一条竖画、
             // 不填充**，两侧留着海报虚化的空带（哪怕看着浪费也是对的）。
             // 「填充」只允许本次会话里临时切来看，绝不跨页面/跨启动保留 ——
@@ -1077,47 +1890,80 @@ struct OneSkinStage: View {
         }
         .onChange(of: isFullScreen) { _, new in
             guard !debugBlockFullScreen else { return }
-            withAnimation(.smooth(duration: 0.28)) { fullScreenNow = new }
+            // ⛔ 不能用 `withAnimation` 包住 `fullScreenNow`。
+            //
+            // `fullScreenNow` 决定 `stage` 的整个版式（全屏 vs 分栏），
+            // 用 0.28s 曲线插值它，就等于让 SwiftUI 把这 0.28 秒内的**每一帧**
+            // 都当成一次新的布局输入：
+            //   动画帧 → body 重算 → onGeometryChange 回报新尺寸
+            //          → measuredStageSize 变 → 再重排 → 再回报 …
+            // 0.28s ≈ 17 帧 @60fps，与实测完全吻合：
+            //   #44→#60 连续 17 帧，proxy 每帧 -8pt（1352→1192），dt=17–31ms。
+            //
+            // 形态是**离散**的（全屏 / 非全屏两种），几何一步到位即可；
+            // 视觉平滑应由叶子控件自己的过渡承担，不能让整页几何参与插值。
+            fullScreenNow = new
         }
-        .onChange(of: shape) { _, new in
+        // ★ 全屏 ⇄ 非全屏要让**几何层**知道。
+        //
+        // 两者在 `box` 里的扣减不同：全屏 `.ignoresSafeArea(.all)` → 一点不扣；
+        // 非全屏底部没忽略 → 必须扣 `safeInsets.bottom`。
+        // 只写这一处：`onAppear` / `onChange(of: isFullScreen)` / 控件层的
+        // 「退出全屏」三条路径都只是改 `fullScreenNow`，由这里统一往下传。
+        .onChange(of: fullScreenNow) { _, value in
+            geoDriver.fullScreenDidChange(to: value)
+        }
+        // 「自动全屏」：开播即进全屏（参考截图里那颗蓝底蓝字的 chip）。
+        // 只认 `false → true` 这一跳，退出全屏不会再被立刻弹回去。
+        .onChange(of: playing) { _, value in
+            guard value, autoFullScreen, !fullScreenNow else { return }
+            onFullScreen()
+        }
+        // ★ 遮挡变化（折叠/展开、转屏后挖孔换了个角）→ 几何层重算 `box`。
+        //   `occlusionDidChange` 自带 0.5pt 幂等门，同一份值重传不会引起重排。
+        .onChange(of: occlusion) { _, value in
+            geoDriver.occlusionDidChange(to: value.geometryInsets)
+        }
+        // 铰链状态跨档（摊开 ⇄ 半折 ⇄ 合拢）→ 几何层知道折叠态变了。
+        // `hingeDidChange` 自带相等门 + 「只在活跃档重排」门，纯角度抖动不触发。
+        .onChange(of: hingePartiallyOpen) { _, value in
+            geoDriver.hingeDidChange(to: value.map { $0 ? .halfOpen : .flat } ?? .unavailable)
+        }
+        .onChange(of: shape()) { _, new in
             // 旋转/折叠后调用方改了 shape 参数。
             //
-            // ⛔ 这里只更新 `shapeNow`（镜像）与 `frozenBox`（冻结屏幕盒），
-            //    **不参与 `effectiveShape` 的判定** —— 后者已改为直接读 `shape`，
-            //    见 `effectiveShape` 里的说明。
+            // ⛔ 这里只更新 `shapeNow` 镜像，**不参与 `effectiveShape` 的判定** ——
+            //    后者已改为直接读 `shape`，见 `effectiveShape` 里的说明。
             //
-            // 两个 @State 写在一起，SwiftUI 会合并成一次事务，不会出现
-            // 「形态新的、尺寸旧的」中间帧。
-            //
-            // 形态是离散枚举，几何一步到位、不做插值；**视觉上的平滑由外层
-            // 的 `.animation` 承担**（见 body 上的 `oneSkinTransition`），
-            // 这样既有确定的终点，又不会在中间态停留。
+            // 形态是离散枚举，几何一步到位、不做插值；视觉上的平滑由叶子控件
+            // 自己的过渡承担（不给整页挂隐式动画，理由见 body 上的注释）。
             shapeNow = new
-            let raw = OneSkin.fixedScreenSize()
-            let land = CGSize(width: max(raw.width, raw.height), height: min(raw.width, raw.height))
-            let port = CGSize(width: min(raw.width, raw.height), height: max(raw.width, raw.height))
-            frozenBox = new.isLandscape ? land : port
-        }
-        // 形态是离散信号，正常只会在折叠 / 旋转时跳一次。
-        // 如果连续截图里这行反复出现，就说明又有人按容器尺寸反推形态了。
-        .onChange(of: shape) { _, new in
             oneSkinLog("SHAPE -> \(new.logName)")
+            // ★ 通知几何驱动：形态跨档了才重算（B 站 `appliedRightInset` 模式）。
+            // 同样必须用 effectiveShape 而不是 new —— 与 onAppear 保持同一来源。
+            geoDriver.shapeDidChange(to: shape())
+            // ⛔ 已删除 `frozenBox` 的写入（16.8 / 16.10）：
+            //    它读的是 `cachedLiveContainer`（视图 frame，正是自激环的入口），
+            //    写出来的值却没有任何读者。几何的离散缓存现在只有 `geoDriver` 一份。
         }
-        // ★ 屏幕尺寸变了也要重算冻结盒。
+        // ⛔ 这里原来还有第二个 `.onChange(of: shape)` 只打一行 SHAPE 日志。
+        //   两个 modifier 各自注册订阅，同一值变化触发**两次** body 求值。
+        //   日志已并进上面的 SHAPE 行。
+        // ★ 屏幕尺寸变了也要让几何层重算。
         //
-        // `frozenBox` 原来只在 `onAppear` 与 `onChange(of: shape)` 时重算。
-        // 但**形态可以不变、可用空间却变了**：Duo 内屏进 Split View 时宽度从 951
+        // **形态可以不变、可用空间却变了**：Duo 内屏进 Split View 时宽度从 951
         // 变成约 475，而 size class 仍是 regular×regular、`duoExpanded` 仍 true、
-        // `oneSkinShape` 仍是 `.split` —— `shape` 一个字都没变 → box 停在 951×669，
-        // 三栏按 951 分、铺到 475 上，右侧被推出屏幕。PiP 压短同理。
+        // `oneSkinShape` 仍是 `.split` —— `shape` 一个字都没变。此时唯一会变的
+        // 离散信号就是窗口尺寸，所以拿它当触发源。
         //
-        // 用**屏幕实际尺寸**（静态值、不受旋转动画影响）当触发源；
-        // 只有变化超过阈值才重算，避免亚点抖动引起整页重排。
+        // 用 `fixedScreenSize()`（keyWindow.bounds，系统所有、静态量）而不是
+        // 视图测量值：后者会被内容撑大，喂回去就是自激环。
         .onChange(of: OneSkin.fixedScreenSize()) { old, new in
-            // 只记录尺寸变化，用于诊断 Split View / PiP 是否真的改了可用空间。
-            // `frozenBox` 的重算仍走上面的 `onChange(of: shape)` —— 静态工厂
-            // `OneSkin.frozenBox(forLandscape:)` 已不在当前版本，不在此另造一份。
+            // 转屏当帧就写入，驱动 body 重算（geo.size 此时还是旧值）。
+            let isLand = new.width > new.height
+            if screenIsLandscapeNow != isLand { screenIsLandscapeNow = isLand }
             guard OneSkinStageSize.isLayoutChange(from: old, to: new) else { return }
+            geoDriver.screenDidChange()
             oneSkinLog("SCREEN -> \(Int(new.width))x\(Int(new.height))")
         }
     }
@@ -1173,8 +2019,10 @@ struct OneSkinStage: View {
     /// 所以这里绝不能按方向分叉成两棵视图树。用 AnyLayout 只换 axis，
     /// 播放器身份在每个折叠/转向/全屏之间保持不变。
     @ViewBuilder private func stage(_ size: CGSize,
+                                    ratioBase: CGSize,
                                     fitMode: OneSkinFitMode,
-                                    playerAspect: CGFloat) -> some View {
+                                    playerAspect: CGFloat,
+                                    liveShape: OneSkinShape) -> some View {
         // 关键修正：调用方传的 shape 复用了我方二开的 Duo 判据
         // （duoExpanded/sideways/portraitExpanded），在 Fig-clone 虚拟机上
         // 会把横屏误判成「竖持 fullBleed」，导致画面铺满 92%、详情栏消失。
@@ -1220,11 +2068,14 @@ struct OneSkinStage: View {
         // 既分不清「展开宽屏」和「展开横屏」，在旋转动画里还会每帧变一次，
         // 于是窗口 winX/winY 与整层控件坐标一直漂移。形态由调用方按
         // interfaceOrientation / size class 一次性定死，QA 开关是唯一覆盖入口。
-        let landscapeNow = stageIsLandscape
-        // ⛔ box 从 frozenBox（@State）读，只在离散事件（onAppear/形态切换）重算。
-        // 不能每帧由 screen.bounds 现算：旋转动画里 screen.bounds 连续变，
-        // box 每帧变 = 「横竖屏切换控件疯狂推移」复发（日志铁证见 frozenBox 注释）。
-        // 首帧兜底：frozenBox 尚未初始化（.zero）时按当前形态现算一次。
+        // ★ 2026-11-12 需求3：横竖只认 `liveShape`（由 `GeometryReader.geo.size`
+        //   在**同一次求值内**算出并传入）。不经过任何 @State 中转，
+        //   所以转屏当帧即生效，没有「多等一轮」或「状态没变」。
+        let landscapeNow = liveShape.isLandscape
+        // ★ 布局基准盒 = 「几何层缓存的离散盒」与「系统实际分配给本视图的空间」取交集。
+        // 离散盒由 `geoDriver` 给（只在形态/折叠/遮挡/屏幕跨档时重算），
+        // 绝不每帧从 `screen.bounds` 现算 —— 旋转动画里那是连续量。
+        // 下面那一大段实测记录讲的是为什么必须**同时**受容器约束，别删。
         // ★ 布局基准盒 = 「冻结的屏幕尺寸」与「系统实际分配给本视图的空间」取交集。
         //
         // ⛔ 这是一个自反馈环的修复（实测日志铁证）：
@@ -1267,19 +2118,57 @@ struct OneSkinStage: View {
         // 修法：`size`（系统真正分配的空间）是**唯一**布局基准。
         // `frozenBox` 只用来决定**比例意图**（谁宽谁高），不参与像素计算。
         // 内容永不超出 size ⇒ 容器无需重协商 ⇒ 环断开。
-        let screenBox: CGSize = {
-            if frozenBox.width > 1, frozenBox.height > 1 { return frozenBox }
-            let raw = OneSkin.fixedScreenSize()
-            let land = CGSize(width: max(raw.width, raw.height), height: min(raw.width, raw.height))
-            let port = CGSize(width: min(raw.width, raw.height), height: max(raw.width, raw.height))
-            return forcePortrait ? port
-                : forceLandscape ? land
-                : (landscapeNow ? land : port)
-        }()
-        // ⛔ size 无效时（首帧 / 尚未布局）才退回 screenBox；绝不反向。
-        let box: CGSize = (size.width > 1 && size.height > 1) ? size : screenBox
+        // ★ 布局基准 = `size`（已由调用方 `stableBucket` 量化过）。
+        //
+        // ⛔ 这里不再有 `screenBox` 兜底分支 —— 它是死代码：
+        //   上游 `stableBucket` 保证 `size >= step`（≥8pt），
+        //   所以 `size.width > 1 && size.height > 1` 恒成立，
+        //   `screenBox` 永远不会被走到。留着只会让人以为还有两套基准。
+        //
+        //   首帧兜底由调用方负责：`availableSize` 在 `proxy` 无效时
+        //   直接返回 `screen`，所以 `size` 从一开始就是有意义的。
+        // 容器可用尺寸：只用于「不要溢出」的钳制。
+        // ═══ 顾及2 · 修坐标 ═══
+        // `box` = 几何层已经整形过的离散盒（`OneSkinGeometry.box`：按形态决定宽高、
+        // 扣掉底部安全区与遮挡），再由调用方经 `availableSize` 夹到不超屏，
+        // 竖持再叠 8pt 桶吸抖。它**不是**每帧连续的 `proxy.size`：
+        //   · 离散 → 不推移（3552a28 的教训：「box 每帧变 = 控件疯狂推移复发」）
+        //   · 真屏尺寸 → 不退回 screen.bounds 的坐标错位
+        // 这里再与 `size` 取交集，保证内容永不超出系统真正分配的空间。
+        let box: CGSize = size
+        // ★ 比例坐标的乘法基准 = 物理全屏（One 原版按整块屏幕排版）。
+        //
+        // 这两个量必须分开，混用两种错误都实测过：
+        //   · 都用全屏 → 比例对但溢出 70pt → 成环（每秒 200+ 次）
+        //   · 都用扣除 → 环断了但坐标缩 10.3%、胶囊条偏上 60.8pt
+        // 详见 `OneSkinGeometry.ratioBase` 的注释。
+        let ratio = ratioBase
         #if DEBUG
-        let _ = oneSkinLog("stage size=\(Int(size.width))x\(Int(size.height)) box=\(Int(box.width))x\(Int(box.height)) shape=\(effectiveShape.logName) land=\(landscapeNow) frozen=\(Int(frozenBox.width))x\(Int(frozenBox.height))")
+        let _ = oneSkinLog("stage size=\(Int(size.width))x\(Int(size.height)) box=\(Int(box.width))x\(Int(box.height)) shape=\(liveShape.logName) land=\(landscapeNow) ratioBase=\(Int(ratioBase.width))x\(Int(ratioBase.height))")
+        // ★ 几何自检（每个形态都打）：单一基准是否成立 = box 与 ratioBase 的差是否
+        // 只出现在**让位带**上（横持 47pt 右让位 / 竖持 0）。任何子视图拿 ratio
+        // 当容器尺寸都会让这里出现非零的「应为 0」项。
+        do {
+            let dx = Int(ratioBase.width - box.width), dy = Int(ratioBase.height - box.height)
+            // 期望值必须与 driver 同公式（按屏宽比例），不能再写死 47。
+            let expectDX = landscapeNow ? Int((ratioBase.width * 0.0494).rounded()) : 0
+            // ★ dY 的期望值不再是 0：非全屏时 `box` 会扣掉底部安全区（P1-4 修正），
+            //   全屏时四边全忽略、扣 0。自检必须跟着这个口径走，
+            //   否则每一帧都会报 ⚠MIXED，真出问题时反而看不见。
+            let expectDY = fullScreenNow ? 0 : Int(max(measuredSafeArea.bottom, 0).rounded())
+            // 允许 ±8pt（stableBucket 桶余量）；dy 同理。
+            let okX = abs(dx - expectDX) <= 8 || ratioBase.width < 1
+            let okY = abs(dy - expectDY) <= 8 || ratioBase.height < 1
+            let mark = (okX && okY) ? "OK" : "⚠MIXED"
+            let _ = oneSkinLog("GEOM[\(liveShape.logName)] box=\(Int(box.width))x\(Int(box.height)) ratio=\(Int(ratioBase.width))x\(Int(ratioBase.height)) dX=\(dx)(expect \(expectDX)) dY=\(dy)(expect \(expectDY)) → \(mark)")
+            // ★ P1-4 的常驻哨兵：盒高绝不能超过容器高（容器 = 物理屏 − 底部安全区）。
+            //   写在日志里而不是 `assert`：真机上宁可多打一行，也别在一个
+            //   「只是差 1pt」的形态上把 QA 跑崩。
+            let containerH = Int(ratioBase.height - (fullScreenNow ? 0 : max(measuredSafeArea.bottom, 0)))
+            if Int(box.height) > containerH + 1 {
+                let _ = oneSkinLog("⚠️BOX>CONTAINER box=\(Int(box.height)) container=\(containerH) shape=\(liveShape.logName) fs=\(fullScreenNow)")
+            }
+        }
         #endif
         // One 的真实实现（Ghidra 解析 VideoDetailPage.sub_1001d90f4 伪代码）：
         //   if (bool == 0) { HorizontalAlignment.center; HStackLayout }
@@ -1324,7 +2213,7 @@ struct OneSkinStage: View {
                 pictureColumn(box, landscape: landscapeNow, fullScreen: true, fitMode: fitMode, playerAspect: aspectRatio)
             } else if folded {
                 pictureColumn(box, landscape: landscapeNow, fitMode: fitMode, playerAspect: aspectRatio)
-            } else if effectiveShape == .halfFold {
+            } else if liveShape == .halfFold {
                 // ★ 半折（书本 / 帐篷）：折痕在**中部**，上下各半屏。
                 //
                 // 与 fullBleed 的关键差别：这里不是「画面在上、详情在下」的
@@ -1339,12 +2228,21 @@ struct OneSkinStage: View {
                 //
                 // 上界用折痕的真实位置，不写死 0.5：模拟器与实际设备上
                 // 折痕并不总在正中央（`splitsContainer` 允许 25%–75%）。
-                let splitRatio = halfFoldSplitRatio
-                let topH = max(box.height * splitRatio, 1)
+                //
+                // ⛔ 16.5：优先用**折痕绝对位置**（`halfFoldSplitY`）。
+                //    旧式 `box.height × splitRatio` 是把窗口高的比例乘到更矮的
+                //    box 上，边界凭空高 ~17pt，再叠 5% 量化最坏多 ±11pt。
+                //    只有拿不到折痕矩形时才退回比例（此时页面对半分，误差本来就无从谈起）。
+                let topH: CGFloat = {
+                    if let y = halfFoldSplitY, y > 1 {
+                        return min(max(y, box.height * 0.25), box.height * 0.75)
+                    }
+                    return max(box.height * halfFoldSplitRatio, 1)
+                }()
                 let bottomH = max(box.height - topH, 1)
                 VStack(alignment: .center, spacing: 0) {
                     pictureColumn(CGSize(width: box.width, height: topH),
-                                  landscape: false, edgeToEdge: true,
+                                  landscape: stageIsLandscape, edgeToEdge: true, ratioBase: ratio,
                                   fitMode: fitMode, playerAspect: aspectRatio)
                         .frame(width: box.width, height: topH)
                     HalfFoldConsoleView(session: session,
@@ -1354,7 +2252,7 @@ struct OneSkinStage: View {
                                         onSeek: onSeekTo)
                         .frame(width: box.width, height: bottomH)
                 }
-            } else if effectiveShape == .fullBleed {
+            } else if liveShape == .fullBleed {
                 // ★ 展开宽屏（Duo 摊开 + 竖持）—— 与展开横屏**明确分叉**。
                 //
                 // 之前 `stage` 完全没读 shape，fullBleed 和 column 画成同一棵
@@ -1370,10 +2268,15 @@ struct OneSkinStage: View {
                 let detailH = max(box.height - picH, 1)
                 VStack(alignment: .center, spacing: 0) {
                     pictureColumn(CGSize(width: box.width, height: picH),
-                                  landscape: false, edgeToEdge: true,
+                                  landscape: false, edgeToEdge: true, ratioBase: ratio,
                                   fitMode: fitMode, playerAspect: aspectRatio)
                         .frame(width: box.width, height: picH)
-                    detailColumn(CGSize(width: box.width, height: detailH), landscape: false)
+                    // ★ 2026-11-12：详情列也要跟着整体下移，且**保持既有间隔**。
+                    //   原来 96/78 是「画面列下沿 → 标题」的固定距离；
+                    //   现在加同一个 `portraitExtraDrop`，画面层与详情层一起下移，
+                    //   两者之间的间距不变（96/78 那一段原样保留）。
+                    detailColumn(CGSize(width: box.width, height: detailH), landscape: false,
+                                 topInset: (session != nil ? 96 : 78) + OneSkin.portraitExtraDrop)
                         .frame(width: box.width, height: detailH)
                 }
             } else if landscapeNow {
@@ -1401,15 +2304,57 @@ struct OneSkinStage: View {
                 // 见交接账本 R8 的否定清单）。
                 // 正确做法就是最朴素的那个：**按 box.width 的比例分**，
                 // 且传给 pictureColumn 的 colW 与 HStack 分配值必须完全相同。
-                let colL: CGFloat = box.width * OneSkinWindowGeometry.Metrics.columnLeft
-                let gapW: CGFloat = box.width * OneSkinWindowGeometry.Metrics.columnGap
-                let colR: CGFloat = box.width * OneSkinWindowGeometry.Metrics.columnRight
-                HStack(alignment: .top, spacing: gapW) {
-                    pictureColumn(CGSize(width: colL, height: box.height), landscape: true, fitMode: fitMode, playerAspect: aspectRatio)
+                // ★ 分栏基准 = **ratio.width（物理全屏 951）**，三段铺满。
+                //
+                // 2026-11-12 正立帧裁决（PIL rotate(90) CCW + OCR + 列黑度剖面）：
+                //   播放器列 0..467.667 = 0.4918 / 纯黑缝 55.333 = 0.0582
+                //   / 详情列 523..951 = 428pt = 0.4501，和 = 951.000。
+                //   旧「容器 904 / colL 428 / 0.4735」是 **180° 倒立帧**：
+                //   951−523=428、951−467.667=483.333，左右宽度归属被镜像。
+                //
+                // ⚠ Core 的 Metrics 命名当初按倒立帧写反了：columnLeft(0.4501)
+                //   实为**正立帧详情列**占比，columnRight(0.4918) 实为**播放器列**。
+                //   本次保留常量名以免牵动全仓引用，只在此处按语义取值并注明，
+                //   后续统一重命名时再同步（E1 §2 P1-5）。
+                // ★★ 2026-11-12 真机 AX 实测修正：**缝并入播放器列**
+                //
+                // 真 One（内屏展开横持 951×669，AX 实测）：
+                //   播放器 x=16.0 w=475.0 → 右边界 491.0
+                //   右栏起点 523.0
+                //   ⇒ 播放器列实际占 0..523（含那 32pt 视觉缝），详情列 523..951（428）
+                //
+                // 我方旧写法：colL(467.7) + HStack spacing gapW(55.3) + colR(428)
+                //   ⇒ 播放器列只有 467.7，比真机少 55.3，播放器被压成 452 宽（真机 475）
+                //
+                // 正解：把缝并入 colL，HStack spacing = 0。视线里那条缝由播放器
+                // 自身的右边距（523-491=32）自然形成，不需要额外 spacing。
+                // ★ 分栏基准统一用 **box.width**，与胶囊条（chipBar）同源。
+                //
+                // 胶囊条一直是对的（AX 实测位置正确），它用的是
+                //   barW = box.width × Metrics.columnRight ...
+                // 而 HStack 原来用 `ratio.width` —— 两者在真机上不等，
+                // 导致分栏算出 669 而不是 951（右栏落 385 而非 523）。
+                // 统一到 box.width 后，分栏与胶囊永远同一基准。
+                let base: CGFloat = box.width
+                let gapW: CGFloat = base * OneSkinWindowGeometry.Metrics.columnGap     // 0.0582 视觉缝
+                let colR: CGFloat = base * OneSkinWindowGeometry.Metrics.columnLeft    // 0.4501 详情列
+                let colL: CGFloat = base - colR                                        // 播放器列 = 剩余（含缝）
+                HStack(alignment: .top, spacing: 0) {
+                    pictureColumn(CGSize(width: colL, height: box.height), landscape: true, ratioBase: ratio, fitMode: fitMode, playerAspect: aspectRatio)
                         .frame(width: colL, height: box.height)
-                    detailColumn(CGSize(width: colR, height: box.height), landscape: true)
+                    detailColumn(CGSize(width: colR, height: box.height), landscape: true, ratioBase: ratio)
                         .frame(width: colR, height: box.height)
                 }
+                .background(
+                    GeometryReader { p in
+                        // 用 onChange 而不是 onAppear：onAppear 只触发一次，
+                        // 抓到的是首次渲染（可能是竖持态），会误导判断。
+                        let desc = "base=\(Int(base)) box=\(Int(box.width))x\(Int(box.height)) size=\(Int(size.width))x\(Int(size.height)) colL=\(Int(colL)) colR=\(Int(colR)) hstack=\(Int(p.size.width))x\(Int(p.size.height)) origin=\(Int(p.frame(in: .global).minX)),\(Int(p.frame(in: .global).minY))"
+                        Color.clear
+                            .onAppear { let _ = oneSkinLog("HSPLIT-A \(desc)") }
+                            .onChange(of: p.size) { _, _ in let _ = oneSkinLog("HSPLIT-C \(desc)") }
+                    }
+                )
             } else {
                 // 竖屏单列：画面在上、详情在下。
                 // 详情列拿的是**剩余高度**，不是整屏高 ——
@@ -1426,9 +2371,16 @@ struct OneSkinStage: View {
                     // 用户报的「竖屏没法全屏」就是这个。传 picH 后 winY/bottomBar
                     // 全部收敛在画面区内，几何自洽。
                     pictureColumn(CGSize(width: box.width, height: picH),
-                                  landscape: false, fitMode: fitMode, playerAspect: aspectRatio)
+                                  landscape: false, ratioBase: ratio, fitMode: fitMode, playerAspect: aspectRatio)
                         .frame(width: box.width, height: picH, alignment: .top)
-                    detailColumn(CGSize(width: box.width, height: max(box.height - picH, 1)), landscape: false)
+                    detailColumn(CGSize(width: box.width, height: max(box.height - picH, 1)),
+                                 landscape: false, ratioBase: ratio,
+                                 // 起播后用 96 让开「胶囊条 + 已定位行」那一带；
+                                 // 未播放态那条带子已经不画了（见 overlay 的判据），
+                                 // 再让 78 只是把标题白白推低 —— 参考里画面下沿到标题
+                                 // 只有 ~20pt 的呼吸位（669×951 实测 469→522，外屏 272→348）。
+                                 topInset: session != nil ? 96 : 20)
+                        .frame(width: box.width, height: max(box.height - picH, 1))
                 }
             }
         }
@@ -1449,37 +2401,91 @@ struct OneSkinStage: View {
         .oneSkinOverlayOnce(alignment: .bottomLeading) {
             // 全屏态不画胶囊条：One 全屏只留画面 + 窗口内控件，
             // 倍速/循环/填充/线路这些属于选集页的选择项。
-            if !fullScreenNow {
+            //
+            // ★ 2026-11-12（参考截图对齐）：**未播放态也不画**。
+            //
+            // 三张参考图（外屏 466×678 / 内屏 669×951 / 内屏横持 951×669）的
+            // 「未播放」全是同一个版式：画面下方直接就是标题，整条倍速/循环/填充/
+            // 自动全屏/线路的胶囊带**根本不存在**；线路选择是详情列里一颗
+            // 「自动 · 线路N · N ms ⌄」胶囊（补在 `detailColumn` 的 CTA 下方）。
+            //
+            // 而我们此前无条件画这条带子：466×678 上它占掉 350–373 这一带，
+            // 详情列的 `topInset` 又按「让开胶囊带」给了 78 → 标题被推到 443，
+            // 参考是 348。整块内容因此整体下移近 100pt，且多出一条参考里没有的控件行。
+            //
+            // 判据用 `session != nil`（真的起播过）而不是 `playing`：暂停态参考图里
+            // 这条带子是**在的**（外屏暂停截图 284pt 处就是那五颗），只有从没起播才没有。
+            // `folded`（单栏铺满，没有详情列）例外保留 —— 那里没有别的地方能放线路选择。
+            if !fullScreenNow, session != nil || folded {
                 // 2026-11-09：旋转横屏后胶囊条要跟画面列走，不能钉死在整页底部。
                 // 横屏双列：贴左列底部（0.868·H）；竖屏单列：画面在上、详情在下，
                 // 原来那套 0.132·H 的 bottom padding 会把 chip 行推到详情区最底下，
                 // 和播放器彻底脱节。改成抬到画面列下沿。
                 let barW = landscapeNow
-                    ? max(min(box.width * OneSkinWindowGeometry.Metrics.columnLeft - box.width * 0.10,
-                              box.width * OneSkinWindowGeometry.Metrics.columnLeft), 240)
+                    ? max(min(ratio.width * OneSkinWindowGeometry.Metrics.columnRight - ratio.width * 0.10,
+                              ratio.width * OneSkinWindowGeometry.Metrics.columnRight), 240)
                     : max(box.width - box.width * 0.10, 200)
                 // 底栏按钮热区的**半高**。旧实现写死 13（`hit = 26` 时代），
                 // 而 `ChromeMetrics.hit = min(52, max(44, glyph*1.8))` —— **下限 44**、半高 22。
                 // 按 13 算会让胶囊条压进底栏热区。
                 let barHitHalf: CGFloat = 22
-                let barBottom = effectiveShape == .fullBleed
-                    // 展开宽屏：胶囊条必须让开**播放器自己的底栏**（时间码/进度条/全屏键，
-                    // 落在列高 0.928 处）。画面多高、胶囊条就贴多高 —— 两者共用
-                    // `bleedingPictureHeight`，不再一个按片源比例、一个按固定 0.56。
-                    ? {
+                #if DEBUG
+                do {
+                    let bw = landscapeNow
+                        ? max(min(ratio.width * OneSkinWindowGeometry.Metrics.columnRight - ratio.width * 0.10, ratio.width * OneSkinWindowGeometry.Metrics.columnRight), 240)
+                        : max(box.width - box.width * 0.10, 200)
+                    let _ = oneSkinLog("chipBar shape=\(liveShape.logName) box=\(Int(box.width))x\(Int(box.height)) barW=\(Int(bw)) land=\(landscapeNow) fs=\(fullScreenNow)")
+                }
+                #endif
+                let barBottom: CGFloat = {
+                    // ⛔ 分支顺序必须和 `stage` **完全一致**（`folded` 先于 `fullBleed`）。
+                    //
+                    // 16.6：原来只看 `liveShape == .fullBleed`，于是
+                    // 「合拢 + 展开宽屏」这个组合里，`stage` 走 folded 分支
+                    // （画面列拿整高 `box.height`、没有详情区），胶囊条却仍按
+                    // fullBleed 的 `bleedingPictureHeight` 落位 —— 结果压进
+                    // 播放器自己的底栏（0.928 处）上，既不是画面下沿也不是合拢位。
+                    //
+                    // 合拢态画面铺满整个 box，播放器底栏就在窗口 0.928 处，
+                    // 所以胶囊条只能贴「底部往上 13.2%」，与横持双列同一口径。
+                    if folded { return max(box.height * (1 - 0.868), 8) }
+                    if liveShape == .fullBleed {
+                        // 展开宽屏：胶囊条必须让开**播放器自己的底栏**（时间码/进度条/
+                        // 全屏键，落在列高 0.928 处）。画面多高、胶囊条就贴多高 ——
+                        // 两者共用 `bleedingPictureHeight`，不再一个按片源比例、
+                        // 一个按固定 0.56。
                         let picH = bleedingPictureHeight(box, aspect: aspectRatio, lower: 0.28, upper: 0.56)
                         return max(box.height - (picH * 0.928 - barHitHalf - 8), 8)
-                    }()
-                    : landscapeNow
-                        ? box.height * (1 - 0.868)
-                        : max(box.height - pictureHeightOf(box, landscape: false) - 6, 8)
-                controlBar
-                    .frame(width: min(barW, box.width - 16))
-                    .padding(.leading, box.width * (landscapeNow
-                        ? OneSkinWindowGeometry.Metrics.insetLandscape
-                        : OneSkinWindowGeometry.Metrics.insetPortrait))
-                    .padding(.bottom, barBottom)
-            }
+                    }
+                    if landscapeNow { return box.height * (1 - 0.868) }
+                    return max(box.height - pictureHeightOf(box, landscape: false) - 6, 8)
+                }()
+                // ★ 胶囊条 + 「已定位到上次看到的 M:SS …… 从头播放」——
+                //   参考截图里这两行是**同一个底部块**，第二行紧贴第一行下方
+                //   （内屏竖持：胶囊 440–466、续播行 485–500）。
+                //   我们之前完全没有续播行，用户的「和 One 不一样」很大一部分来自这里。
+                //   续播行本身是个**叶子视图**（`OneResumeLine`），只有它观察 session，
+                //   父级不会因为播放进度重绘。
+                let plain = !folded && liveShape != .fullBleed
+                VStack(alignment: .leading, spacing: 18) {
+                    // ★ 横向可滚：466 宽外屏上 5 颗胶囊的固有宽度略超一行，
+                    //   放在固定宽度里 SwiftUI 会把文字压成「自动…」。
+                    //   改成 ScrollView 后每颗都保持完整宽度，窄屏可以滑。
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        controlBar
+                    }
+                    .frame(width: min(barW, box.width - 16), alignment: .leading)
+                    if plain, session != nil {
+                        OneResumeLine(session: session) { onSeekTo(0) }
+                            .frame(width: min(barW, box.width - 16))
+                    }
+                }
+                .padding(.leading, box.width * (landscapeNow
+                    ? OneSkinWindowGeometry.Metrics.insetLandscape
+                    : OneSkinWindowGeometry.Metrics.insetPortrait))
+                // 续播行占掉 18(spacing) + 15(行高)；把它从底距里扣掉，
+                // 胶囊条本身仍然停在原来的位置，不多不少。
+                .padding(.bottom, plain && session != nil ? max(barBottom - 33, 8) : barBottom)            }
         }
         // 横向**不加 padding**：One 实测左列从 x0 起算（左列右界 1051px = 51.67%，
         // 右栏文字从 1119px = 55.02% 起）。之前这里加了 layout.margin(≈30px)，
@@ -1498,20 +2504,19 @@ struct OneSkinStage: View {
         // 只为拿一个 margin 就把整个 StageLayout（7 字段 + 40 行 makeLayout）
         // 重建一遍，纯浪费。margin 的定义就是 max(10, 列宽 × 0.0147)。
         .padding(.bottom, fullScreenNow ? 0 : (landscapeNow ? OneSkinWindowGeometry.margin(forColumnWidth: box.width) : 28))
-        // ★★ 把整页钉在**容器**上 —— 这是断环的最后一步。
+        // ⛔ 已移除：`.frame(width: max(1, box.width), height: max(1, box.height))`
         //
-        // 上面所有子视图都用 `.frame(width: box.width, height: box.height)`，
-        // 而 `box` 现在 = `size`（系统分配的空间）。但**这条修饰符链本身**
-        // 没有告诉 SwiftUI「我占多大」，于是它按内容理想尺寸上报。
-        // 内容高度不受限 → 父级 `GeometryReader` 拿到的 proxy 就是内容高度
-        // （实测 294，而屏幕 669）→ 容器重分配 → 再排 → 环。
+        // 上一轮加它是想「把整页钉在容器上」。实测**它反而制造了环**：
+        //   stage 钉死 464×568（量化后的目标）
+        //   但根部 GeometryReader 的 proxy = 501×480（父容器实际大小）
+        //   两者不一致 → 父容器每帧向 464 收敛 → proxy 变 → body 重算 → 再收敛
+        //   实测每秒 397 次 ROOT，proxy 宽 501→497→494→487→483→480 一路缩
         //
-        // 显式声明「我的尺寸 = 容器尺寸」之后，上报值与容器一致，
-        // 父级不再需要重协商，proxy 稳定，环断开。
+        // GeometryReader 本来就会填满父容器，**不需要、也不该**给它的内容钉 frame。
+        // 钉了只会让「内容尺寸」和「容器尺寸」打架 —— 这正是抖动的来源。
         //
-        // `max(1, …)`：`size` 在首帧可能为 0，`.frame(width: 0)` 会让整页不可见；
-        // 给 1pt 兜底，下一帧就有真值。
-        .frame(width: max(1, box.width), height: max(1, box.height), alignment: .topLeading)
+        // 真正的稳定来自：`stage` 内部的列宽/列高全部由 `box`（量化后的 avail）算出，
+        // `ZStack` 自然撑满即可。
         // 顶部条带的补色放在 `body` 里（stage 外面）—— 这里的 `.background`
         // 会跟着 Group 逐个子视图生效，仍旧只填到内缩后的范围，条带照样露底色。
     }
@@ -1544,7 +2549,7 @@ struct OneSkinStage: View {
     /// `col=466x317 / 343 / 345 / 380 / 678` 五种高度、`ROOT proxy` 在
     /// `466x604 / 638 / 555 / 507` 之间跳）—— 画面区高度跟着抖，整页就推。
     ///
-    /// 现在留白比例直接乘 `size.height`（= 已冻结的 `frozenBox` 高度）：
+    /// 现在留白比例直接乘 `size.height`（= 几何层给的离散盒高度）：
     /// box 只在 onAppear / 形态切换时重算，所以这个值也跟着离散、不抖。
     /// 「全出血」形态里画面列的高度 —— **唯一来源**。
     ///
@@ -1558,9 +2563,40 @@ struct OneSkinStage: View {
                                        aspect: CGFloat,
                                        lower: CGFloat,
                                        upper: CGFloat) -> CGFloat {
+        // ⛔ 两条硬约束，缺一就出事：
+        //   ① 结果**不得依赖 `size.height`** —— 那会让列高与容器高互为因果成环
+        //      （实测：列高 213→378 爬升 → 容器被撑高 → 再来一轮，每秒 291 次）
+        //   ② 结果**不得无限大** —— 片源越窄画面越高，竖片 9:16 时
+        //      `width/aspect` = 669/0.5625 = 1189pt，把整页撑爆、详情栏压成 1pt
+        //
+        // 上一版 `min(max(f, f*lower/upper), max(size.height*upper, f))` 是**代数恒等式**
+        // （`lower/upper=0.5<1` 且 `hiCap≥f`），返回恒等于 `width/aspect`，
+        // `upper` 完全失效 —— 子代理用 20 万组随机反例证实 0 例外。
+        // 后果实测：16:9 恰好 ≈50% 所以看不出来，但 4:3 溢出 50pt、
+        // 1:1 溢出 288pt、竖片溢出 1028pt。
+        //
+        // 正解：上限挂在**宽度**上（宽度不随内容变，不成环），
+        // 取「版式窗口按 windowAspect 铺满时的高度 × upper」。
+        // `windowAspect = 1.819` 是 One 版式的窗口比例常量，
+        // 内屏竖持 669 宽 → 标称窗口高 368 → 上限 368×0.56 ≈ 206…
+        // 但这样会把 16:9 的 376 压到 206（上一版就这么错的）。
+        //
+        // ⇒ 上限必须与 `fittedH` 同尺度：用**宽度对应的最长合理画面高**。
+        //   One 的版式规定画面列最多占整页 `upper` 比例，而整页高度按
+        //   「宽度 / 版式宽高比」估。为避免再次压小正常片源，
+        //   取 `max(该值, fittedH)` 作为**下限**，再让 upper 只压那些
+        //   `fittedH` 明显超出窗口的窄片。
         let rawAspect = (aspect.isFinite && aspect > 0.2 && aspect < 6) ? aspect : 16.0 / 9.0
         let fittedH = size.width / rawAspect
-        return min(max(fittedH, size.height * lower), size.height * upper)
+        // 版式窗口高：纯由宽度推出，与容器无关。
+        let nominalWindowH = size.width / OneSkinWindowGeometry.Metrics.windowAspect
+        // 画面列允许的最大高度：窗口高 × upper，但**不低于** 16:9 的画面高，
+        // 否则正常宽片会被压小（上两版都踩了这个坑）。
+        let naturalH = size.width / (16.0 / 9.0)
+        let cap = max(nominalWindowH * upper, naturalH)
+        // 下限：窗口高 × lower，同样不低于 0。
+        let floorH = max(nominalWindowH * lower, 1)
+        return min(max(fittedH, floorH), cap)
     }
 
     private func pictureHeightOf(_ size: CGSize, landscape: Bool) -> CGFloat {
@@ -1569,7 +2605,8 @@ struct OneSkinStage: View {
             return size.height
         }
         let winW = max(size.width, 1)
-        let winH = winW / OneSkinWindowGeometry.Metrics.windowAspect
+        // ★ 分形态：内屏竖持播放态用真机 2.146，外屏维持 1.819（与 Core 同源）。
+        let winH = winW / OneSkinWindowGeometry.Metrics.portraitAspect(forColumnWidth: size.width)
         let h = max(size.height, 1)
         // 上限 0.72 保留：画面区最多占 72%，其余留给详情列。
         return min(h * OneSkinWindowGeometry.Metrics.portraitTop + winH + h * 0.04,
@@ -1584,18 +2621,30 @@ struct OneSkinStage: View {
     /// 放在同一个 ZStack 里时，全屏态窗口铺满整屏，所有按钮都会「看得见但点不到」——
     /// 双列态因为窗口只占左列一小块、多数控件落在窗口外，问题才不明显。
     private func pictureControls(colW: CGFloat, colH: CGFloat, landscape: Bool, fullScreen: Bool,
-                                 edgeToEdge: Bool = false) -> some View {
+                                 edgeToEdge: Bool = false,
+                                 portraitTopInset: CGFloat? = nil) -> some View {
         // 控件层与画面共用**同一个几何来源**（OneSkinWindowGeometry）。
         // 以前这里和 pictureColumn 各算一份，只改一处就立刻错位。
         // edgeToEdge（展开宽屏）也必须同步带上，否则控件仍按内缩窗口定位。
+        //
+        // ★ portraitTopInset **必须由调用方传入**（三模型审查 B-D1）：
+        //   之前这里不传，走 `nil → colH × 0.091` 回退（colH 是画面区高度不是屏高），
+        //   控件层 winY：内屏竖持 44.8 vs 画面层 86.5（真机 85.67）→ 整体上移 42pt；
+        //   外屏 31.3 vs 43.0（真机 43.00）→ 上移 11.7pt。画面层已正确接线、控件层漏传，
+        //   正是 Core 注释警告的「两处必须同源」翻版。
         let geo = OneSkinWindowGeometry(
             size: CGSize(width: colW, height: colH),
             landscape: landscape,
-            fullScreen: fullScreen || edgeToEdge
+            fullScreen: fullScreen || edgeToEdge,
+            edgeToEdgeOnly: edgeToEdge,     // 区分「全出血」与「用户按了全屏键」
+            portraitTopInset: portraitTopInset
         )
         // 安全区：全屏 / 展开宽屏时窗口 (0,0) 就是屏幕 (0,0)，
         // 顶栏会压进状态栏、底栏会被 Home 指示条咬掉 —— 交给控件层夹。
         let safe = OneSkinChrome.safeInsets()
+        // 屏幕尺寸必须和 `safe` 同源（都来自 UIKit 的窗口/屏幕），
+        // 且必须是**当前方向**的：控件层的「窗口外还剩多少」全部以它为基准。
+        let screenNow = OneSkin.fixedScreenSize()
         // 2026-11-09 第二次重写：控件从「OneSkin 自己画的一排装饰图标」换成
         // `OneSkinChrome` —— 上游与二开播放器里的 21 个控件、手势、弹幕、
         // 字幕、片头片尾、视频信息、画中画、外播都接在这一个入口上。
@@ -1609,8 +2658,16 @@ struct OneSkinStage: View {
                 // 控件布局档位必须按**当前形态**取，不能直接用用户手排的原始串：
                 // 同一份 `controlsOrder` 在四形态下要落到不同档位
                 //（比如 split 走 sideways、halfFold 走 folded 紧凑档）。
-                skinShape: shapeNow,
-                layout: PlayerControlsLayout.current(forSkinShape: shapeNow, width: colW),
+                //
+                // ⛔ 这里是 P1-6 修正：原来 `skinShape` 读 `shape`（即刻可见），
+                //    `layout` 却读 `shapeNow`（@State，慢一拍）—— 注释和代码正好相反。
+                //    后果：几何/皮肤已按新形态，控件档位还停在旧形态，转屏/折叠时
+                //    控件滞后一拍再跳；若 `onChange(of: effectiveShape)` 因为
+                //    外层不重算而没触发，`shapeNow` 会**永久**停在初值 `.column`。
+                //    现在两处都读 `effectiveShape`：一个来源（含 QA 强制覆盖），
+                //    与 `stage` 排版的形态也完全同源。
+                skinShape: shape(),
+                layout: PlayerControlsLayout.current(forSkinShape: shape(), width: colW),
                 openEpisodes: onEpisodes,
                 miniPlayer: onMiniPlayer,
                 toggleFullScreen: onFullScreen,
@@ -1628,23 +2685,26 @@ struct OneSkinStage: View {
             safeBottom: safe.bottom,
             safeLeft: safe.left,
             safeRight: safe.right,
+            // 物理屏（当前方向）。安全区是从**屏幕边**量的，而 `colW/colH`
+            // 只是画面列 —— 横持双列时两者差 428pt，拿列宽当屏宽会把
+            // 屏幕右缘的安全区算进窗口内（16.2/16.3）。
+            screenW: screenNow.width,
+            screenH: screenNow.height,
             // 返回分三层，一次只退一层：
             //   ① 全屏 → 走 `onExitFullScreen`（只退全屏，绝不关页）
             //   ② 合拢 → 展开，把详情与选集叫回来（用户的「退回选集页」）
             //   ③ 其余 → 才真的离开这一页
             // 这一层的意义是兜底：即使 `fullScreen` / `foldedNow` 有哪一侧读到过期值，
             // 也不会出现「点一次返回直接回主页」。
-            onBack: {
-                if foldedNow && !fullScreen {
-                    toggleFold()
-                    onFold()
-                } else {
-                    onBack()
-                }
-            },
+            // ⛔ `onBack` 不再传（2026-11-11）：选题页的退出键已迁到页面层，
+            // 控件层里已经没有返回键了。合拢态的「返回＝展开」也随之取消 ——
+            // 那是为一个**已不存在的按钮**服务的分支；页面层那颗退出键一律退出页面
+            // （用户在合拢态想看详情，点画面或展开键即可，不需要再造一个语义）。
             onExitFullScreen: {
                 // 先把皮肤自己的镜像收起来（布局立刻还原）……
-                withAnimation(.smooth(duration: 0.25)) { fullScreenNow = false }
+                // ⛔ 不能包 withAnimation：`fullScreenNow` 直接决定 stage 走
+                // 全屏分支还是分栏分支，0.25s ≈ 15 帧逐帧重排。
+                fullScreenNow = false
                 // ……再让页面把 `fullScreen` 单向置 false。两步都做，
                 // 哪一侧曾经读到过期的 true 都会被这次返回清掉。
                 onExitFullScreen()
@@ -1659,12 +2719,20 @@ struct OneSkinStage: View {
 
     private func pictureColumn(_ colSize: CGSize, landscape: Bool, fullScreen: Bool = false,
                                edgeToEdge: Bool = false,
+                               ratioBase: CGSize = .zero,
                                fitMode: OneSkinFitMode = .fit,
                                playerAspect: CGFloat = 0) -> some View {
         #if DEBUG
+        // ⛔ 这个探针**必须传 portraitTopInset**，否则竖持时 `winY` 会算成
+        //    `colH × 0.091`（≈31），而真实 `geo` 用的是
+        //    `ratioBase.height × 0.0634 + portraitExtraDrop`（≈58）。
+        //    两者差 27pt —— 此前多轮「日志说 31、实际是 58」的误判就是它造成的。
         let _g = OneSkinWindowGeometry(size: colSize, landscape: landscape,
-                                       fullScreen: fullScreen || edgeToEdge)
-        oneSkinLog("pictureColumn shape=\(effectiveShape.logName) col=\(Int(colSize.width))x\(Int(colSize.height)) fs=\(fullScreen) edge=\(edgeToEdge) fit=\(fitMode.rawValue) aspect=\(playerAspect) win=\(Int(_g.winW))x\(Int(_g.winH))")
+                                       fullScreen: fullScreen || edgeToEdge,
+            edgeToEdgeOnly: edgeToEdge,
+                                       portraitTopInset: landscape ? nil : OneSkinStage.portraitTopInset(
+                                           ratioBase: ratioBase, colSize: colSize))
+        oneSkinLog("pictureColumn shape=\(shape().logName) col=\(Int(colSize.width))x\(Int(colSize.height)) fs=\(fullScreen) edge=\(edgeToEdge) fit=\(fitMode.rawValue) aspect=\(playerAspect) win=\(Int(_g.winW))x\(Int(_g.winH)) at=(\(Int(_g.winX)),\(Int(_g.winY))) bottomY=\(Int(_g.winY + _g.winH))")
         #endif
         // ===== 播放器窗口几何（2026-11-07 双方向逐像素实测，One 1.7.0）=====
         //
@@ -1710,7 +2778,22 @@ struct OneSkinStage: View {
             // edgeToEdge（展开宽屏）复用「铺满」分支拿全出血坐标：
             // winX/winY = 0、winW/winH = 整块画面区。它**不是**全屏态，
             // 控件仍按选集页样式常驻（见 pictureControls 的 fullScreen 参数）。
-            fullScreen: fullScreen || edgeToEdge
+            fullScreen: fullScreen || edgeToEdge,
+            // ★★★ 这个参数**从 2026-11-11 起才真正接线** —— 之前全仓零调用点，
+            //     于是竖持时窗口顶边一直按 `colH * 0.091` 算，而 `colH` 只是
+            //     「画面区高度」（≈ 屏高 × 0.55），比屏幕矮一半，顶边自然只有
+            //     应有值的 55%：外屏 33.9pt（应 61.7）、内屏 44.8pt（应 86.5）。
+            //     窗口整体上移 27.8 / 41.7pt —— 这就是用户报的
+            //     「竖屏时控件没有避让摄像头」+「坐标不对」。
+            //
+            // 正确基准是**物理屏高**（`ratio.height`，不是 colH）：
+            //     外屏 678 × 0.091 = 61.7pt ✓
+            //     内屏 951 × 0.091 = 86.5pt ✓
+            // 与 `OneSkinWindowGeometryCore` 注释里的实测值逐位吻合。
+            // 顶边留白的基准必须是**物理屏高**，不是 colH（见 init 注释）：
+            // 外屏 678×0.091=61.7 ✓  内屏 951×0.091=86.5 ✓
+            portraitTopInset: landscape ? nil : OneSkinStage.portraitTopInset(
+                ratioBase: ratioBase, colSize: colSize)
         )
         let winX = geo.winX, winY = geo.winY
         let winW = geo.winW, winH = geo.winH
@@ -1800,6 +2883,43 @@ struct OneSkinStage: View {
             .offset(x: winX, y: winY)
             .zIndex(-1)
 
+            // ★ 未播放态的**中央播放键**（2026-11-12，参考截图对齐）。
+            //
+            // 三张参考图的「未播放」都有一颗白色实心圆 + 黑色三角，压在画面正中
+            // （外屏 ≈62pt、内屏 ≈59pt，实测都是 60 上下）。我们此前完全没有：
+            // 控件层 `OneSkinChrome` 只在 `session != nil` 时画 `centerTransport`，
+            // 未播放时画面是一块没有任​何入口的黑色 —— 想播只能去详情列找
+            // 「继续播放」，而那颗按钮在小屏上还要滚一下才看得见。
+            //
+            // 用 `session == nil` 而不是 `!playing`：播放器已就绪但暂停时，
+            // 控件层自己会画那颗圆键（含 ±10s），这里再画一颗会叠成两个。
+            if session == nil {
+                // ⛔ 用「定尺寸的透明底 + overlay 居中」，不要
+                //    `Button.frame(winW, winH).offset(winX, winY)`：
+                //    外层是 `ZStack(alignment: .topLeading)`，`frame` 只把**容器**
+                //    撑到 winW×winH，子视图仍按 topLeading 摆 —— 实测那颗键跑到
+                //    画面左上角而不是中心。`.position` 也一样会被这个 ZStack 吃掉。
+                //    透明底给的是**确定的**几何，overlay 的居中与尺寸无关，稳。
+                Color.clear
+                    .frame(width: winW, height: winH)
+                    .overlay {
+                        Button {
+                            // 与详情列那颗「继续播放」同一条路径：先当前集，再第一集。
+                            onTogglePlay()
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(Color.black)
+                                .frame(width: 62, height: 62)
+                                .background(Circle().fill(Color.white))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text("播放"))
+                    }
+                    .offset(x: winX, y: winY)
+            }
+
             // 底部胶囊条**不在这里画**（见 stage 里的说明）：
             // 放在 pictureColumn 的 ZStack 里会被 PlaybackView 的 UIKit 图层盖住，
             // 看得见但点不到 —— 实测点 4 个位置全部无响应。
@@ -1817,33 +2937,37 @@ struct OneSkinStage: View {
         // 否则整屏按钮都会被它挡住（详见 pictureControls 的说明）。
         .overlay {
             pictureControls(colW: colW, colH: colH, landscape: landscape,
-                            fullScreen: fullScreen, edgeToEdge: edgeToEdge)
+                            fullScreen: fullScreen, edgeToEdge: edgeToEdge,
+                            // 与画面层同源：同一份 portraitTopInset（B-D1）。
+                            portraitTopInset: landscape ? nil : OneSkinStage.portraitTopInset(
+                                ratioBase: ratioBase, colSize: colSize))
         }
-        // One 的「用外部播放器打开」「复制视频链接」两项。实测菜单还含
-        // 「用内置播放器播放」，我们是内置播放器本体，所以不列。
-        .confirmationDialog("更多", isPresented: $showsMoreMenu, titleVisibility: .hidden) {
-            if let streamURL {
-                Button {
-                    UIPasteboard.general.string = streamURL.absoluteString
-                    copiedLink = true
-                } label: {
-                    Label("复制视频链接", systemImage: "doc.on.doc")
-                }
-                // 已安装的外部播放器才出现，未安装的不列 —— 与 One 一致
-                //（它按已安装状态列出 Infuse / SenPlayer / VLC / nPlayer）。
-                ForEach(OneSkin.externalPlayers, id: \.name) { entry in
-                    if let target = OneSkin.externalURL(entry.scheme, streamURL),
-                       UIApplication.shared.canOpenURL(target) {
-                        Button(entry.name) { UIApplication.shared.open(target) }
-                    }
-                }
-            } else {
-                Text("还没有可用的播放地址")
+        // 「用外部播放器打开」——真机是**右侧弹出的自定义面板**，不是系统弹窗。
+        //
+        // 实测（桌面截图「展开横屏双栏 暂停选触发按钮」，951×669 内屏横持）：
+        //   用 Infuse 播放      y=151.9  x=760.2
+        //   用 SenPlayer 播放   y=193.5  x=760.2   ← 行距 ≈41.7pt
+        //   用 VLC 播放         y=235.7  x=760.1
+        //   用 nPlayer 播放     y=277.8  x=760.2
+        //   用内置播放器播放     y=319.2  x=760.2
+        // ⇒ x 恒 760（贴右缘）、行距 41.7、每行是**左图标 + 文字**的一行按钮
+        //
+        // 之前用 `.confirmationDialog`：系统会把按钮排成居中的一堆，
+        // 与真机的「贴右缘竖排」完全不同，而且颜色跟着系统走。
+        .overlay {
+            if showsMoreMenu {
+                OneSkinExternalPanel(
+                    streamURL: streamURL,
+                    onCopy: {
+                        if let u = streamURL { UIPasteboard.general.string = u.absoluteString }
+                        copiedLink = true
+                    },
+                    onDismiss: { showsMoreMenu = false }
+                )
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
-            Button("取消", role: .cancel) {}
-        } message: {
-            if copiedLink { Text("已复制视频链接") }
         }
+        .animation(.smooth(duration: 0.2), value: showsMoreMenu)
         .onChange(of: showsMoreMenu) { _, open in
             if open { copiedLink = false }
         }
@@ -1921,55 +3045,138 @@ struct OneSkinStage: View {
     /// → 标签 → 简介 → 合集头 + 横排大卡片。上一版自己加的「下载卡」
     /// 与「热门评论」占位块（含「播放页只显示真实数据，不占位」这句实现
     /// 说明）One 没有，一并删除。
-    private func detailColumn(_ size: CGSize, landscape: Bool) -> AnyView {
+    private func detailColumn(_ size: CGSize, landscape: Bool, ratioBase: CGSize = .zero, topInset: CGFloat = 0, shapeOverride: OneSkinShape? = nil) -> AnyView {
+        #if DEBUG
+        #endif
         #if DEBUG
         oneSkinLog("detailColumn \(Int(size.width))x\(Int(size.height)) landscape=\(landscape) eps=\(episodes.count)")
         #endif
         let colW = size.width
         let colH = size.height
-        // One 是非对称留白：左 5.5%、右 10%（文字右缘距列右界约 3%）。
-        let pad = max(14, min(colW * 0.055, 26))
-        let trailing = pad + colW * 0.045
+        // ★ 左右内缩按参考截图量出来的固定值，不再按列宽比例。
+        //
+        // 参考截图（669×951 / 466×678 / 951×669 三种，OCR 换算成 pt）：
+        //   正文左缘一律 **16**；竖屏/外屏右缘也是 16（全部 20 集那颗「全部」右缘 652.5/669）。
+        //   横持例外：右缘要留出**返回 / 更多**两颗圆按钮的竖排轨道 ≈ 98pt。
+        // 旧写法 `max(14, min(colW * 0.055, 26))` 在 669 上是 26、在 951 上是 26，
+        // 比参考宽 10pt，整列文字右移，右边又留了 ~45pt 的空 —— 标题更早换行。
+        // ★ 2026-11-12 真机 AX 实测修正：横持改成 pad=0 / trailing=100。
+        //
+        // 实测（内屏展开横持 951×669，AX）：
+        //   右栏容器起点 523.0，而所有内容 x 也是 523.0 → **左内边距 = 0**
+        //   最右内容边界 850.7 → 右留白 100.3pt
+        //   内容实际占用 = 850.7 - 523.0 = 327.7pt
+        //
+        // 旧值 pad=16 / trailing=92 让 innerW = 428-16-92 = 320：
+        //   · 内容右移 16pt（真机与容器同 x）
+        //   · 可用宽少 7.7pt
+        //
+        // 新值 pad=0 / trailing=100 → innerW = 428-0-100 = 328
+        //   与真机 327.7 吻合到 0.3pt。
+        //
+        // 竖屏/外屏仍是 16/16（那两种形态的实测右缘就是 16）。
+        let pad: CGFloat = landscape ? 0 : 16
+        let trailing: CGFloat = landscape ? 100 : 16
         let innerW = max(colW - pad - trailing, 1)
-        // 选集卡片：右栏约 46% 宽，一排露出下一张的半张。
-        let cardW = min(max(innerW * 0.46, 128), 190)
+        // 选集卡片：右栏约 62% 宽，一排露出下一张的半张。
+        //
+        // 横持按参考实测反推：卡片 **210.67** 宽、gap **26.33**，而
+        // innerW = 428 − 0 − 100 = 328 → 比例 0.642。原来是 0.62（=203.4），
+        // 一张牌差 7pt，一排看下来整行短 3 成。
+        // 竖屏/外屏沿用 0.62：那两种形态的参考图里卡片被裁在屏幕外，没有可比值。
+        let cardW = min(max(innerW * (landscape ? 0.642 : 0.62), 128), landscape ? 212 : 220)
+        // 日志必须打**真实的 pad/trailing/innerW**，不要重复一遍旧公式。
+        // 曾经写 `max(14, min(size.width*0.055, 26))`（=23），而实际 pad 早已是 0 ——
+        // 日志报 23、真实 0，白查半天。
+        let _ = oneSkinLog("detailColumn shape=\(shape().logName) col=\(Int(size.width))x\(Int(size.height)) land=\(landscape) pad=\(Int(pad)) trailing=\(Int(trailing)) innerW=\(Int(innerW)) cardW=\(Int(cardW))")
 
         return AnyView(
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    // 顶部给状态栏和右上角两个圆按钮留位置；竖屏上半已是画面。
-                    Color.clear.frame(height: landscape ? 38 : 8)
+                    // 横持：标题上沿实测 y≈40（列顶起算）。
+                    // 竖屏：详情列从**画面列下沿**开始，而胶囊条 + 续播行也压在这一带里，
+                    // 所以必须先让出它们的高度，否则标题会紧贴胶囊、两者黏在一起。
+                    // 参考截图（669×951）：画面 415 → 胶囊 440–466 → 续播 485–500 → 标题 516，
+                    // 即标题距画面下沿 ≈ 100pt。
+                    Color.clear.frame(height: landscape ? 38 : max(topInset, 2))
 
                     Text(shown.name)
-                        .font(.system(size: 17, weight: .semibold))
+                        // 参考截图里标题是**整页最重的一档**：内屏竖持约 24pt，
+                        // 外屏约 26pt，横持右栏约 22pt。我们原来写 17/20，
+                        // 明显偏小，整页看起来「标题不像标题」。
+                        .font(.system(size: landscape ? 25 : 24, weight: .bold))
                         .foregroundStyle(OneSkinPalette.primary)
-                        .lineSpacing(3)
+                        .lineSpacing(landscape ? 1 : 4)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.bottom, 9)
+                        .padding(.bottom, 8)
 
-                    if let ep = playingEpisode ?? episodes.first {
-                        Text("第 \(episodeIndex + 1) 集 · \(ep.name.isEmpty ? shown.name : ep.name)")
-                            .font(.system(size: 12))
-                            .foregroundStyle(OneSkinPalette.primary.opacity(0.88))
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                    // ① 当前集：`第 1 集 · <集名>`（参考 h≈15，常规字重，主色）
+                    if let ep = playingEpisode {
+                        // ⛔ 不要无条件拼「第 N 集 · 」：上游的 `ep.name` 本身常常
+                        //    就是「第 01 集」，于是会渲染成「第 1 集 · 第 1 集 · …」。
+                        let epTitle = ep.name.trimmingCharacters(in: .whitespaces)
+                        Text(epTitle.hasPrefix("第") ? epTitle : "第 \(episodeIndex + 1) 集 · \(epTitle)")
+                            .font(.system(size: 15))
+                            .foregroundStyle(OneSkinPalette.primary.opacity(0.92))
+                            .lineLimit(1)
+                            .padding(.top, 11)
                     }
 
-                    if !oneMetaLine.isEmpty {
-                        Text(oneMetaLine)
-                            .font(.system(size: 11))
+                    // ② 元信息：年份 + 备注（参考 h≈12），一行
+                    let metaTop: [String] = {
+                        var parts: [String] = []
+                        if let year = shown.year, !year.isEmpty { parts.append(year) }
+                        if !shown.remarks.isEmpty { parts.append(shown.remarks) }
+                        return parts
+                    }()
+                    if !metaTop.isEmpty {
+                        Text(metaTop.joined(separator: " · "))
+                            .font(.system(size: 12.5))
                             .foregroundStyle(OneSkinPalette.tertiary)
                             .lineLimit(1)
-                            .padding(.top, 7)
+                            .padding(.top, 31)
                     }
 
-                    oneActionRow(width: innerW)
-                        .padding(.top, 14)
+                    // ③ 统计行（真机第 4 段，y=168.6 h=14.3）：「N 次观看 · 收藏 N · 评论 N」
+                    //
+                    // 真 One 有观看数/收藏数/评论数三项。我方数据源只有 `Episode.views`，
+                    // 没有收藏与评论计数 ⇒ **只显示真实有的，不编造**：
+                    //   · 有 views  → 「X 次观看 · 共 N 集」
+                    //   · 无 views  → 「共 N 集」
+                    // 空着比编数好：编出来的数字是假的，用户一眼能看出。
+                    if !episodes.isEmpty {
+                        let totalViews = episodes.compactMap(\.views).reduce(0, +)
+                        let text: String = totalViews > 0
+                            ? "\(Self.compactCount(totalViews)) 次观看 · 共 \(episodes.count) 集"
+                            : "共 \(episodes.count) 集"
+                        Text(text)
+                            .font(.system(size: 12))
+                            .foregroundStyle(OneSkinPalette.tertiary)
+                            .padding(.top, 10)
+                    }
+
+                    oneActionRow(width: innerW, landscape: landscape)
+                        .padding(.top, 22)
+
+                    // ⛔ 不再单独画一条「自动 · 线路N」文本行。
+                    //
+                    // 参考截图（六态全对过）：线路信息只在胶囊条那一颗 chip 上出现，
+                    // 「继续播放」与标签之间是**直接相接**的，没有第三行文字。
+                    // 之前这里多画一条，等于同一份数据在页面上出现两次。
+                    //
+                    // ★ 但**未播放态**是例外：那时底部胶囊带整条不画（见 overlay 判据），
+                    // 线路选择跑到详情列来，就是 CTA 下面这颗胶囊 ——
+                    // 参考三态都在这个位置（横持 y≈294、外屏 y≈584、内屏 y≈676），
+                    // 文案「自动 · 线路9 · 2010 ms ⌄」。此时它不再重复任何东西。
+                    if session == nil, !lines.isEmpty {
+                        lineSelector
+                            .padding(.top, 22)
+                    }
 
                     if !tags.isEmpty {
                         tagFlow(width: innerW, sx: 1, sy: 1)
-                            .padding(.top, 15)
+                            .padding(.top, 22)
                     }
 
                     if !synopsisText.isEmpty {
@@ -1979,7 +3186,7 @@ struct OneSkinStage: View {
                             .foregroundStyle(OneSkinPalette.secondary)
                             .lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 16)
+                            .padding(.top, 22)
                     }
 
                     if !episodes.isEmpty {
@@ -2000,28 +3207,21 @@ struct OneSkinStage: View {
                         } label: {
                             HStack(alignment: .center, spacing: 8) {
                                 Text("合集 · 共 \(episodes.count) 集")
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(.system(size: 15, weight: .medium))
                                     .foregroundStyle(OneSkinPalette.primary.opacity(0.9))
                                 Spacer(minLength: 0)
-                                HStack(spacing: 4) {
-                                    Text("选集")
-                                        .font(.system(size: 11, weight: .medium))
-                                    Image(systemName: "chevron.down")
-                                        .font(.system(size: 9, weight: .semibold))
-                                }
-                                .foregroundStyle(OneSkinPalette.primary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Capsule().fill(Color.white.opacity(0.14)))
-                                .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+                                // 真机右端是纯文本钮「全部」，无胶囊底、无描边。
+                                Text("全部")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color.white)
                             }
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 12)
+                        .padding(.top, 26)
 
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(alignment: .top, spacing: 12) {
+                            HStack(alignment: .top, spacing: 26) {
                                 ForEach(Array(episodes.enumerated()), id: \.element.id) { idx, ep in
                                     // ★ 用 Button 而不是 onTapGesture。
                                     //
@@ -2039,7 +3239,7 @@ struct OneSkinStage: View {
                             }
                             .padding(.trailing, trailing)
                         }
-                        .padding(.top, 10)
+                        .padding(.top, 14)
                     }
 
                     // ⑯ 下载卡 —— One 把它放在**选集之后**
@@ -2068,7 +3268,7 @@ struct OneSkinStage: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .padding(.top, 22)
+                    .padding(.top, 60)
 
                     // ⑰ 评论区 —— 下载之后
                     Text(commentCount > 0 ? "评论 \(commentCount)" : "评论")
@@ -2120,39 +3320,63 @@ struct OneSkinStage: View {
         )
     }
 
-    /// 只报上游真有的字段：年份 / 备注 / 集数。观看次数与收藏数不在 `Video` 里，不编。
-    private var oneMetaLine: String {
-        var parts: [String] = []
-        if let year = shown.year, !year.isEmpty { parts.append(year) }
-        if !shown.remarks.isEmpty { parts.append(shown.remarks) }
-        if !episodes.isEmpty { parts.append("共 \(episodes.count) 集") }
-        return parts.joined(separator: " · ")
-    }
-
-
-    /// 「继续播放」白色胶囊 + 收藏 / 下载 / 分享 灰胶囊（One 主按钮行）。
-    private func oneActionRow(width: CGFloat) -> some View {
+    /// 「继续播放」按钮 + 收藏 / 下载 / 分享 / 更多 灰胶囊（One 主按钮行）。
+    /// 横持：继续播放是 167×20 的紧凑文本行（无白底胶囊）；竖持：白底胶囊 190×52。
+    private func oneActionRow(width: CGFloat, landscape: Bool) -> some View {
         HStack(alignment: .center, spacing: 10) {
             Button {
                 if let ep = playingEpisode ?? episodes.first { onPlay(ep) }
             } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 15, weight: .bold))
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(position > 0 ? "继续播放" : "播放")
-                            .font(.system(size: 14, weight: .semibold))
-                        if position > 0 {
-                            Text("第 \(episodeIndex + 1) 集 · \(timeText)")
-                                .font(.system(size: 10))
-                        }
+                if landscape {
+                    // ★ 2026-11-12 真机 AX 实测修正：横持是 **168×52 实体按钮**，不是紧凑文本行。
+                    //
+                    // 两次独立采集（播放中 / 未播放）都给出同一组值：
+                    //   x=523  y=205  w=168  h=52
+                    // 旧注释「横持是 167×20 紧凑文本行」与实测不符（宽度接近、高度差 32pt）。
+                    // 真机「继续播放」是**两行**（OCR 实测）：
+                    //   y=525.2 「继续播放」 h=17.9
+                    //   y=545.5 「第1集 · 2:59」 h=12.7
+                    // 复用 `OneContinueHint`（它已经是叶子视图、自带副行、只订阅 position），
+                    // 横持按 0.7 缩放字号（真机横持 14/10，竖持 20/13）。
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                        OneContinueHint(session: session, episodeNumber: episodeIndex + 1)
+                            .scaleEffect(0.7, anchor: .leading)
+                            .frame(width: 118, alignment: .leading)
                     }
-                    Spacer(minLength: 0)
+                    .foregroundStyle(Color.white)
+                    .frame(width: 168, height: 52)
+                } else {
+                    HStack(spacing: 10) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 15, weight: .bold))
+                        // ★★ 只让这一小块观察 `position` —— 它每帧都变。
+                        //
+                        // 原来这里直接读 `position` / `timeText`，而 `position` 是
+                        // `OneSkinStage` 的 `var` 参数、由父视图用
+                        // `playerSession?.position ?? 0` 每帧喂进来（`PlaybackSession`
+                        // 是 `@Observable`，播放时每秒 ~60 次更新）。
+                        // 后果：**整个 `OneSkinStage.body` 重建 → 根部 `GeometryReader`
+                        // 重跑 → `proxy` 每帧抖动 → 控件一直推移**。
+                        //
+                        // 实测（Fig 外屏竖持）：每秒 479 次 ROOT 重算，dt=7–11ms；
+                        // proxy 宽 473→469→466→462→459→455 平滑递减；
+                        // 高度夹住后稳定 568，但宽度仍抖。
+                        //
+                        // 也就是说：**这不是布局 bug，是「播放进度把整页重绘」**。
+                        // 把观察范围收到这个叶子视图里，`GeometryReader` 就不再跟着进度走。
+                        OneContinueHint(session: session, episodeNumber: episodeIndex + 1)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(Color.black)
+                    .padding(.horizontal, 16)
+                    // 参考尺寸：白胶囊 **190×52**（外屏实测 190×52 @(16,515)，
+                    // 内屏竖持同样 190 宽）。之前上限 160，按钮明显偏窄，
+                    // 和右边那组圆形按钮之间空出一大截。
+                    .frame(width: max(min(width * 0.50, 190), 150), height: 52)
+                    .background(Capsule().fill(Color.white))
                 }
-                .foregroundStyle(Color.black)
-                .padding(.horizontal, 16)
-                .frame(width: max(min(width * 0.5, 160), 124), height: 46)
-                .background(Capsule().fill(Color.white))
             }
             .buttonStyle(.plain)
 
@@ -2171,8 +3395,11 @@ struct OneSkinStage: View {
                         .frame(width: 30, height: 38)
                 }
                 .buttonStyle(.plain)
-                Button { onShare() } label: {
-                    Image(systemName: "square.and.arrow.up")
+                // 真机第三颗是「用其他播放器打开」（AX 实测 label 就是这五个字），
+                // 不是我方原来的「分享」。图标用 `play.rectangle.on.rectangle`：
+                // 语义是「换个播放器接着放」，与分享（向上箭头出方框）区分开。
+                Button { onOpenExternal() } label: {
+                    Image(systemName: "play.rectangle.on.rectangle")
                         .font(.system(size: 14))
                         .foregroundStyle(OneSkinPalette.primary)
                         .frame(width: 30, height: 38)
@@ -2194,17 +3421,23 @@ struct OneSkinStage: View {
     }
 
     /// 标签胶囊：One 是灰底无描边，不是空心描边。
+    /// 真机：等高 29.667pt、等宽 50pt、横向步长 58.33pt、行距 13.66pt、字号 ~13。
     private func tagFlow(width: CGFloat, sx: CGFloat, sy: CGFloat) -> some View {
-        let rows = stride(from: 0, to: tags.count, by: 5).map { Array(tags[$0..<min($0+5, tags.count)]) }
-        return VStack(alignment: .leading, spacing: 7 * sx) {
+        let step = 58.33 * sx
+        let perRow = max(1, Int((width / step).rounded(.down)))
+        let rows = stride(from: 0, to: tags.count, by: perRow).map { Array(tags[$0..<min($0+perRow, tags.count)]) }
+        return VStack(alignment: .leading, spacing: 13.66 * sy) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 7 * sx) {
+                HStack(spacing: 8.33 * sx) {
                     ForEach(row, id: \.self) { t in
                         Text(t)
-                            .font(.system(size: max(8, 10 * sx)))
+                            .font(.system(size: max(12, 13 * sx)))
                             .foregroundStyle(OneSkinPalette.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 10 * sx)
-                            .padding(.vertical, 4 * sy)
+                            .padding(.vertical, 7.5 * sy)
+                            .frame(minWidth: 50 * sx, minHeight: 29.667 * sy)
                             .background(Capsule().fill(Color.white.opacity(0.12)))
                     }
                     Spacer(minLength: 0)
@@ -2290,16 +3523,24 @@ struct OneSkinStage: View {
                     .buttonStyle(.plain)
 
                 // One 的第 3 颗 chip：画面呈现方式。点一下在
-                // 适应 → 填充 → 铺满 → 拉伸 之间循环，芯片文字跟着变。
-                // **只改画面怎么画，窗口几何恒定**（1.819 横向容器）。
+                // 适应 ⇄ 填充 之间切换。
+                // ⛔ 文案按「动作」写，不按「状态」写：参考截图里画面明明是
+                //    letterbox（未填充），这颗 chip 仍写着「填充」——它是「点了会填充」。
+                //    我们之前写当前状态（适应），于是同一画面下文案就和 One 反了。
                 Button {
-                    // ⛔ 固定两档：适应 / 填充。铺满、拉伸这两档会按片源比例
-                    // 缩放，竖屏片源直接被放大到看不见 —— 不再提供入口。
                     let all: [OneSkinFitMode] = [.fit, .fill]
                     let i = all.firstIndex(of: fitMode) ?? 0
                     fitMode = all[(i + 1) % all.count]
                 } label: {
-                    chip(fitMode.label, on: fitMode != .fit)
+                    chip(fitMode == .fill ? "适应" : "填充", on: fitMode != .fit)
+                }
+                .buttonStyle(.plain)
+
+                // One 第 4 颗：自动全屏（开播即全屏）。高亮态是蓝底蓝字。
+                Button {
+                    autoFullScreen.toggle()
+                } label: {
+                    chip("自动全屏", on: autoFullScreen, accent: true)
                 }
                 .buttonStyle(.plain)
 
@@ -2482,19 +3723,22 @@ struct OneSkinStage: View {
         }
         guard !targets.isEmpty else { return }
 
-        let results = await withTaskGroup(of: (String, Int?).self) { group in
-            for (name, sample) in targets {
-                group.addTask { (name, await Self.measure(sample)) }
+        // 逐条测，而不是一次把全部线路的 HEAD 打出去。
+        //
+        // ⛔ 原来这里是 `for … group.addTask` 全量并发（RCA H5 的同型问题）。
+        // 线路菜单一展开就有 4~9 个 HEAD 与播放同时起跑；虽然它们现在走专用会话
+        // 不再抢播放的连接池，仍然会抢**用户这条链路**的带宽。
+        // 逐条测的代价只是数字一条条亮起来 —— 而那个过程本来就在面板里，用户看得见。
+        var out: [String: Int] = [:]
+        for (name, sample) in targets {
+            if Task.isCancelled { break }
+            if let ms = await Self.measure(sample) { out[name] = ms }
+            await MainActor.run {
+                lineLatencies.merge([name: out[name]].compactMapValues { $0 }) { _, new in new }
             }
-            var out: [String: Int] = [:]
-            for await (name, ms) in group {
-                if let ms { out[name] = ms }
-            }
-            return out
         }
 
         await MainActor.run {
-            lineLatencies.merge(results) { _, new in new }
             lineLatency = lineLatencies[activeLine] ?? lineLatencies.values.min()
         }
     }
@@ -2507,8 +3751,13 @@ struct OneSkinStage: View {
         head.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         for (k, v) in sample.headers { head.setValue(v, forHTTPHeaderField: k) }
 
+        // ⛔ 走探针专用会话，不走 `URLSession.shared`（RCA H3）。
+        //
+        // 共用的那个池 iOS 默认只有 6 条连接；线路菜单一点开就为每条线发一个 HEAD，
+        // 再加上播放页的线路解析与选集面板的探测，正好把 6 条占满 —— 播放器的
+        // m3u8 与分片请求排在后面，用户看到「点播放要等」。
         let t0 = Date()
-        if let (_, resp) = try? await URLSession.shared.data(for: head),
+        if let (_, resp) = try? await SourceProbeRunner.probeSession.data(for: head),
            (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400 {
             return Int(Date().timeIntervalSince(t0) * 1000)
         }
@@ -2521,7 +3770,7 @@ struct OneSkinStage: View {
         get.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         for (k, v) in sample.headers { get.setValue(v, forHTTPHeaderField: k) }
         let t1 = Date()
-        if let (_, resp) = try? await URLSession.shared.data(for: get),
+        if let (_, resp) = try? await SourceProbeRunner.probeSession.data(for: get),
            (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400 {
             return Int(Date().timeIntervalSince(t1) * 1000)
         }
@@ -2543,16 +3792,157 @@ struct OneSkinStage: View {
                     ? (accent ? OneSkinPalette.autoBlue : OneSkinPalette.primary)
                     : OneSkinPalette.secondary
             )
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
             .background(
-                // 只有 accent 项在开启时带一层极深蓝底（实测 #000D1C）
-                Capsule().fill(on && accent ? OneSkinPalette.autoBlueDeep : Color.clear)
+                // ★ 参考截图里**每一颗都是实心胶囊**，不是裸文字：
+                //   普通项 ≈ #1F1F1F（黑底上白 10%），开启态的「自动全屏」是
+                //   #000D1C 深蓝底 + #1A6CC7 蓝字。
+                //   之前只有 accent 项有底、其余透明，整行看起来像四段散字，
+                //   和 One 的「一排胶囊」差得很远。
+                Capsule().fill(on && accent
+                               ? OneSkinPalette.autoBlueDeep
+                               : Color.white.opacity(0.10))
             )
     }
 
     // MARK: 标题与统计
 
+
+    /// 详情列里的线路胶囊 —— **只在未播放态出现**（`detailColumn` 里调用）。
+    ///
+    /// 为什么要有这一颗：One 的未播放态把底部整条胶囊带收掉了，线路选择改放到
+    /// 「继续播放」下面一颗独立胶囊上。三张参考图位置一致（横持 y≈294、
+    /// 外屏 y≈584、内屏 y≈676），文案形如「自动 · 线路9 · 2010 ms ⌄」。
+    /// 我们此前两种情况都不对：未播放也画整条带子（多出一行参考里没有的控件），
+    /// 而详情列里一颗线路都没有。
+    ///
+    /// 交互与胶囊带里那颗完全一致（点开测一次延迟 → 展开线路列表），
+    /// 只是把「列表」也搬到这里，因为胶囊带在未播放态不存在了。
+    /// 线路选择器 —— 真机是**竖排面板**（不是横向胶囊）。
+    ///
+    /// OCR 实测（桌面截图）：
+    ///   外屏 466×678：  V自动（推荐） y=98.5 x=48.3
+    ///                   线路1•不通    y=141.2 x=43.3   ← 行距 42.7
+    ///                   线路9•不通    y=476.7 x=43.3   ← 行距 42.4
+    ///                   重新测速      y=539.7 x=79.7   ← 底部独立
+    ///   内屏竖持 669：  V自动（推荐） y=450.5 x=288.9
+    ///                   线路9·1435ms·最快 y=492.1     ← 行距 41.6
+    ///
+    /// 三点与旧实现不同：
+    ///   ① **竖排**，每行 42pt 高；旧的是横向 ScrollView 胶囊
+    ///   ② 首行固定「自动（推荐）」，代表「让 App 选最快」
+    ///   ③ 每行右侧显示延迟或「不通」，最快那条加「最快」标签
+    private var lineSelector: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // 收起态：一颗胶囊，显示当前线路
+            Button {
+                withAnimation(.smooth(duration: 0.22)) { showsLineMenu.toggle() }
+                if !showsLineMenu { Task { await probeLatency() } }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform.path")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(OneSkinPalette.secondary)
+                    Text(lineLabel)
+                        .font(.system(size: 13))
+                        .foregroundStyle(OneSkinPalette.secondary)
+                        .lineLimit(1)
+                    Image(systemName: showsLineMenu ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(OneSkinPalette.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+
+            // 展开态：竖排面板（真机样式）
+            if showsLineMenu, !lines.isEmpty {
+                let fastest = lineLatencies.min { $0.value < $1.value }?.key
+                VStack(alignment: .leading, spacing: 0) {
+                    // 首行固定「自动（推荐）」
+                    lineRow(title: "自动（推荐）",
+                            detail: nil,
+                            isActive: activeLine.isEmpty,
+                            isFastest: false,
+                            systemImage: "wand.and.stars") {
+                        if !activeLine.isEmpty { onSelectLine("") }
+                        withAnimation(.smooth(duration: 0.22)) { showsLineMenu = false }
+                    }
+                    ForEach(lines, id: \.self) { line in
+                        let ms = lineLatencies[line]
+                        lineRow(title: line.isEmpty ? "线路" : line,
+                                detail: ms.map { "\($0) ms" } ?? (probingLines ? nil : "不通"),
+                                isActive: line == activeLine,
+                                isFastest: line == fastest && ms != nil,
+                                systemImage: "antenna.radiowaves.left.and.right") {
+                            if line != activeLine { onSelectLine(line) }
+                            withAnimation(.smooth(duration: 0.22)) { showsLineMenu = false }
+                        }
+                    }
+                    // 底部独立按钮
+                    Button {
+                        Task { await probeLatency() }
+                    } label: {
+                        Text("重新测速")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(OneSkinPalette.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 42)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
+                .background(OneSkinPalette.card,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(OneSkinPalette.buttonStroke, lineWidth: 0.5))
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+            }
+        }
+    }
+
+    /// 线路面板的一行。高度固定 42（真机实测行距 41.6~42.7）。
+    @ViewBuilder
+    private func lineRow(title: String,
+                         detail: String?,
+                         isActive: Bool,
+                         isFastest: Bool,
+                         systemImage: String,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(isActive ? OneSkinPalette.accent : OneSkinPalette.tertiary)
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 14, weight: isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? OneSkinPalette.primary : OneSkinPalette.secondary)
+                    .lineLimit(1)
+                if isFastest {
+                    Text("最快")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(OneSkinPalette.accent)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(OneSkinPalette.accent.opacity(0.16)))
+                }
+                Spacer(minLength: 6)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(OneSkinPalette.tertiary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 42)          // ← 真机行距 41.6~42.7
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 
     /// 简介文本。优先用 `detail` 的完整简介：列表页给的 `video.synopsis` 常常是截断的短版。
     private var synopsisText: String {
@@ -2573,21 +3963,18 @@ struct OneSkinStage: View {
 
     // MARK: 标签
 
-    /// 上游把分类塞在 `Video.category`，逗号分隔；没有就不画这一行。
-    /// 标签。One 的标签云来自三个字段，不是只有 `category`：
-    ///   分类（逗号分隔）+ 年份 + 备注（更新至 N 集这种）
-    /// 之前只读 `category`，QA 夹具里没有这个字段 → 标签区整块不渲染，
-    /// 真机/VM 截图上表现为「One 有两行胶囊，我们什么都没有」。
+    /// 标签胶囊的文案源 = **只有 `category`**（逗号分隔）。
+    ///
+    /// ⛔ 不要再把 `year` / `remarks` 拼进来。之前拼了，2026-11-12 的模拟器
+    /// 截图里就出现「标签行里多出一颗 `2026-11-03` 胶囊，备注 `人间杀妈客 · ♥14k`
+    /// 直接压在胶囊上」—— 因为备注和元信息行是同一份数据，变成排两遍。
+    /// 真 One 的标签云只有分类词（国产 / 直播 / ONE直播 / 主播 / 喵呜 …），
+    /// 年份与备注各有自己的行，见 `detailColumn` 的元信息三段。
     private var tags: [String] {
-        var out: [String] = []
-        if let category = shown.category {
-            out += category.split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-        }
-        if let year = shown.year, !year.isEmpty { out.append(year) }
-        if !shown.remarks.isEmpty, !out.contains(shown.remarks) { out.append(shown.remarks) }
-        return out
+        guard let category = shown.category else { return [] }
+        return category.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
 

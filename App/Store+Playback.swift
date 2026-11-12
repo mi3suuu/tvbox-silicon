@@ -10,33 +10,68 @@ extension Store {
         return watchPageScopes.contains(scope)
     }
 
-    /// [mi3s] 二开：小窗是否该显示。
+    /// [mi3s] 二开：这一集是不是正挂在坞里（= 界面上画着小窗）。
     ///
-    /// 两道闸，缺一不可：
-    /// 1. `miniPlayerActive` —— **只**由视频控件里的「缩成小窗」写入。折叠、旋转、切页面、
-    ///    返回上一级都不写它，所以它们不可能把小窗拱出来。以前这里是 `floatRequested`，
-    ///    名字上像「请求一次」，实际是一个不会自己清掉的长期授权，转场里任何一次误判都会
-    ///    被它放大成一个小窗。
-    /// 2. `!playsInWatchPage` —— 观看页还在前台时不要再浮第二个画面（`dismiss()` 没生效时
-    ///    的兜底）。这个条件本身在折叠/换向时会有一帧为空，但那时第 1 道闸是关的，
-    ///    所以不会误触发；用户真的按了小窗时，它只在页面真正退场后才放行。
+    /// ⛔ 判据已换成**坞本身**（`videoTasks.tasks`），不再是「`miniPlayerActive` 为真且
+    /// 这一集就是 `playing`」。
+    ///
+    /// 原来那套读的是 `playing` —— 全局单值，只能表达一集。用户要求坞里能同时挂多个、
+    /// 且长按海报新开的那个**不影响已有的**，于是「这一集在坞里吗」必须按集去问坞，
+    /// 而不能靠一个全局布尔 + 一个全局频道去推。
+    ///
+    /// `presentingPlayer` 那一道闸也随之删掉：它当初是为了挡住「点了缩成小窗但
+    /// `onDisappear` 还没跑、scope 仍在前台」的那一帧。现在「在坞里」是**显式登记**的
+    /// 事实（`VideoTaskCenter.add`），不存在推导，也就没有推导的空窗。
     func floatsInMiniPlayer(_ channel: Channel?) -> Bool {
-        guard miniPlayerActive, let channel, playing != nil else { return false }
-        // ⛔ 闸二不能用 `!playsInWatchPage(channel)`。
-        //
-        // 那条判据读的是 `watchPageScopes`，而它由 `onAppear` / `onDisappear` 维护 ——
-        // 两者都是 **SwiftUI 的下一帧动作**。用户点「缩成小窗」的那一刻顺序是：
-        //   1) `miniPlayerActive = true`
-        //   2) `dismiss()`
-        //   3) 本函数被调用 → 此时 `onDisappear` 还没跑，`watchPageScopes` 仍含当前页
-        //   4) 于是返回 false，小窗视图根本没被挂上
-        //   5) 之后 scope 更新了，但状态早已判完，这一帧错过了就再也不会重算
-        // 用户看到的就是「点了没反应」。
-        //
-        // 改用 `presentingPlayer`：它是同一次点击里同步置 false 的，
-        // 而且语义就是「播放页还在不在前台」，比 scope 集合更贴近这条闸想问的事。
-        return !presentingPlayer
+        guard let channel else { return false }
+        return videoTasks.tasks.contains { $0.channel == channel }
     }
+
+    #if os(iOS)
+    /// 把**前台这一集**交给坞：登记进坞，然后清掉前台那两个槽 —— **不停止播放**。
+    ///
+    /// 这是「返回时画面收进小窗继续播」的唯一实现点。为什么必须清前台槽：
+    ///
+    ///   · 一集要么在前台、要么在坞里。两边同时指向同一个 `PlaybackSession` 时，
+    ///     前台那一侧的任何一次 `stopPlaying()`（换集、退出观看页的登出裁决）
+    ///     都会把坞里那张卡片正在播的流一起停掉 —— 用户看到的是「小窗黑掉」；
+    ///   · `store.playing` 还非 nil 时 `RootView` 的弹层判据会把全屏播放器判出来，
+    ///     于是「返回主界面」的同时又弹一层播放器盖在主页上。
+    ///
+    /// 与 `stopPlaying()` 的分工：那个会跑会话收尾（历史存档、停流），这个**只摘槽**。
+    func dockForeground() {
+        guard let channel = playing else { return }
+        let session = playbackSession(for: channel)
+        videoTasks.dock(channel: channel, session: session, store: self)
+        // 摘前台槽：`playing = nil` 的 didSet 只清 `activeSession` / `presentingPlayer`，
+        // 不碰会话本身，所以坞里那一份继续播。
+        playing = nil
+    }
+
+    /// **彻底退出某一集**（选集页/全屏播放页的「退出」键）。
+    ///
+    /// ★ 2026-11-12 用户裁决：「不止是关音频，而是彻底退出那个视频。」
+    ///
+    /// 与另外两条路的区别必须分清，否则就会出现「以为退出了其实还在播」：
+    ///
+    /// | 动作 | 结果 |
+    /// |---|---|
+    /// | `dockForeground()`（返回 / 左滑 / Back） | 画面进坞，**继续播** |
+    /// | `stopPlaying()`（换集、登出裁决） | 停前台这一路，不动坞里别的 |
+    /// | `quitPlayback(_:)`（退出键，就是这个） | 停 + **从坞里摘掉**这一集，彻底不留 |
+    ///
+    /// 为什么要额外摘坞：从坞里点卡片回到选集页后，那一集已经 `take` 出坞了；
+    /// 但「返回时进了坞 → 又点回来 → 再点退出」这条链上，它会先被 `dockForeground`
+    /// 登记回去。此时只 `stopPlaying()` 会让它留在坞里继续播。
+    ///
+    /// - Parameter channel: 要退掉的那一集；传 nil 时只停前台。
+    func quitPlayback(_ channel: Channel?) {
+        if let channel {
+            videoTasks.removeAll(of: channel)
+        }
+        stopPlaying()
+    }
+    #endif
 
     func toggleFavorite(_ channel: Channel) { favorites.toggle(.live(channel)) }
     func isFavorite(_ channel: Channel) -> Bool { favorites.contains(.live(channel)) }

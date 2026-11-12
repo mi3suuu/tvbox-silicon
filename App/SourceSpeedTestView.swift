@@ -113,12 +113,23 @@ struct SourceSpeedTestView: View {
                 }
             }
         } else {
-            Button {
-                store.startProbingAllSources()
-            } label: {
-                Label(L10n.text("Probe Every Source"), systemImage: "speedometer")
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    store.startProbingAllSources()
+                } label: {
+                    Label(L10n.text("Probe Every Source"), systemImage: "speedometer")
+                }
+                .disabled(sweepIsEmpty)
+                // 开跑前把代价说清楚。
+                //
+                // 不给这个数，用户就会在蜂窝上点下去 —— 一次全量按旧路径要几百 MB。
+                // 现在两阶段之后大约是这个估算的规模，但「大约多少」仍然必须让用户看见。
+                if let estimate = sweepEstimate {
+                    Text(estimate.summary)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .disabled(sweepIsEmpty)
         }
 
         Button {
@@ -182,6 +193,23 @@ struct SourceSpeedTestView: View {
     private var measuredCount: Int { allRows.filter { $0.probe != nil }.count }
     private var sweepIsEmpty: Bool { allRows.isEmpty }
 
+    /// 全量扫描的预估代价，跟随当前源数与历史通过率。
+    ///
+    /// 通过率用**实测出来的**而不是常数：已经测过的源里，「可达 + 慢」占多少，
+    /// 就是这套订阅实际的存活率。一个都没测过时才退回 0.5（刻意保守）。
+    private var sweepEstimate: ProbeSchedule.Estimate? {
+        guard !allRows.isEmpty else { return nil }
+        let measured = allRows.compactMap(\.probe)
+        let passRate: Double
+        if measured.isEmpty {
+            passRate = 0.5
+        } else {
+            let alive = measured.filter(\.isUsable).count
+            passRate = Double(alive) / Double(measured.count)
+        }
+        return ProbeSchedule.standard.estimate(sources: allRows.count, passRate: passRate)
+    }
+
     /// How many of the library's current sources have a reading, and when they were last measured.
     private var measuredSources: [(sourceKey: String, reading: SourceProbeResult)] {
         SourceProbeStore.shared.measuredSources()
@@ -230,6 +258,12 @@ struct SourceSpeedTestView: View {
                         Text(row.site.name)
                             .lineLimit(1)
                         routeChip(row.route)
+                        // 读数不可信的源必须在这一行就看得出来。
+                        //
+                        // 实测那套 341 源的订阅里，38 条外部读数**没有一条**两个速度字段自洽
+                        // （比值 0.12–1.87）。那种数字只在排序层被降级，列表上却看不出来 ——
+                        // 用户会以为自己看到的 `1.1 MB/s` 是测出来的，实际上它只是被丢弃的中间产物。
+                        confidenceBadge(row.probe)
                     }
                     Text(subtitle(row))
                         .font(.caption2)
@@ -279,6 +313,30 @@ struct SourceSpeedTestView: View {
         }
         if !row.feed.isEmpty { parts.append(row.feed) }
         return parts.joined(separator: " · ")
+    }
+
+    /// 读数的可信度徽标。只有**不可信**时才出现 —— 正常读数不需要一枚「正常」标签。
+    @ViewBuilder
+    private func confidenceBadge(_ probe: SourceProbeResult?) -> some View {
+        if let probe {
+            switch probe.confidence {
+            case .conflicted:
+                badge(L10n.text("Speed readings disagree"), tint: Brand.amber)
+            case .partial:
+                badge(L10n.text("Reachability only"), tint: .secondary)
+            case .measured, .absent:
+                EmptyView()
+            }
+        }
+    }
+
+    private func badge(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(tint.opacity(0.16), in: Capsule())
+            .foregroundStyle(tint)
+            .lineLimit(1)
     }
 
     private func routeChip(_ route: SourceRoute) -> some View {

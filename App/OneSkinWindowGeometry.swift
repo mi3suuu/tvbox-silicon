@@ -3,6 +3,8 @@ import CoreGraphics
 import SwiftUI
 import AVFoundation
 import QuartzCore
+import TVCore
+
 
 /// 画面窗口的**唯一几何来源**。
 ///
@@ -10,149 +12,15 @@ import QuartzCore
 /// 各自算过一遍 `winX / winY / winW / winH`。两份代码在 R10 那次改动里只同步
 /// 了一处，结果按钮画在画面之外 —— 靠注释里写「两处必须保持一致」维持的不变式
 /// 迟早会破。所有窗口几何必须从这里取。
-struct OneSkinWindowGeometry {
-    let colW: CGFloat
-    let colH: CGFloat
-    let inset: CGFloat
-    let winX: CGFloat
-    let winY: CGFloat
-    let winW: CGFloat
-    let winH: CGFloat
-
-    /// 顶部/底部 padding —— 必须与 `stage` 真正施加的一致。
-    /// `stage` 用的是：
-    ///   `.padding(.top,    landscape ? 8 : 0)`
-    ///   `.padding(.bottom, landscape ? layout.margin : 28)`
-    /// 其中 `margin = max(10, 列宽 × 0.0147)`（**不是**列高的比例）。
-    // ===== 版式常量（One 1.7.0 逐像素实测）=====
-    //
-    // 这些数字原先散落在 8 个地方各写一遍：
-    //   0.0333 ×4、0.0236 ×3、0.5334 ×4、0.4499 ×2、0.0167 ×2、0.091 ×3、466.0 ×1
-    // 改一处不同步一处就会错位（R10 那次只改了 pictureColumn 的 winY，
-    // 按钮立刻画到画面外）。现在**只在这里定义**，别的地方一律引用。
-    enum Metrics {
-        /// 横屏左列宽 / 间隙 / 右栏宽（合计 1.0）
-        static let columnLeft: CGFloat = 0.5334
-        static let columnGap: CGFloat = 0.0167
-        static let columnRight: CGFloat = 0.4499
-        /// 画面窗口的水平内缩（相对列宽）
-        static let insetLandscape: CGFloat = 0.0333
-        static let insetPortrait: CGFloat = 0.0236
-        /// 竖屏画面窗口顶部起点（相对列高）
-        static let portraitTop: CGFloat = 0.091
-        /// 横屏窗口垂直中心（相对可用高度）
-        static let landscapeCentre: CGFloat = 0.455
-        /// 字号缩放基准列高
-        static let fontBaseHeight: CGFloat = 466
-        /// 画面窗口最小高度
-        static let minPictureHeight: CGFloat = 120
-        /// **画面窗口的版式比例（固定，不随片源变）**。
-        /// One 实测 1015×558 px = 1.819。窗口尺寸必须恒定 ——
-        /// 一旦由片源比例决定，初始兜底值（0.4）会把 winH 算成 842pt
-        /// 超出屏幕、画面被裁到看不见，用户点「填充」才看得到；
-        /// 等 presentationSize 轮询读到真值，窗口又跳一次。
-        /// 片源不匹配时由 `videoGravity`(.resizeAspect) 在**窗口内部** letterbox。
-        static let windowAspect: CGFloat = 1.819
-    }
-
-    /// 横屏内容区上方的内缩量。
-    ///
-    /// 原来 8pt —— 对应 `stage` 上的 `.padding(.top, 8)`。两者必须同步：
-    /// 那个 padding 已经删掉（它让屏幕最上沿露出 8pt 黑条），这里也必须归零，
-    /// 否则 `usableH` 少算 8、窗口会凭空上移 8pt，顶栏跟着一起偏。
-    static let topPaddingLandscape: CGFloat = 0
-    static let bottomPaddingPortrait: CGFloat = 28
-    static func margin(forColumnWidth width: CGFloat) -> CGFloat {
-        max(10, width * 0.0147)
-    }
-
-    /// - Parameters:
-    ///   - size: 这一列的尺寸
-    ///   - landscape: 由容器决定，**不要**用 `colW > colH` 反推
-    ///     （双列时左列是 361×466 的窄高矩形，反推会永远判成竖屏）
-    ///   - fullScreen: 全屏态铺满可用空间并 letterbox 居中
-    ///
-    /// ⚠️ 片源比例**不参与窗口几何**，所以不再有 `aspectRatio` 参数。
-    /// 2026-11-09 之前 `winH = innerW / ratio`（ratio 取片源 presentationSize）：
-    /// 竖屏片源 0.56 会把窗口算成列高的近两倍，用户看到的正是
-    /// 「播放竖屏时播放器被拉高、画面糊满整列」；等轮询读到真比例，
-    /// 窗口还会再跳一次。片源比例只决定 `videoGravity` 在窗口内部怎么留黑边。
-    @MainActor
-    init(size: CGSize, landscape: Bool, fullScreen: Bool) {
-        let colW = size.width
-        let colH = size.height
-        self.colW = colW
-        self.colH = colH
-
-        let inset = landscape ? colW * Metrics.insetLandscape : colW * Metrics.insetPortrait
-        // ⚠️ 只作旧版式记录，**不参与任何窗口几何计算**。
-        // 外壳满宽后这两个比例只剩史料价值；谁再拿它去减 winW 就是把边距带回来。
-        self.inset = inset
-
-        if fullScreen {
-            // 全屏：窗口铺满整列，由 `.resizeAspect` 在内部 letterbox。
-            //
-            // 之前这里也按片源比例算 `winH = colW / ratio`：初始兜底 ratio 是 0.4，
-            // 算出的高度再被 `min(·, colH)` 夹住 —— 表面上「看得见」，
-            // 但真比例到达后 `winH` 会跳一次，正是用户报的「播放器大小会变化」。
-            // 全屏要的本来就是「铺满」，比例交给 videoGravity 就够了。
-            self.winW = colW
-            self.winH = colH
-            self.winX = 0
-            self.winY = 0
-        } else {
-            // ★ 播放器外壳**满宽**（用户明确要求）：
-            //   · 竖屏播放态：占满整个屏幕宽度；
-            //   · 横屏双栏：占满整个左列宽度（winX = 0）。
-            let innerW = max(colW, 1)
-
-            // ⛔ 竖屏与横屏**独立定义**（用户明确：不能共用一个公式）。
-            //
-            // 越界根因：竖屏的 `colH` 是 `pictureHeightOf` 算出的「画面区高度」，
-            // 它**已经包含**窗口高度（= screenH*0.091 + winH + screenH*0.04）。
-            // 旧代码又用 `colH*0.091` 当 winY、用 `colH` 当 maxH 基准 ——
-            // 对「含窗口高的高度」再套一次「顶部留白比例 + 窗口高」，双重计算。
-            // 屏幕较矮时 colH 被 0.72 夹住，winY + winH 就超出 colH，
-            // 窗口底部压进 detailColumn —— 用户报的「越界」。
-            //
-            // 正解：竖屏窗口几何直接用**屏幕尺寸**（离散值，不随动画变），
-            // 与 colH/picH 完全解耦：
-            //   winW = 屏幕宽（满宽）
-            //   winH = 屏幕宽 ÷ 1.819（固定版式比例，不夹 maxH）
-            //   winY = 屏幕高 × 0.091（顶部留白，基于屏幕高）
-            // 窗口底 = 屏幕高×0.091 + 屏宽÷1.819，天然 ≤ 屏幕高（屏宽÷1.819 < 屏高）。
-            let raw = OneSkin.fixedScreenSize()
-            let screenW = min(raw.width, raw.height)
-            let screenH = max(raw.width, raw.height)
-
-            if landscape {
-                // 横屏：窗口在左列内，winW=左列宽、winH=winW/1.819、中心 45.5%。
-                let usableH = max(
-                    colH - Self.topPaddingLandscape - Self.margin(forColumnWidth: colW),
-                    1
-                )
-                let fittedH = max(
-                    min(innerW / Metrics.windowAspect, usableH * 0.91),
-                    min(Metrics.minPictureHeight, colH)
-                )
-                self.winW = innerW
-                self.winH = fittedH
-                self.winX = 0
-                self.winY = usableH * Metrics.landscapeCentre - fittedH / 2
-            } else {
-                // 竖屏：独立定义，用屏幕尺寸，不经过 picH 双重计算。
-                self.winW = innerW
-                self.winH = max(innerW / Metrics.windowAspect, min(Metrics.minPictureHeight, screenH))
-                self.winX = 0
-                self.winY = screenH * Metrics.portraitTop
-            }
-        }
-    }
-
-    /// 窗口内归一化坐标 → 列坐标
-    func x(_ fx: CGFloat) -> CGFloat { winX + winW * fx }
-    func y(_ fy: CGFloat) -> CGFloat { winY + winH * fy }
-}
+/// 播放器窗口几何 —— **定义已移入 TVCore**（`TVCore/OneSkinWindowGeometryCore.swift`）。
+///
+/// 为什么搬走：这里的每一行都是纯算术，而「转屏时窗口越界」正是这类算术最容易错的
+/// 地方。留在 App target 里就写不了单测（App 不可被测试目标 import），
+/// 那些边界条件只能靠真机试出来 —— 而真机试不出的场景（极端容器尺寸）就一直漏着。
+///
+/// 现在几何由 `OneSkinWindowGeometryTests` 用矩阵式断言钉住：
+/// 任意宽高组合、横竖两个分支，窗口都必须完整落在容器内。
+typealias OneSkinWindowGeometry = TVCore.OneSkinWindowGeometry
 
 // MARK: - ⛔ 选集页播放器样式（LOCKED · 不随通用播放器样式改动）
 //
@@ -245,15 +113,19 @@ struct OneSkinFixedPlayerLayer: UIViewRepresentable {
 
     func updateUIView(_ view: OneSkinFixedPlayerView, context: Context) {
         view.fixedSize = size
-        view.update(player: player, gravity: videoGravity)
         // ⚠️ 一个 AVPlayer 同时只能驱动一条 AVPlayerLayer：PiP 悬浮窗在跑的时候，
         // 这条内嵌 layer 再抢 player，悬浮窗就只剩声音。`shouldRender` 是那只闸。
-        if let pip, !pip.shouldRender(view.renderLayer) {
-            view.update(player: nil, gravity: videoGravity)
-        } else {
-            view.update(player: player, gravity: videoGravity)
-            pip?.attach(view.renderLayer)
-        }
+        let renders = pip?.shouldRender(view.renderLayer) ?? true
+        view.update(player: renders ? player : nil, gravity: videoGravity)
+        // ⛔ **无论是否渲染都必须 attach**。
+        //
+        // 原来「不渲染就不 attach」，于是 PiP 活跃时折叠一次 →
+        // 新的内嵌 layer 从没登记过 → 用户退出 PiP 时 `rebind()` 拿到的
+        // 还是**已销毁的旧 layer**（`self.layer` 是弱引用）→ 新 controller 绑到死图层
+        // → `isPictureInPicturePossible` 恒 false，PiP 按钮永久灰掉，要再切一次页面才自愈。
+        // attach 只是登记内容源，PiP 在跑时它自己会走「adopt / 改 contentSource」分支，
+        // 不会抢画面；真正抢画面的是 `player`，那一层已经由 `renders` 拦住了。
+        pip?.attach(view.renderLayer)
     }
 }
 
@@ -314,3 +186,5 @@ final class OneSkinFixedPlayerView: UIView {
         #endif
     }
 }
+
+

@@ -30,6 +30,12 @@ struct SiteView: View {
         }
     }
 
+    /// 这个源当前显示的 name（带用户在「源」页做的改名）。
+    private var shownName: String {
+        guard let origin = store.subscription?.origin else { return site.name }
+        return store.resolvedSite(site, origin: origin).name
+    }
+
     var body: some View {
         Group {
             if !canLoad {
@@ -101,6 +107,10 @@ struct SiteView: View {
                                         RouteLink { CatalogDestination(video: video, client: client) } label: { PosterCard(video: video) }.cardButton()
                                     }
                                 }
+                                // [mi3s] 二开：长按海报 → 迷你播放器播放 / 下载（要求 6）。
+                                // 索引源（ranking / 列表站）的海报点了是「跨源搜索」，没有可播的一集，
+                                // 所以不挂这个菜单 —— 挂了只会给出两个点了就报错的项。
+                                .modifier(OptionalPosterMenu(enabled: !isIndex, video: video, client: client))
                                 .onAppear {
                                     guard browser.moreError == nil, video.id == browser.videos.last?.id else { return }
                                     startRequest { await loadMore() }
@@ -148,7 +158,9 @@ struct SiteView: View {
             let login = BilibiliAccount.load().cookie
             if login != bilibiliLogin { bilibiliLogin = login; query = ""; startRequest { await home(); await browser.loadCategories(client: client) } }
         }
-        .screenTitle(folder?.name ?? site.name).task {
+        // ⛔ 标题必须走 `resolvedSite`，否则卡片上改了名、点进源里还是旧名 ——
+        // 用户会以为改名没保存。一个源「显示什么名」只能有一个来源。
+        .screenTitle(folder?.name ?? shownName).task {
             store.searchModel.suspend()
             // A source card can still be on screen when the vault relocks (timeout, screenshot, background):
             // the page must not then browse a hidden source's catalog.
@@ -373,5 +385,19 @@ struct CatalogDestination: View {
     var body: some View {
         if video.isFolder { SiteView(site: client.site, origin: client.origin, jarURL: client.jarURL, folder: video) }
         else { VideoDetailView(video: video, client: client) }
+    }
+}
+
+/// `isIndex` 为真时不挂长按菜单。
+///
+/// 不能写成 `if isIndex { … } else { content.catalogPosterMenu(…) }` 包住整段：那样两个分支
+/// 是不同视图身份，滚到屏幕外的卡片重建时会丢掉 `onAppear` 的续页触发。用一个空修饰器保持身份。
+private struct OptionalPosterMenu: ViewModifier {
+    let enabled: Bool
+    let video: Video
+    let client: CatalogClient
+
+    func body(content: Content) -> some View {
+        if enabled { content.catalogPosterMenu(video, client: client) } else { content }
     }
 }
