@@ -4,15 +4,18 @@ import XCTest
 /// 控件遍历审计：对每个根 section 深链打开后，枚举其可交互控件（按钮/开关/文本域），
 /// 逐个触发并截图，捕捉「点击后」的 UI 状态（弹 sheet、跳子页、切 toggle）供视觉审计。
 ///
-/// 与 DuoAcceptanceUITests 同 runner（Scripts/test-duo-ui.sh --simulator），驱动已装好的映匣。
+/// 与 DuoAcceptanceUITests 同 runner（Scripts/test-duo-ui.sh --simulator/--device），驱动已装好的映匣。
 /// 只读优先：仅 tap 可逆的控件（打开 sheet 后点「取消」/「完成」/滑动关闭），不提交任何破坏性动作。
+///
+/// bundle id 不写在这里：由 `QATarget.appBundleID` 在构建期注入（见 UITests/QATargetBundle.swift）。
+/// 模拟器装的是 `wda.prdc.yingxia.guji`、真机是 `wda.prdc.yingxia.dev`，两者签名 Team 不同，
+/// 写死任何一个都会在另一台机器上指向一个没装的应用。
 final class ControlWalkUITests: XCTestCase {
-    private let bundleID = "wda.prdc.yingxia.dev"
     private var app: XCUIApplication!
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-        app = XCUIApplication(bundleIdentifier: bundleID)
+        app = XCUIApplication(bundleIdentifier: try QATarget.appBundleID)
     }
 
     /// 对每个 section：打开 → 枚举控件 → 逐个 tap（可逆）→ 截图。
