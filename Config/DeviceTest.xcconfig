@@ -1,4 +1,27 @@
-CODE_SIGN_STYLE = Automatic
-CODE_SIGN_IDENTITY = Apple Development
-DEVELOPMENT_TEAM = U4TCPT39D5
+// 真机测试专用（不进正式包）。由 `Scripts/install-duo-test.sh` 注入到构建参数，
+// project.yml 始终保持正式 id `com.jo32.yingxia.ios`。
+//
+// ── 签名团队：xu ────────────────────────────────────────────────────────────
+// 证书 `iPhone Developer: allisonx xu (Q4LPR7GXL8)`，OU = G4XMHC9NWZ。
+// 本机有一份**含 iPhone Duo 的通配描述文件**：
+//   Name = all1023
+//   UUID = 86319b0c-4457-4708-b7c6-b5ae12134b2f
+//   AppID = G4XMHC9NWZ.wda.prdc.*
+//   Expires = 2027-10-23
+//   ProvisionedDevices 含 00008160-0002698C0A900036
+// 设备上已有 166 个同前缀（wda.prdc.*）App 在用它，装机不撞 application-identifier。
+//
+// ✅ 签名键就写在这里 —— 本文件通过 project.yml 的 **target 级**
+//    `configFiles: { Debug: Config/DeviceTest.xcconfig }` 挂载，
+//    只作用于 TVBox-iOS，不再走命令行 -xcconfig（那是全局的，
+//    会把 PROVISIONING_PROFILE_SPECIFIER 注入 SwiftPM 包 target
+//    TVCore_TVCore，包 target 不接受描述文件 → BUILD FAILED）。
+//
+// ⛔ 本机 Xcode 未登录 Apple ID（build 报 `No Accounts`），`-allowProvisioningUpdates`
+//    开不出新档，所以必须走「手动 + 指定已有 profile」这条路。
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = iPhone Developer
+DEVELOPMENT_TEAM = G4XMHC9NWZ
+PROVISIONING_PROFILE_SPECIFIER = all1023
 PRODUCT_BUNDLE_IDENTIFIER = wda.prdc.yingxia.guji
+TEST_PROVISIONING_PROFILE = all1023

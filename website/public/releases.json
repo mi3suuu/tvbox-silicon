@@ -1,8 +1,559 @@
 {
   "releases": [
     {
+      "version": "1.8.16",
+      "build": 54,
+      "date": "2026-11-10",
+      "links": {
+        "macos": "https://download.getmegaportal.com/yingxia/1.8.16/Yingxia-1.8.16-macos-arm64.dmg",
+        "macos-x86_64": "https://download.getmegaportal.com/yingxia/1.8.16/Yingxia-1.8.16-macos-x86_64.dmg",
+        "ios": "https://yingxia.getmegaportal.com/#install-ios",
+        "tvos": "https://yingxia.getmegaportal.com/#install-tv"
+      },
+      "features": [
+        {
+          "symbol": "hand.tap",
+          "title": {
+            "en": "Full screen on iPhone answers taps again",
+            "zh-Hans": "iPhone 全屏后点击恢复正常",
+            "zh-Hant": "iPhone 全螢幕後點按恢復正常",
+            "ja": "iPhone の全画面でタップが効くように"
+          },
+          "detail": {
+            "en": "On iOS 26, after a watch page's player went full screen, taps no longer brought the controls back, so you couldn't seek, change the volume or leave full screen. Taps, holds and slides work again.",
+            "zh-Hans": "在 iOS 26 上，观看页的播放器全屏后，点击屏幕不再唤出控制条，无法拖动进度、调节音量或退出全屏。现在点按、长按和滑动都恢复正常。",
+            "zh-Hant": "在 iOS 26 上，觀看頁的播放器全螢幕後，點按畫面不再叫出控制列，無法拖曳進度、調整音量或退出全螢幕。現在點按、長按和滑動都恢復正常。",
+            "ja": "iOS 26 で、視聴ページのプレーヤーを全画面にするとタップしても操作パネルが出ず、シークや音量変更、全画面の終了ができませんでした。タップ、長押し、スライドが再び使えます。"
+          },
+          "platforms": [
+            "ios"
+          ]
+        },
+        {
+          "symbol": "arrow.up.left.and.arrow.down.right",
+          "title": {
+            "en": "Mac full screen keeps subtitles and arrow keys",
+            "zh-Hans": "Mac 全屏保留字幕和方向键",
+            "zh-Hant": "Mac 全螢幕保留字幕和方向鍵",
+            "ja": "Mac の全画面で字幕と矢印キーが有効に"
+          },
+          "detail": {
+            "en": "The full-screen button in the Mac player's control bar now takes the whole player full screen, so subtitles, danmaku and Left/Right seeking stay, as with the button at the top right.",
+            "zh-Hans": "Mac 播放器控制条上的全屏按钮现在会让整个播放器全屏，字幕、弹幕和左右方向键快进快退都会保留，与右上角的按钮一致。",
+            "zh-Hant": "Mac 播放器控制列上的全螢幕按鈕現在會讓整個播放器全螢幕，字幕、彈幕和左右方向鍵快轉倒轉都會保留，與右上角的按鈕一致。",
+            "ja": "Mac プレーヤーの操作バーにある全画面ボタンが、プレーヤー全体を全画面にするようになりました。右上のボタンと同じく、字幕、弾幕コメント、左右キーでのシークがそのまま使えます。"
+          },
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "symbol": "globe",
+          "title": {
+            "en": "Choose the app's language on the Mac",
+            "zh-Hans": "在 Mac 上选择 App 语言",
+            "zh-Hant": "在 Mac 上選擇 App 語言",
+            "ja": "Mac でアプリの言語を選択"
+          },
+          "detail": {
+            "en": "Settings has a Language row: System Language, English, Simplified Chinese, Traditional Chinese or Japanese. Restart Now applies it.",
+            "zh-Hans": "设置中新增“语言”一栏：系统语言、English、简体中文、繁體中文或日本語。点“立即重新启动”即可生效。",
+            "zh-Hant": "設定中新增「語言」一欄：系統語言、English、简体中文、繁體中文或日本語。點「立即重新啟動」即可生效。",
+            "ja": "設定に「言語」の項目を追加しました。システムの言語、English、简体中文、繁體中文、日本語から選べ、「今すぐ再起動」で反映されます。"
+          },
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "symbol": "appletv",
+          "title": {
+            "en": "Title logo and video tags on Apple TV",
+            "zh-Hans": "Apple TV 显示片名标志和视频标签",
+            "zh-Hant": "Apple TV 顯示片名標誌和影片標籤",
+            "ja": "Apple TV にタイトルロゴと動画タグ"
+          },
+          "detail": {
+            "en": "While the transport bar shows, the player shows the title's logo at the bottom left and the video's tags (such as H265, HDR10, 4K) at the right, as on iPhone.",
+            "zh-Hans": "显示播放控制条时，播放器会在左下角显示片名标志，在右侧显示视频标签（如 H265、HDR10、4K），与 iPhone 一致。",
+            "zh-Hant": "顯示播放控制列時，播放器會在左下角顯示片名標誌，在右側顯示影片標籤（如 H265、HDR10、4K），與 iPhone 一致。",
+            "ja": "再生バーの表示中、左下にタイトルロゴ、右側に動画のタグ（H265、HDR10、4K など）を iPhone と同じように表示します。"
+          },
+          "platforms": [
+            "tvos"
+          ]
+        },
+        {
+          "symbol": "text.bubble",
+          "title": {
+            "en": "Huya danmaku keeps flowing",
+            "zh-Hans": "虎牙弹幕不再中断",
+            "zh-Hant": "虎牙彈幕不再中斷",
+            "ja": "虎牙の弾幕コメントが途切れなく"
+          },
+          "detail": {
+            "en": "Huya live rooms used to show a few lines of danmaku and then stop. The chat connection now stays open, so you see the full chat.",
+            "zh-Hans": "虎牙直播间以前只显示几条弹幕就停了。现在弹幕连接会一直保持，可以看到完整的弹幕。",
+            "zh-Hant": "虎牙直播間以前只顯示幾條彈幕就停了。現在彈幕連線會一直保持，可以看到完整的彈幕。",
+            "ja": "虎牙の配信では、弾幕コメントが数行で止まっていました。コメントの接続が維持されるようになり、すべてのコメントが表示されます。"
+          }
+        },
+        {
+          "symbol": "checkmark.shield",
+          "title": {
+            "en": "CatPawOpen sources no longer close the app",
+            "zh-Hans": "猫源不再导致 App 退出",
+            "zh-Hant": "貓源不再導致 App 退出",
+            "ja": "CatPawOpen ソースでアプリが終了しなく"
+          },
+          "detail": {
+            "en": "A CatPawOpen source that runs out of memory or hits an error of its own now stops on its own, with a message, instead of closing Yingxia. Other sources keep working, and trying again starts it again.",
+            "zh-Hans": "猫源在内存不足或自身出错时，现在只会关闭自己并给出提示，不再导致映匣退出。其他片源照常使用，重试即可重新启动它。",
+            "zh-Hant": "貓源在記憶體不足或自身出錯時，現在只會關閉自己並給出提示，不再導致映匣退出。其他片源照常使用，重試即可重新啟動它。",
+            "ja": "CatPawOpen のソースがメモリ不足や自身のエラーになっても、映匣を終了させず、そのソースだけがメッセージ付きで止まります。ほかのソースはそのまま使え、もう一度試すと再起動します。"
+          }
+        },
+        {
+          "symbol": "wrench.and.screwdriver",
+          "title": {
+            "en": "Other fixes",
+            "zh-Hans": "其他修复",
+            "zh-Hant": "其他修正",
+            "ja": "そのほかの修正"
+          },
+          "detail": {
+            "en": "Screenshots attached to feedback are smaller and send faster. Playback failure reports say more about the video, which helps us fix Dolby Vision files that won't play.",
+            "zh-Hans": "反馈附带的截图更小，发送更快。播放失败报告会包含更多视频信息，帮助我们修复无法播放的杜比视界文件。",
+            "zh-Hant": "意見回饋附帶的截圖更小，傳送更快。播放失敗報告會包含更多影片資訊，幫助我們修正無法播放的杜比視界檔案。",
+            "ja": "フィードバックに添付するスクリーンショットが小さくなり、送信が速くなりました。再生失敗のレポートに動画の情報が増え、再生できない Dolby Vision ファイルの修正に役立ちます。"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.8.15",
+      "build": 53,
+      "date": "2026-11-08",
+      "links": {
+        "macos": "https://download.getmegaportal.com/yingxia/1.8.15/Yingxia-1.8.15-macos-arm64.dmg",
+        "macos-x86_64": "https://download.getmegaportal.com/yingxia/1.8.15/Yingxia-1.8.15-macos-x86_64.dmg",
+        "ios": "https://yingxia.getmegaportal.com/#install-ios",
+        "tvos": "https://yingxia.getmegaportal.com/#install-tv"
+      },
+      "features": [
+        {
+          "symbol": "icloud.and.arrow.down",
+          "title": {
+            "en": "Cloud drives that adapt to your device",
+            "zh-Hans": "云盘播放自动适配设备",
+            "zh-Hant": "雲端硬碟播放自動適配裝置",
+            "ja": "端末に合わせるクラウド再生"
+          },
+          "detail": {
+            "en": "Cloud-drive videos now size their read-ahead and connections to your device and to the video, and stop opening connections that do not help. Large MKV files start faster and stall less.",
+            "zh-Hans": "云盘视频会根据设备和视频大小调整预读和连接数，并不再增加没有帮助的连接。大体积 MKV 文件起播更快，卡顿更少。",
+            "zh-Hant": "雲端硬碟影片會依裝置與影片大小調整預讀和連線數，並不再增加沒有幫助的連線。大型 MKV 檔案起播更快，卡頓更少。",
+            "ja": "クラウドの動画は、端末と動画に合わせて先読みと接続数を決め、効果のない接続は増やしません。大きな MKV でも再生が早く始まり、止まりにくくなりました。"
+          }
+        },
+        {
+          "symbol": "captions.bubble",
+          "title": {
+            "en": "Subtitles: ASS styling and picture subtitles",
+            "zh-Hans": "字幕：ASS 样式与图片字幕",
+            "zh-Hant": "字幕：ASS 樣式與圖片字幕",
+            "ja": "字幕：ASS スタイルと画像字幕"
+          },
+          "detail": {
+            "en": "ASS/SSA subtitles are drawn with their own fonts, colors and positions, and PGS and VobSub picture subtitles now show. Subtitle ZIP archives, an Apple TV address for subtitle files and subtitles next to Cloud Files videos are supported too.",
+            "zh-Hans": "ASS/SSA 字幕按原有的字体、颜色和位置显示，PGS 和 VobSub 图片字幕也能显示了。同时支持字幕 ZIP 压缩包、Apple TV 上的字幕地址以及云盘文件旁的字幕。",
+            "zh-Hant": "ASS/SSA 字幕依原有的字體、顏色和位置顯示，PGS 和 VobSub 圖片字幕也能顯示了。同時支援字幕 ZIP 壓縮檔、Apple TV 上的字幕網址以及雲端檔案旁的字幕。",
+            "ja": "ASS/SSA 字幕は元のフォント、色、位置で表示され、PGS と VobSub の画像字幕も表示されます。字幕の ZIP、Apple TV での字幕アドレス、クラウドファイルの隣にある字幕にも対応しました。"
+          }
+        },
+        {
+          "symbol": "play.circle",
+          "title": {
+            "en": "Playback and player controls",
+            "zh-Hans": "播放与播放器控制",
+            "zh-Hant": "播放與播放器控制",
+            "ja": "再生とプレーヤー操作"
+          },
+          "detail": {
+            "en": "Ad segments spliced into a video's HLS playlist are cut. A live stream with a saved position plays from its live edge instead of loading forever. Seeking starts from the current position, double-tap has a setting, and the iPhone lock says Unlock Controls. On the Mac the window fits the video and keeps its aspect ratio, and the scroll wheel sets the volume.",
+            "zh-Hans": "视频 HLS 播放列表中插入的广告片段会被剪掉。有保存进度的直播会从直播最新位置开始播放，不再一直加载。快进快退从当前位置开始，双击手势可以设置，iPhone 的锁定提示改为“解锁控制”。Mac 上窗口会贴合视频并保持比例，滚轮可以调节音量。",
+            "zh-Hant": "影片 HLS 播放清單中插入的廣告片段會被剪掉。有儲存進度的直播會從直播最新位置開始播放，不再一直載入。快轉倒轉從目前位置開始，雙擊手勢可以設定，iPhone 的鎖定提示改為「解鎖控制」。Mac 上視窗會貼合影片並保持比例，滾輪可以調整音量。",
+            "ja": "動画の HLS プレイリストに挟まれた広告部分をカットします。位置を保存したライブは、読み込み続けず最新位置から再生します。シークは現在位置から始まり、ダブルタップは設定できるようになり、iPhone のロック表示は「コントロールのロック解除」になりました。Mac ではウィンドウが動画に合わせて縦横比を保ち、ホイールで音量を変えられます。"
+          }
+        },
+        {
+          "symbol": "magnifyingglass",
+          "title": {
+            "en": "Search, ratings and sources",
+            "zh-Hans": "搜索、评分与片源",
+            "zh-Hant": "搜尋、評分與片源",
+            "ja": "検索、評価、ソース"
+          },
+          "detail": {
+            "en": "Search puts titles that match your keyword first. Source video pages show the Douban score after TMDB's. Turn a subscription on or off from the list in Settings. Import accepts addresses typed without http:// or with full-width punctuation, and Add from File takes M3U and TXT live playlists. You can undo a mistaken hide, hide dead sources and remove subscriptions.",
+            "zh-Hans": "搜索结果中标题与关键词匹配的排在前面。片源视频页在 TMDB 评分之后显示豆瓣评分。可以在设置的列表中直接开关订阅。导入地址可以不带 http://，也接受全角标点，“从文件添加”支持 M3U 和 TXT 直播列表。可以撤销误隐藏、隐藏失效片源和移除订阅。",
+            "zh-Hant": "搜尋結果中標題與關鍵字相符的排在前面。來源影片頁在 TMDB 評分之後顯示豆瓣評分。可以在設定的列表中直接開關訂閱。匯入網址可以不帶 http://，也接受全形標點，「從檔案加入」支援 M3U 和 TXT 直播清單。可以復原誤隱藏、隱藏失效來源和移除訂閱。",
+            "ja": "キーワードに合うタイトルが検索結果の先頭に並びます。ソースの動画ページでは TMDB の次に豆瓣の評価を表示します。設定のリストから購読をオン／オフできます。アドレスは http:// なしや全角記号でも取り込め、「ファイルから追加」は M3U と TXT のライブ一覧に対応しました。誤って隠したソースを元に戻す、使えないソースを隠す、購読を削除することもできます。"
+          }
+        },
+        {
+          "symbol": "macwindow",
+          "title": {
+            "en": "Mac: video and comic pages",
+            "zh-Hans": "Mac：视频页与漫画页",
+            "zh-Hant": "Mac：影片頁與漫畫頁",
+            "ja": "Mac：動画ページとマンガページ"
+          },
+          "detail": {
+            "en": "Video pages on the Mac take the Apple TV pages' design, with a portrait poster, the Bilibili comments sheet and a hero that runs to the window's top edge. Comic pages follow the Discover title page's design on the Mac, iPhone and iPad.",
+            "zh-Hans": "Mac 上的视频页采用 Apple TV 页面的设计，包含竖版海报、哔哩哔哩评论面板，顶部大图延伸到窗口上边缘。Mac、iPhone 和 iPad 上的漫画页采用“发现”标题页的设计。",
+            "zh-Hant": "Mac 上的影片頁採用 Apple TV 頁面的設計，包含直式海報、嗶哩嗶哩留言面板，頂部大圖延伸到視窗上邊緣。Mac、iPhone 和 iPad 上的漫畫頁採用「發現」標題頁的設計。",
+            "ja": "Mac の動画ページは Apple TV のページのデザインになり、縦長ポスター、Bilibili のコメントシート、ウィンドウ上端まで広がるヒーロー画像が加わります。Mac、iPhone、iPad のマンガページは「見つける」のタイトルページのデザインになりました。"
+          },
+          "platforms": [
+            "macos",
+            "ios"
+          ]
+        },
+        {
+          "symbol": "appletv",
+          "title": {
+            "en": "Apple TV: tidier pages",
+            "zh-Hans": "Apple TV：更整洁的页面",
+            "zh-Hant": "Apple TV：更整齊的頁面",
+            "ja": "Apple TV：すっきりしたページ"
+          },
+          "detail": {
+            "en": "A source's name now sits above its category chips instead of in a bar over the search field. Bilibili tile captions move with the cover when focused, and there is no gap above the Episodes strip in the player. What's New uses compact rows.",
+            "zh-Hans": "片源名称现在显示在分类标签上方，不再占用搜索框上方的横条。哔哩哔哩卡片的文字会随封面一起移动，播放器中选集栏上方不再有空隙。“新功能”改为紧凑的行。",
+            "zh-Hant": "來源名稱現在顯示在分類標籤上方，不再佔用搜尋欄上方的橫條。嗶哩嗶哩卡片的文字會隨封面一起移動，播放器中選集列上方不再有空隙。「新功能」改為精簡的列。",
+            "ja": "ソース名は、検索欄の上のバーではなくカテゴリのチップの上に表示されます。Bilibili のカードの文字はフォーカス時にカバーと一緒に動き、プレーヤーのエピソード列の上の隙間もなくなりました。「新機能」はコンパクトな行になりました。"
+          },
+          "platforms": [
+            "tvos"
+          ]
+        },
+        {
+          "symbol": "wrench.and.screwdriver",
+          "title": {
+            "en": "Other fixes",
+            "zh-Hans": "其他修复",
+            "zh-Hant": "其他修正",
+            "ja": "その他の修正"
+          },
+          "detail": {
+            "en": "Fixes a launch crash on early iOS 27.2 betas and a tab bar crash on iPad. Clearing Recently Played in Music also clears Continue Playing. Source filters without an All choice open unfiltered. Watch Now headings stay in Watch Now, and source search ends when idle.",
+            "zh-Hans": "修复早期 iOS 27.2 测试版上的启动崩溃和 iPad 上的标签栏崩溃。清除音乐的“最近播放”时会一并清除“继续播放”。没有“全部”选项的片源筛选会默认不筛选。“正在观看”的标题留在“正在观看”内，片源搜索空闲时会自动结束。",
+            "zh-Hant": "修正早期 iOS 27.2 測試版上的啟動當機和 iPad 上的標籤列當機。清除音樂的「最近播放」時會一併清除「繼續播放」。沒有「全部」選項的來源篩選會預設不篩選。「現在觀看」的標題留在「現在觀看」內，來源搜尋閒置時會自動結束。",
+            "ja": "iOS 27.2 の初期ベータでの起動時クラッシュと、iPad のタブバーのクラッシュを修正しました。ミュージックの「最近再生した項目」を消すと「続きを再生」も消えます。「すべて」のないソースのフィルタは絞り込みなしで開きます。「今すぐ見る」の見出しは「今すぐ見る」内にとどまり、ソース検索はアイドル時に終了します。"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.8.14",
+      "build": 52,
+      "date": "2026-11-08",
+      "links": {
+        "macos": "https://download.getmegaportal.com/yingxia/1.8.14/Yingxia-1.8.14-macos-arm64.dmg",
+        "macos-x86_64": "https://download.getmegaportal.com/yingxia/1.8.14/Yingxia-1.8.14-macos-x86_64.dmg",
+        "ios": "https://yingxia.getmegaportal.com/#install-ios",
+        "tvos": "https://yingxia.getmegaportal.com/#install-tv"
+      },
+      "features": [
+        {
+          "symbol": "play.rectangle.on.rectangle",
+          "title": {
+            "en": "Bilibili, rebuilt",
+            "zh-Hans": "全新哔哩哔哩",
+            "zh-Hant": "全新嗶哩嗶哩",
+            "ja": "生まれ変わった Bilibili"
+          },
+          "detail": {
+            "en": "Open an UP主's space from search or any video and follow them. Signed in, you can like, give coins, favorite and save videos for later. Videos now have comments, chapters, Skip Intro and Skip Outro for anime and films, CC and AI subtitles, and related videos. The home page adds Live Now, Following, Watch Later, Popular and Rankings rows. The video pages on Apple TV and iPhone are redesigned.",
+            "zh-Hans": "可以从搜索或任意视频进入 UP 主空间并关注。登录后可以点赞、投币、收藏和稍后再看。视频新增评论、分段章节、番剧和影视的跳过片头片尾、CC 和 AI 字幕以及相关视频。首页新增正在直播、关注、稍后再看、热门和排行榜。Apple TV 和 iPhone 上的视频页全新设计。",
+            "zh-Hant": "可以從搜尋或任一影片進入 UP 主空間並關注。登入後可以按讚、投幣、收藏和稍後再看。影片新增留言、分段章節、番劇和影視的跳過片頭片尾、CC 和 AI 字幕以及相關影片。首頁新增正在直播、關注、稍後再看、熱門和排行榜。Apple TV 和 iPhone 上的影片頁全新設計。",
+            "ja": "検索やどの動画からでも UP主 のスペースを開いてフォローできます。サインイン中は いいね、コイン、お気に入り、後で見る が使えます。動画にはコメント、チャプター、アニメと映画のオープニング／エンディングのスキップ、CC と AI 字幕、関連動画が加わりました。ホームには ライブ配信中、フォロー中、後で見る、人気、ランキング の列が並びます。Apple TV と iPhone の動画ページはデザインを一新しました。"
+          }
+        },
+        {
+          "symbol": "captions.bubble",
+          "title": {
+            "en": "Subtitle files and online subtitles",
+            "zh-Hans": "字幕文件和在线字幕",
+            "zh-Hant": "字幕檔案與線上字幕",
+            "ja": "字幕ファイルとオンライン字幕"
+          },
+          "detail": {
+            "en": "Add a subtitle file or address to any video (on the Mac, drop the file on the player), with delay, frame rate and encoding. While watching, search OpenSubtitles or Assrt and pick a result. On Apple TV, the subtitle menu offers the source's files and an Online section. Keys go in Settings › Subtitle Sources.",
+            "zh-Hans": "可以为任意视频添加字幕文件或字幕地址（Mac 上把文件拖到播放器即可），并可调整延迟、帧率和编码。观看时可以在 OpenSubtitles 或 Assrt 搜索字幕并选择结果。Apple TV 的字幕菜单提供片源自带的字幕和“在线”搜索。密钥在“设置 › 字幕来源”中填写。",
+            "zh-Hant": "可以為任一影片加入字幕檔案或字幕網址（Mac 上把檔案拖到播放器即可），並可調整延遲、影格率和編碼。觀看時可以在 OpenSubtitles 或 Assrt 搜尋字幕並選擇結果。Apple TV 的字幕選單提供來源附帶的字幕和「線上」搜尋。金鑰在「設定 › 字幕來源」中填寫。",
+            "ja": "どの動画にも字幕ファイルや字幕のアドレスを追加でき（Mac ではプレーヤーにファイルをドロップ）、遅延、フレームレート、文字コードも調整できます。視聴中に OpenSubtitles や Assrt を検索して結果を選べます。Apple TV の字幕メニューには、ソースの字幕と「オンライン」の項目があります。キーは「設定 › 字幕ソース」で入力します。"
+          }
+        },
+        {
+          "symbol": "appletv",
+          "title": {
+            "en": "Apple TV: episodes while watching",
+            "zh-Hans": "Apple TV：边看边选集",
+            "zh-Hant": "Apple TV：邊看邊選集",
+            "ja": "Apple TV：視聴中にエピソードを選択"
+          },
+          "detail": {
+            "en": "Swipe down while watching to switch episodes or lines in a compact strip with episode pictures. Video pages open with the picture across the screen, the title and Play. 4K 60 fps HDR plays smoothly when the TV is set to SDR, and the app opens on tvOS 17 again.",
+            "zh-Hans": "观看时向下轻扫，即可在带剧照的紧凑选集条中切换剧集或线路。视频页以铺满屏幕的画面、片名和播放按钮呈现。电视设为 SDR 时，4K 60 帧 HDR 也能流畅播放；tvOS 17 上又可以打开应用了。",
+            "zh-Hant": "觀看時向下滑動，即可在帶劇照的精簡選集列中切換劇集或線路。影片頁以鋪滿螢幕的畫面、片名和播放按鈕呈現。電視設為 SDR 時，4K 60 幀 HDR 也能流暢播放；tvOS 17 上又可以開啟 App 了。",
+            "ja": "視聴中に下へスワイプすると、場面写真付きのコンパクトな列でエピソードや回線を切り替えられます。動画ページは画面いっぱいの画像、タイトル、再生ボタンで始まります。テレビを SDR に設定していても 4K 60fps HDR が滑らかに再生され、tvOS 17 でも再び起動できます。"
+          },
+          "platforms": [
+            "tvos"
+          ]
+        },
+        {
+          "symbol": "iphone",
+          "title": {
+            "en": "iPhone player and video page",
+            "zh-Hans": "iPhone 播放器与视频页",
+            "zh-Hant": "iPhone 播放器與影片頁",
+            "ja": "iPhone のプレーヤーと動画ページ"
+          },
+          "detail": {
+            "en": "A screen lock stops stray taps from skipping. Full-screen video hides the home indicator, Picture in Picture starts after you turn the phone sideways, and the clock and battery show above the player again. The page under the player is redesigned. Music and audiobook sources open Now Playing.",
+            "zh-Hans": "新增锁屏，避免误触快进。全屏播放时隐藏主屏幕指示条；横过手机后也能开启画中画；播放器上方重新显示时间和电量。播放器下方的页面全新设计。音乐和有声书类片源会打开“正在播放”。",
+            "zh-Hant": "新增鎖定畫面，避免誤觸快轉。全螢幕播放時隱藏主畫面指示條；橫放手機後也能開啟子母畫面；播放器上方重新顯示時間和電量。播放器下方的頁面全新設計。音樂和有聲書類來源會開啟「正在播放」。",
+            "ja": "画面ロックで誤タップによるスキップを防げます。全画面再生中はホームインジケータを隠し、横向きにした後もピクチャ・イン・ピクチャが始まります。プレーヤーの上に時刻とバッテリーが再び表示されます。プレーヤーの下のページはデザインを一新しました。音楽やオーディオブックのソースは「再生中」を開きます。"
+          },
+          "platforms": [
+            "ios"
+          ]
+        },
+        {
+          "symbol": "arrow.down.circle",
+          "title": {
+            "en": "Downloads, redesigned",
+            "zh-Hans": "下载页全新设计",
+            "zh-Hant": "下載頁全新設計",
+            "ja": "ダウンロードを一新"
+          },
+          "detail": {
+            "en": "Each downloaded show is a card with its TMDB artwork and opens its own page, with episode pictures, sorting and reverse order. On iPhone and iPad, save a finished episode or song to Files or Photos, or send it with AirDrop.",
+            "zh-Hans": "每部已下载的剧都是一张带 TMDB 配图的卡片，可进入单独的页面，显示剧照，并支持排序和倒序。在 iPhone 和 iPad 上，可以把下载好的剧集或歌曲存到“文件”或“照片”，也可以用隔空投送发送。",
+            "zh-Hant": "每部已下載的劇都是一張帶 TMDB 配圖的卡片，可進入獨立的頁面，顯示劇照，並支援排序和倒序。在 iPhone 和 iPad 上，可以把下載好的劇集或歌曲儲存到「檔案」或「照片」，也可以用 AirDrop 傳送。",
+            "ja": "ダウンロードした番組は TMDB のアートワーク付きのカードになり、場面写真、並べ替え、逆順に対応した専用ページを開けます。iPhone と iPad では、ダウンロード済みのエピソードや曲を「ファイル」や「写真」に保存したり、AirDrop で送ったりできます。"
+          }
+        },
+        {
+          "symbol": "sparkles",
+          "title": {
+            "en": "Discover, episodes and more",
+            "zh-Hans": "发现、选集及其他",
+            "zh-Hant": "發現、選集及其他",
+            "ja": "見つける、エピソードなど"
+          },
+          "detail": {
+            "en": "Discover's top carousel shows today's IMDb and Douban charts. On a video's page, tap a cast photo to see their other work. Every episode gets a picture even when TMDB has stills for only some, and episodes named after files show their resolution and size. Favorites can show one kind at a time, music search finds artists, and Douyu and Huya rooms show their chat as danmaku.",
+            "zh-Hans": "发现页顶部轮播改为当天的 IMDb 和豆瓣榜单。在视频页轻点演员照片即可查看其他作品。即使 TMDB 只有部分剧照，每一集也会显示图片；以文件名命名的剧集会显示分辨率和大小。收藏可以按类别显示，音乐搜索可以搜歌手，斗鱼和虎牙直播间的聊天会显示为弹幕。",
+            "zh-Hant": "探索頁頂部輪播改為當天的 IMDb 和豆瓣榜單。在影片頁輕點演員照片即可查看其他作品。即使 TMDB 只有部分劇照，每一集也會顯示圖片；以檔名命名的劇集會顯示解析度和大小。收藏可以按類別顯示，音樂搜尋可以搜歌手，鬥魚和虎牙直播間的聊天會顯示為彈幕。",
+            "ja": "「見つける」上部のカルーセルにはその日の IMDb と Douban のランキングが並びます。動画ページで出演者の写真をタップすると他の出演作を見られます。TMDB に一部の場面写真しかなくても全エピソードに画像が付き、ファイル名のエピソードには解像度とサイズが表示されます。お気に入りは種類ごとに表示でき、音楽検索でアーティストを探せ、斗魚と虎牙のライブではチャットが弾幕として流れます。"
+          }
+        },
+        {
+          "symbol": "wrench.and.screwdriver",
+          "title": {
+            "en": "Other fixes",
+            "zh-Hans": "其他修复",
+            "zh-Hant": "其他修正",
+            "ja": "その他の修正"
+          },
+          "detail": {
+            "en": "Blu-ray and DVD disc images (.iso) play. Sources built on FongMi's new spider SDK work. Drive sign-ins reach the 豆儿 CatPawOpen subscription. Fixed a Smooth Motion crash on iOS 27.0. Watch Now's Resume button matches the rest of the app.",
+            "zh-Hans": "可以播放蓝光和 DVD 光盘镜像（.iso）。基于 FongMi 新版爬虫 SDK 的片源可以使用了。网盘登录现在对豆儿 CatPawOpen 订阅生效。修复 iOS 27.0 上智能补帧的闪退。“现在观看”页的“继续”按钮与应用其他地方一致。",
+            "zh-Hant": "可以播放藍光和 DVD 光碟映像檔（.iso）。基於 FongMi 新版爬蟲 SDK 的來源可以使用了。雲端硬碟登入現在對豆兒 CatPawOpen 訂閱生效。修正 iOS 27.0 上智慧補幀的當機。「立即觀看」頁的「繼續」按鈕與 App 其他地方一致。",
+            "ja": "Blu-ray と DVD のディスクイメージ（.iso）を再生できます。FongMi の新しい spider SDK で作られたソースが動きます。豆儿の CatPawOpen 配信設定でもクラウドドライブのサインインが使われます。iOS 27.0 でのなめらか補間のクラッシュを修正。「今すぐ観る」の「再開」ボタンを他の画面と揃えました。"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.8.13",
+      "build": 51,
+      "date": "2026-11-07",
+      "links": {
+        "macos": "https://download.getmegaportal.com/yingxia/1.8.13/Yingxia-1.8.13-macos-arm64.dmg",
+        "macos-x86_64": "https://download.getmegaportal.com/yingxia/1.8.13/Yingxia-1.8.13-macos-x86_64.dmg",
+        "ios": "https://yingxia.getmegaportal.com/#install-ios",
+        "tvos": "https://yingxia.getmegaportal.com/#install-tv"
+      },
+      "features": [
+        {
+          "symbol": "appletv",
+          "title": {
+            "en": "CatPawOpen on Apple TV",
+            "zh-Hans": "Apple TV 支持猫源",
+            "zh-Hant": "Apple TV 支援貓源",
+            "ja": "Apple TV で CatPawOpen"
+          },
+          "detail": {
+            "en": "Apple TV can now add and play CatPawOpen (猫源) subscriptions; it used to say this device can't run them. iPhone and iPad now run these sources on Node.js 26 too.",
+            "zh-Hans": "Apple TV 现在可以添加和播放 CatPawOpen（猫源）订阅，不再提示此设备无法运行猫源。iPhone 和 iPad 也改用 Node.js 26 运行这些源。",
+            "zh-Hant": "Apple TV 現在可以新增和播放 CatPawOpen（貓源）訂閱，不再提示此裝置無法執行貓源。iPhone 和 iPad 也改用 Node.js 26 執行這些來源。",
+            "ja": "Apple TV でも CatPawOpen（猫源）の配信設定を追加して再生できるようになりました。以前は「このデバイスでは実行できません」と表示されていました。iPhone と iPad もこれらのソースを Node.js 26 で動かします。"
+          },
+          "platforms": [
+            "ios",
+            "tvos"
+          ]
+        },
+        {
+          "symbol": "tag",
+          "title": {
+            "en": "Video tags in the player",
+            "zh-Hans": "播放器视频标签",
+            "zh-Hant": "播放器影片標籤",
+            "ja": "プレーヤーの映像タグ"
+          },
+          "detail": {
+            "en": "When the controls show, tags above the seek bar sum up the picture, like HW H265 HDR10 4K 24FPS (24→60FPS with Smooth Motion). Tap them for the full video info. The title's logo from TMDB sits at the bottom left.",
+            "zh-Hans": "显示控制栏时，进度条上方的标签概括画面信息，例如 HW H265 HDR10 4K 24FPS（开启智能补帧时为 24→60FPS）。轻点标签可查看完整的视频信息。左下角显示来自 TMDB 的片名标志。",
+            "zh-Hant": "顯示控制列時，進度條上方的標籤概括畫面資訊，例如 HW H265 HDR10 4K 24FPS（開啟智慧補幀時為 24→60FPS）。輕點標籤可查看完整的影片資訊。左下角顯示來自 TMDB 的片名標誌。",
+            "ja": "コントロールを表示すると、シークバーの上のタグが映像の概要を示します（例：HW H265 HDR10 4K 24FPS、なめらか補間がオンなら 24→60FPS）。タグをタップすると詳しいビデオ情報を表示します。左下には TMDB の作品ロゴが表示されます。"
+          },
+          "platforms": [
+            "ios"
+          ]
+        },
+        {
+          "symbol": "text.bubble",
+          "title": {
+            "en": "Subtitle Delay",
+            "zh-Hans": "字幕延迟",
+            "zh-Hant": "字幕延遲",
+            "ja": "字幕の遅延"
+          },
+          "detail": {
+            "en": "Subtitles that show before the line is spoken can now wait. Set a delay in Settings > Subtitle Style > Timing; on iPhone you can also change it in half-second steps from the player's options while you watch.",
+            "zh-Hans": "字幕比台词早出现时，现在可以让它晚一点显示。在“设置 > 字幕样式 > 时间”里设置延迟；在 iPhone 上也可以边看边在播放器选项里以半秒为单位调整。",
+            "zh-Hant": "字幕比台詞早出現時，現在可以讓它晚一點顯示。在「設定 > 字幕樣式 > 時間」裡設定延遲；在 iPhone 上也可以邊看邊在播放器選項裡以半秒為單位調整。",
+            "ja": "セリフより先に出てしまう字幕を遅らせられるようになりました。「設定 > 字幕のスタイル > タイミング」で遅延を設定します。iPhone では視聴中にプレーヤーのオプションから 0.5 秒単位で変更することもできます。"
+          }
+        },
+        {
+          "symbol": "gearshape.2",
+          "title": {
+            "en": "Settings inside sources",
+            "zh-Hans": "源里的设置项",
+            "zh-Hant": "來源裡的設定項",
+            "ja": "ソース内の設定"
+          },
+          "detail": {
+            "en": "Items such as 配置中心 or 我的云盘┃配置 in a source's list now open the plugin's own windows: sign-in codes, cookie forms, choices and switches. A setting that needs a second tap gets Run Again, and remote-input codes open on this device.",
+            "zh-Hans": "源列表里的“配置中心”“我的云盘┃配置”等项目，现在会打开插件自己的窗口：登录二维码、Cookie 表单、选项和开关。需要再点一次的设置有“再运行一次”，远程输入的二维码也能在本机直接打开。",
+            "zh-Hant": "來源列表裡的「配置中心」「我的云盘┃配置」等項目，現在會打開外掛自己的視窗：登入 QR 碼、Cookie 表單、選項和開關。需要再點一次的設定有「再執行一次」，遠端輸入的 QR 碼也能在本機直接打開。",
+            "ja": "ソース一覧の「配置中心」「我的云盘┃配置」などの項目は、プラグイン自身のウインドウ（サインインコード、Cookie の入力欄、選択肢やスイッチ）を開くようになりました。2 回押す必要がある設定には「もう一度実行」があり、リモート入力のコードもこのデバイスで開けます。"
+          }
+        },
+        {
+          "symbol": "person.badge.key",
+          "title": {
+            "en": "Drive sign-ins from the source",
+            "zh-Hans": "源自己的网盘登录",
+            "zh-Hant": "來源自己的網盤登入",
+            "ja": "ソース自身のドライブサインイン"
+          },
+          "detail": {
+            "en": "When a source needs a drive account during playback, it shows its own sign-in code instead of the app's page; on iPhone and iPad the code opens in the drive's app. Accounts in Settings > Cloud Drive Accounts still reach every source first.",
+            "zh-Hans": "播放时源需要网盘账号，现在会显示源自己的登录码，而不是应用的登录页；在 iPhone 和 iPad 上可以直接在网盘 App 里打开。“设置 > 网盘账号”里的账号仍会先提供给每个源。",
+            "zh-Hant": "播放時來源需要網盤帳號，現在會顯示來源自己的登入碼，而不是 App 的登入頁；在 iPhone 和 iPad 上可以直接在網盤 App 裡打開。「設定 > 網盤帳號」裡的帳號仍會先提供給每個來源。",
+            "ja": "再生中にソースがドライブのアカウントを必要とすると、アプリのページではなくソース自身のサインインコードを表示します。iPhone と iPad ではドライブのアプリで開けます。「設定 > クラウドドライブのアカウント」のアカウントはこれまでどおり先に各ソースへ渡されます。"
+          }
+        },
+        {
+          "symbol": "play.circle",
+          "title": {
+            "en": "Play picks up the right episode",
+            "zh-Hans": "播放接对剧集",
+            "zh-Hant": "播放接對劇集",
+            "ja": "正しいエピソードから再生"
+          },
+          "detail": {
+            "en": "Play on a series whose last-watched episode you finished goes on to the next episode instead of starting over, and picking an episode you've started resumes it.",
+            "zh-Hans": "最后看的一集已经看完时，“播放”会接着播下一集，而不是从头开始；重新选择看过一部分的剧集会从上次的位置继续。",
+            "zh-Hant": "最後看的一集已經看完時，「播放」會接著播下一集，而不是從頭開始；重新選擇看過一部分的劇集會從上次的位置繼續。",
+            "ja": "最後に見たエピソードを見終えていれば、「再生」は最初からではなく次のエピソードを再生します。途中まで見たエピソードを選び直すと続きから再生します。"
+          }
+        },
+        {
+          "symbol": "wrench.and.screwdriver",
+          "title": {
+            "en": "Other fixes",
+            "zh-Hans": "其他修复",
+            "zh-Hant": "其他修正",
+            "ja": "その他の修正"
+          },
+          "detail": {
+            "en": "4K HEVC live channels that played only sound now show the picture. CMS sources' home pages show posters. Plugins with guarded code load on 3 GB iPads. Episode lists read names like E01.mp4【…】 as episode numbers, and Settings > Watch Now > Show File Size and Quality adds a file's size and quality to your history. iCloud sync keeps a switched account's items apart and checks iCloud when you come back to the app. Manga pinch zoom follows your fingers on iPhone and iPad, and several crashes are fixed.",
+            "zh-Hans": "只有声音的 4K HEVC 直播频道现在能显示画面。CMS 源的首页会显示海报。带保护代码的插件在 3 GB 内存的 iPad 上也能加载。剧集列表会把 E01.mp4【…】这类名称识别为集数；开启“设置 > 现在观看 > 显示文件大小与画质”后，播放记录会显示文件大小和画质。iCloud 同步在切换账号后不会混用旧账号的内容，回到应用时也会检查 iCloud。iPhone 和 iPad 上的漫画双指缩放会跟随手指，并修复了多个闪退问题。",
+            "zh-Hant": "只有聲音的 4K HEVC 直播頻道現在能顯示畫面。CMS 來源的首頁會顯示海報。帶保護程式碼的外掛在 3 GB 記憶體的 iPad 上也能載入。劇集列表會把 E01.mp4【…】這類名稱辨識為集數；開啟「設定 > 立即觀看 > 顯示檔案大小與畫質」後，播放記錄會顯示檔案大小和畫質。iCloud 同步在切換帳號後不會混用舊帳號的內容，回到 App 時也會檢查 iCloud。iPhone 和 iPad 上的漫畫雙指縮放會跟隨手指，並修正了多個閃退問題。",
+            "ja": "音声だけだった 4K HEVC のライブチャンネルで映像が表示されるようになりました。CMS ソースのホームにポスターが表示されます。保護されたコードを持つプラグインがメモリ 3 GB の iPad でも読み込めます。E01.mp4【…】のような名前を話数として表示し、「設定 > 今すぐ観る > ファイルサイズと画質を表示」をオンにすると再生履歴にファイルサイズと画質が加わります。iCloud 同期はアカウントを切り替えても前のアカウントの項目を混ぜず、アプリに戻ったときにも iCloud を確認します。iPhone と iPad では漫画のピンチズームが指に追従し、いくつかのクラッシュも修正しました。"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.8.12",
+      "build": 50,
+      "date": "2026-11-06",
+      "links": {
+        "macos": "https://download.getmegaportal.com/yingxia/1.8.12/Yingxia-1.8.12-macos-arm64.dmg",
+        "macos-x86_64": "https://download.getmegaportal.com/yingxia/1.8.12/Yingxia-1.8.12-macos-x86_64.dmg"
+      },
+      "features": [
+        {
+          "symbol": "book.pages",
+          "title": {
+            "en": "Manga on the Mac",
+            "zh-Hans": "Mac 上的漫画",
+            "zh-Hant": "Mac 上的漫畫",
+            "ja": "Mac で漫画"
+          },
+          "detail": {
+            "en": "Manga now shows in the Mac sidebar once a Venera comic source list is subscribed. While you read, the sidebar and the window buttons step aside, so the pages fill the window.",
+            "zh-Hans": "订阅 Venera 漫画源列表后，Mac 侧边栏里会出现“漫画”。阅读时侧边栏和窗口按钮会让开，漫画页面铺满整个窗口。",
+            "zh-Hant": "訂閱 Venera 漫畫源列表後，Mac 側邊欄裡會出現「漫畫」。閱讀時側邊欄和視窗按鈕會讓開，漫畫頁面鋪滿整個視窗。",
+            "ja": "Venera のコミックソース一覧を配信設定に追加すると、Mac のサイドバーに「漫画」が表示されます。読んでいる間はサイドバーとウインドウのボタンが隠れ、ページがウインドウいっぱいに広がります。"
+          },
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "symbol": "display",
+          "title": {
+            "en": "The screen stays on during videos",
+            "zh-Hans": "播放视频时屏幕保持常亮",
+            "zh-Hant": "播放影片時螢幕保持常亮",
+            "ja": "動画の再生中は画面がついたまま"
+          },
+          "detail": {
+            "en": "While a video plays, your Mac no longer dims, sleeps or locks the screen. Pause, and it can sleep again as usual.",
+            "zh-Hans": "播放视频时，Mac 不会再让屏幕变暗、睡眠或锁定；暂停后照常可以睡眠。",
+            "zh-Hant": "播放影片時，Mac 不會再讓螢幕變暗、睡眠或鎖定；暫停後照常可以睡眠。",
+            "ja": "動画の再生中は、Mac の画面が暗くなったり、スリープやロックされたりしなくなりました。一時停止すると、通常どおりスリープできます。"
+          },
+          "platforms": [
+            "macos"
+          ]
+        }
+      ]
+    },
+    {
       "version": "1.8.11",
-      "build": 888,
+      "build": 49,
       "date": "2026-11-06",
       "links": {
         "macos": "https://download.getmegaportal.com/yingxia/1.8.11/Yingxia-1.8.11-macos-arm64.dmg",
