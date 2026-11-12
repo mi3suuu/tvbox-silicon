@@ -379,6 +379,12 @@ struct MobilePlayerView: View {
     @State private var swipeStart: Double?
     /// Sliding up or down: the brightness on the left, the volume on the right, from where the slide began.
     @AppStorage(PictureLevel.key) private var slidesLevels = true
+    /// 双击左右跳过 10 秒；关掉后双击改为播放/暂停（上游 1.8.12 的开关）。
+    ///
+    /// ⛔ 融合时这条判据丢了：上游 `972a75a` 在这一行加了 `doubleTapSkips &&`，
+    /// 我方 `41930c4` 在同一行加了 `!controlsLocked &&` —— 两侧改同一行，
+    /// 融合只能留一份，我方版本留存，开关的行为层整条消失（UI 也一并没了）。
+    @AppStorage(PictureDoubleTap.key) private var doubleTapSkips = true
     @State private var level: (volume: Bool, start: Double, value: Double)?
     @State private var leveling = false
     @State private var levelTask: Task<Void, Never>?
@@ -627,7 +633,8 @@ struct MobilePlayerView: View {
 
     private func tapped(_ x: CGFloat, _ width: CGFloat) {
         // Locked controls: a tap only shows or hides them; it never pauses or skips.
-        let zone = PictureTaps.zone(x: x, width: width, seekable: !controlsLocked && seekable && showsTransport && playingOn == nil && !pip.active)
+        // `doubleTapSkips` off: two taps anywhere play or pause, and the sides don't skip.
+        let zone = PictureTaps.zone(x: x, width: width, seekable: doubleTapSkips && !controlsLocked && seekable && showsTransport && playingOn == nil && !pip.active)
         switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone) {
         case .toggleControls:
             // Locked controls stay put: a tap may reveal the chrome (so the lock button stays reachable)

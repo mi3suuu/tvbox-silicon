@@ -166,6 +166,14 @@ struct OneSkinChrome: View {
     @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
     /// 广告拦截总开关。与设置页、原版播放器、HLS 代理**同一个键**（`player.skipAds`）。
     @AppStorage(AdSkip.key) private var skipsAds = true
+    /// 竖滑调亮度/音量（设置页「滑动调亮度与音量」）。
+    ///
+    /// ⛔ 以前这里没有这个开关，`dragged()` 只判几何位置就直接改亮度/音量 ——
+    /// 用户在设置里关掉后**照样生效**。原生皮肤（`MobilePlayerView`）是判
+    /// `parent?.levels == true` 的，两套皮肤行为分叉。
+    @AppStorage(PictureLevel.key) private var slidesLevels = true
+    /// 双击左右跳过 10 秒；关掉后双击改为播放/暂停（上游 1.8.12 的开关，见 `PictureDoubleTap`）。
+    @AppStorage(PictureDoubleTap.key) private var doubleTapSkips = true
 
     /// 控件锁：手势与遮挡层全部失效（只有「解锁」还能点）。
     @State private var locked = false
@@ -1943,7 +1951,10 @@ struct OneSkinChrome: View {
         tapTask?.cancel(); tapTask = nil
         guard boost == nil else { return }
         guard let session else { return }
-        let zone = PictureTaps.zone(x: Double(location.x), width: Double(winW), seekable: seekable)
+        // `seekable: false` 让 `zone(...)` 恒回 `.middle`（见 `PictureTaps.zone`）——
+        // 关掉「双击跳过」后双击中间/左右都变成播放暂停，与原生皮肤同一语义。
+        let zone = PictureTaps.zone(x: Double(location.x), width: Double(winW),
+                                    seekable: seekable && doubleTapSkips)
         // ⛔ 不再走 `taps.tap(at:in:)`：那个方法内部自己数双击间隔，
         //    而 `handleTap` 已经数过一遍（0.30s 窗口）。两套计数叠加会让
         //    第二下双击被它判成「新的一次 streak 起点」，跳过永远不触发。
@@ -1975,7 +1986,7 @@ struct OneSkinChrome: View {
                                             moved: value.translation.width,
                                             width: winW,
                                             duration: duration)
-        } else if PictureLevel.slides(fromY: value.startLocation.y, height: winH) {
+        } else if slidesLevels, PictureLevel.slides(fromY: value.startLocation.y, height: winH) {
             let volume = value.startLocation.x > winW / 2
             if level == nil {
                 let start = volume ? Double(AVAudioSession.sharedInstance().outputVolume)

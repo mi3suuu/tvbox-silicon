@@ -2594,3 +2594,5 @@
 "Tick sources to move just those; with nothing ticked the move applies to everything in the scope above. A move only changes which group lists a source — it still plays through its own subscription, and it survives a refresh." = "Tick sources to move just those; with nothing ticked the move applies to everything in the scope above. A move only changes which group lists a source — it still plays through its own subscription, and it survives a refresh.";
 "Unreachable Group" = "Unreachable Group";
 "Your Groups" = "Your Groups";
+"Double-Tap to Skip" = "Double-Tap to Skip";
+"Double-tap the left or right of the video to skip 10 seconds. Turn this off and a double tap plays or pauses instead." = "Double-tap the left or right of the video to skip 10 seconds. Turn this off and a double tap plays or pauses instead.";

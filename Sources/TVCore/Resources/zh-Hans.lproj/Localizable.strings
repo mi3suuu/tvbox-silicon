@@ -2598,3 +2598,5 @@
 "没有匹配的剧集" = "没有匹配的剧集";
 "跳到第几页" = "跳到第几页";
 "重新测速" = "重新测速";
+"Double-Tap to Skip" = "双击快进快退";
+"Double-tap the left or right of the video to skip 10 seconds. Turn this off and a double tap plays or pauses instead." = "双击视频左侧或右侧可快进或快退 10 秒。关闭后，双击将改为播放或暂停。";
