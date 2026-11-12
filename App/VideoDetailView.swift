@@ -3556,6 +3556,32 @@ struct VideoDetailView: View {
             .onAppear {
                 store.isWatchPageMounted = true
                 store.watchPageScopes.formUnion(watchScopes)
+                // ⛔ 定时关闭：把到点时要做的事挂上，并把已存的到点时刻接回来。
+                //
+                // `BiliPlayerExtras` 是单例（Duo 合拢/展开会把观看页整个撕掉重建，
+                // `@State` 每次归零 —— 定时关闭会静默消失），注释里写明
+                // 「页面出现时把 `onSleep` 重新挂上就行」——**但从来没有任何地方挂过它**。
+                //
+                // 后果：`startSleep` 的四个入口都通、ticker 每秒真跑、到点真调
+                // `self.onSleep?()`，而 `onSleep` 恒为 nil ⇒ **到点什么都不会发生**。
+                // `?.()` 这个可选调用让整条链在类型层面完全合法，编译器不会提醒。
+                // 而且 `sleepBadge` 也没有 UI 消费 —— 用户连「设没设上」都看不到。
+                //
+                // 挂在 `watchPageLifecycleBody` 而不是各皮肤内部：三个 Bili 页面
+                // （全集/横屏/竖屏）都从这里进，且只有这里拿得到 `playerSession`。
+                //
+                // ⛔ 闭包体里不要用 `[self]` 读 `playerSession`：本视图是 struct，
+                //    捕获副本后读的是**闭包创建那一刻**的快照，换集后就是旧会话。
+                //    这里取一个局部强引用（`PlaybackSession` 是 `@Observable final class`），
+                //    到点时如果会话已换，闭包里拿到的仍是当初那一个 —— 所以额外判一层
+                //    「它还是当前会话吗」。
+                let owningSession = playerSession
+                BiliPlayerExtras.shared.onSleep = { [weak owningSession] in
+                    guard let owningSession else { return }
+                    owningSession.player.pause()
+                    Diagnostics.shared.record(.info, "bili", "sleep timer paused playback")
+                }
+                BiliPlayerExtras.shared.resumeSleepIfNeeded()
                 // ⛔ 这里**不再动坞**。
                 //
                 // 上一版写的是 `store.miniPlayerActive = false`（「回到观看页，小窗授权作废」）。
