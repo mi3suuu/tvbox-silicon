@@ -48,7 +48,7 @@ public enum LineMatrix {
         /// 未测（`nil`）**不算可播** —— 没测过不等于能用，把它当能用会误导换源。
         public var isUsable: Bool {
             guard let result else { return false }
-            return result.reachability != .unreachable && result.reachability != .unknown
+            return result.isUsable
         }
     }
 

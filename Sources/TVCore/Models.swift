@@ -111,6 +111,7 @@ public enum JSONValue: Codable, Equatable, Sendable {
         }
     }
     public var int: Int? { string.flatMap(Int.init) }
+    public var bool: Bool? { if case .bool(let v) = self { v } else { nil } }
     public var object: [String: JSONValue]? { if case .object(let v) = self { v } else { nil } }
     public var array: [JSONValue]? { if case .array(let v) = self { v } else { nil } }
 }
@@ -222,6 +223,9 @@ public struct Site: Identifiable, Codable, Hashable, Sendable {
     /// The script a JavaScript or Python source runs, relative to the subscription.
     public func scriptURL(origin: URL) throws -> URL {
         if runtime == .python, api.hasPrefix("py_"), let script = raw["ext"]?.string { return try WebAddress.resolve(script, relativeTo: origin) }
+        // A plugin shipped inside the app names a bundled asset, not a file on the subscription's host
+        // (WeBox plugins in ScriptAssets/webox/sites); `WebAddress.resolve` only accepts http(s).
+        if api.hasPrefix("assets://"), let bundled = URL(string: api) { return bundled }
         return try WebAddress.resolve(api, relativeTo: origin)
     }
     public var compatibility: String {

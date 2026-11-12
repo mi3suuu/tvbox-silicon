@@ -206,6 +206,30 @@ extension PlaybackHistoryEntry {
     }
     public func clear() { for entry in entries { clean(entry) }; entries.removeAll(); prioritizeCaches(); persist(); onChange?() }
 
+    /// 删掉**所有来自这一条源**的观看记录（跨全部环境）。
+    ///
+    /// 与 `Favorites.removeAll(fromSource:origin:)` 同一个理由：删源只写了
+    /// `deletedSources` / `hiddenSources`，而「继续观看」不读那两份记账。
+    /// 删完源之后，首页「继续观看」会留一张点开就报错的卡片
+    /// （`Store.reportMissingFavoriteSource` 那条路径），用户没有任何办法清掉它。
+    ///
+    /// 按 `sourceKey + origin` 匹配 —— 与 `EpisodeSkipSettings.scope` 用的是同一对身份，
+    /// 不按集、不按环境：同一条源在各环境留下的都是同样的死记录。
+    ///
+    /// - Returns: 删掉的条数（0 表示没有受影响的记录）。
+    @discardableResult
+    public func removeAll(fromSource sourceKey: String, origin: URL) -> Int {
+        let before = entries.count
+        for entry in entries where entry.context.sourceKey == sourceKey && entry.context.origin == origin {
+            clean(entry)
+        }
+        entries.removeAll { $0.context.sourceKey == sourceKey && $0.context.origin == origin }
+        let removed = before - entries.count
+        guard removed > 0 else { return 0 }
+        prioritizeCaches(); persist(); onChange?()
+        return removed
+    }
+
     /// Deletes every entry belonging to `environment` (legacy `nil` entries count as the default
     /// environment), used when that environment is removed. The caches they own go with them.
     public func delete(environment: UUID) {

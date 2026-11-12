@@ -98,6 +98,25 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
     /// 而不是各写一个常数：这两个问题其实是同一个 —— 「多旧的读数还算数」。
     /// 它们曾经不同（这里 300 秒、`Store.probeMaxAge` 600 秒），于是同一个源可能在选集页被判
     /// 「过期要重测」，在点播源页却被当成「新鲜」直接跳过，两处对同一条读数给出相反结论。
+    /// 这一条读数是否说明「这条线路现在能用」。
+    ///
+    /// **全仓唯一判据出口。** 这不是为了少写几行：此前 15 处各自写
+    /// `reachability != .unreachable` 或 `== .unreachable`，而它们对 `.unknown` 的处理并不一致 ——
+    /// `LineMatrix` 把 `.unknown` 排除（不能用的意思），别的处当它是「没死」。
+    /// 于是同一个源可能在一页「能用」、在另一页「测不到」，而两处都自称读的是同一个读数。
+    ///
+    /// 口径定在这里：
+    /// - `.reachable` / `.slow` → 能用（慢不等于不能用，卡顿才是问题，而卡顿由速度字段表达）
+    /// - `.unreachable` → 不能用
+    /// - `.unknown` → **不能用**，但和「不可用」不是一回事：它是「这次没测出来」。
+    ///   需要区分这两种情形的地方读 `reachability` 本身，不要拿本属性当唯一真相。
+    public var isUsable: Bool {
+        switch reachability {
+        case .reachable, .slow: true
+        case .unreachable, .unknown: false
+        }
+    }
+
     public func isStale(now: Date = Date(), tolerance: TimeInterval = sourceProbeStaleness) -> Bool {
         now.timeIntervalSince(measuredAt) > tolerance
     }
@@ -381,6 +400,22 @@ public final class SourceProbeStore {
 
     private static let rotationKey = "player.playLine.rotation"
     private static let learningKey = "player.playLine.learning"
+    /// 按 base(host) 的延迟表 —— **One 的 `latencyByBase` 的等价物**。
+    ///
+    /// ⛔ 这一张表补的是最贵的一处口径差异（RCA H4）。
+    ///
+    /// One 的 `PlayLines` 只有 `latencyByBase: [String: Int]`（interface.swift:1392-1399），
+    /// 键是 **base = host**，没有「哪部剧」「哪一集」这两个维度。于是一部剧测过的线路延迟，
+    /// 换到同源的任何另一部剧都直接命中、立即显示。
+    ///
+    /// 我方的 `probes` 表键是 `sourceKey|videoID|lineFlag`（见 `storageKey`）——
+    /// 换一部剧就全部 miss，播放页于是**每进一部新剧都把全部线路重测一遍**。
+    /// 这就是「进播放页初期特别慢」在数据层的根因：不是测一次，是每部剧都测一次。
+    ///
+    /// 这里不改 `probes` 的键（那套键回答的是「这部这集这条线」的历史读数，仍有用），
+    /// 而是**并排加一张 base 级表**：一条线路只要测过一次，同 host 的其它剧立刻可用。
+    /// 读数新鲜度仍按 `sourceProbeStaleness` 判。
+    private static let baseKey = "player.playLine.baseLatency"
 
     private let defaults: UserDefaults
     private var probes: [String: SourceProbeResult]
@@ -394,6 +429,12 @@ public final class SourceProbeStore {
     private var rotation: HostRotation
     /// Which bases have actually answered, so a working CDN is tried before an unknown one.
     private var learning: HostLearning
+    /// 按 base(host) 的延迟读数 —— One `latencyByBase` 的等价物，见 `baseKey` 的说明。
+    ///
+    /// 键是 host（不含 scheme / 路径），值是那条 base 上「最近一次测到的」读数。
+    /// 存整条 `SourceProbeResult` 而不是只存毫秒：播放页除了延迟还要显示速度与画质，
+    /// 只留毫秒会让同 host 的其它剧显示「120 ms」却对速度一无所知 —— 那仍是半张表。
+    private var baseLatency: [String: SourceProbeResult]
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -410,6 +451,12 @@ public final class SourceProbeStore {
             self.health = decoded
         } else {
             self.health = [:]
+        }
+        if let blob = defaults.data(forKey: Self.baseKey),
+           let decoded = try? JSONDecoder().decode([String: SourceProbeResult].self, from: blob) {
+            self.baseLatency = decoded
+        } else {
+            self.baseLatency = [:]
         }
         // Readings written before this table existed still answer `latest`: fold the newest detail
         // row of each source in once, so an upgrade does not look like a library nobody measured.
@@ -459,6 +506,121 @@ public final class SourceProbeStore {
     /// True when every base is cooling down. A caller should show "所有线路都在冷却" rather than
     /// "没有可播放的地址", because the two have different fixes.
     public func allBasesCoolingDown(now: Date = Date()) -> Bool { rotation.allCoolingDown(now: now) }
+
+    // MARK: - 全局在飞上限与轮次（One `pendingTests` / `generation` 的等价物）
+
+    /// 同时在飞的探针总数上限 —— One 的 `PlayLines.pendingTests` 就是干这件事的。
+    ///
+    /// ⛔ 没有这一层时（RCA H5），每个测速入口各自限并发，但它们**互不知情**：
+    /// 播放页 `buildLineSamples` 4~9 条、选集面板 `probeAll` 4 条、跨源矩阵 3 源 × 每条线、
+    /// 全量扫描 32 源 × 每条线 —— 叠加起来能同时打出几十个请求，
+    /// 而它们抢的正是用户此刻要用来起播的那条链路。
+    ///
+    /// 6 的依据：`probeSession` 每 host 允许 4 条（见 `probeSession`），跨 host 的探针
+    /// 留 2 条余量。再多也不会更快 —— 瓶颈在用户带宽，不在探针数量。
+    public static let maxGlobalProbes = 6
+    private var globalInflight = 0
+    /// 等名额的挂起器，先进先出。见 `waitForProbeSlot`。
+    private var slotWaiters: [SlotWaiter] = []
+
+    /// 一个排队者。带 `id` 是为了能在超时/取消时**精确**把自己摘掉 ——
+    /// `CheckedContinuation` 本身不可比较，光凭它找不到队列里哪一个是自己。
+    private struct SlotWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+    /// 探针轮次。每个「一轮测速」开始时取一个新值；轮次变了就说明用户换了集/换了线/重进页面，
+    /// 旧轮次还在跑的探针应当自己收手，而不是把结果写进新一轮的界面。
+    ///
+    /// One 用同样的办法（`PlayLines.generation`）解决「旧一轮的延迟数字飘进新一轮」。
+    public private(set) var probeGeneration = 0
+
+    /// 开始新的一轮：作废此前所有在跑的轮次，返回新轮次号。
+    @discardableResult
+    public func beginProbeGeneration() -> Int {
+        probeGeneration += 1
+        return probeGeneration
+    }
+
+    /// 这一轮还算不算当前的。
+    public func isCurrentGeneration(_ generation: Int) -> Bool { generation == probeGeneration }
+
+    /// 领一个全局探针名额。false = 已经满了，调用方应当**跳过这一条**（不是判它死）。
+    ///
+    /// 与 `beginBase` 的分工：那个按 host 限流（别把某个站打急），这个按全局限流
+    /// （别把用户这条链路占满）。两层都过才发请求。
+    public func claimProbeSlot() -> Bool {
+        guard globalInflight < Self.maxGlobalProbes else { return false }
+        globalInflight += 1
+        return true
+    }
+
+    /// 归还名额。必须与 `claimProbeSlot()` 成对，用 `defer` 保证异常路径也归还。
+    ///
+    /// 归还时若有排队者，**把名额直接移交**给最前面那个：全局计数不降、唤醒等待者。
+    /// 这样既不会"唤醒了却抢不到"（饥饿），也不会把同一个名额算两次。
+    public func releaseProbeSlot() {
+        if !slotWaiters.isEmpty {
+            let waiter = slotWaiters.removeFirst()
+            waiter.continuation.resume(returning: true)
+            return
+        }
+        globalInflight = max(0, globalInflight - 1)
+    }
+
+    /// 排队等一个探针名额。
+    ///
+    /// ⛔ 这一条修的是「用户点了线路却什么都不发生」。
+    ///
+    /// 原先调用方拿到 `claimProbeSlot() == false` 就 `return` —— 名额被别的入口
+    /// （播放页摸底、跨源矩阵、全量扫描）占满时，用户的点击**静默丢失**，
+    /// 界面上既不显示数字也不报错，看起来就是坏了。
+    ///
+    /// 现在排队；名额由 `releaseProbeSlot` 一对一移交，不会有同批等待者互抢的饥饿。
+    /// 等待有上限：超过 `budget` 返回 false —— 那时确实该放弃
+    /// （前面还排着几十个同类请求），让调用方按"未测"处理比无限等更诚实。
+    ///
+    /// ## 谁该排队、谁该跳过
+    ///
+    /// 这条区分很重要，别一律改成本函数：
+    ///
+    ///   · **交互路径要排队** —— 用户点了某条线路、按了「重新测速」。
+    ///     他正盯着这一条等结果，跳过等于"点了没反应"。用 `waitForProbeSlot`。
+    ///   · **批量路径要跳过** —— 全量扫描（340 源 × 4 线）、跨源矩阵、跨源测速。
+    ///     这些请求本身就在互相争名额，让它们排队只会把整轮扫描拖成串行，
+    ///     用户看到的是进度条几分钟不动。跳过（保持 `claimProbeSlot`）并计入
+    ///     "本轮未测"才是诚实的处理。
+    public var slotBacklog: Int { slotWaiters.count }
+    public func waitForProbeSlot(budget: Duration = .seconds(20)) async -> Bool {
+        if claimProbeSlot() { return true }
+
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                slotWaiters.append(SlotWaiter(id: id, continuation: continuation))
+                // 到点仍未轮到：把自己摘出队列（`cancelSlotWaiter` 幂等，摘到就回 false）。
+                Task { [weak self] in
+                    try? await Task.sleep(for: budget)
+                    self?.cancelSlotWaiter(id: id)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancelSlotWaiter(id: id) }
+        }
+    }
+
+    /// 把一个还在排队的等待者摘掉并返回 false。已轮到或被移走时什么也不做。
+    ///
+    /// `slotWaiters` 是 `@MainActor` 隔离的（`SourceProbeStore` 整体如此），
+    /// 所以这里就是唯一的写入口，不需要额外加锁。
+    private func cancelSlotWaiter(id: UUID) {
+        guard let index = slotWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = slotWaiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+
+    /// 当前在飞数，供诊断面板。
+    public var inflightProbes: Int { globalInflight }
 
     /// Registers a base in the pool on first sight, so `HostRotation.begin` does not drop it
     /// (it only claims hosts that are already known). Surviving hosts keep their state.
@@ -581,7 +743,8 @@ public final class SourceProbeStore {
         probes.removeAll()
         order.removeAll()
         health.removeAll()
-        persist()
+        baseLatency.removeAll()
+        persistNow()
         revision += 1
     }
 
@@ -634,7 +797,8 @@ public final class SourceProbeStore {
             probes.removeValue(forKey: order.removeFirst())
         }
         note(result, for: sourceKey)
-        persist()
+        persistSummary()
+        schedulePersistDetail()
         revision += 1
     }
 
@@ -662,7 +826,7 @@ public final class SourceProbeStore {
             written += 1
         }
         guard written > 0 else { return 0 }
-        persist()
+        persistNow()
         revision += 1
         return written
     }
@@ -695,7 +859,7 @@ public final class SourceProbeStore {
                     : lhs.result.sortScore < rhs.result.sortScore
             }
         if let verdict { note(verdict.result, for: sourceKey) }
-        persist()
+        persistNow()
         revision += 1
     }
 
@@ -706,14 +870,110 @@ public final class SourceProbeStore {
     }
 
     /// Writes the readings once, after a batch.
-    private func persist() {
+    // MARK: - 写盘：小表立即、大表合并
+
+    /// ⛔ 这一处是「测速时播放页发卡」的第二个成因（RCA H7，已基准实测）。
+    ///
+    /// 原来的 `persist()` 每次都把 `probes`（上限 4000 行）**和** `health` 一起重新
+    /// JSON 编码并写 UserDefaults，跑在主 actor 上 —— 实测单次 **≈ 9.0 ms**
+    /// （swiftc -O，4000 条明细 + 340 个源）。而 `record` 每记一条读数就同步调一次：
+    /// 选集面板一次测 4 条线 = 主线程卡 36 ms；跨源矩阵一次 240 条 = 2.1 秒。
+    ///
+    /// 拆成两层，因为两张表的代价差一个数量级：
+    ///   · **汇总表**（`health` + `baseLatency`）—— 756 个源 + 400 个 host 实测 ≈ 2.2 ms。
+    ///     它小、且是「重启后还认不认这条读数」的唯一依据（`latest` / `measuredSourceCount`
+    ///     都读它），所以**立即同步写**。早先版本把它也延迟了，`SourceProbeRankingTests`
+    ///     的 `aReadingSurvivesARestartThroughTheSummaryTable` 当场抓出回归。
+    ///   · **明细表**（`probes` + `order`）—— 4000 行，≈ 7 ms，而且只服务「这部剧每条线」
+    ///     的界面。它被合并成 0.6 秒一次的写：崩溃最多丢 0.6 秒内的明细，
+    ///     而明细重测即可 —— 不值得为它卡界面。
+    private static let persistDelay: Duration = .milliseconds(600)
+    private var persistTask: Task<Void, Never>?
+
+    /// 立即写**汇总表**。每次 `record` 都调，代价 ≈ 2.2 ms。
+    private func persistSummary() {
+        if let encoded = try? JSONEncoder().encode(health) {
+            defaults.set(encoded, forKey: Self.healthKey)
+        }
+        if let encoded = try? JSONEncoder().encode(baseLatency) {
+            defaults.set(encoded, forKey: Self.baseKey)
+        }
+    }
+
+    /// 排队写**明细表**（合并 0.6 秒）。
+    private func schedulePersistDetail() {
+        guard persistTask == nil else { return }
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.persistDelay)
+            guard !Task.isCancelled else { return }
+            self?.persistTask = nil
+            self?.persistDetail()
+        }
+    }
+
+    private func persistDetail() {
         if let encoded = try? JSONEncoder().encode(probes) {
             defaults.set(encoded, forKey: Self.probeKey)
         }
         defaults.set(order, forKey: Self.orderKey)
-        if let encoded = try? JSONEncoder().encode(health) {
-            defaults.set(encoded, forKey: Self.healthKey)
+    }
+
+    /// 立即写全部（重置、清空、批量落定等「不写就可能丢」的场合）。
+    private func persistNow() {
+        persistTask?.cancel()
+        persistTask = nil
+        persistDetail()
+        persistSummary()
+    }
+
+    private func persist() { persistNow() }
+
+    // MARK: - 按 base(host) 的读数（One `latencyByBase` 的等价物）
+
+    /// 这条线路所属 host 上已有的读数，**与是哪部剧无关**。
+    ///
+    /// 播放页在决定「要不要现在测这条线」时先问这个：同 host 刚测过就直接用，
+    /// 于是换剧不再重测。这正是 One 的行为 —— 它的 `latencyByBase` 里根本没有剧的维度。
+    ///
+    /// - Parameter url: 该线路的真实流地址。取 host 作键。
+    /// - Parameter maxAge: 多旧的读数还算数。默认与 `sourceProbeStaleness` 同源。
+    /// - Returns: nil 表示这个 host 没测过（或读数已过期），调用方应当去测。
+    public func baseReading(for url: URL, maxAge: TimeInterval = sourceProbeStaleness,
+                            now: Date = Date()) -> SourceProbeResult? {
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        guard let reading = baseLatency[host] else { return nil }
+        guard now.timeIntervalSince(reading.measuredAt) <= maxAge else { return nil }
+        return reading
+    }
+
+    /// 记下一条读数属于哪个 host，供 `baseReading(for:)` 跨剧复用。
+    ///
+    /// 公开版本：批量路径（跨源矩阵）攒的是 `(result, flag)` 而不是 URL，
+    /// 没法走 `record(_:sourceKey:videoID:lineFlag:url:)`，只好在这里单独登记。
+    public func noteBasePublic(_ result: SourceProbeResult, url: URL) { noteBase(result, url: url) }
+
+    private func noteBase(_ result: SourceProbeResult, url: URL) {
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return }
+        // 只保留更新的那条：同 host 的两部剧可能并发测完，后到的不该覆盖更新的读数。
+        if let seen = baseLatency[host], seen.measuredAt > result.measuredAt { return }
+        baseLatency[host] = result
+    }
+
+    /// 为了把 `probes` 的写入与 base 表对齐，`record` 系列都需要知道 URL。
+    /// 现有的 `record` 签名里没有 URL —— 这里提供带 URL 的入口，调用方顺手传即可。
+    public func record(_ result: SourceProbeResult, sourceKey: String, videoID: String,
+                       lineFlag: String, url: URL?) {
+        if let url { noteBase(result, url: url) }
+        record(result, sourceKey: sourceKey, videoID: videoID, lineFlag: lineFlag)
+    }
+
+    public func record(_ rows: [(result: SourceProbeResult, lineFlag: String, url: URL?)],
+                       sourceKey: String, videoID: String) {
+        for row in rows {
+            if let url = row.url { noteBase(row.result, url: url) }
         }
+        record(rows.map { (result: $0.result, lineFlag: $0.lineFlag) },
+               sourceKey: sourceKey, videoID: videoID)
     }
 
     /// Drops the detail rows for one video. The source's standing reading stays: "forget this
@@ -725,7 +985,7 @@ public final class SourceProbeStore {
             probes.removeValue(forKey: key)
             order.removeAll { $0 == key }
         }
-        persist()
+        persistNow()
     }
 }
 
@@ -734,9 +994,47 @@ public final class SourceProbeStore {
 /// Probes one line with a single ranged GET: enough to learn whether it answers,
 /// how fast, and what the manifest declares — without pulling a whole segment.
 public enum SourceProbeRunner {
+    /// 探针专用的 URLSession —— **绝不与播放共用连接池**。
+    ///
+    /// ⛔ 这一条是「起播变慢」的直接成因之一（RCA H3）。此前探针默认走
+    /// `URLSession.shared`，而 iOS 的 `httpMaximumConnectionsPerHost` 默认只有 6。
+    /// 打开播放页会同时发生两件事：`buildLineSamples` 为每条线路解析并探测，选集面板
+    /// 一弹开又对每条线各拉 256 KB。它们把 6 条连接占满，于是**播放器自己的
+    /// m3u8 清单与分片请求排在后面**，用户看到的就是「黑屏转圈、起播比平时慢很多」。
+    ///
+    /// One 的对应物是 `MediaResolver.probeSession`（interface.swift:1158），
+    /// 一个 `let probeSession: NSURLSession` —— 实测它把探针与播放分在两个会话里。
+    /// 这里照做：探针用自己的池，且每 host 上限压到 4，让 CDN 永远留有余量给播放。
+    ///
+    /// `ephemeral` 而不是 `default`：探针的缓存没有任何价值（每次都是 Range 取新字节），
+    /// 而 `default` 会在磁盘上留下几十 MB 的探测残留。
+    public static let probeSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        // 与 `LineRotation.maxConcurrent` 同值：同一 host 最多 4 条探针在飞。
+        configuration.httpMaximumConnectionsPerHost = 4
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        // 起播时探针不该被系统当成「用户等待的前台流量」而与播放争优先级。
+        configuration.networkServiceType = .background
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        // 探针的字节没有任何复用价值（每次都是新 Range），连内存缓存都不要 ——
+        // `ephemeral` 只是不给磁盘，它仍然会给一个内存缓存。
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return URLSession(configuration: configuration)
+    }()
+
     /// Bytes to pull when measuring throughput. Large enough to separate a
     /// healthy CDN from a stalled one, small enough to stay harmless on cellular.
     public static let sampleBytes = 256 * 1024
+
+    /// 播放页在「用户还没点播放」时用的采样量。
+    ///
+    /// 128 KB 按 4 Mbps 算仍有 0.25 秒，足够分出发不出字节的死线与活线；
+    /// 而它只有常规探针的一半流量 —— 播放页同时要跑 4~9 条线，
+    /// 这一档把「进页面就吃掉 1 MB 下行」压到 512 KB 以内。
+    public static let lightSampleBytes = 128 * 1024
 
     /// 深测时拉多少。首轮用 `sampleBytes`，只有「看起来够快、值得再问」的源才升到这里。
     ///
@@ -757,11 +1055,33 @@ public enum SourceProbeRunner {
     ///
     /// - Parameter deep: 拉 `deepSampleBytes` 而不是 `sampleBytes`。
     ///   只给「首轮判定够快、值得再确认」的源用 —— 见 `deepSampleBytes` 的说明。
-    public static func probe(url: URL, headers: [String: String] = [:], session: URLSession = .shared,
-                             deep: Bool = false) async -> SourceProbeResult {
+    /// - Parameter light: 拉 `lightSampleBytes`。播放页在**用户还没点播放**时用它：
+    ///   那时用户要的只是「哪条线是活的」，不是精确吞吐，不该为四个数字吃掉 1 MB。
+    ///   `deep` 优先。
+    /// - Parameter session: 默认走 `probeSession`（专用池），**不是** `.shared`。
+    ///   传 `.shared` 会让探针重新与播放抢那 6 条连接 —— 见 `probeSession` 的说明。
+    public static func probe(url: URL, headers: [String: String] = [:],
+                             session: URLSession = SourceProbeRunner.probeSession,
+                             deep: Bool = false, light: Bool = false) async -> SourceProbeResult {
+        // 三条「不是 HTTP」的地址也必须能测：云盘文件（`tvbox-cloud`）、红果加密 MP4
+        // （`tvbox-hongguo`）、重打包的 DASH（`tvbox-dash`）。它们由 App 内的资源加载器回答，
+        // 直接发 `URLRequest` 必然失败 —— 于是这些源在每一轮扫描里都被判「不可达」，
+        // 而它们在播放页明明能播。
+        //
+        // 它们并不神秘：每个都只是「给我某个文件的第 N..M 字节」。走同一个字节读取口，
+        // 用同一套两段计时，测出来的就是**真实吞吐**，而不是「能不能发 HTTP」。
+        if let source = await WebCastVirtualStreams.source(for: url) {
+            return await probeVirtual(source, url: url, deep: deep)
+        }
+        // 是这三种 scheme 但解析不出流（还没注册、或注册已被回收）：**没测出来**，不是判死。
+        // 落到下面的 `URLRequest` 会必然失败并被记成 `.unreachable` —— 那就把一个能播的源
+        // 送进了「不通」分组。
+        if let scheme = url.scheme, [CloudStreams.scheme, HongguoStreams.scheme, DashStreams.scheme].contains(scheme) {
+            return SourceProbeResult(reachability: .unknown)
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = deep ? 15 : 8
-        let budget = deep ? deepSampleBytes : sampleBytes
+        let budget = deep ? deepSampleBytes : (light ? lightSampleBytes : sampleBytes)
         request.setValue("bytes=0-\(budget - 1)", forHTTPHeaderField: "Range")
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
 
@@ -835,6 +1155,74 @@ public enum SourceProbeRunner {
         }
     }
 
+    /// 测一条虚拟流：按 `sampleBytes` 读一段字节，用与 HTTP 探针**相同的两段计时**算稳态速度。
+    ///
+    /// 口径必须一致，否则同一个源在「选集页（HTTP 直测）」和「扫描（虚拟流）」里会给出两套数字。
+    /// 这里不复用 `stream(_:session:budget:)`：那个函数吃 `URLRequest`，而这几个来源是 App 内的
+    /// 字节流（云盘分块、红果解密、DASH 播放列表），没有请求可发。计时的算法是一样的：
+    /// 前 `warmupBytes` 记时间戳，后一段的字节数除以后一段的耗时。
+    private static func probeVirtual(_ source: WebCastVirtualStreams.Source,
+                                     url: URL, deep: Bool) async -> SourceProbeResult {
+        let budget = deep ? deepSampleBytes : sampleBytes
+        // 播放列表（DASH）只有几百字节，长度已知即全文；读它本身就是「能不能拿到清单」。
+        let total = await source.length()
+        let started = Date()
+        do {
+            var received = 0
+            var warmupEnd: Date?
+            var warmupBytesSeen = 0
+            // 分块读，块大小与 HTTP 路径的单次 `bytes(for:)` 批次同量级。
+            let chunk = 32 * 1024
+            while received < budget {
+                let want = min(chunk, budget - received)
+                let piece = try await source.read(at: received, count: want)
+                if piece.isEmpty { break }
+                received += piece.count
+                if warmupEnd == nil {
+                    warmupBytesSeen += piece.count
+                    if warmupBytesSeen >= warmupBytes { warmupEnd = Date() }
+                }
+                if Task.isCancelled { return SourceProbeResult(reachability: .unknown) }
+            }
+            let elapsed = max(Date().timeIntervalSince(started), 0.001)
+            guard received > 0 else {
+                // 一个字节都拿不到：和 HTTP 路径的 4xx 等价，是「这条线不通」。
+                return SourceProbeResult(reachability: .unreachable, measuredAt: Date())
+            }
+            // 稳态速度：慢启动之后那一段。没走完预热区就退回整段平均，并如实偏低。
+            let kBps: Int
+            if let warmupEnd {
+                let steadyBytes = received - warmupBytesSeen
+                let steadySeconds = Date().timeIntervalSince(warmupEnd)
+                if steadyBytes > 0, steadySeconds > 0 {
+                    kBps = Int(Double(steadyBytes) / 1024 / steadySeconds)
+                } else {
+                    kBps = Int(Double(received) / 1024 / elapsed)
+                }
+            } else {
+                kBps = Int(Double(received) / 1024 / elapsed)
+            }
+            let latency = Int(elapsed * 1_000)
+            let reachability: SourceProbeResult.Reachability =
+                elapsed > 3 || kBps < 64 ? .slow : .reachable
+            return SourceProbeResult(
+                reachability: reachability,
+                latencyMilliseconds: latency,
+                kilobytesPerSecond: kBps,
+                // 虚拟流的画质不由 URL 声明，来源本身已经知道分辨率；这里不猜。
+                resolutionHeight: nil,
+                resolutionLabel: nil,
+                fileSizeBytes: total,
+                measuredAt: Date()
+            )
+        } catch {
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                return SourceProbeResult(reachability: .unknown)
+            }
+            return SourceProbeResult(reachability: .unreachable, measuredAt: Date())
+        }
+    }
+
     /// 分段计时的一次拉流：总字节、响应头、以及慢启动之后的「稳态」区间。
     ///
     /// `steady` 为 nil 表示样本在慢启动区内就结束了（小文件、被截断、或极慢的源）。
@@ -856,10 +1244,25 @@ public enum SourceProbeRunner {
         //  真正排除的慢启动只有 1.56%）。改名消除遮蔽。
         var warmupMark = 0
 
+        // ★ 预热边界必须随预算缩放，否则 light 采样测不出稳态。
+        //
+        // ⛔ `warmupBytes` 是固定 96 KB，而 `lightSampleBytes` 只有 128 KB ——
+        //    留给「稳态窗」的只剩 32 KB。32 KB 的耗时里 RTT 抖动占比极大，
+        //    算出来的 KB/s 会大幅跳动，同一 host 两次读数能差一倍。
+        //    那会让线路菜单里的速度数字变成随机数，比没有数字更糟。
+        //
+        // 取「预算的一半」与 `warmupBytes` 的较小者：
+        //   · 常规 256 KB → min(96 KB, 128 KB) = **96 KB，一个字节没变**
+        //     （既有口径与历史读数继续可比 —— 这一条是硬约束，先按 /3 写过一次，
+        //      把常规探针的预热区改成了 85 KB，被 `theWarmupBoundaryAlwaysLeavesASteadyWindow`
+        //      当场抓出）；
+        //   · light 128 KB → min(96 KB, 64 KB) = 64 KB，稳态窗正好一半。
+        let warmupBoundary = min(Self.warmupBytes, max(budget / 2, 16 * 1024))
+
         for try await byte in bytes {
             data.append(byte)
             // 到达慢启动边界时打时间戳，只打一次。
-            if warmupEnd == nil, data.count >= Self.warmupBytes {
+            if warmupEnd == nil, data.count >= warmupBoundary {
                 warmupEnd = Date()
                 warmupMark = data.count
             }

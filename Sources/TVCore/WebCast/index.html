@@ -162,8 +162,18 @@ video{width:100%;flex:1;background:#000}
 </div>
 
 <div id="main">
-  <div class="group-title">资源</div>
-  <div id="sourceList"></div>
+  <!-- 四张列表与「资源」平级：电脑端不该只能浏览源，App 里的直播/收藏/继续看/下载也要能看。 -->
+  <div class="cats" id="homeCats">
+    <button class="active" data-tab="sources" onclick="switchTab('sources')">资源</button>
+    <button data-tab="live" onclick="switchTab('live')">直播</button>
+    <button data-tab="favorites" onclick="switchTab('favorites')">收藏</button>
+    <button data-tab="history" onclick="switchTab('history')">继续看</button>
+    <button data-tab="downloads" onclick="switchTab('downloads')">下载</button>
+  </div>
+  <div id="sourcesPane">
+    <div id="sourceList"></div>
+  </div>
+  <div id="listPane" style="display:none"><div id="listContent"></div></div>
 </div>
 
 <div id="catalog" style="display:none">
@@ -265,7 +275,15 @@ async function api(path, opts) {
     throw new Error('网络断开');
   }
   if (r.status === 401) { setToken(''); showLogin(); throw new Error('需要登录'); }
-  if (r.status >= 500) { showBanner('服务异常（' + r.status + '）', true); throw new Error('服务异常 ' + r.status); }
+  if (r.status >= 500) {
+    // 500 的响应体里带着真正的原因（服务端 { error: "..." }）。此前直接丢掉，
+    // 界面上只剩「服务异常（500）」，等于把唯一有用的信息扔了。
+    let reason = '';
+    try { const d = await r.json(); reason = d && d.error ? String(d.error) : ''; } catch(e) {}
+    if (!reason) reason = '服务异常（' + r.status + '）';
+    showBanner(reason, true);
+    throw new Error(reason);
+  }
   return r.json();
 }
 
@@ -292,10 +310,15 @@ function scheduleReconnect() {
 function iconColor(i){ return ICON_COLORS[i % ICON_COLORS.length]; }
 
 // 代理 URL，附上 token 供 <img>/<video>（无法设 header）鉴权。直连模式（proxyMedia=false）下不中转。
-function px(url) {
+// h = 服务端登记的「该源自带的请求头」id（Referer/签名 UA 等）。浏览器给 <video> 设不了请求头，
+// 少了它，防盗链的源就算解析出地址也会被 CDN 拒——这正是「手机能播、电脑不能」的另一半原因。
+function px(url, h) {
   const t = getToken();
   if (state.proxyMedia === false) return url;
-  return '/proxy/' + encodeURIComponent(url) + (t ? '?token=' + encodeURIComponent(t) : '');
+  const parts = [];
+  if (h) parts.push('h=' + encodeURIComponent(h));
+  if (t) parts.push('token=' + encodeURIComponent(t));
+  return '/proxy/' + encodeURIComponent(url) + (parts.length ? '?' + parts.join('&') : '');
 }
 
 async function load() {
@@ -334,15 +357,121 @@ function renderSources() {
   }
 }
 
+// ── 四张列表：直播 / 收藏 / 继续看 / 下载 ────────────────────────────────
+// 全部只读镜像：数据由服务端从 App 的「可见出口」取出（已按当前环境与保险库过滤），
+// 电脑端不写回，避免与手机上的播放记录/收藏互相覆盖。
+let activeTab = 'sources';
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('#homeCats button').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+  const listMode = tab !== 'sources';
+  document.getElementById('sourcesPane').style.display = listMode ? 'none' : 'block';
+  document.getElementById('listPane').style.display = listMode ? 'block' : 'none';
+  if (listMode) loadListTab(tab);
+}
+
+async function loadListTab(tab) {
+  const box = document.getElementById('listContent');
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const d = await api(tab);
+    const list = d.list || [];
+    if (!list.length) { box.innerHTML = '<div class="empty">暂无内容</div>'; return; }
+    if (tab === 'live') box.innerHTML = renderLive(list);
+    else if (tab === 'favorites') box.innerHTML = renderFavorites(list);
+    else if (tab === 'history') box.innerHTML = renderHistory(list);
+    else box.innerHTML = renderDownloads(list);
+  } catch(e) {
+    box.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderLive(list) {
+  // 内置平台走 App 的接口取频道，普通 m3u 播放列表直接交给播放器（同样经过 /proxy）。
+  // 绑定用 data-live 索引而不是把 URL 拼进 onclick：encodeURIComponent 不转义单引号，
+  // 地址里出现 ' 就能闭合 onclick 的字符串并注入脚本。
+  const rows = list.map((l, i) => `<div class="${l.builtIn ? '' : 'live-row'}" data-live="${i}">
+      <div class="source-row">
+        <div class="icon" style="background:#ff375f">${esc(l.name[0] || '?')}</div>
+        <div class="name">${esc(l.name)}</div>
+        ${l.builtIn ? '<span class="badge">内置</span>' : ''}
+      </div>
+    </div>`).join('');
+  liveList = list;
+  setTimeout(() => {
+    document.querySelectorAll('#listContent [data-live]').forEach(node => {
+      const entry = liveList[Number(node.dataset.live)];
+      if (entry && !entry.builtIn) node.onclick = () => playLive(entry.url, entry.headerID);
+    });
+  }, 0);
+  return '<div class="group-title">直播源</div>' + rows;
+}
+
+let liveList = [];
+
+function playLive(url, headerID) {
+  current.source = null;
+  document.getElementById('playerTitle').textContent = '直播';
+  document.getElementById('playerMask').classList.add('show');
+  document.getElementById('playerErr').style.display = 'none';
+  playUrl(url, headerID);
+}
+
+function renderFavorites(list) {
+  const label = { video: '影片', episode: '剧集', live: '直播', music: '音乐', cloud: '网盘' };
+  return '<div class="group-title">收藏</div>' + list.map(f => `
+    <div class="source-row">
+      <div class="icon" style="background:#ff9500">${esc((f.videoName || '?')[0])}</div>
+      <div class="name">${esc(f.videoName)}${f.episodeName ? ' · ' + esc(f.episodeName) : ''}
+        <div style="font-size:12px;color:var(--muted)">${esc(f.sourceName || '')}${f.year ? ' · ' + esc(f.year) : ''}</div>
+      </div>
+      <span class="badge">${esc(label[f.kind] || f.kind)}</span>
+    </div>`).join('');
+}
+
+function renderHistory(list) {
+  return '<div class="group-title">继续观看</div>' + list.map(h => {
+    const pct = Math.round((h.progress || 0) * 100);
+    return `<div class="source-row">
+      <div class="icon" style="background:#30d158">${esc((h.videoName || '?')[0])}</div>
+      <div class="name">${esc(h.videoName)}${h.episodeName ? ' · ' + esc(h.episodeName) : ''}
+        <div style="font-size:12px;color:var(--muted)">${esc(h.sourceName || '')} · ${h.completed ? '已看完' : '看到 ' + pct + '%'}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderDownloads(list) {
+  const label = { queued: '排队中', downloading: '下载中', finishing: '收尾中', paused: '已暂停', completed: '已完成', failed: '失败' };
+  return '<div class="group-title">下载（文件在手机上）</div>' + list.map(d => {
+    const pct = Math.round((d.progress || 0) * 100);
+    return `<div class="source-row">
+      <div class="icon" style="background:#0a84ff">${esc((d.title || '?')[0])}</div>
+      <div class="name">${esc(d.title)}${d.episode ? ' · ' + esc(d.episode) : ''}
+        <div style="font-size:12px;color:var(--muted)">${esc(label[d.status] || d.status)}${d.status === 'downloading' ? ' · ' + pct + '%' : ''}${d.failure ? ' · ' + esc(d.failure) : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function renderSettings() {
   document.getElementById('setEnabled').checked = state.enabled;
   document.getElementById('setPort').value = state.port;
   document.getElementById('setProxy').checked = state.proxyMedia !== false;
   const el = document.getElementById('hiddenSources'); el.innerHTML = '';
-  state.sources.filter(s => s.hidden).forEach(s => {
+  // 绑定用索引，不把 key 拼进 onclick。`esc()` 只做 HTML 实体转义，而属性里的实体会被浏览器
+  // **先解码再交给 JS 引擎** —— `&#39;` 到 JS 眼里仍然是 `'`，照样能闭合字符串。sourceKey 完全
+  // 由导入的订阅 JSON 决定，一个带引号的 key 就能在电脑浏览器里执行任意脚本（可读走
+  // localStorage 里的 webcast_token、调 /api/settings 关掉密码）。
+  const hidden = state.sources.filter(s => s.hidden);
+  hidden.forEach((s, i) => {
     const d = document.createElement('div');
     d.className = 'settings-row';
-    d.innerHTML = `<span class="lbl">${esc(s.name)}</span><button style="border:none;background:none;color:var(--accent);font-size:14px" onclick="showSource('${esc(s.key)}')">显示</button>`;
+    d.innerHTML = `<span class="lbl">${esc(s.name)}</span><button data-show="${i}" style="border:none;background:none;color:var(--accent);font-size:14px">显示</button>`;
+    d.querySelector('[data-show]').onclick = () => showSource(hidden[i].key);
     el.appendChild(d);
   });
 }
@@ -411,7 +540,7 @@ function renderList(list) {
   const grid = document.createElement('div'); grid.className = 'grid';
   list.forEach(v => {
     const c = document.createElement('div'); c.className = 'card';
-    c.innerHTML = `<div class="pic">${v.poster ? `<img loading="lazy" src="${px(v.poster)}">` : ''}
+    c.innerHTML = `<div class="pic">${v.poster ? `<img loading="lazy" src="${px(v.poster, v.posterHeaderID)}">` : ''}
       ${v.remarks ? `<span class="tag">${esc(v.remarks)}</span>` : ''}</div>
       <div class="name">${esc(v.name)}</div>`;
     c.onclick = () => openDetail(v.id);
@@ -433,18 +562,25 @@ function renderDetail(v) {
   box.innerHTML = `
     <button class="close-btn" onclick="closeDetail()">✕</button>
     <div class="detail-head">
-      ${v.poster ? `<img src="${px(v.poster)}">` : ''}
+      ${v.poster ? `<img src="${px(v.poster, v.posterHeaderID)}">` : ''}
       <div class="detail-info">
         <h2>${esc(v.name)}</h2>
         <div class="meta">${esc([v.year, v.remarks, v.category].filter(Boolean).join(' · '))}</div>
         <div class="desc">${esc(v.synopsis || '暂无简介')}</div>
       </div>
     </div>
-    ${(v.episodes || []).length ? `<button class="play-now" onclick='play(${JSON.stringify(v.episodes[0])})'>▶ 立即播放</button>` : ''}
+    ${(v.episodes || []).length ? `<button class="play-now" data-ep="0">▶ 立即播放</button>` : ''}
     <div class="ep-title">剧集</div>
     <div class="ep-list">
-      ${(v.episodes || []).map(e => `<button onclick='play(${JSON.stringify(e)})'>${esc(e.name)}</button>`).join('')}
+      ${(v.episodes || []).map((e, i) => `<button data-ep="${i}">${esc(e.name)}</button>`).join('')}
     </div>`;
+  // Bind by index instead of inlining `JSON.stringify(episode)` into an onclick attribute: an
+  // episode name containing a quote would otherwise close the attribute and inject markup.
+  const episodes = v.episodes || [];
+  box.querySelectorAll('[data-ep]').forEach(button => {
+    const episode = episodes[Number(button.dataset.ep)];
+    if (episode) button.onclick = () => play(episode);
+  });
   document.getElementById('detailMask').classList.add('show');
 }
 async function play(ep) {
@@ -452,19 +588,20 @@ async function play(ep) {
   document.getElementById('playerMask').classList.add('show');
   const err = document.getElementById('playerErr'); err.style.display = 'none';
   try {
-    const d = await api(`${current.source}/play?flag=${encodeURIComponent(ep.flag||'')}&address=${encodeURIComponent(ep.address)}&name=${encodeURIComponent(ep.name)}`);
+    // videoID 必须一起带回：type 3（播放器接口）源要靠它当 detailID 才能解析播放，
+    // 少了它插件答不出地址，服务端只能回 500。
+    const qs = `flag=${encodeURIComponent(ep.flag||'')}&address=${encodeURIComponent(ep.address)}&name=${encodeURIComponent(ep.name)}`
+      + (ep.videoID ? `&videoID=${encodeURIComponent(ep.videoID)}` : '');
+    const d = await api(`${current.source}/play?${qs}`);
     if (!d.url) { showErr('未解析到播放地址'); return; }
-    // 自定义 scheme（如 tvbox-xxx://）浏览器无法播放，明确提示而非转圈。
-    if (d.scheme) {
-      showErr('此源使用自定义播放协议（' + d.scheme + '://），请在手机映霞 App 内播放');
-      return;
-    }
-    playUrl(d.url);
+    // 云盘 / 红果加密 / DASH 三类地址不是 http，浏览器本身打不开；服务端已在 /proxy 里把它们
+    // 变成按 Range 提供的普通流，所以这里照样交给 playUrl 走代理，不再要求用户回手机播放。
+    playUrl(d.url, d.headerID);
   } catch(e) { showErr('解析失败：' + e.message); }
 }
-function playUrl(url) {
+function playUrl(url, headerID) {
   const video = document.getElementById('video');
-  const finalUrl = px(url);
+  const finalUrl = px(url, headerID);
   if (url.includes('.m3u8') && window.Hls && Hls.isSupported()) {
     const hls = new Hls({ maxBufferLength: 60 });
     hls.loadSource(finalUrl); hls.attachMedia(video);

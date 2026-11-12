@@ -29,6 +29,13 @@ public enum DashStreams {
         return named == nil ? sources.first : nil
     }
 
+    /// The playlist text a `tvbox-dash` address stands for, so a browser can be handed it as a
+    /// normal m3u8 instead of going through AVPlayer's resource loader.
+    public static func playlist(for url: URL) async -> String? {
+        guard url.scheme == scheme else { return nil }
+        return PlaylistStore.shared.playlist(url)
+    }
+
     /// An asset for an address from `stream`, or nil for any other address.
     public static func asset(for url: URL) -> AVURLAsset? {
         guard url.scheme == scheme else { return nil }
@@ -311,7 +318,12 @@ final class PlaylistStore: @unchecked Sendable {
     func add(_ playlists: [String: String], token: String, headers: [String: String] = [:], qualities: [StreamQuality] = [], sources: [DashFiles] = []) {
         lock.withLock {
             streams[token] = playlists; choices[token] = qualities; files[token] = sources; requestHeaders[token] = headers; order.append(token)
-            while order.count > 4 { let old = order.removeFirst(); streams[old] = nil; choices[old] = nil; files[old] = nil; requestHeaders[old] = nil }
+            // ⛔ 上限取 `PlaybackCapacity.streamLimit`。写死 4 时「坞 4 + 前台 1」必然逐出
+            // 一路**正在播**的清单，那一集的 `PlaylistLoader` 随即回 "This playback has
+            // expired"，画面黑掉且不会自愈 —— 见 `PlaybackCapacity`。
+            while order.count > PlaybackCapacity.streamLimit {
+                let old = order.removeFirst(); streams[old] = nil; choices[old] = nil; files[old] = nil; requestHeaders[old] = nil
+            }
         }
     }
     func sources(_ url: URL) -> [DashFiles] {

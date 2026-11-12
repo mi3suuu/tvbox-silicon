@@ -40,6 +40,12 @@ public enum CloudStreams {
     /// The headers a drive's HLS copy wants, for the Mac's HLS adapter and for downloads.
     public static func playlistHeaders(for url: URL) -> [String: String]? { CloudPlaylists.shared.headers(url) }
 
+    /// The byte stream behind a registered `tvbox-cloud` address, for a relay that serves it over
+    /// HTTP to a browser instead of AVPlayer.
+    static func byteStream(for url: URL) async -> CloudByteStream? {
+        CloudStreamStore.shared.stream(url)
+    }
+
     public static func asset(for url: URL) -> AVURLAsset? {
         if let headers = CloudPlaylists.shared.headers(url) { return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers]) }
         guard CloudStreamStore.shared.stream(url) != nil else { return nil }
@@ -158,7 +164,13 @@ private final class CloudStreamStore: @unchecked Sendable {
         let retired: [(URL, CloudByteStream)] = lock.withLock {
             streams[url] = stream; order.append(url)
             var old: [(URL, CloudByteStream)] = []
-            while order.count > 3 { let first = order.removeFirst(); if let value = streams.removeValue(forKey: first) { old.append((first, value)) } }
+            // ⛔ 上限必须跟坞一起涨。原值 3 (< 坞 4 + 前台 1)，多任务时必然把**正在播**的
+            // 某一路逐出，而逐出是 `clear()` —— 那一路画面还在、流没了，就是用户报的「互顶」。
+            // 见 `PlaybackCapacity`。
+            while order.count > PlaybackCapacity.streamLimit {
+                let first = order.removeFirst()
+                if let value = streams.removeValue(forKey: first) { old.append((first, value)) }
+            }
             return old
         }
         for (old, stream) in retired { CloudResourceLoader.shared.cancel(old); Task { await stream.clear() } }

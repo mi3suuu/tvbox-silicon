@@ -81,6 +81,11 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     public internal(set) var media: String?
     /// Bytes on disk once finished.
     public internal(set) var size: Int64 = 0
+    /// Sockets actually carrying this download right now, and how fast they are going together.
+    /// The pair is what makes an accelerator legible: 8 sockets at 12 MB/s reads differently from
+    /// 1 socket at 1.5 MB/s, and only the number tells you which one you got.
+    public internal(set) var connections: Int = 0
+    public internal(set) var speed: Double = 0
     public internal(set) var finished: Date?
     public internal(set) var cid: String?
     public internal(set) var duration: Double?
@@ -118,45 +123,63 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
         public var available: Int64?
         public var capacity: Int64?
     }
-    /// How many downloads run at once, 1 to 4.
+    /// How many downloads run at once, 1 to 8. Kept on the library because the queue is what it governs;
+    /// the value lives in `DownloadSettings` so the two knobs beside it do too.
     public var simultaneous: Int {
-        didSet {
-            // @Observable runs didSet again for an assignment made inside it, so only assign when clamping.
-            let clamped = min(max(simultaneous, 1), 4)
-            guard clamped == simultaneous else { simultaneous = clamped; return }
-            defaults.set(simultaneous, forKey: "downloadsSimultaneous")
+        get { settings.tuning.parallel }
+        set {
+            settings.set(parallel: newValue)
             schedule()
         }
     }
+    /// Range requests per file, range size in MB, and files at once — the three knobs One exposes.
+    @ObservationIgnored public let settings: DownloadSettings
     /// Resolves an episode to its current media address; set by the app, which knows the sources.
     @ObservationIgnored public var resolver: (@MainActor @Sendable (DownloadItem) async throws -> Channel)?
     /// Called each time a download starts running. The iOS app uses it to keep downloads going in the background.
     @ObservationIgnored public var onStart: (@MainActor () -> Void)?
+    /// Called whenever the set of running downloads changes — a start, a finish, a pause, a removal.
+    ///
+    /// 存在的理由只有一个：**「下载时保持屏幕常亮」必须能自己关掉**。
+    /// 只有 `onStart` 而没有「结束」信号时，压住自动锁屏的那一次调用永远不会被撤销，
+    /// 用户下完一集之后手机再也睡不着 —— 比不加这个功能更糟。
+    /// `schedule()` 是唯一知道「现在到底还有几个在跑」的地方，所以由它发。
+    @ObservationIgnored public var onActivityChange: (@MainActor (Bool) -> Void)?
 
     public let root: URL
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let session: URLSession
-    @ObservationIgnored private var running: [String: (run: UUID, task: Task<Void, Never>, meter: DownloadMeter)] = [:]
+    @ObservationIgnored private var running: [String: (run: UUID, task: Task<Void, Never>, meter: DownloadMeter, speed: SpeedMeter)] = [:]
     @ObservationIgnored private var samples: [String: (date: Date, bytes: Int64)] = [:]
+    /// The live knobs each running transfer shares, so a change reaches it mid-file.
+    @ObservationIgnored private var boxes: [String: TuningBox] = [:]
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var savedAt = Date.distantPast
 
-    public init(root: URL = DownloadLibrary.defaultRoot, defaults: UserDefaults = .standard) {
-        self.root = root; self.defaults = defaults
+    public init(root: URL = DownloadLibrary.defaultRoot, defaults: UserDefaults = .standard,
+                settings: DownloadSettings = .shared) {
+        self.root = root; self.defaults = defaults; self.settings = settings
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
-        configuration.httpMaximumConnectionsPerHost = 8
+        // The limit is per host, so it must be at least the sockets one file opens, or URLSession would
+        // queue the very ranges this download exists to run in parallel.
+        configuration.httpMaximumConnectionsPerHost = max(8, settings.tuning.sockets)
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         session = URLSession(configuration: configuration)
-        let stored = defaults.integer(forKey: "downloadsSimultaneous")
-        simultaneous = stored > 0 ? min(stored, 4) : 2
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         #if os(iOS)
         var values = URLResourceValues(); values.isExcludedFromBackup = true
         var folder = root; try? folder.setResourceValues(values)
         #endif
         load()
+        // A knob turned in Settings reaches the files already in flight, not just the next one.
+        settings.onTuning = { [weak self] tuning in
+            guard let self else { return }
+            for box in self.boxes.values { box.value = tuning }
+            self.session.configuration.httpMaximumConnectionsPerHost = max(8, tuning.sockets)
+            self.schedule()
+        }
         // Downloads that were running when the app quit wait for the app to set `resolver`.
         Task { @MainActor in self.schedule() }
     }
@@ -178,20 +201,60 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     /// a failed one is retried. Returns the episode's download.
     @discardableResult
     public func download(_ source: DownloadSource, title: String, poster: URL?, posterHeaders: [String: String] = [:], environmentID: UUID? = nil) -> DownloadItem {
-        if let existing = item(for: source) {
+        // 去重只在**这次下载要落到的那个环境**里做：同一个地址在另一个环境下是一条独立记录，
+        // 拿它的条目返回会让 B 环境点下载看起来「已经有了」而其实什么都没下。
+        let target = environmentID ?? activeEnvironmentID
+        if let existing = item(for: source, environment: target) {
             if existing.status == .failed || existing.status == .paused { resume(existing.id) }
             return existing
         }
         let item = DownloadItem(id: UUID().uuidString.lowercased(), title: title, episode: source.episodeName, poster: poster,
-                                posterHeaders: posterHeaders, source: source, created: Date(), environmentID: environmentID)
+                                posterHeaders: posterHeaders, source: source, created: Date(), environmentID: target)
         items.append(item)
         save()
         schedule()
         return item
     }
 
+    /// 某环境下这一集的记录（nil 归默认环境）。`download` 的去重与详情页的「下过没有」都用它。
+    func item(for source: DownloadSource, environment: UUID?) -> DownloadItem? {
+        let target = environment ?? defaultEnvironmentID
+        return items.first {
+            $0.source.key == source.key && ($0.environmentID ?? defaultEnvironmentID) == target
+        }
+    }
+
     public func item(for source: DownloadSource) -> DownloadItem? { items.first { $0.source.key == source.key } }
     public func item(id: String) -> DownloadItem? { items.first { $0.id == id } }
+
+    /// [mi3s] 二开：下载所属环境的两个出口。记录自带 `environmentID`（nil 归默认环境），
+    /// 页面和「这一集下过没有」的判断都从这里取，避免再出现「切了环境还看得见」或
+    /// 「新环境里那一集显示已下载、点了却播不了」。
+    /// 默认环境 id 由 App 在 `Environments` 加载后写入。
+    public var defaultEnvironmentID: UUID?
+    /// 当前环境 id，由 App 跟着 `Environments.activeID` 保持同步。
+    public var activeEnvironmentID: UUID?
+
+    /// `items` 里属于当前环境的那些。
+    public func visibleItems() -> [DownloadItem] {
+        let active = activeEnvironmentID ?? defaultEnvironmentID
+        return items.filter { ($0.environmentID ?? defaultEnvironmentID) == active }
+    }
+    /// 当前环境里这一集的下载记录。另一环境下过的那一集在这里是 nil —— 它确实还不能在本环境播。
+    public func visibleItem(for source: DownloadSource) -> DownloadItem? {
+        let active = activeEnvironmentID ?? defaultEnvironmentID
+        return items.first { $0.source.key == source.key && ($0.environmentID ?? defaultEnvironmentID) == active }
+    }
+
+    /// 删掉某一环境下的下载记录和文件，用于删除环境。
+    ///
+    /// 每条记录有自己的 id 和文件夹，所以另一个环境下过同一集时它是一条**独立记录**、
+    /// 独立文件，删这一环境的不会动到那一条。
+    public func delete(environment: UUID) {
+        let doomed = items.filter { ($0.environmentID ?? defaultEnvironmentID) == environment }
+        guard !doomed.isEmpty else { return }
+        remove(doomed.map(\.id))
+    }
 
     public func pause(_ id: String) {
         guard let item = item(id: id), item.isPending, item.status != .failed else { return }
@@ -225,6 +288,64 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
         Task { await measure() }
     }
 
+    /// Empties the list and the disk: every running transfer stops, every folder goes, and anything the
+    /// list does not know about goes with them.
+    ///
+    /// The orphans are the reason this is not just `remove(items.map(\.id))`: a crash leaves a folder whose
+    /// plan names a download that never made it into `downloads.json`, and on a phone those gigabytes are
+    /// invisible until the storage bar is full.
+    public func removeAll() {
+        // Stop first, then wait for the lanes to actually let go: deleting the root while a lane is
+        // still in `pwrite` leaves that write failing into a removed directory, and on iOS that
+        // surfaces as a download that "finished" with zero bytes.
+        for id in Array(running.keys) { stop(id) }
+        boxes.removeAll()
+        let ids = Set(items.map(\.id))
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        items.removeAll()
+        rates.removeAll(); samples.removeAll(); boxes.removeAll()
+        save()
+        Task { await measure() }
+        Diagnostics.shared.record(.info, "download", "cleared (ids.count) downloads folder=(root.lastPathComponent)")
+    }
+
+    /// Deletes folders the list does not know about: left behind by a crash, or by a version that saved a
+    /// plan before the download was recorded. Cheap to run, so `measure()` does.
+    public func purgeOrphans() {
+        let known = Set(items.map(\.id))
+        // Folders this instance is actively writing are not orphans, whatever the list says: a
+        // download whose record has not been saved yet (the first second of its life, or a plan being
+        // built after a renew) would otherwise be deleted from under the sockets writing into it.
+        let live = Set(running.keys).union(boxes.keys)
+        let contents = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        for url in contents {
+            let name = url.lastPathComponent
+            // ⛔ 只删**下载文件夹**（名字是 `UUID().uuidString.lowercased()`，见 `download(_:…)`）。
+            //
+            // 不能只豁免 `downloads.json`：音乐库的根目录是 `<Downloads>/Music`
+            // （`MusicDownloadLibrary.defaultRoot`），是这里 root 的**子目录**且名字不是任何
+            // download id。按「不在 known 里就删」的老写法，进一次下载页（`measure()` 会调
+            // 这里）就把整棵音乐库连同 `music-downloads.json` 递归删掉 —— 所有下载的歌与
+            // 专辑记录一起消失，且索引没了、重启也恢复不了。
+            //
+            // 用「是否形如 UUID 目录」当判据，而不是逐个列白名单：以后再加子目录
+            // （封面、缓存、临时文件）就不会重蹈覆辙。
+            guard Self.isDownloadFolderName(name) else { continue }
+            guard !known.contains(name), !live.contains(name) else { continue }
+            try? FileManager.default.removeItem(at: url)
+            Diagnostics.shared.record(.info, "download", "purged orphan folder=\(name)")
+        }
+    }
+
+    /// Whether a directory name in the downloads root is one of ours (a download's own folder).
+    ///
+    /// Downloads are named `UUID().uuidString.lowercased()`; anything else in that root — the index
+    /// file, the Music library subdirectory, future side stores — must never be treated as an orphan.
+    nonisolated static func isDownloadFolderName(_ name: String) -> Bool {
+        UUID(uuidString: name) != nil
+    }
+
     public func pauseAll() {
         for item in items where item.status == .queued || item.isActive { stop(item.id); update(item.id) { $0.status = .paused } }
         save(); schedule()
@@ -246,10 +367,14 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     /// Starts waiting downloads, oldest first, while fewer than `simultaneous` run.
     private func schedule() {
         guard resolver != nil else { return }
+        let before = running.count
         for item in items where item.status == .queued {
             guard running.count < simultaneous else { break }
             start(item.id)
         }
+        // 只有「跑着的数量」真的变了才发通知：`schedule()` 被 save/pause/remove/wake 各条
+        // 路径反复调用，每次无条件通知会让 `isIdleTimerDisabled` 每秒被写一遍。
+        if running.count != before { onActivityChange?(!running.isEmpty) }
         if running.isEmpty { ticker?.cancel(); ticker = nil }
         else if ticker == nil {
             ticker = Task { [weak self] in
@@ -262,10 +387,12 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     }
 
     private func start(_ id: String) {
-        let run = UUID(), meter = DownloadMeter()
+        let run = UUID(), meter = DownloadMeter(), speed = SpeedMeter()
         update(id) { $0.status = .downloading; $0.failure = nil }
         let folder = folder(id)
-        let transfer = Transfer(folder: folder, meter: meter, session: session, resolve: { [weak self] in
+        let box = TuningBox(settings.tuning)
+        boxes[id] = box
+        let transfer = Transfer(folder: folder, meter: meter, session: session, tuning: box, speed: speed, resolve: { [weak self] in
             guard let self else { throw CancellationError() }
             return try await self.resolve(id)
         }, note: { [weak self] note in
@@ -282,7 +409,7 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
                 self?.finish(id, run: run) { $0.status = .failed; $0.failure = error.localizedDescription }
             }
         }
-        running[id] = (run, task, meter)
+        running[id] = (run, task, meter, speed)
         onStart?()
     }
 
@@ -307,9 +434,12 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     }
 
     private func finish(_ id: String, run: UUID, _ change: (inout DownloadItem) -> Void) {
-        guard running[id]?.run == run else { return }
+        guard let entry = running[id], entry.run == run else { return }
+        // The last tick before the row settles: without it a finished download keeps the rate it had
+        // a second ago, and a paused one keeps it forever.
+        entry.speed.settle()
         tick()
-        running[id] = nil; samples[id] = nil; rates[id] = nil
+        running[id] = nil; samples[id] = nil; rates[id] = nil; boxes[id] = nil
         update(id, change)
         save(); schedule()
         Task { await measure() }
@@ -317,7 +447,7 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
 
     private func stop(_ id: String) {
         running[id]?.task.cancel()
-        running[id] = nil; samples[id] = nil; rates[id] = nil
+        running[id] = nil; samples[id] = nil; rates[id] = nil; boxes[id] = nil
     }
 
     /// Copies running downloads' counters into their items and works out speeds.
@@ -325,15 +455,26 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
         let now = Date()
         for (id, entry) in running {
             let value = entry.meter.snapshot
+            entry.speed.sample(value.received)
             update(id) { item in
                 item.received = value.received; item.completedParts = value.parts; item.totalParts = value.total
+                if !item.isActive { item.speed = 0 }
                 if item.kind == .hls, value.parts > 0, value.total > 0 {
                     item.expected = Int64(Double(value.received) / Double(value.parts) * Double(value.total))
                 } else if let expected = value.expected { item.expected = expected }
+                // Both move with the transfer, so they belong on the item the page is already reading.
+                item.speed = entry.speed.speed
+                // The peak, not the instant: a lane between two ranges is closed for a moment, and a
+                // number that flickers to zero reads as a bug rather than as a finished request.
+                if entry.speed.activeConnections > 0 { item.connections = entry.speed.activeConnections }
+                else { item.connections = max(item.connections, entry.speed.peakConnections) }
             }
+            // The meter has the true rate now; the queue's own sampler stays for rows whose speed comes
+            // from the item rather than from a live meter.
+            if entry.speed.speed > 0 { rates[id] = entry.speed.speed }
             if let last = samples[id], now.timeIntervalSince(last.date) > 0.5 {
                 let rate = max(0, Double(value.received - last.bytes) / now.timeIntervalSince(last.date))
-                rates[id] = rates[id].map { $0 * 0.6 + rate * 0.4 } ?? rate
+                if rates[id] == nil { rates[id] = rate }
             }
             samples[id] = (now, value.received)
         }
@@ -398,6 +539,7 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     /// Measures the downloads on disk and the space left on the device.
     public func measure() async {
         forgetMissing()
+        purgeOrphans()
         let root = root, ids = items.map(\.id)
         let sizes = await Task.detached { ids.map { (id: $0, size: Self.allocatedSize(root.appending(path: $0))) } }.value
         for entry in sizes {

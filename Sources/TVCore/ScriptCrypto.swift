@@ -95,6 +95,15 @@ enum ScriptCrypto {
             }
         case "rsaRaw":
             answer = ["data": try rsaRaw(publicKey: request["key"]?.string ?? "", data: bytes("data")).base64EncodedString()]
+        // WeBox's crypto.rsaEncrypt/rsaDecrypt: PKCS#1 v1.5 padding by default, and a private key decrypts.
+        case "rsa":
+            let algorithm: SecKeyAlgorithm = (request["padding"]?.string ?? "pkcs1").lowercased() == "raw" ? .rsaEncryptionRaw : .rsaEncryptionPKCS1
+            if flag("decrypt", false) {
+                let plain = try rsa(decrypt: true, pem: request["key"]?.string ?? "", data: bytes("data"), algorithm: algorithm)
+                answer = ["data": plain.base64EncodedString(), "text": String(decoding: plain, as: UTF8.self)]
+            } else {
+                answer = ["data": try rsa(decrypt: false, pem: request["key"]?.string ?? "", data: bytes("data"), algorithm: algorithm).base64EncodedString()]
+            }
         default: throw ScriptHostError("unsupported crypto operation")
         }
         return String(decoding: try JSONSerialization.data(withJSONObject: answer), as: UTF8.self)
@@ -145,10 +154,54 @@ enum ScriptCrypto {
         return output as Data
     }
 
+    /// PKCS#1 v1.5, and raw for callers that ask: what WeBox's `crypto.rsaEncrypt` does, and what 瓜子's
+    /// device sign-in needs. A private key decrypts, and arrives as PKCS#8 ("BEGIN PRIVATE KEY") or PKCS#1.
+    static func rsa(decrypt: Bool, pem: String, data: Data, algorithm: SecKeyAlgorithm) throws -> Data {
+        let body = pem.components(separatedBy: .newlines).filter { !$0.hasPrefix("-----") }.joined()
+        guard var der = Data(base64Encoded: body, options: .ignoreUnknownCharacters), !der.isEmpty else { throw ScriptHostError("invalid RSA key") }
+        let isPrivate = pem.contains("PRIVATE KEY")
+        if isPrivate, pem.contains("BEGIN PRIVATE KEY") { der = try privateKey(der) }
+        else if !isPrivate, pem.contains("BEGIN PUBLIC KEY") { der = try subjectPublicKey(der) }
+        let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeyClass: isPrivate ? kSecAttrKeyClassPrivate : kSecAttrKeyClassPublic]
+        guard let key = SecKeyCreateWithData(der as CFData, attributes as CFDictionary, nil) else { throw ScriptHostError("invalid RSA key") }
+        if decrypt {
+            guard SecKeyIsAlgorithmSupported(key, .decrypt, algorithm) else { throw ScriptHostError("this RSA key can't decrypt") }
+            guard let output = SecKeyCreateDecryptedData(key, algorithm, data as CFData, nil) else { throw ScriptHostError("RSA decryption failed") }
+            return output as Data
+        }
+        guard SecKeyIsAlgorithmSupported(key, .encrypt, algorithm) else { throw ScriptHostError("this RSA key can't encrypt") }
+        guard let output = SecKeyCreateEncryptedData(key, algorithm, data as CFData, nil) else { throw ScriptHostError("RSA encryption failed") }
+        return output as Data
+    }
+
+    /// The PKCS#1 RSAPrivateKey inside a PKCS#8 PrivateKeyInfo:
+    /// SEQUENCE { INTEGER version, SEQUENCE algorithm, OCTET STRING privateKey }.
+    static func privateKey(_ der: Data) throws -> Data {
+        let bytes = [UInt8](der), invalid = ScriptHostError("invalid RSA private key")
+        var index = 0
+        func header(_ tag: UInt8) throws -> Int {
+            guard index < bytes.count, bytes[index] == tag else { throw invalid }
+            index += 1
+            guard index < bytes.count else { throw invalid }
+            let first = bytes[index]; index += 1
+            if first < 0x80 { return Int(first) }
+            let count = Int(first & 0x7F)
+            guard (1...4).contains(count), index + count <= bytes.count else { throw invalid }
+            var length = 0
+            for _ in 0..<count { length = length << 8 | Int(bytes[index]); index += 1 }
+            return length
+        }
+        _ = try header(0x30)
+        index += try header(0x02)          // version
+        index += try header(0x30)          // algorithm identifier
+        let length = try header(0x04)      // OCTET STRING: the PKCS#1 key
+        guard index + length <= bytes.count else { throw invalid }
+        return Data(bytes[index..<(index + length)])
+    }
+
     /// The PKCS#1 key inside a SubjectPublicKeyInfo ("BEGIN PUBLIC KEY"):
     /// SEQUENCE { SEQUENCE { algorithm }, BIT STRING { 0x00, RSAPublicKey } }.
-    static func subjectPublicKey(_ der: Data) throws -> Data {
-        let bytes = [UInt8](der), invalid = ScriptHostError("invalid RSA public key")
+    static func subjectPublicKey(_ der: Data) throws -> Data {        let bytes = [UInt8](der), invalid = ScriptHostError("invalid RSA public key")
         var index = 0
         func header(_ tag: UInt8) throws -> Int {
             guard index < bytes.count, bytes[index] == tag else { throw invalid }

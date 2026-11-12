@@ -31,12 +31,47 @@ public struct LineSetting: Codable, Hashable, Sendable {
     /// in one place was invisible in the other.
     @MainActor public static var shared = LineSettings()
 
-    private static let storageKey = "lineSettings.v1"
+    private static let baseKey = "lineSettings.v1"
+    /// 该环境下的 key。源改名 / 改 API、线路开关、源路由都是**偏好**，没有记录可打戳，
+    /// 只能按 storage key 分环境（口径同 `PinnedSources`）：默认环境保留原 key，升级不丢旧偏好。
+    /// 不分环境时，A 环境里把某源改名成「我的源」、或把某条线路设为代理/隐藏，切到 B 环境
+    /// 照样生效 —— 同一份订阅在两个环境下 `origin + sourceKey` 完全一致，必中。
+    public var environmentID: UUID?
+    public var defaultEnvironmentID: UUID?
+    private var scopedKey: String {
+        EnvironmentScopedKey.key(Self.baseKey, environment: environmentID, default: defaultEnvironmentID)
+    }
+
+    /// 切环境后按新 key 重读，否则内存里仍是上一个环境那一份。
+    public func reloadForEnvironment() {
+        let next = defaults.data(forKey: scopedKey)
+            .flatMap { try? JSONDecoder().decode([String: LineSetting].self, from: $0) } ?? [:]
+        guard next != values else { return }
+        values = next
+        bump(notify: false)
+    }
+
+    /// 写入**当前环境**那个 key。
+    ///
+    /// 父类 `KeyedPersistedStore.write()` 写的是构造时传入的 `storageKey`（这里给的是 baseKey，
+    /// 因为 init 时还不知道当前环境）。不覆写的话就成了「读 scoped、写裸 key」：在非默认环境里
+    /// 改名/改 API 会落进默认环境的 key，再 reload 时改动凭空消失 —— 正是「切环境后残留」的镜像。
+    /// 三兄弟里 `SourceRouting` 从一开始就覆写了，这两个漏了。
+    public override func write() {
+        if let data = try? JSONEncoder().encode(values) { defaults.set(data, forKey: scopedKey) }
+    }
+
+    /// 删环境时清掉它名下的偏好 key。
+    public static func delete(environment: UUID, defaults: UserDefaults = .standard, default defaultID: UUID?) {
+        guard let defaultID, environment != defaultID else { return }
+        defaults.removeObject(forKey: EnvironmentScopedKey.key(baseKey, environment: environment, default: defaultID))
+    }
 
     public init(defaults: UserDefaults = .standard) {
-        let values = defaults.data(forKey: Self.storageKey)
+        // 同 `SourceOverrides`：先读原 key，环境确定后由 `reloadForEnvironment()` 换成该环境那份。
+        let values = defaults.data(forKey: Self.baseKey)
             .flatMap { try? JSONDecoder().decode([String: Setting].self, from: $0) } ?? [:]
-        super.init(defaults: defaults, storageKey: Self.storageKey, values: values)
+        super.init(defaults: defaults, storageKey: Self.baseKey, values: values)
     }
 
     private func key(origin: URL, sourceKey: String, flag: String) -> String {

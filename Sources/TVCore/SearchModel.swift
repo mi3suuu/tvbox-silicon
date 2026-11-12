@@ -45,6 +45,9 @@ import Observation
     private var excluded: @MainActor (Site) -> Bool = { _ in false }
     /// The viewer's source order; while it is on, it replaces `SourceStrategy`'s.
     public var order: SourceOrder?
+    /// Which group a source belongs to (`SourceGroup.id`), so search can honour the viewer's group
+    /// priority. Set by the store, which is the only place that knows the merged grouping.
+    public var groupOf: (@MainActor (Site) -> String)?
     public init(http: HTTPClient = HTTPClient()) { self.http = http }
 
     public var failures: [SearchSourceResult] { results.filter { $0.error != nil } }
@@ -238,10 +241,22 @@ import Observation
         }
     }
 
-    /// `SourceStrategy` order, or the viewer's own while it is on (sources it doesn't list yet follow).
+    /// `SourceStrategy` order, then the viewer's own: group priority first, then the source list
+    /// inside each group.
+    ///
+    /// The two layers are independent on purpose. Group priority is a coarse, safe statement ("ask
+    /// this feed before that one") and applies as soon as it is set; the source list is a fine,
+    /// laborious one and applies only while its switch is on. A reader who ranks six feeds has not
+    /// thereby asked for their 300-source hand order to take over.
     private func arrange(_ sites: [Site], config: Subscription, failing: (Site) -> Bool) -> [Site] {
         let automatic = SourceStrategy.arrange(sites, where: { _ in true }, failing: failing)
-        guard let order, order.enabled else { return automatic }
+        guard let order else { return automatic }
+        // One comparator, not two passes: sorting by group and then by source would throw the group
+        // buckets away the moment a source order exists.
+        if let groupOf, order.hasGroupOrder {
+            return order.arrange(automatic, origin: config.origin, group: groupOf)
+        }
+        guard order.enabled else { return automatic }
         return order.arrange(automatic, origin: config.origin)
     }
 

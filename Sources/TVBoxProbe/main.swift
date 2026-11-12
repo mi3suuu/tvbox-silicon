@@ -3,6 +3,44 @@ import AVFoundation
 import TVCore
 
 @main struct Probe {
+    /// The same file at one connection and at N: the only honest way to state what the engine buys.
+    @MainActor static func benchmark(_ target: String, folder: URL, connections: Int, chunkMB: Int) async throws {
+        guard let url = URL(string: target) else { return }
+        // Probe once for the length, which is what an unranged download would move in one request.
+        var head = URLRequest(url: url)
+        head.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        let (_, response) = try await URLSession.shared.data(for: head)
+        let length = Int64((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Range")?
+            .split(separator: "/").last.flatMap { Int64($0) } ?? 0)
+        print("file length=\(length) bytes")
+        for tuning in [DownloadTuning(connections: 1, chunkMB: chunkMB, parallel: 1),
+                       DownloadTuning(connections: connections, chunkMB: chunkMB, parallel: 1)] {
+            let root = folder.appending(path: "c\(tuning.connections)")
+            try? FileManager.default.removeItem(at: root)
+            let library = DownloadLibrary(root: root, defaults: UserDefaults(suiteName: "probe-bench")!,
+                                          settings: DownloadSettings(defaults: UserDefaults(suiteName: "probe-bench")!))
+            library.settings.set(connections: tuning.connections, chunkMB: tuning.chunkMB, parallel: 1)
+            library.resolver = { _ in Channel(name: "probe", url: url) }
+            let episode = Episode(id: target, name: "Bench", address: target, flag: "bench")
+            // A benchmark only needs a source record to hang the download on, not a real site. Built by
+            // decoding because Site's initialiser is internal to TVCore.
+            let site = try JSONDecoder().decode(Site.self, from: Data(#"{"key":"bench","name":"Bench","type":3,"api":"bench://local","raw":{}}"#.utf8))
+            let item = library.download(DownloadSource(site: site, videoID: target, episode: episode),
+                                        title: "Bench", poster: nil)
+            let began = Date()
+            while library.item(id: item.id)?.status != .completed, library.item(id: item.id)?.status != .failed {
+                try await Task.sleep(for: .milliseconds(200))
+                if Date().timeIntervalSince(began) > 300 { break }
+            }
+            let elapsed = Date().timeIntervalSince(began)
+            let done = library.item(id: item.id)
+            let bytes = done?.received ?? 0
+            print(String(format: "connections=%d chunk=%dMB %.2fs %.2f MB/s peakSockets=%d status=%@",
+                         tuning.connections, tuning.chunkMB, elapsed, Double(bytes) / elapsed / 1_048_576,
+                         done?.connections ?? 0, done?.status.rawValue ?? "-"))
+        }
+    }
+
     @MainActor static func download(_ target: String, folder: URL, pauseAfter: Double?) async throws {
         let library = DownloadLibrary(root: folder, defaults: UserDefaults(suiteName: "probe-downloads")!)
         library.resolver = { _ in
@@ -22,7 +60,8 @@ import TVCore
             try await Task.sleep(for: .seconds(1))
             guard let current = library.item(id: item.id) else { return }
             let rate = library.rates[item.id].map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + "/s" } ?? "-"
-            print("\(Int(Date().timeIntervalSince(started)))s \(current.status.rawValue) kind=\(current.kind?.rawValue ?? "-") \(current.quality ?? "") \(String(format: "%.1f%%", current.fraction * 100)) \(current.received)/\(current.expected ?? -1) parts=\(current.completedParts)/\(current.totalParts) \(rate) \(current.failure ?? "")")
+            // connections= is the accelerator's own number: how many sockets carried this download.
+            print("\(Int(Date().timeIntervalSince(started)))s \(current.status.rawValue) kind=\(current.kind?.rawValue ?? "-") \(current.quality ?? "") \(String(format: "%.1f%%", current.fraction * 100)) \(current.received)/\(current.expected ?? -1) parts=\(current.completedParts)/\(current.totalParts) connections=\(current.connections) \(rate) \(current.failure ?? "")")
             if let pauseAfter, !paused, Date().timeIntervalSince(started) > pauseAfter {
                 paused = true
                 library.pause(item.id); print("paused")
@@ -155,15 +194,390 @@ import TVCore
             } catch { step("page FAILED: \(error.localizedDescription)") }
         }
     }
+    /// One WeBox plugin through the same calls the app makes: home, search, detail, play. The plugin is
+    /// edited by its author, not by us, so this reports what it answers rather than asserting a shape.
+    static func webox(_ address: String, keyword: String?) async throws {
+        // The api goes through the same resolution the app uses for a subscription entry, so an
+        // `assets://` plugin proves the bundled path and not just a direct URL.
+        let origin = URL(string: "http://localhost/")!
+        let escaped = address.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        // TVBOX_EXT carries a source's `ext` (the plugin's settings), so a plugin's non-default
+        // settings — a mirror site, a cookie — are tried exactly as a subscription would supply them.
+        let extra = (ProcessInfo.processInfo.environment["TVBOX_EXT"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let settings = extra.isEmpty || extra == "{}" ? "{\"webox\":1}" : "{\"webox\":1,\"ext\":\(extra.debugDescription)}"
+        let site = try JSONDecoder().decode(Site.self, from: Data(#"{"key":"webox-probe","name":"WeBox","type":3,"api":"\#(escaped)","raw":\#(settings)}"#.utf8))
+        let script = try site.scriptURL(origin: origin)
+        print("api: \(script.absoluteString)")
+        let http = HTTPClient()
+        func call(_ params: [String: String]) async -> [String: JSONValue]? {
+            let began = Date()
+            do {
+                let json = try await ScriptRuntime.shared.request(site: site, scriptURL: script, params: params, http: http, origin: origin)
+                print(String(format: "  (%.0fms, %d fields)", Date().timeIntervalSince(began) * 1000, json.count))
+                return json
+            } catch {
+                print(String(format: "  FAILED (%.0fms): %@", Date().timeIntervalSince(began) * 1000, error.localizedDescription))
+                return nil
+            }
+        }
+        func items(_ json: [String: JSONValue]?) -> [[String: JSONValue]] {
+            (json?["list"]?.array ?? []).compactMap(\.object)
+        }
+
+        print("home …")
+        guard let home = await call([:]) else { return }
+        let classes = (home["class"]?.array ?? []).compactMap(\.object)
+        print("  classes: " + classes.compactMap { $0["type_name"]?.string }.joined(separator: " / "))
+        let homeItems = items(home)
+        print("  home: \(homeItems.count) items; first: \(homeItems.first?["vod_name"]?.string ?? "-")")
+
+        var chosen: String? = homeItems.first?["vod_id"]?.string
+        if let keyword, !keyword.isEmpty {
+            print("search “\(keyword)” …")
+            if let result = await call(["wd": keyword, "pg": "1"]) {
+                let found = items(result)
+                print("  \(found.count) results; first: \(found.first?["vod_name"]?.string ?? "-")")
+                if let id = found.first?["vod_id"]?.string { chosen = id }
+            }
+        }
+        if let category = classes.dropFirst().first?["type_id"]?.string {
+            print("category \(category) …")
+            if let result = await call(["t": category, "pg": "1"]) {
+                let listed = items(result)
+                print("  \(listed.count) items; first: \(listed.first?["vod_name"]?.string ?? "-")")
+                // A probe of many candidates at once returns one item per candidate: show them all.
+                if listed.count > 1, listed.count <= 12 { for item in listed.dropFirst() { print("    · \(item["vod_name"]?.string ?? "-")") } }
+                chosen = chosen ?? listed.first?["vod_id"]?.string
+            }
+        }
+        guard let id = chosen else { print("nothing to open"); return }
+        print("detail \(id) …")
+        guard let detail = await call(["ids": id]), let vod = items(detail).first else { return }
+        print("  title: \(vod["vod_name"]?.string ?? "-")")
+        print("  poster: \(vod["vod_pic"]?.string ?? "-")")
+        let flags = (vod["vod_play_from"]?.string ?? "").components(separatedBy: "$$$")
+        let groups = (vod["vod_play_url"]?.string ?? "").components(separatedBy: "$$$")
+        print("  lines: \(flags.joined(separator: " / "))")
+        guard let first = groups.first, !first.isEmpty else { print("  no episodes"); return }
+        let episodes = first.components(separatedBy: "#").filter { !$0.isEmpty }
+        print("  episodes: \(episodes.count); first: \(episodes.first ?? "-")")
+        let parts = (episodes.first ?? "").split(separator: "$", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { print("  episode has no address"); return }
+        print("play …")
+        let played = await call(["play": parts[1], "flag": flags.first ?? ""])
+        print("  url: \(played?["url"]?.string ?? "-")")
+        // A media proxy lives in this process, so a check of the address it answered needs the process alive.
+        if let hold = ProcessInfo.processInfo.environment["TVBOX_HOLD"], let seconds = Double(hold) {
+            print("holding \(Int(seconds))s …")
+            try? await Task.sleep(for: .seconds(seconds))
+        }
+    }
+
+    // MARK: - 播放探测（配置包版）
+
+    /// 一条源的探测结果。`media` 是**字节级**结论，不是「接口应答了」：
+    /// `ok` 拉到媒体字节且够快，`fail` 拿不到，`web` 播放地址是网页需要嗅探，
+    /// `none` 是插件代理/磁力等没有 HTTP 地址，`timeout` 整个源超时。
+    struct ProbeRow: Encodable, Sendable {
+        let sub: String
+        let key: String
+        let name: String
+        let type: Int
+        let api: String
+        var stage: String = "home"
+        var play: String? = nil
+        var media: String = "none"
+        var kbps: Int? = nil
+        var peers: Int? = nil
+        var height: Int? = nil
+        var ms: Int? = nil
+        var error: String? = nil
+        /// 真的出字节的那一条（片名 · 集名），证明结论不是只看海报得出的。
+        var title: String? = nil
+        /// 试了几个「视频 × 线路」组合。
+        var attempts: Int = 0
+    }
+
+    /// 只解探测需要的字段：`yingxia-config` / `mi3s-config` 两种格式名都带 `subscriptions`。
+    struct ConfigBundle: Decodable {
+        struct Item: Decodable {
+            let entry: SubscriptionEntry
+            let document: Subscription?
+        }
+        let subscriptions: [Item]
+    }
+
+    /// 到一个截止时间就放弃，把这个源判成 timeout 而不是让它拖住整轮。
+    static func withDeadline<T: Sendable>(_ seconds: Double,
+                                          _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(seconds, 1) * 1_000_000_000))
+                throw TVError.unsupported("timed out after \(Int(seconds))s")
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw TVError.unsupported("no answer") }
+            return first
+        }
+    }
+
+    /// 拉一小段字节，确认这条地址真的出流。HLS 会再往里走一层：主清单 → 变体 → 分片，
+    /// 只有分片拿得到字节才算可播 —— 清单能拉、分片全 404 的源很常见。
+    static func fetchHead(_ url: URL, headers: [String: String], bytes: Int) async -> (status: Int, data: Data)? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.setValue("bytes=0-\(bytes - 1)", forHTTPHeaderField: "Range")
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return nil }
+        return (http.statusCode, data)
+    }
+
+    /// `ok` / `fail`，以及真正取到字节的那条地址（分片）。
+    static func verify(_ address: String, headers: [String: String], depth: Int = 0) async -> (media: String, leaf: URL?) {
+        guard let url = URL(string: address) else { return ("fail", nil) }
+        guard let head = await fetchHead(url, headers: headers, bytes: 65_536) else { return ("fail", nil) }
+        guard (200..<400).contains(head.status), !head.data.isEmpty else { return ("fail", nil) }
+        let text = String(decoding: head.data.prefix(16_384), as: UTF8.self)
+        guard text.contains("#EXTM3U") else { return ("ok", url) }
+        guard depth < 2 else { return ("fail", nil) }
+        // 第一条不是注释的行就是下一层：主清单里是变体清单，媒体清单里是分片。
+        let next = text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard let next, let resolved = URL(string: next, relativeTo: url)?.absoluteURL else { return ("fail", nil) }
+        return await verify(resolved.absoluteString, headers: headers, depth: depth + 1)
+    }
+
+    /// 一条播放地址到底能不能出字节。
+    ///
+    /// 磁力真的加入种子网络读一片；网页地址（`requiresWebDetection`）记为需要嗅探；HTTP 地址按 Range
+    /// 拉 64 KB，HLS 一路下钻到分片——只看清单回 200 是不够的，海报点进去放不出来正是差在这一步。
+    static func examine(_ choice: PlaybackChoice, plan: PlaybackPlan) async
+        -> (ok: Bool, media: String, error: String?, kbps: Int?, height: Int?, ms: Int?, peers: Int?) {
+        let address = choice.address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { return (false, "none", "empty address", nil, nil, nil, nil) }
+        if address.lowercased().hasPrefix("magnet:") {
+            do {
+                let torrent = try await TorrentBridge.shared.open(address, wait: 60)
+                let data = try await TorrentBridge.shared.read(torrent, at: 0, count: 262_144)
+                return (data.count > 512, data.count > 512 ? "ok" : "fail",
+                        data.count > 512 ? nil : "torrent gave no bytes", data.count, nil, nil, torrent.peers)
+            } catch {
+                return (false, "fail", error.localizedDescription, nil, nil, nil, nil)
+            }
+        }
+        if plan.requiresWebDetection { return (false, "web", "needs in-app web detection", nil, nil, nil, nil) }
+        guard let url = URL(string: address), let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return (false, "none", "not an http address: \(address.prefix(40))", nil, nil, nil, nil)
+        }
+        let checked = await verify(address, headers: plan.headers)
+        guard checked.media == "ok", let leaf = checked.leaf else {
+            return (false, checked.media, "no bytes from \(url.host() ?? address)", nil, nil, nil, nil)
+        }
+        let reading = await SourceProbeRunner.probe(url: leaf, headers: plan.headers)
+        return (reading.isUsable, reading.isUsable ? "ok" : "fail",
+                reading.isUsable ? nil : "probe could not read", reading.kilobytesPerSecond,
+                reading.resolutionHeight, reading.latencyMilliseconds, nil)
+    }
+
+    /// 走 App 真实的目录链路：首页 →（无片时）分类 → 详情 → 播放地址，再拉一段字节。
+    ///
+    /// 只试第一个视频不够：首页挂着海报、点进去那条线路已经死掉的源很常见。所以轮一遍
+    /// 「多个视频 × 每集的前几条线路」，任何一个组合真的出字节就算可播；全都拉不到才判 `fail`，
+    /// 并把最后一次的原因写进 `error`，免得把「海报能点」当成「能播」。
+    static func runProbe(site: Site, sub: String, origin: URL, jar: URL?,
+                         videos maxVideos: Int = 4, episodes maxEpisodes: Int = 1,
+                         choices maxChoices: Int = 2) async throws -> ProbeRow {
+        var row = ProbeRow(sub: sub, key: site.key, name: site.name, type: site.type, api: site.api)
+        let client = CatalogClient(site: site, origin: origin, jarURL: jar)
+        var pool: [Video] = []
+        do {
+            let home = try await client.home()
+            pool = home.videos
+            if pool.isEmpty, let category = home.categories.first {
+                row.stage = "category"
+                pool = try await client.list(category: category.id, query: "", page: 1).videos
+            }
+        } catch {
+            row.error = error.localizedDescription
+            return row
+        }
+        guard !pool.isEmpty else {
+            row.error = "no videos on the home page"
+            return row
+        }
+
+        var attempts = 0
+        var lastError: String?
+        var sawWeb = false
+        for video in pool.prefix(maxVideos) {
+            row.stage = "detail"
+            guard let full = try? await client.detail(video.id), !full.episodes.isEmpty else {
+                lastError = "no episodes for \(video.name)"
+                continue
+            }
+            for episode in full.episodes.prefix(maxEpisodes) {
+                row.stage = "play"
+                guard let plan = try? await client.preparePlayback(episode), !plan.choices.isEmpty else {
+                    lastError = "no playback address for \(video.name)"
+                    continue
+                }
+                for choice in plan.choices.prefix(maxChoices) {
+                    attempts += 1
+                    let outcome = await examine(choice, plan: plan)
+                    if outcome.media == "web" { sawWeb = true }
+                    if outcome.ok {
+                        row.media = "ok"
+                        row.play = choice.address
+                        row.title = "\(video.name) · \(episode.name) · \(choice.name)"
+                        row.kbps = outcome.kbps
+                        row.height = outcome.height
+                        row.ms = outcome.ms
+                        row.peers = outcome.peers
+                        row.attempts = attempts
+                        return row
+                    }
+                    lastError = outcome.error ?? lastError
+                }
+            }
+        }
+        row.attempts = attempts
+        if attempts == 0 {
+            row.media = "none"
+            row.error = lastError ?? "no episodes"
+        } else if sawWeb {
+            // 每条线路都是网页地址：接口没坏，字节要 App 的 WebView 才出得来。
+            row.media = "web"
+            row.error = lastError
+        } else {
+            row.media = "fail"
+            row.error = "posters but nothing plays (\(attempts) tries): " + (lastError ?? "unknown")
+        }
+        return row
+    }
+
+    static func playProbe(_ args: [String]) async throws {
+        setvbuf(stdout, nil, _IONBF, 0)
+        var address = ""
+        var jobs = 6
+        var deadline = 45.0
+        var maxVideos = 4
+        var maxEpisodes = 1
+        var maxChoices = 2
+        var filters: [String] = []
+        var index = 0
+        while index < args.count {
+            switch args[index] {
+            case "--jobs": index += 1; jobs = max(1, Int(args[index]) ?? jobs)
+            case "--deadline": index += 1; deadline = Double(args[index]) ?? deadline
+            case "--videos": index += 1; maxVideos = max(1, Int(args[index]) ?? maxVideos)
+            case "--episodes": index += 1; maxEpisodes = max(1, Int(args[index]) ?? maxEpisodes)
+            case "--choices": index += 1; maxChoices = max(1, Int(args[index]) ?? maxChoices)
+            default:
+                if address.isEmpty { address = args[index] } else { filters.append(args[index]) }
+            }
+            index += 1
+        }
+        let (data, _) = try await HTTPClient().get(try WebAddress.resolve(address))
+        let bundle = try JSONDecoder().decode(ConfigBundle.self, from: data)
+        var work: [(String, Subscription, Site)] = []
+        for item in bundle.subscriptions {
+            guard let document = item.document, item.entry.enabled else { continue }
+            for site in document.sites
+            where filters.isEmpty || filters.contains(where: { site.name.contains($0) || site.key.contains($0) }) {
+                work.append((item.entry.name, document, site))
+            }
+        }
+        FileHandle.standardError.write(Data("probing \(work.count) sources, \(jobs) at a time\n".utf8))
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let limit = deadline
+        // 闭包要并发执行，参数先落成常量，免得 Swift 6 报「引用可变的捕获变量」。
+        let videoBudget = maxVideos, episodeBudget = maxEpisodes, choiceBudget = maxChoices
+        var counts: [String: Int] = [:]
+        for start in stride(from: 0, to: work.count, by: jobs) {
+            let slice = work[start..<min(start + jobs, work.count)]
+            await withTaskGroup(of: ProbeRow.self) { group in
+                for (sub, document, site) in slice {
+                    group.addTask {
+                        do {
+                            return try await withDeadline(limit) {
+                                try await runProbe(site: site, sub: sub, origin: document.origin, jar: document.spiderURL,
+                                                   videos: videoBudget, episodes: episodeBudget, choices: choiceBudget)
+                            }
+                        } catch {
+                            var row = ProbeRow(sub: sub, key: site.key, name: site.name, type: site.type, api: site.api)
+                            row.stage = "timeout"; row.error = error.localizedDescription
+                            return row
+                        }
+                    }
+                }
+                for await row in group {
+                    counts[row.media, default: 0] += 1
+                    print(String(decoding: try! encoder.encode(row), as: UTF8.self))
+                }
+            }
+        }
+        let summary = counts.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        FileHandle.standardError.write(Data("SUMMARY total=\(work.count) \(summary)\n".utf8))
+    }
+
     static func main() async throws {
         let args = CommandLine.arguments
         // Yingxia's own sources and live platforms come from its subscription.
-        if args.count >= 2, args[1] == "--live" || args[1] == "--cloud-site" || args[1].hasPrefix("--bili") || args[1] == "--download" {
+        if args.count >= 2, args[1] == "--live" || args[1] == "--cloud-site" || args[1].hasPrefix("--bili") || args[1] == "--download" || args[1] == "--bench-download" {
             CloudSources.current = try await CloudSources.fetch(http: HTTPClient())
         }
         guard args.count >= 2 else {
             print("Usage: TVBoxProbe <jar path> [class descriptor] [static int method]")
             print("       TVBoxProbe --subscription-check <URL> [...]")
+            return
+        }
+        if args[1] == "--webox", args.count >= 3 {
+            // --webox <plugin .webox.js file or URL> [keyword]: the four calls the app makes on one plugin.
+            setvbuf(stdout, nil, _IONBF, 0)
+            try await webox(args[2], keyword: args.count > 3 ? args[3] : nil)
+            return
+        }
+        if args[1] == "--torrent", args.count >= 3 {
+            // --torrent <magnet>: join the swarm, then read a slice of the file it holds.
+            setvbuf(stdout, nil, _IONBF, 0)
+            let magnet = args[2]
+            let seconds = args.count > 3 ? (Double(args[3]) ?? 60) : 60
+            // 第四个参数写 remux：强制走重封装（用 MP4 验 MKV 那条链路）。
+            let forceRemux = args.count > 4 && args[4] == "remux"
+            do {
+                let started = Date()
+                let torrent = try await TorrentBridge.shared.open(magnet, wait: seconds)
+                print("joined  \(torrent.name)  peers=\(torrent.peers)  file=\(torrent.fileName)  \(torrent.length) bytes  direct=\(torrent.direct)")
+                if torrent.direct, !forceRemux {
+                    let url = try await TorrentBridge.shared.streamURL(torrent)
+                    print("stream  \(url.absoluteString)")
+                    let reading = await SourceProbeRunner.probe(url: url)
+                    print("probe   \(reading.reachability.rawValue)  \(reading.kilobytesPerSecond ?? -1) KB/s  \(reading.latencyMilliseconds ?? -1) ms")
+                } else {
+                    print("remux   (MKV/AVI, opening the repackager)")
+                    let url = try await TorrentBridge.shared.remuxURL(torrent)
+                    print("hls     \(url.absoluteString)")
+                }
+                let data = try await TorrentBridge.shared.read(torrent, at: 0, count: 262_144)
+                print("read    \(data.count) bytes in \(String(format: "%.2f", Date().timeIntervalSince(started)))s  first4=\(data.prefix(4).map { String(format: "%02x", $0) }.joined())")
+                // 和 --webox 一样：媒体口在本进程里，验地址要进程活着。
+                if let hold = ProcessInfo.processInfo.environment["TVBOX_HOLD"], let seconds = Double(hold) {
+                    print("holding \(Int(seconds))s …")
+                    try? await Task.sleep(for: .seconds(seconds))
+                }
+            } catch {
+                print("FAILED \(error.localizedDescription)")
+            }
+            return
+        }
+        if args[1] == "--play-probe", args.count >= 3 {
+            // --play-probe <config package> [--jobs N] [--deadline S] [source filters]: every source's
+            // home → detail → play, then a byte-level reading of the address it handed back.
+            try await playProbe(Array(args.dropFirst(2)))
             return
         }
         if args[1] == "--manga", args.count >= 3 {
@@ -177,6 +591,15 @@ import TVCore
             // optionally paused and resumed partway, then the result played through AVPlayer.
             setvbuf(stdout, nil, _IONBF, 0)
             try await download(args[2], folder: URL(filePath: args[3]), pauseAfter: args.count > 4 ? Double(args[4]) : nil)
+            return
+        }
+        if args[1] == "--bench-download", args.count >= 4 {
+            // --bench-download <media URL> <folder> [connections] [chunkMB] [parallel]: the same file at
+            // several connection counts, to show what the accelerator is worth on this link.
+            setvbuf(stdout, nil, _IONBF, 0)
+            try await benchmark(args[2], folder: URL(filePath: args[3]),
+                                connections: args.count > 4 ? Int(args[4]) ?? 8 : 8,
+                                chunkMB: args.count > 5 ? Int(args[5]) ?? 4 : 4)
             return
         }
         if args[1] == "--rewrap", args.count >= 4 {

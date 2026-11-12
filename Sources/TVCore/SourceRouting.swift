@@ -27,13 +27,37 @@ public enum SourceRoute: String, Codable, CaseIterable, Sendable {
 /// Subscription-qualified routing choices. The key scheme matches `PinnedSources` and `HiddenSources`,
 /// so a choice survives re-imports and merges; a source not listed falls back to its subscription's route.
 @MainActor @Observable public final class SourceRouting: KeyedPersistedStore<String> {
-    private static let storageKey = "sourceRouting.v1"
+    private static let baseKey = "sourceRouting.v1"
+    /// 该环境下的 key。源改名 / 改 API、线路开关、源路由都是**偏好**，没有记录可打戳，
+    /// 只能按 storage key 分环境（口径同 `PinnedSources`）：默认环境保留原 key，升级不丢旧偏好。
+    /// 不分环境时，A 环境里把某源改名成「我的源」、或把某条线路设为代理/隐藏，切到 B 环境
+    /// 照样生效 —— 同一份订阅在两个环境下 `origin + sourceKey` 完全一致，必中。
+    public var environmentID: UUID?
+    public var defaultEnvironmentID: UUID?
+    private var scopedKey: String {
+        EnvironmentScopedKey.key(Self.baseKey, environment: environmentID, default: defaultEnvironmentID)
+    }
 
     /// Reads the choices stored as raw-value strings (the pre-existing on-disk format).
     public init(defaults: UserDefaults = .standard) {
-        let raw = defaults.dictionary(forKey: Self.storageKey) as? [String: String] ?? [:]
+        let raw = defaults.dictionary(forKey: Self.baseKey) as? [String: String] ?? [:]
         let values = raw.compactMapValues { SourceRoute(rawValue: $0)?.rawValue }
-        super.init(defaults: defaults, storageKey: Self.storageKey, values: values)
+        super.init(defaults: defaults, storageKey: Self.baseKey, values: values)
+    }
+
+    /// 切环境后按新 key 重读（存的是 raw string，格式与磁盘一致）。
+    public func reloadForEnvironment() {
+        let raw = defaults.dictionary(forKey: scopedKey) as? [String: String] ?? [:]
+        let next = raw.compactMapValues { SourceRoute(rawValue: $0)?.rawValue }
+        guard next != values else { return }
+        values = next
+        bump(notify: false)
+    }
+
+    /// 删环境时清掉它名下的路由偏好。
+    public static func delete(environment: UUID, defaults: UserDefaults = .standard, default defaultID: UUID?) {
+        guard let defaultID, environment != defaultID else { return }
+        defaults.removeObject(forKey: EnvironmentScopedKey.key(baseKey, environment: environment, default: defaultID))
     }
 
     private func key(_ site: Site, origin: URL) -> String {
@@ -73,7 +97,7 @@ public enum SourceRoute: String, Codable, CaseIterable, Sendable {
 
     /// Stores the raw-value strings directly, keeping the pre-existing on-disk format.
     public override func write() {
-        defaults.set(values, forKey: Self.storageKey)
+        defaults.set(values, forKey: scopedKey)
     }
 }
 

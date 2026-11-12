@@ -465,6 +465,9 @@ protocol RemuxStored: AnyObject, Sendable {
 extension RemuxSession: RemuxStored {}
 
 /// The open files and streams; the oldest is closed when a fourth opens (an episode queued behind another holds two).
+///
+/// ⛔ 上限取 `PlaybackCapacity.streamLimit`，不再写死 3。写死 3 时「坞 4 + 前台 1」必然
+/// 逐出**正在播**的转封装会话（逐出即 `close()`，那一路画面立刻断），见 `PlaybackCapacity`。
 final class RemuxStore: @unchecked Sendable {
     static let shared = RemuxStore()
     private let lock = NSLock()
@@ -475,7 +478,9 @@ final class RemuxStore: @unchecked Sendable {
         let retired: [any RemuxStored] = lock.withLock {
             sessions[session.id] = session; order.append(session.id)
             var old: [any RemuxStored] = []
-            while order.count > 3 { if let value = sessions.removeValue(forKey: order.removeFirst()) { old.append(value) } }
+            while order.count > PlaybackCapacity.streamLimit {
+                if let value = sessions.removeValue(forKey: order.removeFirst()) { old.append(value) }
+            }
             return old
         }
         retired.forEach { $0.close() }

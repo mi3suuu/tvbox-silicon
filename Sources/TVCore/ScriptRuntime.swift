@@ -14,7 +14,7 @@ public actor ScriptRuntime {
 
     public func request(site: Site, scriptURL: URL, params: [String: String], http: HTTPClient, origin: URL) async throws -> [String: JSONValue] {
         let started = ContinuousClock.now
-        let session = try await self.session(site: site, scriptURL: scriptURL, origin: origin, http: http)
+        let session = try await self.session(site: site, scriptURL: scriptURL, origin: origin, http: http, webox: Self.runsWebBox(site, scriptURL))
         let envelope = try await session.call(params)
         if let message = PluginFailure.message(envelope) {
             Diagnostics.shared.record(.error, "script.request", PluginFailure.diagnostic(source: site.key, envelope))
@@ -27,7 +27,14 @@ public actor ScriptRuntime {
         return try JSONDecoder().decode([String: JSONValue].self, from: Data(text.utf8))
     }
 
-    private func session(site: Site, scriptURL: URL, origin: URL, http: HTTPClient) async throws -> ScriptSession {
+    /// A WeBox plugin is a `.webox.js` file (the extension its publisher gives it) or a source whose
+    /// raw declares `"webox"`. Nothing else changes: it is still a type 3 JavaScript source.
+    static func runsWebBox(_ site: Site, _ scriptURL: URL) -> Bool {
+        if site.raw["webox"] != nil { return true }
+        return scriptURL.lastPathComponent.lowercased().hasSuffix(".webox.js")
+    }
+
+    private func session(site: Site, scriptURL: URL, origin: URL, http: HTTPClient, webox: Bool) async throws -> ScriptSession {
         var ext: String
         if let value = try site.pluginExtension(origin: origin) {
             ext = try value.string ?? String(decoding: JSONEncoder().encode(value), as: UTF8.self)
@@ -41,7 +48,7 @@ public actor ScriptRuntime {
             return existing
         }
         let profile = ScriptAssets.profiles.appendingPathComponent(PluginChecksum.sha256(Data((site.key + "\n" + origin.absoluteString).utf8)), isDirectory: true)
-        let session = try await ScriptSession.start(api: scriptURL.absoluteString, key: site.sourceKey, ext: ext, profile: profile, label: site.key)
+        let session = try await ScriptSession.start(api: scriptURL.absoluteString, key: site.sourceKey, ext: ext, profile: profile, label: site.key, webox: webox)
         sessions[key] = session
         recent.append(key)
         while recent.count > Self.maximumSessions {
@@ -91,14 +98,17 @@ final class ScriptSession: @unchecked Sendable {
     private let bridge: ScriptBridge
     private var script: OpaquePointer?
 
-    private init(thread: ScriptThread, bridge: ScriptBridge) { self.thread = thread; self.bridge = bridge }
+    private init(thread: ScriptThread, bridge: ScriptBridge) { self.thread = thread; self.bridge = bridge; bridge.session = self }
 
     /// `source`, when given, is served for `api` instead of downloading it.
-    static func start(api: String, key: String, ext: String, profile: URL, label: String, source: String? = nil) async throws -> ScriptSession {
+    /// `webox` loads the WeBox compatibility prelude between the TVBox prelude and the plugin, which is
+    /// what lets a plugin written for WeBox (`WeBox.define({list, search, detail, play})`) run unchanged:
+    /// the adapter presents those four methods as the spider `__tvbox.call` drives.
+    static func start(api: String, key: String, ext: String, profile: URL, label: String, source: String? = nil, webox: Bool = false) async throws -> ScriptSession {
         let session = ScriptSession(thread: ScriptThread(label: label), bridge: ScriptBridge(profile: profile, label: label, supplied: source.map { [api: $0] } ?? [:]))
         session.thread.start()
         let failure: String? = await session.thread.run {
-            if let failure = session.boot() { return failure }
+            if let failure = session.boot(webox: webox) { return failure }
             let input = (try? String(decoding: JSONSerialization.data(withJSONObject: ["api": api, "key": key, "ext": ext]), as: UTF8.self)) ?? "{}"
             guard let envelope = session.evaluate("__tvbox.init(\(input))", seconds: 60) else { return "The script runtime stopped" }
             if envelope["value"]?.object?["ready"] != nil { return nil }
@@ -134,13 +144,18 @@ final class ScriptSession: @unchecked Sendable {
         await thread.run { self.evaluate(expression, seconds: seconds) } ?? ["error": .string("The script runtime stopped")]
     }
 
-    /// Runs on the session thread: QuickJS with the TVBox prelude loaded.
-    private func boot() -> String? {
+    /// Runs on the session thread: QuickJS with the TVBox prelude loaded, then the WeBox prelude for a
+    /// plugin that needs it. A WeBox plugin is still driven by `__tvbox.call`; only the environment differs.
+    private func boot(webox: Bool = false) -> String? {
         let opaque = Unmanaged.passUnretained(bridge).toOpaque()
         guard let script = tv_script_create(opaque, scriptHost, 256 << 20, 12 << 20) else { return "QuickJS could not start" }
         self.script = script
         guard let prelude = ScriptAssets.bundled("assets://tvbox/prelude.js") else { return "The script prelude is missing from this build" }
         if let error = tv_script_module(script, "assets://tvbox/prelude.js", prelude, 60) { defer { free(error) }; return String(cString: error) }
+        if webox {
+            guard let runtime = ScriptAssets.bundled("assets://webox/prelude.js") else { return "The WeBox runtime is missing from this build" }
+            if let error = tv_script_module(script, "assets://webox/prelude.js", runtime, 60) { defer { free(error) }; return String(cString: error) }
+        }
         return nil
     }
 
@@ -217,6 +232,8 @@ final class ScriptBridge: @unchecked Sendable {
     private var preferencesFile: URL { profile.appendingPathComponent("preferences.json") }
     private let pending = PendingRequests()
     private let handler: ScriptHostExtension?
+    /// The session this bridge answers for: the media proxy calls back into it for each media request.
+    weak var session: ScriptSession?
 
     deinit { pending.cancelAll() }
 
@@ -255,6 +272,12 @@ final class ScriptBridge: @unchecked Sendable {
             return ScriptHTTP.text(data, encoding: request["encoding"] ?? "utf-8")
         case "md5": return Insecure.MD5.hash(data: Data(argument.utf8)).map { String(format: "%02x", $0) }.joined()
         case "crypto": return try ScriptCrypto.run(argument)
+        // A WeBox plugin's own code with WebAssembly, which QuickJS has no engine for (WebBoxCompute).
+        case "compute": return try WebBoxCompute.run(argument)
+        // An in-memory playlist: WebBoxMediaProxy serves it and asks the plugin's hooks per request.
+        case "mediaPublish":
+            guard let session else { throw ScriptHostError("the media session has gone") }
+            return try WebBoxMediaProxy.shared.publish(argument, session: session)
         case "url": return try ScriptURL.parse(argument)
         case "local":
             let parts = try JSONDecoder().decode([String].self, from: Data(argument.utf8))
@@ -347,6 +370,60 @@ private let scriptHost: TVScriptHost = { opaque, operation, argument in
     return strdup(answer)
 }
 
+/// A proxy carried by one script request. A source can set it in its `ext`
+/// (`{"proxy":"socks5://127.0.0.1:1080"}`) for a site that only answers some regions, and every request
+/// that source makes goes through it. No proxy means the usual system route.
+struct ScriptProxy: Hashable {
+    enum Kind: String { case http, https, socks5 }
+    let kind: Kind
+    let host: String
+    let port: Int
+    let username: String
+    let password: String
+
+    /// `scheme://[user:password@]host:port`, or a bare `host:port` read as HTTP.
+    init?(_ text: String) {
+        var rest = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rest.isEmpty else { return nil }
+        var kind = Kind.http
+        if let mark = rest.range(of: "://") {
+            guard let parsed = Kind(rawValue: String(rest[rest.startIndex..<mark.lowerBound]).lowercased()) else { return nil }
+            kind = parsed
+            rest = String(rest[mark.upperBound...])
+        }
+        rest = rest.split(separator: "/").first.map(String.init) ?? rest
+        var credentials = ""
+        if let at = rest.lastIndex(of: "@") { credentials = String(rest[rest.startIndex..<at]); rest = String(rest[rest.index(after: at)...]) }
+        let pieces = rest.split(separator: ":", omittingEmptySubsequences: false)
+        guard pieces.count == 2, let port = Int(pieces[1]), (1...65535).contains(port) else { return nil }
+        let host = String(pieces[0]).trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty else { return nil }
+        let pair = credentials.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        self.init(kind: kind, host: host, port: port,
+                  username: pair.count > 0 ? String(pair[0]) : "",
+                  password: pair.count > 1 ? String(pair[1]) : "")
+    }
+
+    init(kind: Kind, host: String, port: Int, username: String = "", password: String = "") {
+        self.kind = kind; self.host = host; self.port = port; self.username = username; self.password = password
+    }
+
+    var proxyDictionary: [AnyHashable: Any] {
+        var dictionary: [AnyHashable: Any]
+        switch kind {
+        case .socks5:
+            dictionary = ["SOCKSEnable": 1, "SOCKSProxy": host, "SOCKSPort": port]
+        case .http, .https:
+            // `https` here means an HTTP CONNECT proxy, which CFNetwork reaches through the HTTPS keys.
+            dictionary = ["HTTPEnable": 1, "HTTPProxy": host, "HTTPPort": port,
+                          "HTTPSEnable": 1, "HTTPSProxy": host, "HTTPSPort": port]
+        }
+        if !username.isEmpty { dictionary["HTTPProxyUsername"] = username; dictionary["HTTPSProxyUsername"] = username }
+        if !password.isEmpty { dictionary["HTTPProxyPassword"] = password; dictionary["HTTPSProxyPassword"] = password }
+        return dictionary
+    }
+}
+
 /// Synchronous HTTP for scripts, which call `req` without awaiting. Runs on a session thread.
 enum ScriptHTTP {
     private final class Redirects: NSObject, URLSessionTaskDelegate {
@@ -356,6 +433,40 @@ enum ScriptHTTP {
     }
     private static let following = URLSession(configuration: .ephemeral)
     private static let stopping = URLSession(configuration: .ephemeral, delegate: Redirects(), delegateQueue: nil)
+    /// One session per proxy, made once: `proxy` is rare, and a session per request would leak connections.
+    private static let proxied = ProxiedSessions()
+
+    private final class ProxiedSessions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cache: [String: URLSession] = [:]
+        func session(_ proxy: ScriptProxy, stopsRedirects: Bool) -> URLSession {
+            let key = "\(proxy.kind.rawValue)://\(proxy.host):\(proxy.port)|\(proxy.username)|\(stopsRedirects)"
+            return lock.withLock {
+                if let existing = cache[key] { return existing }
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.connectionProxyDictionary = proxy.proxyDictionary
+                let made = stopsRedirects ? URLSession(configuration: configuration, delegate: Redirects(), delegateQueue: nil)
+                                           : URLSession(configuration: configuration)
+                cache[key] = made
+                return made
+            }
+        }
+    }
+
+    private static func session(_ options: [String: JSONValue], stopsRedirects: Bool) -> URLSession {
+        guard let text = options["proxy"]?.string, !text.isEmpty, let proxy = ScriptProxy(text) else {
+            return stopsRedirects ? stopping : following
+        }
+        return proxied.session(proxy, stopsRedirects: stopsRedirects)
+    }
+
+    /// A session of its own, for a hedged try that must not share a connection.
+    private static func freshSession(_ options: [String: JSONValue], stopsRedirects: Bool) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        if let text = options["proxy"]?.string, let proxy = ScriptProxy(text) { configuration.connectionProxyDictionary = proxy.proxyDictionary }
+        return URLSession(configuration: configuration, delegate: stopsRedirects ? Redirects() : nil, delegateQueue: nil)
+    }
+
     typealias Reply = (Data?, URLResponse?, Error?)
 
     /// Starts one try, and another each time `hedge` seconds pass without an answer or a try fails, up to
@@ -397,14 +508,14 @@ enum ScriptHTTP {
             let hedge = Double(options["hedge"]?.int ?? 0) / 1000
             result = race(racers: racers, hedge: hedge > 0 ? hedge : 2.5) { finish in
                 // Each try gets its own connection: a stalled HTTP/2 connection must not carry the next one.
-                let session = URLSession(configuration: .ephemeral, delegate: stopsRedirects ? Redirects() : nil, delegateQueue: nil)
+                let session = freshSession(options, stopsRedirects: stopsRedirects)
                 session.dataTask(with: request) { data, response, error in finish((data, response, error)) }.resume()
                 return { session.invalidateAndCancel() }
             }
         } else {
             let semaphore = DispatchSemaphore(value: 0)
             nonisolated(unsafe) var reply: Reply = (nil, nil, nil)
-            (stopsRedirects ? stopping : following).dataTask(with: request) { data, response, error in reply = (data, response, error); semaphore.signal() }.resume()
+            session(options, stopsRedirects: stopsRedirects).dataTask(with: request) { data, response, error in reply = (data, response, error); semaphore.signal() }.resume()
             semaphore.wait()
             result = reply
         }
@@ -416,7 +527,7 @@ enum ScriptHTTP {
     static func start(_ json: String, finish: @escaping @Sendable (String) -> Void) throws -> () -> Void {
         let options = try JSONDecoder().decode([String: JSONValue].self, from: Data(json.utf8))
         let (request, stopsRedirects) = try prepare(options)
-        let task = (stopsRedirects ? stopping : following).dataTask(with: request) { data, response, error in
+        let task = session(options, stopsRedirects: stopsRedirects).dataTask(with: request) { data, response, error in
             finish((try? answer((data, response, error), request: request, options: options)) ?? #"{"code":0,"content":"","failed":"Network request failed"}"#)
         }
         task.resume()

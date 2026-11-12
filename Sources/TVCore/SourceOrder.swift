@@ -311,12 +311,32 @@ import Observation
         return true
     }
 
+    /// 按测速得分重排。**`score` 收的是 `Site`，不是键。**
+    ///
+    /// ⛔ 上一版的签名是 `score: (String) -> Int?`，而调用方 `Store.reorderSourcesByProbeResult`
+    /// 传进来的键是 `key(_:origin:)` 生成的 **scope-JSON**（`["origin","sourceKey",""]`），
+    /// 却拿去查以**裸 `sourceKey`** 为键的 `SourceProbeStore` —— 每一次查都返回 nil，
+    /// `probeOrder` 于是把全部源归进 `unmeasured`、按原序返回。**「测速后自动排序」从上线起
+    /// 是空操作，且无报错、无日志。** 测试也测不出：`reorderByProbe(keysForTesting:)` 用的是
+    /// 调用方直接给的键，绕过了 `Site → key` 那一步。
+    ///
+    /// 收 `Site` 就没有这个问题：调用方不需要知道内部用什么键，也就不可能用错一套。
     @discardableResult
     public func reorderByProbe(_ sites: [Site],
                                origin: URL,
-                               score: (String) -> Int?,
+                               score: (Site) -> Int?,
                                pinnedKeys: Set<String> = []) -> Bool {
-        applyProbeOrder(sites.map { key($0, origin: origin) },
-                        score: score, pinnedKeys: pinnedKeys)
+        // 内部仍然按键排序，但「键 → 得分」的对照建在这里，`score` 只面对 `Site`。
+        // ⛔ 不要在这里往 `pinnedKeys` 里塞东西：钉住的判定是调用方的事（它才知道哪个源被钉住），
+        // 混进来会把每个源都当成钉住的。
+        var scoreByKey: [String: Int] = [:]
+        var measured = Set<String>()
+        for site in sites {
+            let k = key(site, origin: origin)
+            if let value = score(site) { scoreByKey[k] = value; measured.insert(k) }
+        }
+        return applyProbeOrder(sites.map { key($0, origin: origin) },
+                               score: { measured.contains($0) ? scoreByKey[$0] : nil },
+                               pinnedKeys: pinnedKeys)
     }
 }

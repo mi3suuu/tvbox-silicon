@@ -1,10 +1,19 @@
 import Foundation
 
+/// A half-open byte span on disk: what one Range request delivered.
+struct ByteSpan: Codable, Sendable, Hashable {
+    var start: Int64
+    var end: Int64
+    var count: Int64 { max(0, end - start) }
+    func covers(_ other: ByteSpan) -> Bool { start <= other.start && end >= other.end }
+    func overlaps(_ other: ByteSpan) -> Bool { start < other.end && other.start < end }
+}
+
 /// How one download's media is laid out, saved beside it as `plan.json`: a stopped download
 /// reads it back and fetches only what is missing.
 struct TransferPlan: Codable, Sendable {
     enum Kind: String, Codable, Sendable { case file, hls, dash }
-    /// A file fetched in fixed-size ranges, several at once; `done` lists the finished ranges.
+    /// A file fetched in fixed-size ranges, several at once; `spans` lists the finished ranges.
     struct RemoteFile: Codable, Sendable {
         /// Mirrors, tried in order.
         var urls: [URL]
@@ -12,20 +21,66 @@ struct TransferPlan: Codable, Sendable {
         var length: Int64?
         /// False when the server ignores ranges: the file then comes in one request and starts over if stopped.
         var ranged: Bool
+        /// What earlier runs already wrote. Spans, not chunk numbers: a range can be split in half when
+        /// the tail of a file needs more sockets, and a chunk number cannot express "the first 2 MB of it".
+        var spans: [ByteSpan] = []
+        /// Chunk numbers from plans written before spans existed. Read once, then folded into `spans`.
         var done: Set<Int> = []
+        /// Bytes per Range request this file was planned with, so a resumed file keeps its marks valid
+        /// even after the person changes the setting.
+        var chunk: Int64 = Transfer.chunk
         /// DASH: the initialization section and `sidx` index, which describe the file as HLS byte ranges.
         var initialization: ClosedRange<Int>?
         var index: ClosedRange<Int>?
         var chunks: Int {
             guard ranged, let length, length > 0 else { return 1 }
-            return Int((length + Transfer.chunk - 1) / Transfer.chunk)
+            return Int((length + chunk - 1) / chunk)
         }
         func range(_ index: Int) -> ClosedRange<Int64> {
-            let start = Int64(index) * Transfer.chunk
-            return start...min(start + Transfer.chunk, length ?? 0) - 1
+            let start = Int64(index) * chunk
+            return start...min(start + chunk, length ?? 0) - 1
         }
-        /// Bytes already on disk for the finished ranges.
-        var saved: Int64 { ranged ? done.reduce(0) { $0 + Int64(range($1).count) } : 0 }
+        /// Bytes already on disk, from spans and from any legacy chunk marks.
+        var saved: Int64 {
+            guard ranged else { return 0 }
+            return finished.reduce(0) { $0 + $1.count }
+        }
+        /// Everything on disk, as spans. Legacy chunk marks are converted here so the fetch loop only
+        /// ever has one thing to trust.
+        var finished: [ByteSpan] {
+            guard let length else { return spans }
+            var all = spans
+            for index in done.sorted() where index >= 0 && index < chunks {
+                let legacy = range(index)
+                all.append(ByteSpan(start: legacy.lowerBound, end: legacy.upperBound + 1))
+            }
+            return all.filter { $0.start >= 0 && $0.end <= max(0, length) }
+        }
+        mutating func merge(_ span: ByteSpan) {
+            guard span.count > 0 else { return }
+            var all = finished.filter { !$0.overlaps(span) }
+            var merged = span
+            for other in finished where other.overlaps(merged) || other.end == merged.start || other.start == merged.end {
+                merged = ByteSpan(start: min(merged.start, other.start), end: max(merged.end, other.end))
+            }
+            all.removeAll { $0.overlaps(merged) || $0.end == merged.start || $0.start == merged.end }
+            all.append(merged)
+            all.sort { $0.start < $1.start }
+            spans = all
+            done = []
+        }
+        /// Whether every byte of the file is on disk.
+        func complete() -> Bool {
+            guard let length, length > 0 else { return false }
+            guard ranged else { return false }
+            let sorted = finished.sorted { $0.start < $1.start }
+            var reach: Int64 = 0
+            for span in sorted {
+                if span.start > reach { return false }
+                reach = max(reach, span.end)
+            }
+            return reach >= length
+        }
     }
     /// One HLS segment, key or initialization section, saved whole under `name`.
     struct Part: Codable, Sendable {
@@ -92,14 +147,26 @@ enum TransferNote: Sendable {
 /// Fetches one download into its folder. Every finished piece is on disk under its final name (or
 /// marked in `plan.json`), so cancelling at any point loses at most the pieces in flight.
 struct Transfer: Sendable {
-    static let chunk: Int64 = 4 << 20
-    /// Connections per download. Parallel ranges get past per-connection throttling on CDNs.
-    static let connections = 4
+    /// Falls back to the settings' defaults; the library passes the person's own knobs.
+    static let chunk: Int64 = DownloadTuning.standard.chunk
+    static let connections = DownloadTuning.standard.connections
     let folder: URL
     let meter: DownloadMeter
     let session: URLSession
+    /// Range requests per file, range size, and the smoothed speed/connection count the UI reads.
+    /// Read through `tuning.value` at the point of use, so a knob turned mid-download takes effect on
+    /// the next range rather than on the next download.
+    let tuning: TuningBox
+    let speed: SpeedMeter
     let resolve: @Sendable () async throws -> Channel
     let note: @Sendable (TransferNote) async -> Void
+
+    init(folder: URL, meter: DownloadMeter, session: URLSession, tuning: TuningBox = TuningBox(.standard),
+         speed: SpeedMeter = SpeedMeter(), resolve: @escaping @Sendable () async throws -> Channel,
+         note: @escaping @Sendable (TransferNote) async -> Void) {
+        self.folder = folder; self.meter = meter; self.session = session
+        self.tuning = tuning; self.speed = speed; self.resolve = resolve; self.note = note
+    }
 
     private var planFile: URL { folder.appending(path: "plan.json") }
 
@@ -158,7 +225,8 @@ struct Transfer: Sendable {
         if mime.hasPrefix("text/html") || mime.hasPrefix("application/json") { throw TransferError.notMedia }
         let ranged = response.statusCode == 206
         let length = ranged ? Self.total(response) : (response.expectedContentLength > 0 ? response.expectedContentLength : nil)
-        let file = TransferPlan.RemoteFile(urls: [base], name: "media.part", length: length, ranged: ranged && length != nil)
+        let file = TransferPlan.RemoteFile(urls: [base], name: "media.part", length: length,
+                                          ranged: ranged && length != nil, chunk: tuning.value.chunk)
         return TransferPlan(kind: .file, headers: headers, files: [file], fileExtension: Self.fileExtension(base, mime: mime, head: head))
     }
 
@@ -171,7 +239,7 @@ struct Transfer: Sendable {
             // Keep the mirror that answered first.
             let first = response.url.flatMap { answered in urls.first { $0.host() == answered.host() } }
             files.append(.init(urls: first.map { [$0] + urls.filter { $0 != first } } ?? urls, name: name, length: length, ranged: true,
-                               initialization: initialization, index: index))
+                               chunk: tuning.value.chunk, initialization: initialization, index: index))
         }
         return TransferPlan(kind: .dash, headers: dash.headers, files: files, quality: dash.quality,
                             streamInfo: dash.streamInfo, label: dash.label, cid: dash.cid, duration: dash.duration)
@@ -202,7 +270,12 @@ struct Transfer: Sendable {
             switch plan.kind {
             case .file, .dash:
                 if plan.files.count == old.files.count, zip(plan.files, old.files).allSatisfy({ $0.length == $1.length && $0.ranged && $1.ranged }) {
-                    for index in plan.files.indices { plan.files[index].done = old.files[index].done }
+                    // Spans carry over, not chunk numbers: a renewed link may be split differently.
+                    for index in plan.files.indices {
+                        plan.files[index].spans = old.files[index].finished
+                        plan.files[index].chunk = old.files[index].chunk
+                        plan.files[index].done = []
+                    }
                     return plan
                 }
             case .hls:
@@ -231,7 +304,11 @@ struct Transfer: Sendable {
         switch plan.kind {
         case .file, .dash:
             saved = plan.files.reduce(0) { $0 + $1.saved }
-            done = plan.files.reduce(0) { $0 + ($1.ranged ? $1.done.count : 0) }
+            // Counted in ranges rather than spans so a split range does not inflate the total.
+            done = plan.files.reduce(0) { total, file in
+                guard file.ranged, let length = file.length, length > 0 else { return total }
+                return total + min(file.chunks, Int(file.saved / max(1, file.chunk)))
+            }
             total = plan.files.reduce(0) { $0 + $1.chunks }
         case .hls:
             let present = plan.parts.compactMap { part -> Int64? in
@@ -254,10 +331,12 @@ struct Transfer: Sendable {
         case .file, .dash:
             for index in plan.files.indices { try await fetch(file: index, box: box) }
         case .hls:
+            // Segments are small and independent, so the same lane count that fetches ranges works here;
+            // each one still arrives in one request because a segment is its own file.
             let pending = plan.parts.filter { !FileManager.default.fileExists(atPath: folder.appending(path: $0.name).path) }
             let queue = WorkQueue(pending)
             try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<min(Self.connections, pending.count) {
+                for _ in 0..<min(tuning.value.connections, pending.count) {
                     group.addTask {
                         while let part = queue.next() {
                             try Task.checkCancellation()
@@ -274,11 +353,18 @@ struct Transfer: Sendable {
         }
     }
 
+    /// Fetches one file with several Range requests at once.
+    ///
+    /// This is the whole acceleration: the speed of one download is not the speed of one socket, it is
+    /// the sum of `connections` sockets. Every packet is written the moment it lands, at its own offset,
+    /// with `pwrite` — no shared file pointer, no lock, no full-chunk buffers. A lane that runs dry takes
+    /// half of the largest range still in flight, which is what keeps the tail of the file at full speed
+    /// instead of finishing on whichever socket happened to be slowest.
     private func fetch(file index: Int, box: PlanBox) async throws {
         let file = box.plan.files[index], headers = box.plan.headers
         let target = folder.appending(path: "parts").appending(path: file.name)
-        guard file.ranged, let length = file.length else {
-            // No ranges: one request into a fresh file.
+        guard file.ranged, let length = file.length, length > 0 else {
+            // No ranges: one request, appended as it arrives, and it starts over if stopped.
             try? FileManager.default.removeItem(at: target)
             FileManager.default.createFile(atPath: target.path, contents: nil)
             let writer = try FileWriter(target)
@@ -295,31 +381,127 @@ struct Transfer: Sendable {
             return
         }
         if !FileManager.default.fileExists(atPath: target.path) {
-            // A fresh file: earlier marks would point at missing bytes.
+            // A fresh file: earlier spans would point at bytes that are not there.
             box.reset(index)
-            FileManager.default.createFile(atPath: target.path, contents: nil)
         }
-        let writer = try FileWriter(target)
-        defer { try? writer.close() }
-        try writer.truncate(length)
-        let pending = (0..<file.chunks).filter { !box.plan.files[index].done.contains($0) }
-        let queue = WorkQueue(pending)
+        let sink = try PositionalFile(target)
+        defer { sink.closeHandle() }
+        // Preallocate before the ranges land: contiguous blocks, and a rename that costs nothing.
+        try sink.reserve(length)
+
+        let already = box.plan.files[index].finished
+        let queue = RangeQueue(length: length, chunk: file.chunk, skip: already.map { Int64($0.start)..<Int64($0.end) })
+        // One lane per pending range, capped by the connection count. A single-lane server still gets one.
+        let lanes = min(tuning.value.connections, max(1, queue.depth))
+
         try await withThrowingTaskGroup(of: Void.self) { group in
-            for _ in 0..<min(Self.connections, pending.count) {
+            for lane in 0..<lanes {
                 group.addTask {
-                    while let chunk = queue.next() {
-                        try Task.checkCancellation()
-                        let range = file.range(chunk)
-                        let (data, _) = try await get(box.plan.files[index].urls, headers: headers, range: range)
-                        guard data.count == range.count else { meter.add(-Int64(data.count)); throw TransferError.incomplete }
-                        try writer.write(data, at: UInt64(range.lowerBound))
-                        box.mark(index, chunk: chunk)
-                        meter.finishedPart()
-                    }
+                    speed.laneOpened()
+                    defer { speed.laneClosed() }
+                    try await self.pump(lane: lane, index: index, length: length, queue: queue, box: box, sink: sink, headers: headers)
                 }
             }
             try await group.waitForAll()
         }
+        sink.flush()
+        box.saveNow()
+        // Nothing is renamed until every byte is on disk: a half file that plays would be worse than
+        // a download that says it failed. Two exemptions, both about servers that cannot be measured
+        // byte by byte: an unranged file has already returned above (one stream, no spans), and a
+        // file whose length the server never told us cannot be proved complete by arithmetic — the
+        // only honest test for it is the byte count the request reported, checked by the caller.
+        if box.plan.files[index].ranged, box.plan.files[index].length ?? 0 > 0 {
+            guard box.plan.files[index].complete() else { throw TransferError.incomplete }
+        }
+    }
+
+    /// One lane: take a range, stream it to its offsets, and when the queue is empty steal half of the
+    /// largest range still in flight rather than idling.
+    private func pump(lane: Int, index: Int, length: Int64, queue: RangeQueue, box: PlanBox,
+                      sink: PositionalFile, headers: [String: String]) async throws {
+        while true {
+            try Task.checkCancellation()
+            guard let range = queue.take(lane: lane) else {
+                // Nothing queued: split the biggest range still running, or stop this lane.
+                guard queue.split(avoid: lane) else { return }
+                continue
+            }
+            let cursor = LaneCursor(range.lowerBound)
+            // One retry owner, not two.
+            //
+            // This used to hold its own attempt loop *and* call `get`, which retries three times per
+            // mirror: a server that answered 503 twice had the same range requested four times for one
+            // megabyte, measured. `get` already covers mirrors and transient failures, so the lane's job
+            // is only to ask again when `get` came back having delivered less than the range — a
+            // condition `get` cannot see, because it finishes when the connection finishes.
+            var shortfalls = 0
+            var attempt = 0
+            while cursor.value < range.upperBound {
+                do {
+                    let urls = box.plan.files[index].urls
+                    let start = cursor.value
+                    _ = try await get(urls, headers: headers, range: start...(range.upperBound - 1), counts: true, sink: { data in
+                        // Written where it belongs the moment it arrives: no chunk-sized buffer is held
+                        // while the rest of the range downloads.
+                        // Clamped to this lane's range. A server that answers with more than asked
+                        // (a proxy that ignores the end of the Range, a mirror that serves the whole
+                        // file) would otherwise run the cursor past `range.upperBound` and write over
+                        // the bytes the neighbouring lane is delivering — two lanes, one region, and a
+                        // file that plays as corruption with no error anywhere.
+                        let room = range.upperBound - cursor.value
+                        let slice = data.count > room ? data.prefix(Int(room)) : data
+                        try sink.write(slice, at: cursor.value)
+                        cursor.advance(by: Int64(slice.count))
+                        // A split from here on starts where this lane actually got to.
+                        queue.progress(lane: lane, reached: cursor.value)
+                    })
+                } catch is CancellationError {
+                    queue.finish(lane: lane)
+                    throw CancellationError()
+                } catch {
+                    // The lane retries too, and it must: \`get\` gives a mirror three attempts, so a server
+                    // that answers 503 four times straight is already past its budget by the time the
+                    // error surfaces here. Dropping this loop made exactly that case fail — measured, a
+                    // five-503 server went from "recovers in 12 s" to "always fails". What it does not do
+                    // is retry blindly: the budget is small and the wait grows, so the common case (\`get\`
+                    // handled it) never reaches this line.
+                    guard Self.worthRetrying(error), attempt < 2, cursor.value < range.upperBound else {
+                        queue.finish(lane: lane)
+                        throw error
+                    }
+                    attempt += 1
+                    try await Task.sleep(for: .milliseconds(800 * attempt))
+                    continue
+                }
+                // A connection can end cleanly without delivering the whole range (a proxy closing
+                // mid-body, a mirror that truncates). \`get\` cannot see that — it finishes when the
+                // connection finishes — so the lane checks and asks again from where it stopped. Each
+                // byte is still written exactly once, because the request starts at the cursor.
+                if cursor.value < range.upperBound {
+                    shortfalls += 1
+                    guard shortfalls <= 2 else {
+                        queue.finish(lane: lane)
+                        throw TransferError.incomplete
+                    }
+                }
+            }
+            // One span per delivered range, merged into the plan and written to disk every few seconds.
+            box.merge(index, span: ByteSpan(start: range.lowerBound, end: range.upperBound))
+            meter.finishedPart()
+            queue.finish(lane: lane)
+        }
+    }
+
+    /// A dropped connection or a 5xx is worth another run at the same offsets; a 403 or a lost range support is not.
+    static func worthRetrying(_ error: Error) -> Bool {
+        if let transfer = error as? TransferError { return transfer.retriable }
+        if error is CancellationError { return false }
+        if let url = error as? URLError {
+            return [.notConnectedToInternet, .timedOut, .networkConnectionLost, .cannotConnectToHost,
+                    .cannotFindHost, .dnsLookupFailed, .secureConnectionFailed, .badServerResponse].contains(url.code)
+        }
+        return error is POSIXError || (error as NSError).domain == NSPOSIXErrorDomain
     }
 
     /// Fetches one address (trying mirrors, retrying network failures with a pause) into memory, or into `sink`.
@@ -327,6 +509,13 @@ struct Transfer: Sendable {
     func get(_ urls: [URL], headers: [String: String], range: ClosedRange<Int64>? = nil, limit: Int? = nil,
              counts: Bool = true, sink: (@Sendable (Data) throws -> Void)? = nil) async throws -> (Data, HTTPURLResponse) {
         var failure: Error = TransferError.http(0)
+        // Mirrors first, attempts second.
+        //
+        // The loops used to be the other way round: attempt 1 tried mirror A, B, C; attempt 2 tried A
+        // again. With three attempts and one mirror that is three requests; with three mirrors the
+        // first attempt already walks all three, so the repeat buys nothing and costs a full round of
+        // duplicates. Swapping the order means the retry round runs only when every mirror has already
+        // failed once, which is exactly when waiting is the right move.
         for attempt in 0..<3 {
             if attempt > 0 { try await Task.sleep(for: .seconds(2 * attempt)) }
             var refused = 0
@@ -597,6 +786,16 @@ final class DownloadMeter: @unchecked Sendable {
     }
 }
 
+/// One lane's read cursor into its range, advanced inside the packet sink and read by the retry loop.
+/// A reference type because the sink runs on the session's delegate queue, not on this task.
+final class LaneCursor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var position: Int64
+    init(_ start: Int64) { position = start }
+    var value: Int64 { lock.withLock { position } }
+    func advance(by count: Int64) { lock.withLock { position += count } }
+}
+
 /// The plan with finished ranges marked as they land, written to disk every few seconds.
 final class PlanBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -605,17 +804,31 @@ final class PlanBox: @unchecked Sendable {
     private var saved = Date()
     init(_ plan: TransferPlan, file: URL) { value = plan; self.file = file }
     var plan: TransferPlan { lock.withLock { value } }
-    func mark(_ file: Int, chunk: Int) {
+    /// Records a delivered range. Written to disk at most every few seconds: one fsync per range would
+    /// cost more than the download.
+    func merge(_ file: Int, span: ByteSpan) {
         let snapshot: TransferPlan? = lock.withLock {
-            value.files[file].done.insert(chunk)
+            value.files[file].merge(span)
             guard Date().timeIntervalSince(saved) > 3 else { return nil }
             saved = Date()
             return value
         }
         if let snapshot { try? JSONEncoder().encode(snapshot).write(to: self.file, options: .atomic) }
     }
-    func markWhole(_ file: Int) { lock.withLock { value.files[file].done = [0] } }
-    func reset(_ file: Int) { lock.withLock { value.files[file].done = [] } }
+    /// The whole file is in place; the marks must be on disk before it is renamed, or a crash between
+    /// the two would leave a finished-looking file the plan calls unfinished.
+    func saveNow() {
+        let snapshot = lock.withLock { saved = Date(); return value }
+        try? JSONEncoder().encode(snapshot).write(to: self.file, options: .atomic)
+    }
+    func markWhole(_ file: Int) {
+        lock.withLock {
+            guard let length = value.files[file].length else { return }
+            value.files[file].spans = [ByteSpan(start: 0, end: length)]
+            value.files[file].done = []
+        }
+    }
+    func reset(_ file: Int) { lock.withLock { value.files[file].spans = []; value.files[file].done = [] } }
 }
 
 final class WorkQueue<Item: Sendable>: @unchecked Sendable {

@@ -9,6 +9,22 @@ import Network
     func webCastState() async -> WebCastState
     /// A ready-to-use catalog client for one source, resolved against the merged subscription.
     func webCastClient(for sourceKey: String) async throws -> (CatalogClient, siteName: String)
+
+    // The four lists a viewer also expects to see here: the same data the app shows, filtered by
+    // the active environment and the privacy vault exactly as the app filters it. Default
+    // implementations below return empty, so a data source need not implement what it has no
+    // opinions about — but the app's Store supplies every one of them.
+    func webCastLive() async -> [WebCastState.LiveInfo]
+    func webCastFavorites() async -> [WebCastState.FavoriteInfo]
+    func webCastHistory() async -> [WebCastState.HistoryInfo]
+    func webCastDownloads() async -> [WebCastState.DownloadInfo]
+}
+
+public extension WebCastDataSource {
+    func webCastLive() async -> [WebCastState.LiveInfo] { [] }
+    func webCastFavorites() async -> [WebCastState.FavoriteInfo] { [] }
+    func webCastHistory() async -> [WebCastState.HistoryInfo] { [] }
+    func webCastDownloads() async -> [WebCastState.DownloadInfo] { [] }
 }
 
 /// A snapshot the web server hands out: every visible source, and the live settings the web UI edits.
@@ -22,6 +38,67 @@ public struct WebCastState: Sendable {
             self.key = key; self.name = name; self.runtime = runtime; self.hidden = hidden
         }
     }
+    /// A live playlist the viewer can open here, played through the same relay as catalog media.
+    public struct LiveInfo: Codable, Sendable {
+        public let name: String
+        public let url: String
+        public let builtIn: Bool
+        /// The headers its playlist wants (many live feeds check Referer/UA), as a `ProxyHeaders` id.
+        public let headerID: String?
+        /// The channel's logo, if the source named one.
+        public let logo: String
+        public init(name: String, url: String, builtIn: Bool, headerID: String? = nil, logo: String = "") {
+            self.name = name; self.url = url; self.builtIn = builtIn
+            self.headerID = headerID; self.logo = logo
+        }
+    }
+    /// A saved video, episode or cloud file. `kind` lets the page group them the way the app does.
+    public struct FavoriteInfo: Codable, Sendable {
+        public let kind: String
+        public let videoName: String
+        public let sourceName: String
+        public let poster: String
+        public let episodeName: String
+        public let year: String
+        public init(kind: String, videoName: String, sourceName: String, poster: String,
+                    episodeName: String, year: String) {
+            self.kind = kind; self.videoName = videoName; self.sourceName = sourceName
+            self.poster = poster; self.episodeName = episodeName; self.year = year
+        }
+    }
+    /// One row of the continue-watching list. `progress` is 0…1, and `episode` may be empty.
+    public struct HistoryInfo: Codable, Sendable {
+        public let videoName: String
+        public let episodeName: String
+        public let sourceName: String
+        public let poster: String
+        public let progress: Double
+        public let position: Double
+        public let duration: Double
+        public let updatedAt: Date
+        public let completed: Bool
+        public init(videoName: String, episodeName: String, sourceName: String, poster: String,
+                    progress: Double, position: Double, duration: Double, updatedAt: Date, completed: Bool) {
+            self.videoName = videoName; self.episodeName = episodeName; self.sourceName = sourceName
+            self.poster = poster; self.progress = progress; self.position = position
+            self.duration = duration; self.updatedAt = updatedAt; self.completed = completed
+        }
+    }
+    /// A download already on the device. Only its state is reported; the file stays on the phone.
+    public struct DownloadInfo: Codable, Sendable {
+        public let title: String
+        public let episode: String
+        public let poster: String
+        public let status: String
+        public let progress: Double
+        public let failure: String
+        public init(title: String, episode: String, poster: String, status: String,
+                    progress: Double, failure: String) {
+            self.title = title; self.episode = episode; self.poster = poster
+            self.status = status; self.progress = progress; self.failure = failure
+        }
+    }
+
     public let sources: [SourceInfo]
     public let enabled: Bool
     public let port: Int
@@ -279,52 +356,234 @@ public actor WebCastServer {
         guard let marker = target.range(of: "/proxy/") else { send(connection, status: 400); return }
         let encoded = String(target[marker.upperBound...])
         let urlPart = encoded.split(separator: "?", maxSplits: 1).first.map(String.init) ?? encoded
-        guard let urlString = urlPart.removingPercentEncoding, let url = URL(string: urlString),
-              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+        guard let urlString = urlPart.removingPercentEncoding, let url = URL(string: urlString) else {
             send(connection, status: 400, json: ["error": "bad proxy url"]); return
         }
 
-        // Pass a Range header through for seeking.
-        var headers: [String: String] = ["User-Agent": HTTPClient.userAgent]
-        if let rangeLine = head.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("range:") }) {
-            headers["Range"] = rangeLine.dropFirst("range:".count).trimmingCharacters(in: .whitespaces)
+        // The app's own playback schemes (`tvbox-cloud`, `tvbox-hongguo`, `tvbox-dash`) are not HTTP:
+        // AVPlayer reads them through a resource loader. Serve them here as ordinary ranged responses
+        // so the browser plays them too, instead of telling the viewer to go back to the phone.
+        if let virtual = await WebCastVirtualStreams.source(for: url) {
+            let own = Self.proxyQuery(target)
+            await serve(virtual, connection: connection, head: head,
+                        headerID: own["h"], token: own["token"])
+            return
         }
-        // Referer: many CDNs refuse requests without one. Try the URL's own origin.
-        if let scheme = url.scheme, let host = url.host {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            send(connection, status: 400, json: ["error": "bad proxy url"]); return
+        }
+
+        // Channel headers the source handed back (a Referer, a signed UA, a referer token) are what
+        // makes the CDN serve the file at all. The app plays with them via
+        // `AVURLAssetHTTPHeaderFieldsKey`; a browser cannot set them on <video>, so the page passes an
+        // opaque `?h=<id>` and the server replays the stored set. Only the id rides in the URL: these
+        // headers are long and some carry credentials that must stay off the browser's address bar.
+        var headers: [String: String] = ["User-Agent": HTTPClient.userAgent]
+        if let id = Self.proxyQuery(target)["h"], let stored = ProxyHeaders.shared.headers(for: id) {
+            headers.merge(stored) { _, new in new }
+        }
+        let incomingRange = head.components(separatedBy: "\r\n")
+            .first { $0.lowercased().hasPrefix("range:") }
+            .map { $0.dropFirst("range:".count).trimmingCharacters(in: .whitespaces) }
+        if let incomingRange { headers["Range"] = incomingRange }
+        // Referer: many CDNs refuse requests without one. Only invented when the source named none —
+        // overwriting the source's own Referer would break exactly the sources that need one.
+        if headers["Referer"] == nil, let scheme = url.scheme, let host = url.host {
             headers["Referer"] = "\(scheme)://\(host)/"
         }
 
         var request = URLRequest(url: url)
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            let http = response as? HTTPURLResponse
-            let status = http?.statusCode ?? 200
-            var body = data
-            let contentType = http?.mimeType ?? "application/octet-stream"
-            // Rewrite m3u8 so segments route back through us.
-            if contentType.contains("mpegurl") || url.pathExtension.lowercased() == "m3u8" {
-                body = rewriteM3U8(data, base: url)
+        // Chunks go out as they arrive, not after the whole file. `URLSession.data(for:)` waits for
+        // the last byte before this connection writes anything, so a 2 GB MKV exhausted memory on
+        // the phone and never reached the browser — the difference between "plays on the phone"
+        // and "500 from the computer".
+        let own = Self.proxyQuery(target)
+        let relay = ProxyRelay(connection: connection, isPlaylist: url.pathExtension.lowercased() == "m3u8",
+                               base: url, headerID: own["h"], token: own["token"])
+        relay.start(request)
+    }
+
+    /// The upstream headers a browser needs to treat the relay as the origin: byte ranges and length.
+    static func passthrough(_ http: HTTPURLResponse) -> [String: String] {
+        var out: [String: String] = [:]
+        for key in ["Content-Range", "Accept-Ranges", "Content-Length"] {
+            if let value = http.value(forHTTPHeaderField: key) { out[key] = value }
+        }
+        return out
+    }
+
+    /// Serves one of the app's own scheme addresses. A playlist is answered whole; a file is answered
+    /// from the byte range the browser asked for, which is what makes seeking work on a virtual stream.
+    private static func serve(_ source: WebCastVirtualStreams.Source, connection: NWConnection,
+                              head: String, headerID: String?, token: String?) async {
+        let mime = await source.contentType()
+        // A playlist has no length: it is a text document, and it must go out **rewritten** so the
+        // variants and segments it names come back through us. Sending it verbatim was a dead end —
+        // a DASH master names `tvbox-dash://…` variants and CDN segment URLs, neither of which a
+        // browser can fetch on its own.
+        guard let total = await source.length() else {
+            do {
+                let raw = try await source.read(at: 0, count: 8 << 20)
+                let base = URL(string: "https://localhost/")!
+                let body = Self.rewriteM3U8(raw, base: base, headerID: headerID, token: token)
+                send(connection, status: 200, body: body, mime: mime, extraHeaders: ["Accept-Ranges": "none"])
+            } catch {
+                send(connection, status: 502, json: ["error": "\(error.localizedDescription)"])
             }
-            send(connection, status: status, body: body, mime: contentType)
+            return
+        }
+        let requested = head.components(separatedBy: "\r\n")
+            .first { $0.lowercased().hasPrefix("range:") }
+            .flatMap { Self.byteRange($0.dropFirst("range:".count).trimmingCharacters(in: .whitespaces), total: total) }
+
+        // No Range → send the head of the file, capped so one request cannot be made to buffer
+        // gigabytes before the browser asks for ranges itself. This is a *partial* answer either way,
+        // so it must be 206 with a truthful Content-Range: a 200 here would tell the browser the file
+        // ends at the cap, and playback would stop there.
+        let range = requested ?? 0..<min(total, 1 << 20)
+        do {
+            let body = try await source.read(at: range.lowerBound, count: range.count)
+            // An empty body means the range resolved past the file, or the stream failed. Answering
+            // 206 with `bytes 0--1/total` would be a malformed header the browser cannot parse.
+            guard !body.isEmpty else {
+                send(connection, status: 416, json: ["error": "requested range not satisfiable"],
+                     extraHeaders: ["Content-Range": "bytes */\(total)"])
+                return
+            }
+            send(connection, status: 206, body: body, mime: mime,
+                 extraHeaders: [
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": "bytes \(range.lowerBound)-\(range.lowerBound + body.count - 1)/\(total)",
+                 ])
         } catch {
-            send(connection, status: 502, json: ["error": "proxy failed: \(error.localizedDescription)"])
+            send(connection, status: 502, json: ["error": "\(error.localizedDescription)"])
         }
     }
 
-    private static func rewriteM3U8(_ data: Data, base: URL) -> Data {
+    /// `bytes=start-end` (or `bytes=start-`, or a suffix `bytes=-n`) mapped onto `total`.
+    static func byteRange(_ header: String, total: Int) -> Range<Int>? {
+        guard let equals = header.firstIndex(of: "=") else { return nil }
+        let spec = header[header.index(after: equals)...].split(separator: ",").first?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        let parts = spec.split(separator: "-", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2 else { return nil }
+        if parts[0].isEmpty {
+            // `bytes=-n`: the last n bytes.
+            guard let n = Int(parts[1]), n > 0 else { return nil }
+            return max(0, total - n)..<total
+        }
+        guard let start = Int(parts[0]), start >= 0, start < total else { return nil }
+        let end = parts[1].isEmpty ? total - 1 : min(Int(parts[1]) ?? total - 1, total - 1)
+        guard end >= start else { return nil }
+        return start..<(end + 1)
+    }
+
+    /// `headerID` keeps the source's own headers on every segment we hand back: a playlist's segments
+    /// often sit behind the same Referer, so a rewritten child URL without `?h=` fails where the
+    /// parent succeeded.
+    static func rewriteM3U8(_ data: Data, base: URL, headerID: String? = nil, token: String? = nil) -> Data {
         guard let text = String(data: data, encoding: .utf8) else { return data }
+        // Both of our own query parameters must survive the rewrite. `/proxy` sits behind the login
+        // gate, so a segment URL that drops `token` is answered with 401 the moment a viewer has set
+        // a password — the first request works (the page added it) and every later one fails.
+        var query: [String] = []
+        if let headerID { query.append("h=" + headerID) }
+        if let token, !token.isEmpty { query.append("token=" + token) }
+        let suffix = query.isEmpty ? "" : "?" + query.joined(separator: "&")
         let baseDir = base.deletingLastPathComponent()
         var out: [String] = []
         for line in text.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { out.append(line); continue }
-            let full = trimmed.hasPrefix("http") ? trimmed : baseDir.appendingPathComponent(trimmed).absoluteString
-            let encoded = full.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? full
-            out.append("/proxy/" + encoded)
+            if trimmed.isEmpty {
+                out.append(line); continue
+            }
+            if trimmed.hasPrefix("#") {
+                // `#EXT-X-KEY:…,URI="key.bin"` and `#EXT-X-MAP:…,URI="init.mp4"` name real segments
+                // inside the tag. Escaping these to us is what makes encrypted and fMP4 playlists play:
+                // left alone, the browser asks the CDN directly and the key fetch fails on Referer.
+                out.append(rewriteAttributes(in: line, base: baseDir, suffix: suffix)); continue
+            }
+            // An address that is already absolute is proxied as given. That includes our own virtual
+            // schemes (`tvbox-dash://…`): a DASH master lists its variants that way, and appending
+            // them to `baseDir` produced `tvbox-dash://tok/tvbox-dash://tok/video-0.m3u8`.
+            // Resolve, don't concatenate. `appendingPathComponent` treats the whole string as one
+            // file name: a signed segment `seg.ts?sign=abc&t=1` became `seg.ts%3Fsign=abc&t=1` —
+            // a *path* containing "?" with an empty query — so the CDN saw a different path and
+            // answered 404. It also swallowed the leading slash of a root-relative `/root/x.ts`.
+            let full = Self.resolveInPlaylist(trimmed, base: baseDir)
+            out.append("/proxy/" + proxyEscape(full) + suffix)
         }
         return out.joined(separator: "\n").data(using: .utf8) ?? data
     }
+
+    /// Rewrites every `URI="…"` attribute value inside a playlist tag to our proxy.
+    ///
+    /// Both quote styles are handled: the HLS examples all use double quotes, but a single-quoted
+    /// `URI='…'` parses fine in players that accept it, and skipping those would leave the key or
+    /// init segment pointing at the CDN — which fails on exactly the sources that need a Referer.
+    private static func rewriteAttributes(in line: String, base: URL, suffix: String) -> String {
+        guard line.contains("URI=") else { return line }
+        var out = ""
+        var rest = Substring(line)
+        while let marker = rest.range(of: "URI=") {
+            out += rest[..<marker.upperBound]
+            rest = rest[marker.upperBound...]
+            guard let quote = rest.first, quote == "\"" || quote == "'" else {
+                // `URI=` not followed by a quote: leave the rest untouched rather than guess.
+                out += rest
+                return out
+            }
+            // Keep the opening quote in the output. Dropping it left a lone closing quote
+            // (`URI=/proxy/…"`), which is not a quoted-string — every AES-128 key and fMP4 init
+            // segment would parse as invalid and the playlist would be rejected.
+            out.append(quote)
+            rest = rest.dropFirst()
+            guard let close = rest.firstIndex(of: quote) else { out += rest; return out }
+            let address = String(rest[..<close])
+            rest = rest[close...]
+            let full = Self.resolveInPlaylist(address, base: base)
+            out += "/proxy/" + proxyEscape(full) + suffix
+        }
+        return out + rest
+    }
+
+    /// A playlist reference resolved against the playlist's own address.
+    ///
+    /// `WebAddress.resolve(_:relativeTo:)` already implements the rules a playlist needs — relative
+    /// paths, root-relative `/a/b.ts`, protocol-relative `//cdn/a.ts`, and absolute `scheme://…` —
+    /// and it keeps a `?query` where it belongs instead of folding it into the path.
+    static func resolveInPlaylist(_ reference: String, base: URL) -> String {
+        let trimmed = reference.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return trimmed }
+        if let url = try? WebAddress.resolve(trimmed, relativeTo: base) { return url.absoluteString }
+        // A custom scheme Foundation cannot join (`tvbox-dash://…`) is already absolute.
+        return trimmed
+    }
+
+    /// Escapes an address for the `/proxy/` path. `.urlQueryAllowed` keeps `&` and `?` literal —
+    /// which would split the wrapped address at our own query parser — so `?` and `#` are escaped too.
+    private static func proxyEscape(_ address: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "?&#+")
+        return address.addingPercentEncoding(withAllowedCharacters: allowed) ?? address
+    }
+
+    /// Our own query on a `/proxy/` request. The wrapped address is percent-escaped, so any `?` inside
+    /// it is `%3F` and cannot be mistaken for our separator — the last unescaped `?` starts our query.
+    static func proxyQuery(_ target: String) -> [String: String] {
+        guard let marker = target.range(of: "/proxy/") else { return [:] }
+        let rest = String(target[marker.upperBound...])
+        guard let separator = rest.lastIndex(of: "?") else { return [:] }
+        var out: [String: String] = [:]
+        for pair in rest[rest.index(after: separator)...].split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard let key = kv.first?.removingPercentEncoding else { continue }
+            out[key] = kv.count > 1 ? (kv[1].removingPercentEncoding ?? "") : ""
+        }
+        return out
+    }
+
 
     // MARK: - API
 
@@ -340,6 +599,36 @@ public actor WebCastServer {
             send(connection, status: 200, json: ["sources": state.sources.map { ["key": $0.key, "name": $0.name, "runtime": $0.runtime, "hidden": $0.hidden] }])
         case "settings":
             await handleSettings(route: Array(route.dropFirst()), method: method, body: body, connection: connection, dataSource: dataSource)
+        // The four lists beside the catalog. They are read-only: the phone stays the place that owns
+        // playback history, favorites and downloads, and the page only mirrors what it already has.
+        case "live":
+            let lives = await dataSource.webCastLive()
+            send(connection, status: 200, json: ["list": lives.map { live -> [String: Any] in
+                var fields: [String: Any] = ["name": live.name, "url": live.url, "builtIn": live.builtIn,
+                                             "logo": live.logo]
+                if let id = live.headerID { fields["headerID"] = id }
+                return fields
+            }])
+        case "favorites":
+            let items = await dataSource.webCastFavorites()
+            send(connection, status: 200, json: ["list": items.map {
+                ["kind": $0.kind, "videoName": $0.videoName, "sourceName": $0.sourceName,
+                 "poster": $0.poster, "episodeName": $0.episodeName, "year": $0.year]
+            }])
+        case "history":
+            let entries = await dataSource.webCastHistory()
+            send(connection, status: 200, json: ["list": entries.map {
+                ["videoName": $0.videoName, "episodeName": $0.episodeName, "sourceName": $0.sourceName,
+                 "poster": $0.poster, "progress": $0.progress, "position": $0.position,
+                 "duration": $0.duration, "updatedAt": $0.updatedAt.timeIntervalSince1970,
+                 "completed": $0.completed] as [String: Any]
+            }])
+        case "downloads":
+            let items = await dataSource.webCastDownloads()
+            send(connection, status: 200, json: ["list": items.map {
+                ["title": $0.title, "episode": $0.episode, "poster": $0.poster,
+                 "status": $0.status, "progress": $0.progress, "failure": $0.failure]
+            }])
         default:
             // /api/<source>/<home|category|detail|search|play>
             guard route.count >= 2 else { send(connection, status: 404); return }
@@ -376,16 +665,34 @@ public actor WebCastServer {
                 guard let flag = q["flag"], let address = q["address"], !address.isEmpty else {
                     send(connection, status: 400, json: ["error": "missing flag/address"]); return
                 }
-                let episode = Episode(id: "0", name: q["name"] ?? "Play", address: address, flag: flag)
+                // `videoID` is the episode's *video* id, which a type 3 (player-API) source needs as
+                // `detailID` before the plugin will answer a play request. The app always has it — its
+                // episodes come from a detail page that stamps `videoID` on every one — so dropping it
+                // here made the web path the only caller that could ask for playback cold: the plugin
+                // answered with no content and the error surfaced as a bare 500.
+                let detailID = q["videoID"].flatMap { $0.isEmpty ? nil : $0 }
+                let episode = Episode(id: "0", name: q["name"] ?? "Play", address: address,
+                                      flag: flag, videoID: detailID)
                 let channel = try await client.playback(episode)
                 var out: [String: Any] = ["url": channel.url.absoluteString, "name": channel.name]
-                // A non-http(s) URL (e.g. `tvbox-hongguo://…`) is an in-app custom scheme the browser
-                // can't play. Flag it so the web UI can show "play in the app" instead of spinning.
-                let scheme = channel.url.scheme?.lowercased() ?? ""
-                if !scheme.isEmpty, scheme != "http", scheme != "https" {
-                    out["scheme"] = scheme
+                // The browser cannot set these on <video>, so hand it an opaque id to replay through
+                // `/proxy`. Without this a signed Referer / token UA is lost and the CDN refuses the
+                // stream even though the phone plays it with those very headers.
+                if let id = ProxyHeaders.shared.store(channel.headers) { out["headerID"] = id }
+                // The app plays these beside the video; the page would otherwise have no way to offer
+                // them. Each subtitle URL rides our proxy too, so its own headers come along.
+                if !channel.subtitles.isEmpty {
+                    out["subtitles"] = channel.subtitles.map { track -> [String: String] in
+                        ["name": track.name, "url": track.url.absoluteString,
+                         "language": track.language, "format": track.format]
+                    }
                 }
-                if !channel.headers.isEmpty { out["headers"] = channel.headers }
+                // Skip marks let the page offer "skip intro" the way the app does.
+                if !channel.skips.isEmpty {
+                    out["skips"] = channel.skips.map { skip in
+                        ["start": skip.start, "end": skip.end, "type": skip.kind.rawValue] as [String: Any]
+                    }
+                }
                 send(connection, status: 200, json: out)
             default:
                 send(connection, status: 404, json: ["error": "unknown action"])
@@ -436,7 +743,7 @@ public actor WebCastServer {
     }
 
     private static func videoJSON(_ video: Video) -> [String: Any] {
-        [
+        var fields: [String: Any] = [
             "id": video.id,
             "name": video.name,
             "poster": video.poster?.absoluteString ?? "",
@@ -444,8 +751,21 @@ public actor WebCastServer {
             "synopsis": video.synopsis,
             "year": video.year ?? "",
             "category": video.category ?? "",
-            "episodes": video.episodes.map { ["id": $0.id, "name": $0.name, "address": $0.address, "flag": $0.flag] },
+            // Carries `videoID` so the web UI can hand it back on `/play`: a type 3 source needs it as
+            // `detailID`, and without it the plugin cannot resolve playback. Optional episodes (a plugin
+            // that names no video id) omit the key rather than sending an empty string.
+            "episodes": video.episodes.map { episode -> [String: Any] in
+                var fields: [String: Any] = ["id": episode.id, "name": episode.name,
+                                             "address": episode.address, "flag": episode.flag]
+                if let videoID = episode.videoID, !videoID.isEmpty { fields["videoID"] = videoID }
+                return fields
+            },
         ]
+        // A poster is fetched by `/proxy` exactly like a stream, and the same CDNs that insist on a
+        // Referer for the video insist on it for the artwork. Without this id the image request goes
+        // out with a bare User-Agent and the cover shows broken on the computer.
+        if let id = ProxyHeaders.shared.store(video.posterHeaders) { fields["posterHeaderID"] = id }
+        return fields
     }
 
     // MARK: - static files
@@ -485,15 +805,21 @@ public actor WebCastServer {
         return out
     }
 
-    private static func send(_ connection: NWConnection, status: Int, json: [String: Any]) {
+    private static func send(_ connection: NWConnection, status: Int, json: [String: Any],
+                             extraHeaders: [String: String] = [:]) {
         let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
-        send(connection, status: status, body: data, mime: "application/json; charset=utf-8")
+        send(connection, status: status, body: data, mime: "application/json; charset=utf-8",
+             extraHeaders: extraHeaders)
     }
 
-    private static func send(_ connection: NWConnection, status: Int, body: Data = Data(), mime: String = "text/plain") {
-        let reason = [200: "OK", 206: "Partial Content", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 500: "Server Error", 503: "Unavailable"][status] ?? "Error"
-        let header = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-        var response = Data(header.utf8)
+    private static func send(_ connection: NWConnection, status: Int, body: Data = Data(), mime: String = "text/plain",
+                             extraHeaders: [String: String] = [:]) {
+        let reason = [200: "OK", 206: "Partial Content", 416: "Range Not Satisfiable", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 500: "Server Error", 502: "Bad Gateway", 503: "Unavailable"][status] ?? "Error"
+        var head = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\n"
+        // A playlist or error keeps its length; the range headers ride along so a browser can seek.
+        for (key, value) in extraHeaders { head += "\(key): \(value)\r\n" }
+        head += "Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        var response = Data(head.utf8)
         response.append(body)
         connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
     }
@@ -506,6 +832,249 @@ public actor WebCastServer {
     public var hide: (String) -> Void = { _ in }
     public var show: (String) -> Void = { _ in }
     public var apply: () -> Void = {}
+}
+
+/// Relays one proxied fetch to one browser connection, passing bytes through as they arrive.
+///
+/// The old path waited for `URLSession.data(for:)` to finish the entire body before writing the
+/// first byte. For a small poster that is invisible; for a 2 GB episode it means the phone buffers
+/// the whole file (or gets killed) and the browser gets nothing — which reads as a 500 on the
+/// computer and "fine on the phone".
+///
+/// Back-pressure: `NWConnection.send` is asynchronous, so an unpaced loop runs at network speed into
+/// an unbounded pipe. `outstanding` counts unacknowledged sends and reception pauses above the cap.
+final class ProxyRelay: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let connection: NWConnection
+    private let isPlaylist: Bool
+    private let base: URL
+    /// The `?h=` id this request carried, replayed onto the playlist's segment URLs.
+    private let headerID: String?
+    /// The login token this request carried, likewise replayed so segments pass the auth gate.
+    private let token: String?
+    private let session: URLSession
+    private let lock = NSLock()
+    private var task: URLSessionDataTask?
+    private var playlist = Data()
+    private var outstanding = 0
+    /// Whether we have called `suspend()` and not yet paired it with a `resume()`.
+    private var suspended = false
+    /// Whether this response is a playlist, decided once at the response stage.
+    private var servingPlaylist = false
+    private var finished = false
+    /// ~4 MB in flight: enough to keep a LAN saturated, small enough to bound memory.
+    private static let outstandingLimit = 64
+
+    init(connection: NWConnection, isPlaylist: Bool, base: URL, headerID: String? = nil, token: String? = nil) {
+        self.connection = connection
+        self.isPlaylist = isPlaylist
+        self.base = base
+        self.headerID = headerID
+        self.token = token
+        // A delegate-held session; invalidated once the body has been relayed.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 900
+        self.session = URLSession(configuration: config)
+        super.init()
+    }
+
+    func start(_ request: URLRequest) {
+        let task = session.dataTask(with: request)
+        task.delegate = self
+        lock.lock(); self.task = task; lock.unlock()
+        task.resume()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            finish(status: 502, json: ["error": "proxy: the source returned no HTTP response"])
+            return
+        }
+        let mime = http.mimeType ?? "application/octet-stream"
+        // The playlist decision must be made once and remembered. Judging by extension here and by
+        // extension again in `didComplete` while *also* accepting a playlist MIME mean a URL like
+        // `get.php?id=1` sending `application/vnd.apple.mpegurl` took the "collect the playlist"
+        // path (which sends no headers), then the media path at the end (which sends nothing) —
+        // the browser received zero bytes and the server logged no error.
+        let playlistResponse = isPlaylist || mime.contains("mpegurl")
+        lock.lock(); servingPlaylist = playlistResponse; lock.unlock()
+        if playlistResponse {
+            // A playlist is small and must be rewritten whole so its segments come back through us.
+            lock.lock(); playlist.removeAll(keepingCapacity: true); lock.unlock()
+            completionHandler(.allow)
+            return
+        }
+        // Media: relay the status and the range headers, then pump the body as it arrives.
+        var head = "HTTP/1.1 \(http.statusCode) \(Self.reason(http.statusCode))\r\nContent-Type: \(mime)\r\n"
+        let extra = WebCastServer.passthrough(http)
+        // The body is chunked exactly when the upstream named no length; every later write must agree,
+        // and the closing `0\r\n\r\n` is owed only in that case.
+        let chunked = Int(extra["Content-Length"] ?? "") == nil
+        if let raw = extra["Content-Length"], let length = Int(raw) { head += "Content-Length: \(length)\r\n" }
+        else { head += "Transfer-Encoding: chunked\r\n" }
+        for (key, value) in extra where key != "Content-Length" { head += "\(key): \(value)\r\n" }
+        head += "Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        lock.lock(); pendingChunked = chunked; lock.unlock()
+        connection.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if lock.withLock({ servingPlaylist }) {
+            lock.lock()
+            // Bounded: a playlist over 8 MB is not a playlist.
+            if playlist.count < 8_000_000 { playlist.append(data) }
+            lock.unlock()
+            return
+        }
+        // Count this chunk as in flight. The count must go up on *every* send, because the
+        // completion below decrements on every completion — incrementing only when not paused
+        // let the counter drift to zero, after which the limit was never reached again and the
+        // relay buffered without bound (the exact thing this accounting exists to prevent).
+        let inflight: Int = lock.withLock {
+            outstanding += 1
+            return outstanding
+        }
+        // Suspend the upstream once when too much is outstanding, and resume once when it drains
+        // below half. Two suspends with one resume would park the task forever, so the transition
+        // is recorded rather than repeated.
+        if inflight > Self.outstandingLimit {
+            let shouldSuspend = lock.withLock { () -> Bool in
+                guard !suspended else { return false }
+                suspended = true
+                return true
+            }
+            if shouldSuspend { dataTask.suspend() }
+        }
+        let chunked = lock.withLock { pendingChunked }
+        var payload = data
+        if chunked { payload = Data("\(String(data.count, radix: 16))\r\n".utf8) + data + Data("\r\n".utf8) }
+        connection.send(content: payload, completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            let shouldResume: Bool = lock.withLock {
+                outstanding = max(0, outstanding - 1)
+                // Resume once half the window has drained: resuming at the limit would immediately
+                // re-suspend on the next chunk and thrash.
+                guard suspended, outstanding <= Self.outstandingLimit / 2 else { return false }
+                suspended = false
+                return true
+            }
+            // Resume unconditionally: `suspended` is only ever set right after we called
+            // `suspend()`, and checking `dataTask.state` races that transition — reading `.running`
+            // in the gap would skip the resume and park the task forever.
+            if shouldResume { dataTask.resume() }
+        })
+    }
+
+    /// Whether the browser connection is chunked (upstream gave no usable length).
+    private var pendingChunked = false
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if lock.withLock({ servingPlaylist }) {
+            let data = lock.withLock { playlist }
+            let body = WebCastServer.rewriteM3U8(data, base: base, headerID: headerID, token: token)
+            let http = task.response as? HTTPURLResponse
+            finish(status: http?.statusCode ?? 200, body: body,
+                   mime: http?.mimeType ?? "application/vnd.apple.mpegurl",
+                   extra: http.map(WebCastServer.passthrough) ?? [:])
+            return
+        }
+        // The chunked terminator must reach the browser before the connection is torn down: the
+        // previous version issued `send` (async) and cancelled immediately, so the terminator was
+        // usually dropped and a chunked response ended without its `0\r\n\r\n`. Cancel from the
+        // send's completion instead. Only a task that ended cleanly gets a terminator — after an
+        // error the body is incomplete and the browser should see a truncated response, not a
+        // clean end, so that it re-requests the range.
+        let chunked = lock.withLock { pendingChunked }
+        let failed = error != nil
+        if failed {
+            // A stalled or cancelled upstream ends this connection; the browser retries the range.
+            connection.cancel()
+        } else if chunked {
+            connection.send(content: Data("0\r\n\r\n".utf8),
+                            completion: .contentProcessed { [connection] _ in connection.cancel() })
+        } else {
+            // A Content-Length body needs the same barrier the chunked terminator provides. Network
+            // makes no promise that queued sends are written before the connection closes, so
+            // cancelling straight away dropped whatever was still outstanding — up to a few MB of
+            // tail under back-pressure — and the browser reported ERR_CONTENT_LENGTH_MISMATCH
+            // mid-playback. An empty send's completion runs only after the earlier ones have drained.
+            connection.send(content: Data(), completion: .contentProcessed { [connection] _ in connection.cancel() })
+        }
+        session.invalidateAndCancel()
+    }
+
+    private func finish(status: Int, body: Data, mime: String, extra: [String: String]) {
+        var head = "HTTP/1.1 \(status) \(Self.reason(status))\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\n"
+        for (key, value) in extra where key != "Content-Length" { head += "\(key): \(value)\r\n" }
+        head += "Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        var response = Data(head.utf8)
+        response.append(body)
+        // A local, not the property: a capture list may not reach a member without `self.`, and
+        // spelling out `self.connection` inside a `@Sendable` completion would capture the whole
+        // relay. One binding says exactly what the closure needs.
+        let link = connection
+        link.send(content: response, completion: .contentProcessed { _ in link.cancel() })
+        session.invalidateAndCancel()
+    }
+
+    private func finish(status: Int, json: [String: Any]) {
+        let body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
+        finish(status: status, body: body, mime: "application/json; charset=utf-8", extra: [:])
+    }
+
+    private static func reason(_ status: Int) -> String {
+        [200: "OK", 206: "Partial Content", 416: "Range Not Satisfiable", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
+         500: "Server Error", 502: "Bad Gateway", 503: "Unavailable"][status] ?? "Error"
+    }
+}
+
+/// Short-lived store for the HTTP headers a source's channel carries, keyed by an opaque id so the
+/// browser can name them with `?h=<id>` instead of putting a signed Referer in its address bar.
+///
+/// Bounded and expiring: a playlist can spawn hundreds of segment requests, and an unbounded map
+/// keyed by source-returned values is a leak. Entries live long enough for one episode's playback.
+public final class ProxyHeaders: @unchecked Sendable {
+    public static let shared = ProxyHeaders()
+    private struct Entry { let headers: [String: String]; let expires: Date }
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    /// How long an id stays usable. Generous on purpose: a playlist can keep asking for the same
+    /// `?h=` for the whole of a long film, and a live playlist re-reads its list every few seconds
+    /// while the `h=` in those URLs never changes. A one-hour lifetime made a two-hour film lose its
+    /// headers at minute 60 — the CDN then answered 403 and the picture simply stopped, with nothing
+    /// in the log. Every hit also pushes the expiry out, so an actively playing stream never lapses.
+    private static let lifetime: TimeInterval = 8 * 3600
+    private static let limit = 256
+
+    /// Registers a header set and returns its id, or nil when there is nothing to carry.
+    public func store(_ headers: [String: String]) -> String? {
+        let useful = headers.filter { !$0.key.isEmpty && !$0.value.isEmpty }
+        guard !useful.isEmpty else { return nil }
+        let id = UUID().uuidString
+        lock.lock()
+        let now = Date()
+        entries = entries.filter { $0.value.expires > now }
+        // Oldest first out once at capacity; the viewer is watching one episode, not a hundred.
+        if entries.count >= Self.limit {
+            for key in entries.sorted(by: { $0.value.expires < $1.value.expires }).prefix(entries.count - Self.limit + 1).map(\.key) {
+                entries.removeValue(forKey: key)
+            }
+        }
+        entries[id] = Entry(headers: useful, expires: now.addingTimeInterval(Self.lifetime))
+        lock.unlock()
+        return id
+    }
+
+    public func headers(for id: String) -> [String: String]? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = entries[id], entry.expires > Date() else { return nil }
+        // Sliding expiry: a stream that is still asking for this id keeps it alive.
+        entries[id] = Entry(headers: entry.headers, expires: Date().addingTimeInterval(Self.lifetime))
+        return entry.headers
+    }
 }
 
 /// A tiny thread-safe box for one-shot guards across the listener's state callbacks (which can fire

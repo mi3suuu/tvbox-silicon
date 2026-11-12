@@ -73,8 +73,19 @@ public struct Episode: Identifiable, Hashable, Sendable, Codable {
     public let address: String
     public let flag: String
     public let videoID: String?
-    public init(id: String, name: String, address: String, flag: String, videoID: String? = nil) {
+    /// Optional per-episode metadata shown by skins that render a rich episode row
+    /// (the bilibili drawer: published date / duration / view count / danmaku count).
+    /// Source-dependent: the generic TVBox catalog parser does not populate these, so they are
+    /// nil unless a source's detail response or a cross-source match (e.g. TMDB) fills them.
+    /// Renderers must guard each field and never fabricate a value when it is nil.
+    public let duration: TimeInterval?
+    public let published: Date?
+    public let views: Int?
+    public let danmaku: Int?
+    public init(id: String, name: String, address: String, flag: String, videoID: String? = nil,
+                duration: TimeInterval? = nil, published: Date? = nil, views: Int? = nil, danmaku: Int? = nil) {
         self.id = id; self.name = name; self.address = address; self.flag = flag; self.videoID = videoID
+        self.duration = duration; self.published = published; self.views = views; self.danmaku = danmaku
     }
 }
 /// A person a source credits for a video (`vod_director`, `vod_actor`). A TVBox credit link
@@ -332,6 +343,13 @@ public struct CatalogClient: Sendable {
         // Yingxia's own sources run in-process on every platform, the Mac's included.
         if site.runsInProcess {
             return try await ScriptRuntime.shared.request(site: site, scriptURL: site.scriptURL(origin: origin), params: params, http: http, origin: origin)
+        }
+        // A WeBox plugin only runs with the WeBox prelude, which the in-process QuickJS runtime installs
+        // and the Mac's Node script host does not. Without this, every `.webox.js` source works on
+        // iPhone, iPad and Apple TV and fails on the Mac with "WeBox is not defined".
+        if ScriptRuntime.available, let script = try? site.scriptURL(origin: origin),
+           ScriptRuntime.runsWebBox(site, script) {
+            return try await ScriptRuntime.shared.request(site: site, scriptURL: script, params: params, http: http, origin: origin)
         }
         // A bundled lite port runs first, in-process on QuickJS everywhere; when it fails or answers
         // with nothing usable, the source's JAR spider answers instead.
@@ -662,13 +680,37 @@ public struct CatalogClient: Sendable {
         return try await sniff(plan, choice: choice, target: choice.address, headers: plan.headers, click: plan.click)
     }
 
+    /// A magnet is not an address: join the swarm, then play what it holds.
+    ///
+    /// An MP4 plays from the bridge's Range endpoint as it streams; anything else (MKV, AVI, TS…) goes
+    /// through the repackager on a source that reads arbitrary slices from the same bridge, exactly as a
+    /// downloaded file of that kind would. BitTorrent is not available on iPhone, iPad or Apple TV, where
+    /// `TorrentBridge.available` is false and this throws a message that says so.
+    private func playTorrent(_ magnet: String, name: String, group: String) async throws -> Channel {
+        guard TorrentBridge.available else {
+            throw TVError.unsupported(L10n.text("Torrent playback needs the Mac app: iPhone, iPad and Apple TV have no Node process to spare."))
+        }
+        let torrent = try await TorrentBridge.shared.open(magnet)
+        if torrent.direct {
+            let url = try await TorrentBridge.shared.streamURL(torrent)
+            return Channel(name: name, group: group, url: url)
+        }
+        guard torrent.isVideo else {
+            throw TVError.unsupported(L10n.text("This torrent holds no video file."))
+        }
+        let url = try await TorrentBridge.shared.remuxURL(torrent)
+        return Channel(name: name, group: group, url: url)
+    }
+
     private static let webDetectionError = TVError.unsupported(L10n.text("This source requires web video detection or additional parsing. Only resolved media URLs are supported."))
     /// The sniffer ran and the 15 second clock ended with no playable address.
     private static let sniffTimeoutError = TVError.unsupported(L10n.text("Video detection timed out before a playable address appeared."))
 
     private func playResolved(_ plan: PlaybackPlan, choice: PlaybackChoice) async throws -> Channel {
         let address = Self.unwrapPluginProxy(choice.address)
-        if address.lowercased().hasPrefix("magnet:") { throw TVError.unsupported(L10n.text("This source returned a magnet link. Torrent playback is not supported.")) }
+        if address.lowercased().hasPrefix("magnet:") {
+            return try await playTorrent(address, name: choice.name, group: plan.group)
+        }
         if Self.isPluginProxy(address) {
             // A Bili JAR spider's proxy id: Yingxia's own Bilibili source plays the same video.
             if let id = Self.bilibiliProxyID(address), let bilibili = CloudSources.site(where: \.isBilibili) {
@@ -696,7 +738,7 @@ public struct CatalogClient: Sendable {
             throw Self.sniffTimeoutError
         }
         if found.url.absoluteString.lowercased().hasPrefix("magnet:") {
-            throw TVError.unsupported(L10n.text("This source returned a magnet link. Torrent playback is not supported."))
+            return try await playTorrent(found.url.absoluteString, name: choice.name, group: plan.group)
         }
         return Channel(name: choice.name, group: plan.group, url: found.url, headers: found.headers)
     }

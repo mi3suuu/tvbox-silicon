@@ -21,7 +21,8 @@ extension Site {
     /// An archive whose MD5 the subscription declares is known by it: mirrors of one subscription
     /// host the same spider at different addresses.
     func fingerprint(origin: URL, spider: URL?, spiderChecksum: String?) -> String {
-        let api = runtime == .jar ? self.api : ((try? WebAddress.resolve(self.api, relativeTo: origin).absoluteString) ?? self.api)
+        let resolved = runtime == .jar ? self.api : ((try? WebAddress.resolve(self.api, relativeTo: origin).absoluteString) ?? self.api)
+        let api = Self.normalizedAddress(resolved)
         let archive: String
         if runtime != .jar {
             archive = ""
@@ -34,6 +35,31 @@ extension Site {
         encoder.outputFormatting = .sortedKeys
         let ext = (try? pluginExtension(origin: origin)).flatMap { try? encoder.encode($0) }.map { String(decoding: $0, as: UTF8.self) } ?? ""
         return [String(type), api, archive, ext].joined(separator: "\n")
+    }
+
+    /// The address bare of the differences that never change what a source offers.
+    ///
+    /// Collections publish the same CMS with and without its serialisation suffix — `…/provide/vod`,
+    /// `…/provide/vod/`, `…/provide/vod/at/json/` — and the same is true of a trailing slash or the
+    /// letter case of a scheme and host. Comparing those verbatim made one provider look like three,
+    /// which is why importing overlapping bundles used to ask the same site three times. `/from/…`
+    /// and the query string are kept: those do select a different library. Anything that is not an
+    /// http(s) address (`csp_X`, `./api/x.py`) is already an identity and is left alone.
+    static func normalizedAddress(_ address: String) -> String {
+        let text = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var parts = URLComponents(string: text),
+              let scheme = parts.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return text }
+        parts.scheme = scheme
+        parts.host = parts.host?.lowercased()
+        if let port = parts.port, (scheme == "http" && port == 80) || (scheme == "https" && port == 443) { parts.port = nil }
+        var path = parts.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        // Only a suffix: `/at/json` selects the serialisation, `/at/…/more` would be another path.
+        if let mark = path.range(of: "/at/", options: .backwards), !path[mark.upperBound...].contains("/") {
+            path = String(path[..<mark.lowerBound])
+        }
+        parts.percentEncodedPath = path.isEmpty ? "" : path
+        return parts.string ?? text
     }
 
     /// The MD5 an archive address declares after `;md5;`, when it is a well-formed one.
@@ -88,6 +114,12 @@ extension Subscription {
 
     /// The MD5 the subscription declares for its spider archive.
     var spiderChecksum: String? { raw["spider"]?.string.flatMap(Site.declaredChecksum) }
+
+    /// Every source identity this subscription offers, resolved against its own origin. Import uses
+    /// it to tell whether a file would add anything to what is already on screen.
+    public var fingerprints: Set<String> {
+        Set(sites.map { $0.fingerprint(origin: origin, spider: spiderURL, spiderChecksum: spiderChecksum) })
+    }
 
     /// A short, stable tag for this subscription's address.
     var tag: String { String(PluginChecksum.sha256(Data(origin.absoluteString.utf8)).prefix(6)) }

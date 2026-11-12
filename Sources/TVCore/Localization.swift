@@ -60,6 +60,17 @@ public enum L10n {
         return supportedLanguages.contains(match) ? match : "en"
     }
 
+    /// Every supported language's rendering of one key.
+    ///
+    /// For the few places where a human-readable string is also an *identity* — a custom group the
+    /// app creates for the reader, which is found again by name. Matching on the current language
+    /// alone means a reader who switches the interface language between two runs gets a second group
+    /// beside the first, each holding half of what they meant as one. This returns all of them so a
+    /// caller can recognise the group whatever language it was made in.
+    public static func everyRendering(of key: String) -> [String] {
+        supportedLanguages.map { text(key, language: $0) }
+    }
+
     public static func text(_ key: String, _ arguments: CVarArg..., language: String? = nil) -> String {
         // 没显式传语言时走**用户选的语言**（`currentLanguage`），
         // 而不是 `Bundle.module` 的 `preferredLocalizations` ——

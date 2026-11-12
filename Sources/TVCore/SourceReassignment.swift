@@ -64,14 +64,46 @@ public struct SourceMove: Codable, Hashable, Sendable, Identifiable {
     /// Moves saved by builds that keyed by the subscription's origin. They still apply, matched by
     /// key and origin, so an update does not quietly move everything back.
     private var legacy: [String: String]
-    private static let storageKey = "sourceReassignment.v2"
-    private static let legacyStorageKey = "sourceReassignment.v1"
+    private static let baseKey = "sourceReassignment.v2"
+    private static let legacyBaseKey = "sourceReassignment.v1"
+    /// The environment whose moves these are. A move is display state, not a record, so it is
+    /// partitioned by storage key: the default environment keeps the bare key (an upgrade keeps every
+    /// move already made), each other environment reads its own. Left global, the previous
+    /// environment's moves kept filing this environment's sources under another subscription.
+    public var environmentID: UUID?
+    public var defaultEnvironmentID: UUID?
+    private var storageKeyScoped: String {
+        EnvironmentScopedKey.key(Self.baseKey, environment: environmentID, default: defaultEnvironmentID)
+    }
+    private var legacyKeyScoped: String {
+        EnvironmentScopedKey.key(Self.legacyBaseKey, environment: environmentID, default: defaultEnvironmentID)
+    }
 
     public init(defaults: UserDefaults = .standard) {
-        let values = defaults.data(forKey: Self.storageKey)
+        let values = defaults.data(forKey: Self.baseKey)
             .flatMap { try? JSONDecoder().decode([String: SourceMove].self, from: $0) } ?? [:]
-        self.legacy = (defaults.dictionary(forKey: Self.legacyStorageKey) as? [String: String]) ?? [:]
-        super.init(defaults: defaults, storageKey: Self.storageKey, values: values)
+        self.legacy = (defaults.dictionary(forKey: Self.legacyBaseKey) as? [String: String]) ?? [:]
+        super.init(defaults: defaults, storageKey: Self.baseKey, values: values)
+    }
+
+    /// Re-reads the moves for whatever environment is now current, so a switch does not leave the
+    /// previous environment's moves filing this one's sources.
+    public func reloadForEnvironment() {
+        let next = defaults.data(forKey: storageKeyScoped)
+            .flatMap { try? JSONDecoder().decode([String: SourceMove].self, from: $0) } ?? [:]
+        let nextLegacy = (defaults.dictionary(forKey: legacyKeyScoped) as? [String: String]) ?? [:]
+        guard next != values || nextLegacy != legacy else { return }
+        values = next
+        legacy = nextLegacy
+        bump(notify: false)
+    }
+
+    /// Forgets the moves a deleted environment owned.
+    public static func delete(environment: UUID, defaults: UserDefaults = .standard, default defaultID: UUID?) {
+        guard let defaultID, environment != defaultID else { return }
+        for base in [baseKey, legacyBaseKey] {
+            defaults.removeObject(forKey: EnvironmentScopedKey.key(base, environment: environment, default: defaultID))
+        }
     }
 
     /// The old identity: what `EpisodeSkipSettings.scope` writes, origin first.
@@ -168,11 +200,11 @@ public struct SourceMove: Codable, Hashable, Sendable, Identifiable {
         bump(notify: notify)
     }
 
-    /// Writes both maps: the new JSON form under `storageKey` and the old origin-keyed map under
-    /// `legacyStorageKey`, kept for sources that have not been moved again yet.
+    /// Writes both maps: the new JSON form under this environment's key and the old origin-keyed map
+    /// beside it, kept for sources that have not been moved again yet.
     public override func write() {
-        if let data = try? JSONEncoder().encode(values) { defaults.set(data, forKey: Self.storageKey) }
-        defaults.set(legacy, forKey: Self.legacyStorageKey)
+        if let data = try? JSONEncoder().encode(values) { defaults.set(data, forKey: storageKeyScoped) }
+        defaults.set(legacy, forKey: legacyKeyScoped)
     }
 }
 

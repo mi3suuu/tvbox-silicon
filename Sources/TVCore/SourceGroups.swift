@@ -42,7 +42,7 @@ public enum SourceGroups {
     /// it — a privacy-hidden source must disappear entirely when locked, or the "Hidden Sources" group
     /// and its count would tell a locked-out viewer how much is in the vault. Unlock and it returns
     /// to its own group.
-    public static func make(entries: [SubscriptionEntry], documents: [String: Subscription], builtIns: [Site], builtInOrigin: URL, mergedSites: [Site], pinOrder: [Site], userHidden: (Site) -> Bool, includeHidden: Bool, jarURL: URL?, privacyHidden: (Site) -> Bool = { _ in false }, reassign: (Site, String) -> String? = { _, _ in nil }, customGroups: [CustomSourceGroup] = []) -> [SourceGroup] {
+    public static func make(entries: [SubscriptionEntry], documents: [String: Subscription], builtIns: [Site], builtInOrigin: URL, mergedSites: [Site], pinOrder: [Site], userHidden: (Site) -> Bool, includeHidden: Bool, jarURL: URL?, privacyHidden: (Site) -> Bool = { _ in false }, deletedHidden: (Site) -> Bool = { _ in false }, reassign: (Site, String) -> String? = { _, _ in nil }, customGroups: [CustomSourceGroup] = []) -> [SourceGroup] {
         /// An entry is known by the address the viewer typed; its copy is known by where the address
         /// finally landed — a redirect, a mirror, an http-to-https hop. Grouping used to compare the
         /// two directly, so every subscription that redirected filed nothing: its sources silently
@@ -62,6 +62,9 @@ public enum SourceGroups {
         func home(_ site: Site) -> String {
             let own = ownAddress(site)
             guard let destination = reassign(site, own) else { return own }
+            // 「未分组」是显式去路，不是「没有去路」：原样返回，不能被下面的回落吞掉，
+            // 否则用户刚拖出去的源下一秒又回原订阅，看起来像拖拽没生效。
+            if CustomSourceGroup.isUngrouped(destination) { return destination }
             // A move that names a group the viewer has since deleted files the source back where it
             // came from; letting it fall through would strand it in "Other Sources" for good.
             if CustomSourceGroup.id(inTarget: destination) != nil,
@@ -97,13 +100,28 @@ public enum SourceGroups {
         }
         // Sources with no listed subscription of their own still show at the end rather than vanishing:
         // edited onto a subscription that is now off, or carried by a copy whose entry is gone.
+        // 「未分组」= 两种源：(a) 用户显式拖出去的（move 指向 `ungrouped`）；
+        // (b) 原本收在这里的「无主源」（所属订阅被关掉/地址变了）。
+        // 两者对用户是同一件事——「不属于任何分组」——所以合成一组，标题就叫「未分组」。
+        // 之前这一组叫 "Other Sources" 且只装 (b)，用户拖出去无处可去。
         let placed = Set(groups.flatMap(\.sites).map(\.id))
         let unplaced = mergedSites.filter { !$0.isBuiltIn && !placed.contains($0.id) && eligible($0) && !isPinned($0, fallback: builtInOrigin) }
-        if !unplaced.isEmpty { groups.append(SourceGroup(kind: .other, title: "Other Sources", sites: SourceStrategy.arrange(unplaced, where: { _ in true }))) }
+        if !unplaced.isEmpty { groups.append(SourceGroup(kind: .other, title: "Ungrouped", sites: SourceStrategy.arrange(unplaced, where: { _ in true }))) }
         // Hidden sources leave their groups and wait in one group at the end, where they can be unhidden.
         // Privacy-hidden sources are not here: a locked vault must not reveal them, even as a count.
         if !includeHidden {
-            let hidden = (builtIns + mergedSites.filter { !$0.isBuiltIn }).filter { !$0.hidden && $0.canBrowse(jarURL: jarURL) && userHidden($0) && !privacyHidden($0) }
+            // ⛔ `deletedHidden` 必须在这里单独排除，**不能靠把 `userHidden` 取反来实现**。
+            //
+            // `userHidden` 同时被两处消费，语义相反：
+            //   · 上面 `eligible()` 用它**剔除**列表（`!userHidden`）；
+            //   · 这里用它**收进**隐藏分区（`userHidden`）。
+            // 所以「真删」不能表达成 `userHidden && !deleted` —— 那样 eligible 会算出
+            // `!false == true`，被删的源反而**留在原分组里**（比出现在已隐藏更糟）。
+            // 「不显示」与「不列进隐藏分区」是两个位，必须分开表达。
+            let hidden = (builtIns + mergedSites.filter { !$0.isBuiltIn }).filter {
+                !$0.hidden && $0.canBrowse(jarURL: jarURL) && userHidden($0)
+                    && !privacyHidden($0) && !deletedHidden($0)
+            }
             if !hidden.isEmpty { groups.append(SourceGroup(kind: .hidden, title: "Hidden Sources", sites: hidden)) }
         }
         return groups

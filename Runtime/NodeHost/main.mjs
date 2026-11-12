@@ -8,6 +8,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { inspect } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { request, setProxy } from './agents.mjs';
 
 const [controlFile, relistenFile] = process.argv.slice(2);
@@ -354,6 +355,14 @@ async function relocate(address) {
     return address;
 }
 
+// One import per runner file: compute.mjs only defines functions, so a single instance serves every call.
+const runners = new Map();
+function sharedRunner(file) {
+    let loaded = runners.get(file);
+    if (!loaded) { loaded = import(pathToFileURL(file).href); runners.set(file, loaded); }
+    return loaded;
+}
+
 const control = http.createServer(async (req, res) => {
     const reply = body => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     if (req.method !== 'POST' || req.url !== '/call' || req.headers['x-yingxia-token'] !== token) { res.writeHead(403); res.end(); return; }
@@ -362,6 +371,17 @@ const control = http.createServer(async (req, res) => {
         for await (const chunk of req) chunks.push(chunk);
         const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (input.relocate) { reply({ result: await relocate(String(input.relocate)) }); return; }
+        // A WeBox plugin's ctx.compute.run (4k影视's wasm play-request builder): the same runner the Mac host
+        // runs as a program, imported once here so both hosts share one implementation.
+        if (input.compute) {
+            try {
+                const { runCompute } = await sharedRunner(String(input.runner));
+                reply({ result: JSON.stringify({ result: (await runCompute(input.compute)) ?? null }) });
+            } catch (error) {
+                reply({ result: JSON.stringify({ error: String((error && error.message) || error) }) });
+            }
+            return;
+        }
         useProxy(input.proxy);
         let instance = bundles.get(input.bundle);
         if (!instance) {

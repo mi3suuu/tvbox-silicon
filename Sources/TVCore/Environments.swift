@@ -145,4 +145,16 @@ public struct Environments: Codable, Hashable, Sendable {
     public var syncingEnvironment: Environment? {
         all.first { $0.syncsExternally }
     }
+
+    /// The default environment's id: the one that owns everything written before environments existed.
+    public var defaultID: UUID { all[0].id }
+
+    /// A preference key qualified by the environment on screen. See `EnvironmentScopedKey`.
+    ///
+    /// Preferences have no record to stamp, so they are partitioned by key instead. The default
+    /// environment keeps the bare key, which is what makes an upgrade keep every pin and hide that
+    /// was set before environments existed.
+    public func scopedKey(_ base: String) -> String {
+        EnvironmentScopedKey.key(base, environment: activeID, default: defaultID)
+    }
 }

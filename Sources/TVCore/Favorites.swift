@@ -242,6 +242,31 @@ struct FavoriteRecord: Codable, Hashable, Sendable {
         onChange?()
     }
 
+    /// 删掉**所有来源为这一条源**的收藏（跨全部环境）。
+    ///
+    /// 为什么需要它：删源（`Store.deleteSite`）只写了 `deletedSources` 与 `hiddenSources`，
+    /// 而收藏与「继续观看」都不看那两份记账。删完源之后，收藏页会留下一张点一下就
+    /// 弹「这个源已不在当前订阅里」的死卡片（`Store.reportMissingFavoriteSource`），
+    /// 而用户已经明确删掉了那条源 —— 这张卡片没有任何意义，只能一条条手删。
+    ///
+    /// 跨环境删是刻意的：源是按**地址 + sourceKey** 删除的，同一个源在各环境里
+    /// 是同一件事，留下的都是同样的死卡片。
+    ///
+    /// - Returns: 删掉的条数（0 表示没有受影响的收藏）。
+    @discardableResult
+    public func removeAll(fromSource sourceKey: String, origin: URL) -> Int {
+        let before = records.count
+        records.removeAll { record in
+            guard case .video(let video) = record.item else { return false }
+            return video.sourceKey == sourceKey && video.origin == origin
+        }
+        let removed = before - records.count
+        guard removed > 0 else { return 0 }
+        persist()
+        onChange?()
+        return removed
+    }
+
     private func isActive(_ record: FavoriteRecord) -> Bool {
         (record.environment ?? defaultEnvironmentID) == (activeEnvironmentID ?? defaultEnvironmentID)
     }

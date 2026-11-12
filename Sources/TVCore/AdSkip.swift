@@ -6,7 +6,14 @@ import Foundation
 /// it doesn't clearly recognize is left exactly as it was.
 public enum AdSkip {
     public static let key = "player.skipAds"
-    public static var enabled: Bool { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
+    public static var enabled: Bool {
+        get { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
+        // 写成同一个键：设置页（`AdSkipSettingsView`）、三个播放器的控件、
+        // HLS 代理（`HLSProxy`）与 `LiveRepair` 读的都是它，只有一处真身。
+        // 此前它没有 setter，于是播放器里想就地开关只能绕过这里自己写
+        // UserDefaults —— 那就是「同一条设置两个写入点」的开端。
+        set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
 
     /// A run is an ad only when it is this short ...
     static let longestRun = 60.0

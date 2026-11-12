@@ -1,7 +1,9 @@
-#if canImport(UIKit)
+// 这个文件只用到 AVFoundation / CoreImage / CoreVideo（`AVPlayerItemVideoOutput`、
+// `CIContext`、`CVPixelBuffer`），三者 macOS / tvOS 全都有 —— 之前的 `canImport(UIKit)`
+// 把整类挡在非 iOS 平台外面，于是跨平台的 `PlaybackView` 报 `cannot find 'AdFrameSampler'`。
 import AVFoundation
 import CoreImage
-import UIKit
+import CoreVideo
 
 /// 从正在播放的 `AVPlayerItem` 里按节奏抓帧，算出 dHash。
 ///
@@ -155,4 +157,3 @@ public final class AdFrameSampler {
         return AdHash.dHash(gray: pixels)
     }
 }
-#endif

@@ -27,6 +27,11 @@ public enum HongguoStreams {
         return HongguoStreamStore.shared.add(HongguoByteStream(urls: [url] + backups, key: Data(bytes), headers: headers, http: http))
     }
 
+    /// The decrypting byte stream behind a `tvbox-hongguo` address, for the web relay.
+    static func byteStream(for url: URL) async -> HongguoByteStream? {
+        HongguoStreamStore.shared.stream(url)
+    }
+
     public static func asset(for url: URL) -> AVURLAsset? {
         guard HongguoStreamStore.shared.stream(url) != nil else { return nil }
         let asset = AVURLAsset(url: url)
@@ -61,7 +66,9 @@ private final class HongguoStreamStore: @unchecked Sendable {
         let retired: [URL] = lock.withLock {
             streams[url] = stream; order.append(url)
             var old: [URL] = []
-            while order.count > 4 { let first = order.removeFirst(); streams[first] = nil; old.append(first) }
+            // ⛔ 上限取 `PlaybackCapacity.streamLimit`（原值 4 = 坞上限，没算前台那一路）。
+            // 越过时逐出的是最老的、可能正在播的那一路 —— 见 `PlaybackCapacity`。
+            while order.count > PlaybackCapacity.streamLimit { let first = order.removeFirst(); streams[first] = nil; old.append(first) }
             return old
         }
         for old in retired { HongguoResourceLoader.shared.cancel(old) }

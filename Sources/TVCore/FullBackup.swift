@@ -121,11 +121,20 @@ public enum FullBackupDefaults {
         "sourceReassignment.v1",
         "proxyEndpoints.v1",
         "proxyRoutes.v1",
-        "pinnedSources.v1",
-        "hiddenSources.v1",
-        "hiddenSources.autoRestore.v1",
-        "hiddenSources.builtInRestore.v1",
-        "sourceOrder.v1",
+        // ⛔ 这里**不能**放存成 `[String]` 数组的键。
+        //
+        // `dataKeys` 的读写走 `defaults.data(forKey:)` / `defaults.set(Data, forKey:)`，
+        // 而 `data(forKey:)` 对「用 `set([String], forKey:)` 写进去的数组」**恒返回 nil**
+        // （实测：`d.set(["a","b"]); d.data(forKey:"k") == nil`，`stringArray` 才是 ["a","b"]）。
+        // 放这里 = snapshot 抓不到、restore 也不写，安静地什么都不做。
+        //
+        // 曾经 `pinnedSources.v1` / `hiddenSources.v1` / `hiddenSources.autoRestore.v1` /
+        // `hiddenSources.builtInRestore.v1` / `sourceOrder.v1` / `sourceOrder.groups.v1`
+        // / `deletedSources.v1` 全在这份清单里，全是死条目 ——
+        // 也就是说「整机备份 → 换机恢复」这条路上，**用户置顶的源、隐藏的源、排好的源顺序、
+        // 真删的源，一个都没被带过去**，而 iCloud 那条路又是好的，
+        // 于是同一个用户在不同恢复方式下看到两套结果。
+        // 它们已全部迁到 `scalarKeys`（`isJSONScalar` 接受 `[String]`，JSON 数组往返语义正确）。
         "sourceFoldState.v1",
         "musicExtensions",
         "musicLXSources",
@@ -146,6 +155,16 @@ public enum FullBackupDefaults {
     /// Keys whose value is a scalar (Bool / String / Int / Double). Stored as a JSON-encoded scalar
     /// blob so one mechanism carries every type.
     public static let scalarKeys: [String] = [
+        // 存成 `[String]` 的偏好：只能走 scalar 通道（见 `dataKeys` 上方的说明）。
+        "pinnedSources.v1",
+        "hiddenSources.v1",
+        "hiddenSources.autoRestore.v1",
+        "hiddenSources.builtInRestore.v1",
+        "sourceOrder.v1",
+        "sourceOrder.groups.v1",
+        // 真删的子源。走 scalar 通道才真的进得了备份；漏了它，
+        // 换机恢复后用户删掉的源会以「已隐藏」+ Unhide 的形式回来。
+        "deletedSources.v1",
         "sourceOrder.enabled",
         "musicQuality",
         "musicDisabledProviders",
