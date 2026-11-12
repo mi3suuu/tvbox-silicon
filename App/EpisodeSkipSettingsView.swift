@@ -8,13 +8,24 @@ struct EpisodeSkipSettingsView: View {
     @State private var enabled = false
     @State private var intro = ""
     @State private var outro = ""
+    /// 本集已有的广告段。**只透传、不编辑** —— 这个页面不改广告段（那是播放页「标记广告」的事），
+    /// 但保存时若不把它带回去，`save` 的整体覆盖会把它们全删掉。
+    @State private var ads: [AdRange] = []
 
     private var draft: EpisodeSkipSettings? {
         guard let introEnd = intro.isEmpty ? 0 : EpisodeSkipSettings.parseTime(intro),
               let outroStart = outro.isEmpty ? session.duration : EpisodeSkipSettings.parseTime(outro),
               outroStart <= session.duration else { return nil }
+        // ⛔ 必须把已有的广告段带过去。
+        //
+        // `EpisodeSkipSettings.init` 的 `ads` 默认是 `[]`，而 `applySkipSettings` →
+        // `save(scope:)` 是 `JSONEncoder().encode(self)` **整体覆盖**。
+        // 所以这里少传 `ads`，用户每点一次「保存」就把本集标好的广告段全部清空 ——
+        // 数据丢失，且界面上看不出来（广告段本来就不画在这个页面里）。
+        // 实测复现：存 2 段 → 按本页构造方式再存一次 → 剩 0 段。
         return EpisodeSkipSettings(enabled: enabled, introEnd: introEnd,
-                                   outroLength: outro.isEmpty ? 0 : session.duration - outroStart)
+                                   outroLength: outro.isEmpty ? 0 : session.duration - outroStart,
+                                   ads: ads)
     }
     private var issue: String? {
         guard let draft else { return L10n.text("Enter a valid time such as 01:30.") }
@@ -74,6 +85,8 @@ struct EpisodeSkipSettingsView: View {
             enabled = value.enabled
             intro = value.introEnd > 0 ? EpisodeSkipSettings.formatTime(value.introEnd) : ""
             outro = value.outroLength > 0 ? EpisodeSkipSettings.formatTime(max(0, session.duration - value.outroLength)) : ""
+            // 读进来只为原样带回去（见 `draft` 里的说明）。不读就等于保存时清空。
+            ads = value.ads
         }
         .onDisappear { session.endEditingSkip() }
         #if os(macOS)
