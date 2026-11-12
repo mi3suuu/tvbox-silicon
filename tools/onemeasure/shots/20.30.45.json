@@ -1,0 +1,175 @@
+{
+  "atomic_blocks": 51,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 623.33,
+      "kind": "card-or-video",
+      "w": 345.67,
+      "x": 500.33,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 253.67,
+      "kind": "small",
+      "w": 33.0,
+      "x": 918.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 503.0,
+      "kind": "small",
+      "w": 76.0,
+      "x": 340.0,
+      "y": 87.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 526.0,
+      "kind": "small",
+      "w": 54.0,
+      "x": 429.67,
+      "y": 87.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 415.67,
+      "kind": "small",
+      "w": 77.67,
+      "x": 178.33,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 415.67,
+      "kind": "small",
+      "w": 54.0,
+      "x": 274.67,
+      "y": 158.33
+    },
+    {
+      "confidence": 0.7,
+      "h": 10.0,
+      "kind": "small",
+      "w": 10.0,
+      "x": 523.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.7,
+      "h": 10.0,
+      "kind": "small",
+      "w": 10.33,
+      "x": 547.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.9,
+      "h": 10.0,
+      "kind": "small",
+      "w": 30.0,
+      "x": 581.0,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.96,
+      "h": 10.0,
+      "kind": "small",
+      "w": 35.99,
+      "x": 751.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.9,
+      "h": 10.0,
+      "kind": "small",
+      "w": 30.0,
+      "x": 810.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 104.0,
+      "x": 524.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 34.33,
+      "x": 647.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 99.0,
+      "x": 752.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.0,
+      "kind": "small",
+      "w": 35.34,
+      "x": 692.33,
+      "y": 652.67
+    }
+  ],
+  "blocks_total": 15,
+  "dual_column": false,
+  "file": "Screenshot Fig 2026-11-11 at 20.30.45.png",
+  "fold_unknown": true,
+  "kinds": {
+    "card-or-video": 1,
+    "small": 13,
+    "text-line": 1
+  },
+  "logical_size_pt": [
+    951.0,
+    669.0
+  ],
+  "orientation_scores": {
+    "0": 0.9088,
+    "270": 1.1003,
+    "90": 1.1003
+  },
+  "posture": "内屏横持",
+  "rotation_deg": 90,
+  "screen_body": "inner",
+  "seam_len_pt": null,
+  "seam_len_strict_pt": null,
+  "seam_matches_known_fact": false,
+  "seam_probe": {
+    "all_black_runs_x": [],
+    "gap": {
+      "ink_frac": 0.2035,
+      "max": 247.0,
+      "mean": 31.44
+    },
+    "left_of_gap": {
+      "ink_frac": 0.1805,
+      "max": 247.0,
+      "mean": 42.24
+    },
+    "right_of_gap": {
+      "ink_frac": 0.8405,
+      "max": 255.0,
+      "mean": 66.06
+    }
+  },
+  "seam_status": "covered-by-overlay",
+  "seam_x": null,
+  "seam_x_strict": null,
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.30.45"
+}

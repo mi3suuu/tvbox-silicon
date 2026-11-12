@@ -1,0 +1,319 @@
+{
+ "file": "外屏暂停播放.png",
+ "tag": "外屏暂停播放",
+ "stored_size_pt": [
+  466.0,
+  678.0
+ ],
+ "logical_size_pt": [
+  466.0,
+  678.0
+ ],
+ "rotation_deg": 0,
+ "orientation_scores": {
+  "0": 1.1518,
+  "90": 0.8682,
+  "270": 0.8682
+ },
+ "screen_body": "cover",
+ "posture": "外屏竖持",
+ "dual_column": false,
+ "seam_status": "absent",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": false,
+ "atomic_blocks": 113,
+ "blocks_total": 35,
+ "kinds": {
+  "card-or-video": 1,
+  "small": 30,
+  "text-line": 2,
+  "capsule": 2
+ },
+ "blocks": [
+  {
+   "x": 308.33,
+   "y": 0.0,
+   "w": 157.67,
+   "h": 344.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 104.67,
+   "y": 43.0,
+   "w": 141.67,
+   "h": 289.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 56.0,
+   "y": 216.33,
+   "w": 4.0,
+   "h": 115.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 18.33,
+   "y": 349.67,
+   "w": 313.34,
+   "h": 23.33,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.67,
+   "y": 380.67,
+   "w": 38.66,
+   "h": 8.0,
+   "kind": "small",
+   "confidence": 0.91
+  },
+  {
+   "x": 19.33,
+   "y": 389.33,
+   "w": 37.0,
+   "h": 9.33,
+   "kind": "small",
+   "confidence": 0.95
+  },
+  {
+   "x": 240.67,
+   "y": 410.0,
+   "w": 120.66,
+   "h": 18.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 150.33,
+   "y": 411.33,
+   "w": 26.01,
+   "h": 16.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 46.0,
+   "y": 412.33,
+   "w": 13.0,
+   "h": 14.0,
+   "kind": "small",
+   "confidence": 0.78
+  },
+  {
+   "x": 17.0,
+   "y": 412.67,
+   "w": 12.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 0.77
+  },
+  {
+   "x": 195.33,
+   "y": 412.67,
+   "w": 27.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 0.97
+  },
+  {
+   "x": 73.67,
+   "y": 413.67,
+   "w": 60.99,
+   "h": 11.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 20.33,
+   "y": 436.67,
+   "w": 23.0,
+   "h": 5.67,
+   "kind": "small",
+   "confidence": 0.73
+  },
+  {
+   "x": 95.33,
+   "y": 458.33,
+   "w": 56.34,
+   "h": 10.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 184.33,
+   "y": 458.67,
+   "w": 12.67,
+   "h": 9.0,
+   "kind": "small",
+   "confidence": 0.71
+  },
+  {
+   "x": 17.0,
+   "y": 459.0,
+   "w": 28.0,
+   "h": 9.0,
+   "kind": "small",
+   "confidence": 0.85
+  },
+  {
+   "x": 68.67,
+   "y": 459.0,
+   "w": 13.67,
+   "h": 9.0,
+   "kind": "small",
+   "confidence": 0.72
+  },
+  {
+   "x": 164.33,
+   "y": 459.33,
+   "w": 9.33,
+   "h": 8.67,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 22.33,
+   "y": 480.67,
+   "w": 63.34,
+   "h": 10.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 101.0,
+   "y": 480.67,
+   "w": 19.66,
+   "h": 10.33,
+   "kind": "small",
+   "confidence": 0.8
+  },
+  {
+   "x": 156.33,
+   "y": 480.67,
+   "w": 47.67,
+   "h": 10.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 131.0,
+   "y": 481.0,
+   "w": 12.67,
+   "h": 9.33,
+   "kind": "small",
+   "confidence": 0.72
+  },
+  {
+   "x": 16.0,
+   "y": 515.0,
+   "w": 190.0,
+   "h": 52.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 238.33,
+   "y": 515.0,
+   "w": 19.33,
+   "h": 52.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 282.0,
+   "y": 515.0,
+   "w": 83.67,
+   "h": 52.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 29.0,
+   "y": 605.0,
+   "w": 23.33,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.87
+  },
+  {
+   "x": 86.67,
+   "y": 605.0,
+   "w": 24.33,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.88
+  },
+  {
+   "x": 144.67,
+   "y": 605.0,
+   "w": 51.67,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 229.67,
+   "y": 605.0,
+   "w": 24.33,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.88
+  },
+  {
+   "x": 292.0,
+   "y": 605.0,
+   "w": 19.34,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.83
+  },
+  {
+   "x": 29.67,
+   "y": 649.0,
+   "w": 22.66,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.86
+  },
+  {
+   "x": 86.67,
+   "y": 649.0,
+   "w": 23.99,
+   "h": 11.66,
+   "kind": "small",
+   "confidence": 0.88
+  },
+  {
+   "x": 146.0,
+   "y": 649.0,
+   "w": 23.0,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.87
+  },
+  {
+   "x": 206.0,
+   "y": 649.0,
+   "w": 21.0,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.85
+  },
+  {
+   "x": 260.33,
+   "y": 649.0,
+   "w": 22.67,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.86
+  }
+ ],
+ "_source_file": "外屏暂停播放.png"
+}

@@ -1,0 +1,261 @@
+{
+ "file": "展开横屏双栏 播放暂停中.png",
+ "tag": "展开横屏双栏 播放暂停中",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  951.0,
+  669.0
+ ],
+ "rotation_deg": 90,
+ "orientation_scores": {
+  "0": 0.8857,
+  "90": 1.1291,
+  "270": 1.1291
+ },
+ "screen_body": "inner",
+ "posture": "内屏横持",
+ "dual_column": true,
+ "seam_status": "detected-partial",
+ "seam_x": [
+  491.0,
+  523.0
+ ],
+ "seam_len_pt": 32.0,
+ "seam_x_strict": [
+  491.0,
+  523.0
+ ],
+ "seam_len_strict_pt": 32.0,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 108,
+ "blocks_total": 27,
+ "kinds": {
+  "card-or-video": 1,
+  "small": 22,
+  "capsule": 2,
+  "text-line": 2
+ },
+ "blocks": [
+  {
+   "x": 525.0,
+   "y": 0.0,
+   "w": 322.33,
+   "h": 373.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 864.0,
+   "y": 0.0,
+   "w": 87.0,
+   "h": 332.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 178.33,
+   "y": 158.33,
+   "w": 78.33,
+   "h": 215.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 270.67,
+   "y": 158.33,
+   "w": 58.0,
+   "h": 215.34,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 87.67,
+   "y": 387.67,
+   "w": 294.67,
+   "h": 38.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 524.0,
+   "y": 390.33,
+   "w": 177.0,
+   "h": 34.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 55.67,
+   "y": 402.0,
+   "w": 4.67,
+   "h": 9.0,
+   "kind": "small",
+   "confidence": 0.64
+  },
+  {
+   "x": 715.33,
+   "y": 411.33,
+   "w": 22.34,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 0.91
+  },
+  {
+   "x": 773.67,
+   "y": 411.33,
+   "w": 71.66,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 755.67,
+   "y": 412.33,
+   "w": 6.0,
+   "h": 11.0,
+   "kind": "small",
+   "confidence": 0.67
+  },
+  {
+   "x": 523.67,
+   "y": 431.33,
+   "w": 310.0,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 524.0,
+   "y": 473.0,
+   "w": 31.33,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 570.67,
+   "y": 473.0,
+   "w": 61.0,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 822.0,
+   "y": 473.0,
+   "w": 22.0,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 0.88
+  },
+  {
+   "x": 537.33,
+   "y": 501.33,
+   "w": 84.0,
+   "h": 122.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 641.33,
+   "y": 501.33,
+   "w": 87.67,
+   "h": 122.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 768.0,
+   "y": 515.0,
+   "w": 7.0,
+   "h": 101.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 789.33,
+   "y": 534.0,
+   "w": 49.01,
+   "h": 82.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 523.67,
+   "y": 631.67,
+   "w": 10.0,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.7
+  },
+  {
+   "x": 547.67,
+   "y": 631.67,
+   "w": 10.33,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.7
+  },
+  {
+   "x": 581.0,
+   "y": 631.67,
+   "w": 30.0,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.9
+  },
+  {
+   "x": 751.67,
+   "y": 631.67,
+   "w": 35.99,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.96
+  },
+  {
+   "x": 810.67,
+   "y": 631.67,
+   "w": 30.0,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.9
+  },
+  {
+   "x": 524.0,
+   "y": 652.0,
+   "w": 104.0,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 647.0,
+   "y": 652.0,
+   "w": 34.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 752.0,
+   "y": 652.0,
+   "w": 99.0,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 692.33,
+   "y": 652.67,
+   "w": 35.34,
+   "h": 13.0,
+   "kind": "small",
+   "confidence": 1.0
+  }
+ ],
+ "_source_file": "展开横屏双栏 播放暂停中.png"
+}

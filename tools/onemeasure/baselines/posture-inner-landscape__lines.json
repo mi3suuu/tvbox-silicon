@@ -1,0 +1,176 @@
+{
+ "file": "展开横屏双栏 暂停选线路.png",
+ "tag": "展开横屏双栏 暂停选线路",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  951.0,
+  669.0
+ ],
+ "rotation_deg": 90,
+ "orientation_scores": {
+  "0": 0.9088,
+  "90": 1.1003,
+  "270": 1.1003
+ },
+ "screen_body": "inner",
+ "posture": "内屏横持",
+ "dual_column": false,
+ "seam_status": "covered-by-overlay",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 51,
+ "blocks_total": 15,
+ "kinds": {
+  "card-or-video": 1,
+  "small": 13,
+  "text-line": 1
+ },
+ "blocks": [
+  {
+   "x": 500.33,
+   "y": 0.0,
+   "w": 345.67,
+   "h": 623.33,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 918.0,
+   "y": 0.0,
+   "w": 33.0,
+   "h": 253.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 340.0,
+   "y": 87.33,
+   "w": 76.0,
+   "h": 503.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 429.67,
+   "y": 87.33,
+   "w": 54.0,
+   "h": 526.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 178.33,
+   "y": 158.33,
+   "w": 77.67,
+   "h": 415.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 274.67,
+   "y": 158.33,
+   "w": 54.0,
+   "h": 415.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 523.67,
+   "y": 631.67,
+   "w": 10.0,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.7
+  },
+  {
+   "x": 547.67,
+   "y": 631.67,
+   "w": 10.33,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.7
+  },
+  {
+   "x": 581.0,
+   "y": 631.67,
+   "w": 30.0,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.9
+  },
+  {
+   "x": 751.67,
+   "y": 631.67,
+   "w": 35.99,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.96
+  },
+  {
+   "x": 810.67,
+   "y": 631.67,
+   "w": 30.0,
+   "h": 10.0,
+   "kind": "small",
+   "confidence": 0.9
+  },
+  {
+   "x": 524.0,
+   "y": 652.0,
+   "w": 104.0,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 647.0,
+   "y": 652.0,
+   "w": 34.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 752.0,
+   "y": 652.0,
+   "w": 99.0,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 692.33,
+   "y": 652.67,
+   "w": 35.34,
+   "h": 13.0,
+   "kind": "small",
+   "confidence": 1.0
+  }
+ ],
+ "seam_probe": {
+  "gap": {
+   "mean": 31.44,
+   "max": 247.0,
+   "ink_frac": 0.2035
+  },
+  "left_of_gap": {
+   "mean": 42.24,
+   "max": 247.0,
+   "ink_frac": 0.1805
+  },
+  "right_of_gap": {
+   "mean": 66.06,
+   "max": 255.0,
+   "ink_frac": 0.8405
+  },
+  "all_black_runs_x": []
+ },
+ "_source_file": "展开横屏双栏 暂停选线路.png"
+}

@@ -1,0 +1,175 @@
+{
+ "file": "展开竖屏 未播放.png",
+ "tag": "展开竖屏 未播放",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  669.0,
+  951.0
+ ],
+ "rotation_deg": 0,
+ "orientation_scores": {
+  "0": 1.0833,
+  "90": 0.9231,
+  "270": 0.9231
+ },
+ "screen_body": "inner",
+ "posture": "内屏竖持",
+ "dual_column": false,
+ "seam_status": "absent",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 73,
+ "blocks_total": 17,
+ "kinds": {
+  "card-or-video": 1,
+  "capsule": 5,
+  "small": 10,
+  "text-line": 1
+ },
+ "blocks": [
+  {
+   "x": 0.0,
+   "y": 0.0,
+   "w": 669.0,
+   "h": 660.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.33,
+   "y": 680.67,
+   "w": 101.33,
+   "h": 36.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.0,
+   "y": 745.67,
+   "w": 268.34,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 363.67,
+   "y": 745.67,
+   "w": 288.66,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 322.67,
+   "y": 754.33,
+   "w": 6.33,
+   "h": 12.0,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 305.67,
+   "y": 755.0,
+   "w": 6.67,
+   "h": 11.33,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 16.0,
+   "y": 789.67,
+   "w": 272.34,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 371.0,
+   "y": 789.67,
+   "w": 258.33,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 311.67,
+   "y": 798.33,
+   "w": 37.33,
+   "h": 21.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 20.67,
+   "y": 851.0,
+   "w": 38.67,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 76.33,
+   "y": 851.0,
+   "w": 255.0,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 17.0,
+   "y": 871.33,
+   "w": 18.33,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 0.84
+  },
+  {
+   "x": 48.0,
+   "y": 871.33,
+   "w": 41.0,
+   "h": 13.01,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 107.67,
+   "y": 871.33,
+   "w": 39.66,
+   "h": 13.34,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 166.67,
+   "y": 871.33,
+   "w": 51.0,
+   "h": 13.34,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.67,
+   "y": 891.67,
+   "w": 8.33,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 0.71
+  },
+  {
+   "x": 36.33,
+   "y": 891.67,
+   "w": 37.67,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 1.0
+  }
+ ],
+ "_source_file": "展开竖屏 未播放.png"
+}

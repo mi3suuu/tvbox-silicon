@@ -1,0 +1,126 @@
+{
+ "file": "展开竖屏 暂停播放选集.png",
+ "tag": "展开竖屏 暂停播放选集",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  669.0,
+  951.0
+ ],
+ "rotation_deg": 0,
+ "orientation_scores": {
+  "0": 1.2056,
+  "90": 0.8294,
+  "270": 0.8294
+ },
+ "screen_body": "inner",
+ "posture": "内屏竖持",
+ "dual_column": false,
+ "seam_status": "absent",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 21,
+ "blocks_total": 11,
+ "kinds": {
+  "small": 6,
+  "card-or-video": 2,
+  "capsule": 3
+ },
+ "blocks": [
+  {
+   "x": 450.0,
+   "y": 0.0,
+   "w": 30.0,
+   "h": 266.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 512.0,
+   "y": 0.0,
+   "w": 157.0,
+   "h": 303.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 240.33,
+   "y": 86.0,
+   "w": 150.0,
+   "h": 236.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 402.0,
+   "y": 90.67,
+   "w": 26.67,
+   "h": 232.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 109.0,
+   "y": 382.67,
+   "w": 414.0,
+   "h": 38.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.0,
+   "y": 439.67,
+   "w": 138.67,
+   "h": 26.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 185.33,
+   "y": 439.67,
+   "w": 50.33,
+   "h": 25.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 403.33,
+   "y": 439.67,
+   "w": 103.0,
+   "h": 26.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 275.67,
+   "y": 447.33,
+   "w": 44.67,
+   "h": 11.01,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 370.33,
+   "y": 447.33,
+   "w": 19.33,
+   "h": 11.0,
+   "kind": "small",
+   "confidence": 0.81
+  },
+  {
+   "x": 8.0,
+   "y": 486.67,
+   "w": 653.0,
+   "h": 459.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  }
+ ],
+ "_source_file": "展开竖屏 暂停播放选集.png"
+}

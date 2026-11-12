@@ -1,0 +1,171 @@
+{
+  "atomic_blocks": 74,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 463.67,
+      "kind": "card-or-video",
+      "w": 320.0,
+      "x": 524.67,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 253.67,
+      "kind": "small",
+      "w": 51.33,
+      "x": 899.67,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 267.0,
+      "kind": "small",
+      "w": 31.67,
+      "x": 257.33,
+      "y": 198.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 267.0,
+      "kind": "small",
+      "w": 147.0,
+      "x": 320.0,
+      "y": 198.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 57.33,
+      "kind": "small",
+      "w": 10.33,
+      "x": 234.67,
+      "y": 303.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 48.66,
+      "x": 531.67,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 71.33,
+      "x": 591.67,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 63.67,
+      "x": 674.33,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 93.33,
+      "x": 755.0,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 310.0,
+      "x": 523.67,
+      "y": 489.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 31.33,
+      "x": 524.0,
+      "y": 531.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 61.0,
+      "x": 570.67,
+      "y": 531.0
+    },
+    {
+      "confidence": 0.89,
+      "h": 13.0,
+      "kind": "small",
+      "w": 22.0,
+      "x": 822.0,
+      "y": 531.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 79.0,
+      "kind": "small",
+      "w": 49.01,
+      "x": 561.33,
+      "y": 559.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 109.67,
+      "kind": "small",
+      "w": 87.0,
+      "x": 641.33,
+      "y": 559.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 46.33,
+      "kind": "small",
+      "w": 28.33,
+      "x": 798.0,
+      "y": 592.0
+    }
+  ],
+  "blocks_total": 16,
+  "dual_column": true,
+  "file": "Screenshot Fig 2026-11-11 at 20.30.00.png",
+  "fold_unknown": true,
+  "kinds": {
+    "card-or-video": 1,
+    "small": 14,
+    "text-line": 1
+  },
+  "logical_size_pt": [
+    951.0,
+    669.0
+  ],
+  "orientation_scores": {
+    "0": 0.9496,
+    "270": 1.0531,
+    "90": 1.0531
+  },
+  "posture": "内屏横持",
+  "rotation_deg": 90,
+  "screen_body": "inner",
+  "seam_len_pt": 55.67,
+  "seam_len_strict_pt": 55.33,
+  "seam_matches_known_fact": true,
+  "seam_status": "detected",
+  "seam_x": [
+    467.33,
+    523.0
+  ],
+  "seam_x_strict": [
+    467.67,
+    523.0
+  ],
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.30.00"
+}

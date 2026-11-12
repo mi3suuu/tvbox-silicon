@@ -1,0 +1,234 @@
+{
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 12.67,
+      "kind": "small",
+      "w": 37.67,
+      "x": 595.0,
+      "y": 46.67
+    },
+    {
+      "confidence": 0.71,
+      "h": 12.67,
+      "kind": "small",
+      "w": 8.33,
+      "x": 644.0,
+      "y": 46.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 51.01,
+      "x": 451.33,
+      "y": 66.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 39.66,
+      "x": 521.67,
+      "y": 66.33
+    },
+    {
+      "confidence": 0.84,
+      "h": 13.33,
+      "kind": "small",
+      "w": 18.33,
+      "x": 633.67,
+      "y": 66.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.0,
+      "kind": "small",
+      "w": 41.0,
+      "x": 580.0,
+      "y": 66.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 255.0,
+      "x": 337.67,
+      "y": 86.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 38.66,
+      "x": 609.67,
+      "y": 86.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 258.33,
+      "x": 39.67,
+      "y": 131.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 21.0,
+      "kind": "small",
+      "w": 37.33,
+      "x": 320.0,
+      "y": 131.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 272.33,
+      "x": 380.67,
+      "y": 131.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 288.66,
+      "x": 16.67,
+      "y": 175.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 268.33,
+      "x": 384.67,
+      "y": 175.67
+    },
+    {
+      "confidence": 0.68,
+      "h": 12.0,
+      "kind": "small",
+      "w": 6.33,
+      "x": 340.0,
+      "y": 184.67
+    },
+    {
+      "confidence": 0.68,
+      "h": 11.33,
+      "kind": "small",
+      "w": 6.67,
+      "x": 356.67,
+      "y": 184.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 36.0,
+      "kind": "capsule",
+      "w": 101.33,
+      "x": 551.33,
+      "y": 234.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 659.67,
+      "kind": "card-or-video",
+      "w": 669.0,
+      "x": 0.0,
+      "y": 291.33
+    }
+  ],
+  "blocks_total": 17,
+  "candidates": [
+    {
+      "blocks": 17,
+      "largest_block_frac": 0.694,
+      "max_block_area_pt2": 441319.2,
+      "nonsmall": 7,
+      "seam_status": "absent",
+      "tag": "20.34.37"
+    },
+    {
+      "blocks": 25,
+      "largest_block_frac": 0.7,
+      "max_block_area_pt2": 445105.8,
+      "nonsmall": 2,
+      "seam_status": "absent",
+      "tag": "20.36.00"
+    },
+    {
+      "blocks": 18,
+      "largest_block_frac": 0.505,
+      "max_block_area_pt2": 321068.2,
+      "nonsmall": 7,
+      "seam_status": "absent",
+      "tag": "20.34.43"
+    },
+    {
+      "blocks": 11,
+      "largest_block_frac": 0.471,
+      "max_block_area_pt2": 299727.0,
+      "nonsmall": 5,
+      "seam_status": "absent",
+      "tag": "20.31.46"
+    },
+    {
+      "blocks": 11,
+      "largest_block_frac": 0.389,
+      "max_block_area_pt2": 247646.0,
+      "nonsmall": 1,
+      "seam_status": "absent",
+      "tag": "20.31.55"
+    },
+    {
+      "blocks": 34,
+      "largest_block_frac": 0.182,
+      "max_block_area_pt2": 115736.0,
+      "nonsmall": 3,
+      "seam_status": "absent",
+      "tag": "20.35.27"
+    },
+    {
+      "blocks": 49,
+      "largest_block_frac": 0.132,
+      "max_block_area_pt2": 84106.2,
+      "nonsmall": 8,
+      "seam_status": "absent",
+      "tag": "20.32.01"
+    },
+    {
+      "blocks": 36,
+      "largest_block_frac": 0.056,
+      "max_block_area_pt2": 35841.1,
+      "nonsmall": 2,
+      "seam_status": "absent",
+      "tag": "20.35.34"
+    }
+  ],
+  "dual_column": false,
+  "fold_unknown": true,
+  "kinds": {
+    "capsule": 5,
+    "card-or-video": 1,
+    "small": 10,
+    "text-line": 1
+  },
+  "largest_block_frac": 0.694,
+  "main_state_rule": "单栏形态：最大块占画布比例（0.1 分档）desc → 非small块数 desc → 最大块面积 desc",
+  "measure_mode": "adaptive",
+  "measure_quality": "ok",
+  "posture": "内屏竖持",
+  "posture_key": "inner-portrait",
+  "px_per_pt": 3.0,
+  "rotation_deg": 0,
+  "seam_x": null,
+  "size_pt": [
+    669.0,
+    951.0
+  ],
+  "source": "Screenshot Fig 2026-11-11 at 20.34.37.png",
+  "source_tag": "20.34.37",
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ]
+}

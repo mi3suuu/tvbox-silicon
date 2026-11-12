@@ -1,0 +1,182 @@
+{
+  "atomic_blocks": 78,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 12.67,
+      "kind": "small",
+      "w": 37.67,
+      "x": 595.0,
+      "y": 46.67
+    },
+    {
+      "confidence": 0.71,
+      "h": 12.67,
+      "kind": "small",
+      "w": 8.33,
+      "x": 644.0,
+      "y": 46.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 51.01,
+      "x": 451.33,
+      "y": 66.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 39.66,
+      "x": 521.67,
+      "y": 66.33
+    },
+    {
+      "confidence": 0.84,
+      "h": 13.33,
+      "kind": "small",
+      "w": 18.33,
+      "x": 633.67,
+      "y": 66.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.0,
+      "kind": "small",
+      "w": 41.0,
+      "x": 580.0,
+      "y": 66.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 255.0,
+      "x": 337.67,
+      "y": 86.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 38.66,
+      "x": 609.67,
+      "y": 86.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 258.33,
+      "x": 39.67,
+      "y": 131.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 21.0,
+      "kind": "small",
+      "w": 37.33,
+      "x": 320.0,
+      "y": 131.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 272.33,
+      "x": 380.67,
+      "y": 131.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 288.66,
+      "x": 16.67,
+      "y": 175.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 268.33,
+      "x": 384.67,
+      "y": 175.67
+    },
+    {
+      "confidence": 0.68,
+      "h": 12.0,
+      "kind": "small",
+      "w": 6.33,
+      "x": 340.0,
+      "y": 184.67
+    },
+    {
+      "confidence": 0.68,
+      "h": 11.33,
+      "kind": "small",
+      "w": 6.67,
+      "x": 356.67,
+      "y": 184.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 716.67,
+      "kind": "card-or-video",
+      "w": 448.0,
+      "x": 0.0,
+      "y": 234.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 603.0,
+      "kind": "small",
+      "w": 8.67,
+      "x": 458.33,
+      "y": 234.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 716.67,
+      "kind": "card-or-video",
+      "w": 184.67,
+      "x": 484.33,
+      "y": 234.33
+    }
+  ],
+  "blocks_total": 18,
+  "dual_column": false,
+  "file": "Screenshot Fig 2026-11-11 at 20.34.43.png",
+  "fold_unknown": true,
+  "kinds": {
+    "capsule": 4,
+    "card-or-video": 2,
+    "small": 11,
+    "text-line": 1
+  },
+  "logical_size_pt": [
+    669.0,
+    951.0
+  ],
+  "orientation_scores": {
+    "0": 1.0485,
+    "270": 0.9538,
+    "90": 0.9538
+  },
+  "posture": "内屏竖持",
+  "rotation_deg": 0,
+  "screen_body": "inner",
+  "seam_len_pt": null,
+  "seam_len_strict_pt": null,
+  "seam_matches_known_fact": false,
+  "seam_status": "absent",
+  "seam_x": null,
+  "seam_x_strict": null,
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.34.43"
+}

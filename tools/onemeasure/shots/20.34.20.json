@@ -1,0 +1,109 @@
+{
+  "atomic_blocks": 23,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 579.0,
+      "kind": "small",
+      "w": 75.67,
+      "x": 16.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 579.0,
+      "kind": "card-or-video",
+      "w": 274.0,
+      "x": 160.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 503.0,
+      "kind": "small",
+      "w": 33.0,
+      "x": 106.0,
+      "y": 76.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 87.0,
+      "kind": "small",
+      "w": 16.0,
+      "x": 448.0,
+      "y": 96.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 139.0,
+      "x": 16.0,
+      "y": 608.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "capsule",
+      "w": 153.67,
+      "x": 189.0,
+      "y": 608.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 26.0,
+      "kind": "capsule",
+      "w": 120.33,
+      "x": 16.33,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 26.0,
+      "kind": "capsule",
+      "w": 107.0,
+      "x": 210.67,
+      "y": 652.0
+    },
+    {
+      "confidence": 0.69,
+      "h": 10.0,
+      "kind": "small",
+      "w": 8.67,
+      "x": 171.67,
+      "y": 661.67
+    }
+  ],
+  "blocks_total": 9,
+  "dual_column": false,
+  "file": "Screenshot Fig 2026-11-11 at 20.34.20.png",
+  "fold_unknown": false,
+  "kinds": {
+    "capsule": 4,
+    "card-or-video": 1,
+    "small": 4
+  },
+  "logical_size_pt": [
+    466.0,
+    678.0
+  ],
+  "orientation_scores": {
+    "0": 1.0183,
+    "270": 0.982,
+    "90": 0.982
+  },
+  "posture": "外屏竖持",
+  "rotation_deg": 0,
+  "screen_body": "cover",
+  "seam_len_pt": null,
+  "seam_len_strict_pt": null,
+  "seam_matches_known_fact": false,
+  "seam_status": "absent",
+  "seam_x": null,
+  "seam_x_strict": null,
+  "stored_size_pt": [
+    466.0,
+    678.0
+  ],
+  "tag": "20.34.20"
+}

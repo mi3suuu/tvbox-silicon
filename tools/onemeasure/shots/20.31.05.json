@@ -1,0 +1,107 @@
+{
+  "atomic_blocks": 34,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 642.0,
+      "kind": "card-or-video",
+      "w": 157.67,
+      "x": 523.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 649.0,
+      "kind": "card-or-video",
+      "w": 247.0,
+      "x": 704.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 415.67,
+      "kind": "small",
+      "w": 77.67,
+      "x": 178.33,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 415.67,
+      "kind": "small",
+      "w": 53.67,
+      "x": 275.0,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 104.0,
+      "x": 524.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 34.33,
+      "x": 647.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 99.0,
+      "x": 752.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.0,
+      "kind": "small",
+      "w": 35.34,
+      "x": 692.33,
+      "y": 652.67
+    }
+  ],
+  "blocks_total": 8,
+  "dual_column": true,
+  "file": "Screenshot Fig 2026-11-11 at 20.31.05.png",
+  "fold_unknown": true,
+  "kinds": {
+    "card-or-video": 2,
+    "small": 5,
+    "text-line": 1
+  },
+  "logical_size_pt": [
+    951.0,
+    669.0
+  ],
+  "orientation_scores": {
+    "0": 0.9211,
+    "270": 1.0857,
+    "90": 1.0857
+  },
+  "posture": "内屏横持",
+  "rotation_deg": 90,
+  "screen_body": "inner",
+  "seam_len_pt": 32.0,
+  "seam_len_strict_pt": 32.0,
+  "seam_matches_known_fact": false,
+  "seam_status": "detected-partial",
+  "seam_x": [
+    491.0,
+    523.0
+  ],
+  "seam_x_strict": [
+    491.0,
+    523.0
+  ],
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.31.05"
+}

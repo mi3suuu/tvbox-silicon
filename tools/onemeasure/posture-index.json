@@ -1,0 +1,544 @@
+{
+  "baseline_tables": [
+    {
+      "blocks": 16,
+      "candidates": 6,
+      "key": "inner-landscape",
+      "path": "posture-inner-landscape.json",
+      "posture": "内屏横持",
+      "source": "20.30.00"
+    },
+    {
+      "blocks": 17,
+      "candidates": 8,
+      "key": "inner-portrait",
+      "path": "posture-inner-portrait.json",
+      "posture": "内屏竖持",
+      "source": "20.34.37"
+    },
+    {
+      "blocks": 10,
+      "candidates": 4,
+      "key": "cover-portrait",
+      "path": "posture-cover-portrait.json",
+      "posture": "外屏竖持",
+      "source": "20.34.11"
+    }
+  ],
+  "desktop_glob": "/Users/mi3s/Desktop/Screenshot Fig 2026-11-11 at *.png",
+  "generated_by": "tools/onemeasure/classify.py",
+  "known_facts": {
+    "cover_landscape_pt": [
+      678.0,
+      466.0
+    ],
+    "cover_portrait_pt": [
+      466.0,
+      678.0
+    ],
+    "inner_landscape_pt": [
+      951.0,
+      669.0
+    ],
+    "inner_landscape_seam_pt": {
+      "from": 467.667,
+      "len": 55.333,
+      "to": 523.0
+    },
+    "inner_portrait_pt": [
+      669.0,
+      951.0
+    ],
+    "note": "内屏半折与摊开屏幕尺寸相同，静态截图无法区分 fold，故 fold_unknown=true"
+  },
+  "postures_found": [
+    "内屏横持",
+    "内屏竖持",
+    "外屏竖持"
+  ],
+  "postures_missing": [
+    {
+      "key": "cover-landscape",
+      "posture": "外屏横持",
+      "reason": "19 张真机截图中无 678×466pt（2034×1398px）存储帧；外屏横持未采到"
+    },
+    {
+      "key": "inner-half-portrait",
+      "posture": "半折竖持",
+      "reason": "半折与摊开的屏幕像素尺寸相同（951×669 / 669×951），静态截图无 fold 信息，无法与内屏横持/竖持区分；需真机或模拟器切 hinge=90° 时读 reservedRegions 才能标注"
+    },
+    {
+      "key": "inner-half-landscape",
+      "posture": "半折横持",
+      "reason": "同上：与内屏横持同尺寸，静态截图不可分辨"
+    }
+  ],
+  "px_per_pt": 3.0,
+  "shots": [
+    {
+      "blocks_total": 16,
+      "dual_column": true,
+      "file": "Screenshot Fig 2026-11-11 at 20.30.00.png",
+      "kinds": {
+        "card-or-video": 1,
+        "small": 14,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        951.0,
+        669.0
+      ],
+      "posture": "内屏横持",
+      "r0": 0.9496,
+      "rotation_deg": 90,
+      "seam_len_pt": 55.67,
+      "seam_status": "detected",
+      "seam_x": [
+        467.33,
+        523.0
+      ],
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.30.00"
+    },
+    {
+      "blocks_total": 27,
+      "dual_column": true,
+      "file": "Screenshot Fig 2026-11-11 at 20.30.21.png",
+      "kinds": {
+        "capsule": 2,
+        "card-or-video": 1,
+        "small": 22,
+        "text-line": 2
+      },
+      "logical_size_pt": [
+        951.0,
+        669.0
+      ],
+      "posture": "内屏横持",
+      "r0": 0.8857,
+      "rotation_deg": 90,
+      "seam_len_pt": 32.0,
+      "seam_status": "detected-partial",
+      "seam_x": [
+        491.0,
+        523.0
+      ],
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.30.21"
+    },
+    {
+      "blocks_total": 15,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.30.45.png",
+      "kinds": {
+        "card-or-video": 1,
+        "small": 13,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        951.0,
+        669.0
+      ],
+      "posture": "内屏横持",
+      "r0": 0.9088,
+      "rotation_deg": 90,
+      "seam_len_pt": null,
+      "seam_status": "covered-by-overlay",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.30.45"
+    },
+    {
+      "blocks_total": 8,
+      "dual_column": true,
+      "file": "Screenshot Fig 2026-11-11 at 20.31.05.png",
+      "kinds": {
+        "card-or-video": 2,
+        "small": 5,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        951.0,
+        669.0
+      ],
+      "posture": "内屏横持",
+      "r0": 0.9211,
+      "rotation_deg": 90,
+      "seam_len_pt": 32.0,
+      "seam_status": "detected-partial",
+      "seam_x": [
+        491.0,
+        523.0
+      ],
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.31.05"
+    },
+    {
+      "blocks_total": 28,
+      "dual_column": true,
+      "file": "Screenshot Fig 2026-11-11 at 20.31.22.png",
+      "kinds": {
+        "card-or-video": 2,
+        "small": 26
+      },
+      "logical_size_pt": [
+        951.0,
+        669.0
+      ],
+      "posture": "内屏横持",
+      "r0": 0.8971,
+      "rotation_deg": 90,
+      "seam_len_pt": 32.0,
+      "seam_status": "detected-partial",
+      "seam_x": [
+        491.0,
+        523.0
+      ],
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.31.22"
+    },
+    {
+      "blocks_total": 4,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.31.33.png",
+      "kinds": {
+        "card-or-video": 2,
+        "small": 2
+      },
+      "logical_size_pt": [
+        951.0,
+        669.0
+      ],
+      "posture": "内屏横持",
+      "r0": 0.871,
+      "rotation_deg": 90,
+      "seam_len_pt": null,
+      "seam_status": "covered-by-overlay",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.31.33"
+    },
+    {
+      "blocks_total": 11,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.31.46.png",
+      "kinds": {
+        "capsule": 3,
+        "card-or-video": 2,
+        "small": 6
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.2056,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.31.46"
+    },
+    {
+      "blocks_total": 11,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.31.55.png",
+      "kinds": {
+        "card-or-video": 1,
+        "small": 10
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.0723,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.31.55"
+    },
+    {
+      "blocks_total": 49,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.32.01.png",
+      "kinds": {
+        "capsule": 3,
+        "card-or-video": 2,
+        "small": 41,
+        "text-line": 3
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.1747,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.32.01"
+    },
+    {
+      "blocks_total": 35,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.32.14.png",
+      "kinds": {
+        "capsule": 2,
+        "card-or-video": 1,
+        "small": 30,
+        "text-line": 2
+      },
+      "logical_size_pt": [
+        466.0,
+        678.0
+      ],
+      "posture": "外屏竖持",
+      "r0": 1.1518,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        466.0,
+        678.0
+      ],
+      "tag": "20.32.14"
+    },
+    {
+      "blocks_total": 35,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.33.49.png",
+      "kinds": {
+        "capsule": 2,
+        "card-or-video": 1,
+        "small": 30,
+        "text-line": 2
+      },
+      "logical_size_pt": [
+        466.0,
+        678.0
+      ],
+      "posture": "外屏竖持",
+      "r0": 1.0714,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        466.0,
+        678.0
+      ],
+      "tag": "20.33.49"
+    },
+    {
+      "blocks_total": 10,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.34.11.png",
+      "kinds": {
+        "capsule": 7,
+        "card-or-video": 1,
+        "small": 2
+      },
+      "logical_size_pt": [
+        466.0,
+        678.0
+      ],
+      "posture": "外屏竖持",
+      "r0": 1.0391,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        466.0,
+        678.0
+      ],
+      "tag": "20.34.11"
+    },
+    {
+      "blocks_total": 9,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.34.20.png",
+      "kinds": {
+        "capsule": 4,
+        "card-or-video": 1,
+        "small": 4
+      },
+      "logical_size_pt": [
+        466.0,
+        678.0
+      ],
+      "posture": "外屏竖持",
+      "r0": 1.0183,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        466.0,
+        678.0
+      ],
+      "tag": "20.34.20"
+    },
+    {
+      "blocks_total": 17,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.34.37.png",
+      "kinds": {
+        "capsule": 5,
+        "card-or-video": 1,
+        "small": 10,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.0833,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.34.37"
+    },
+    {
+      "blocks_total": 18,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.34.43.png",
+      "kinds": {
+        "capsule": 4,
+        "card-or-video": 2,
+        "small": 11,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.0485,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.34.43"
+    },
+    {
+      "blocks_total": 34,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.35.27.png",
+      "kinds": {
+        "card-or-video": 2,
+        "small": 31,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.1381,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.35.27"
+    },
+    {
+      "blocks_total": 36,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.35.34.png",
+      "kinds": {
+        "card-or-video": 1,
+        "small": 34,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.1236,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.35.34"
+    },
+    {
+      "blocks_total": 25,
+      "dual_column": false,
+      "file": "Screenshot Fig 2026-11-11 at 20.36.00.png",
+      "kinds": {
+        "card-or-video": 1,
+        "small": 23,
+        "text-line": 1
+      },
+      "logical_size_pt": [
+        669.0,
+        951.0
+      ],
+      "posture": "内屏竖持",
+      "r0": 1.1616,
+      "rotation_deg": 0,
+      "seam_len_pt": null,
+      "seam_status": "absent",
+      "seam_x": null,
+      "stored_size_pt": [
+        669.0,
+        951.0
+      ],
+      "tag": "20.36.00"
+    }
+  ]
+}

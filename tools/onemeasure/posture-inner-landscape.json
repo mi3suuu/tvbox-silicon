@@ -1,0 +1,212 @@
+{
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 463.67,
+      "kind": "card-or-video",
+      "w": 320.0,
+      "x": 524.67,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 253.67,
+      "kind": "small",
+      "w": 51.33,
+      "x": 899.67,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 267.0,
+      "kind": "small",
+      "w": 31.67,
+      "x": 257.33,
+      "y": 198.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 267.0,
+      "kind": "small",
+      "w": 147.0,
+      "x": 320.0,
+      "y": 198.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 57.33,
+      "kind": "small",
+      "w": 10.33,
+      "x": 234.67,
+      "y": 303.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 48.66,
+      "x": 531.67,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 71.33,
+      "x": 591.67,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 63.67,
+      "x": 674.33,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 93.33,
+      "x": 755.0,
+      "y": 469.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 310.0,
+      "x": 523.67,
+      "y": 489.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 31.33,
+      "x": 524.0,
+      "y": 531.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 61.0,
+      "x": 570.67,
+      "y": 531.0
+    },
+    {
+      "confidence": 0.89,
+      "h": 13.0,
+      "kind": "small",
+      "w": 22.0,
+      "x": 822.0,
+      "y": 531.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 79.0,
+      "kind": "small",
+      "w": 49.01,
+      "x": 561.33,
+      "y": 559.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 109.67,
+      "kind": "small",
+      "w": 87.0,
+      "x": 641.33,
+      "y": 559.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 46.33,
+      "kind": "small",
+      "w": 28.33,
+      "x": 798.0,
+      "y": 592.0
+    }
+  ],
+  "blocks_total": 16,
+  "candidates": [
+    {
+      "blocks": 16,
+      "largest_block_frac": 0.233,
+      "max_block_area_pt2": 148374.4,
+      "nonsmall": 2,
+      "seam_status": "detected",
+      "tag": "20.30.00"
+    },
+    {
+      "blocks": 27,
+      "largest_block_frac": 0.189,
+      "max_block_area_pt2": 120445.1,
+      "nonsmall": 5,
+      "seam_status": "detected-partial",
+      "tag": "20.30.21"
+    },
+    {
+      "blocks": 8,
+      "largest_block_frac": 0.252,
+      "max_block_area_pt2": 160303.0,
+      "nonsmall": 3,
+      "seam_status": "detected-partial",
+      "tag": "20.31.05"
+    },
+    {
+      "blocks": 28,
+      "largest_block_frac": 0.193,
+      "max_block_area_pt2": 122656.7,
+      "nonsmall": 2,
+      "seam_status": "detected-partial",
+      "tag": "20.31.22"
+    },
+    {
+      "blocks": 15,
+      "largest_block_frac": 0.339,
+      "max_block_area_pt2": 215466.5,
+      "nonsmall": 2,
+      "seam_status": "covered-by-overlay",
+      "tag": "20.30.45"
+    },
+    {
+      "blocks": 4,
+      "largest_block_frac": 0.302,
+      "max_block_area_pt2": 192132.9,
+      "nonsmall": 2,
+      "seam_status": "covered-by-overlay",
+      "tag": "20.31.33"
+    }
+  ],
+  "dual_column": true,
+  "fold_unknown": true,
+  "kinds": {
+    "card-or-video": 1,
+    "small": 14,
+    "text-line": 1
+  },
+  "largest_block_frac": 0.233,
+  "main_state_rule": "双栏形态：seam_status 完整度 desc → 非small块数 desc → 最大块面积 desc",
+  "measure_mode": "adaptive",
+  "measure_quality": "ok",
+  "posture": "内屏横持",
+  "posture_key": "inner-landscape",
+  "px_per_pt": 3.0,
+  "rotation_deg": 90,
+  "seam_x": [
+    467.33,
+    523.0
+  ],
+  "size_pt": [
+    951.0,
+    669.0
+  ],
+  "source": "Screenshot Fig 2026-11-11 at 20.30.00.png",
+  "source_tag": "20.30.00",
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ]
+}

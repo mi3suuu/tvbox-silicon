@@ -1,0 +1,108 @@
+{
+ "file": "展开横屏双栏 暂停选触发按钮.png",
+ "tag": "展开横屏双栏 暂停选触发按钮",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  951.0,
+  669.0
+ ],
+ "rotation_deg": 90,
+ "orientation_scores": {
+  "0": 0.9211,
+  "90": 1.0857,
+  "270": 1.0857
+ },
+ "screen_body": "inner",
+ "posture": "内屏横持",
+ "dual_column": true,
+ "seam_status": "detected-partial",
+ "seam_x": [
+  491.0,
+  523.0
+ ],
+ "seam_len_pt": 32.0,
+ "seam_x_strict": [
+  491.0,
+  523.0
+ ],
+ "seam_len_strict_pt": 32.0,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 34,
+ "blocks_total": 8,
+ "kinds": {
+  "card-or-video": 2,
+  "small": 5,
+  "text-line": 1
+ },
+ "blocks": [
+  {
+   "x": 523.0,
+   "y": 0.0,
+   "w": 157.67,
+   "h": 642.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 704.0,
+   "y": 0.0,
+   "w": 247.0,
+   "h": 649.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 178.33,
+   "y": 158.33,
+   "w": 77.67,
+   "h": 415.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 275.0,
+   "y": 158.33,
+   "w": 53.67,
+   "h": 415.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 524.0,
+   "y": 652.0,
+   "w": 104.0,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 647.0,
+   "y": 652.0,
+   "w": 34.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 752.0,
+   "y": 652.0,
+   "w": 99.0,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 692.33,
+   "y": 652.67,
+   "w": 35.34,
+   "h": 13.0,
+   "kind": "small",
+   "confidence": 1.0
+  }
+ ],
+ "_source_file": "展开横屏双栏 暂停选触发按钮.png"
+}

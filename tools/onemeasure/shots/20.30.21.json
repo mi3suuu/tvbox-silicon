@@ -1,0 +1,260 @@
+{
+  "atomic_blocks": 108,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 373.67,
+      "kind": "card-or-video",
+      "w": 322.33,
+      "x": 525.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 332.0,
+      "kind": "small",
+      "w": 87.0,
+      "x": 864.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 215.33,
+      "kind": "small",
+      "w": 78.33,
+      "x": 178.33,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 215.34,
+      "kind": "small",
+      "w": 58.0,
+      "x": 270.67,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 38.0,
+      "kind": "capsule",
+      "w": 294.67,
+      "x": 87.67,
+      "y": 387.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 34.67,
+      "kind": "capsule",
+      "w": 177.0,
+      "x": 524.0,
+      "y": 390.33
+    },
+    {
+      "confidence": 0.64,
+      "h": 9.0,
+      "kind": "small",
+      "w": 4.67,
+      "x": 55.67,
+      "y": 402.0
+    },
+    {
+      "confidence": 0.91,
+      "h": 13.67,
+      "kind": "small",
+      "w": 22.34,
+      "x": 715.33,
+      "y": 411.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 71.66,
+      "x": 773.67,
+      "y": 411.33
+    },
+    {
+      "confidence": 0.67,
+      "h": 11.0,
+      "kind": "small",
+      "w": 6.0,
+      "x": 755.67,
+      "y": 412.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 310.0,
+      "x": 523.67,
+      "y": 431.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 31.33,
+      "x": 524.0,
+      "y": 473.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.33,
+      "kind": "small",
+      "w": 61.0,
+      "x": 570.67,
+      "y": 473.0
+    },
+    {
+      "confidence": 0.88,
+      "h": 12.67,
+      "kind": "small",
+      "w": 22.0,
+      "x": 822.0,
+      "y": 473.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 122.0,
+      "kind": "small",
+      "w": 84.0,
+      "x": 537.33,
+      "y": 501.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 122.0,
+      "kind": "small",
+      "w": 87.67,
+      "x": 641.33,
+      "y": 501.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 101.33,
+      "kind": "small",
+      "w": 7.0,
+      "x": 768.0,
+      "y": 515.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 82.33,
+      "kind": "small",
+      "w": 49.01,
+      "x": 789.33,
+      "y": 534.0
+    },
+    {
+      "confidence": 0.7,
+      "h": 10.0,
+      "kind": "small",
+      "w": 10.0,
+      "x": 523.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.7,
+      "h": 10.0,
+      "kind": "small",
+      "w": 10.33,
+      "x": 547.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.9,
+      "h": 10.0,
+      "kind": "small",
+      "w": 30.0,
+      "x": 581.0,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.96,
+      "h": 10.0,
+      "kind": "small",
+      "w": 35.99,
+      "x": 751.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 0.9,
+      "h": 10.0,
+      "kind": "small",
+      "w": 30.0,
+      "x": 810.67,
+      "y": 631.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "text-line",
+      "w": 104.0,
+      "x": 524.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 34.33,
+      "x": 647.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.67,
+      "kind": "small",
+      "w": 99.0,
+      "x": 752.0,
+      "y": 652.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 13.0,
+      "kind": "small",
+      "w": 35.34,
+      "x": 692.33,
+      "y": 652.67
+    }
+  ],
+  "blocks_total": 27,
+  "dual_column": true,
+  "file": "Screenshot Fig 2026-11-11 at 20.30.21.png",
+  "fold_unknown": true,
+  "kinds": {
+    "capsule": 2,
+    "card-or-video": 1,
+    "small": 22,
+    "text-line": 2
+  },
+  "logical_size_pt": [
+    951.0,
+    669.0
+  ],
+  "orientation_scores": {
+    "0": 0.8857,
+    "270": 1.1291,
+    "90": 1.1291
+  },
+  "posture": "内屏横持",
+  "rotation_deg": 90,
+  "screen_body": "inner",
+  "seam_len_pt": 32.0,
+  "seam_len_strict_pt": 32.0,
+  "seam_matches_known_fact": false,
+  "seam_status": "detected-partial",
+  "seam_x": [
+    491.0,
+    523.0
+  ],
+  "seam_x_strict": [
+    491.0,
+    523.0
+  ],
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.30.21"
+}

@@ -1,0 +1,125 @@
+{
+  "atomic_blocks": 21,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 266.0,
+      "kind": "small",
+      "w": 30.0,
+      "x": 450.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 303.0,
+      "kind": "card-or-video",
+      "w": 157.0,
+      "x": 512.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 236.67,
+      "kind": "small",
+      "w": 150.0,
+      "x": 240.33,
+      "y": 86.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 232.0,
+      "kind": "small",
+      "w": 26.67,
+      "x": 402.0,
+      "y": 90.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 38.0,
+      "kind": "capsule",
+      "w": 414.0,
+      "x": 109.0,
+      "y": 382.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 26.0,
+      "kind": "capsule",
+      "w": 138.67,
+      "x": 16.0,
+      "y": 439.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 25.67,
+      "kind": "small",
+      "w": 50.33,
+      "x": 185.33,
+      "y": 439.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 26.0,
+      "kind": "capsule",
+      "w": 103.0,
+      "x": 403.33,
+      "y": 439.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 11.01,
+      "kind": "small",
+      "w": 44.67,
+      "x": 275.67,
+      "y": 447.33
+    },
+    {
+      "confidence": 0.81,
+      "h": 11.0,
+      "kind": "small",
+      "w": 19.33,
+      "x": 370.33,
+      "y": 447.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 459.0,
+      "kind": "card-or-video",
+      "w": 653.0,
+      "x": 8.0,
+      "y": 486.67
+    }
+  ],
+  "blocks_total": 11,
+  "dual_column": false,
+  "file": "Screenshot Fig 2026-11-11 at 20.31.46.png",
+  "fold_unknown": true,
+  "kinds": {
+    "capsule": 3,
+    "card-or-video": 2,
+    "small": 6
+  },
+  "logical_size_pt": [
+    669.0,
+    951.0
+  ],
+  "orientation_scores": {
+    "0": 1.2056,
+    "270": 0.8294,
+    "90": 0.8294
+  },
+  "posture": "内屏竖持",
+  "rotation_deg": 0,
+  "screen_body": "inner",
+  "seam_len_pt": null,
+  "seam_len_strict_pt": null,
+  "seam_matches_known_fact": false,
+  "seam_status": "absent",
+  "seam_x": null,
+  "seam_x_strict": null,
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.31.46"
+}

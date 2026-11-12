@@ -1,0 +1,125 @@
+{
+ "file": "展开竖屏 选线路.png",
+ "tag": "展开竖屏 选线路",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  669.0,
+  951.0
+ ],
+ "rotation_deg": 0,
+ "orientation_scores": {
+  "0": 1.0723,
+  "90": 0.9326,
+  "270": 0.9326
+ },
+ "screen_body": "inner",
+ "posture": "内屏竖持",
+ "dual_column": false,
+ "seam_status": "absent",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 20,
+ "blocks_total": 11,
+ "kinds": {
+  "card-or-video": 1,
+  "small": 10
+ },
+ "blocks": [
+  {
+   "x": 240.33,
+   "y": 0.0,
+   "w": 266.0,
+   "h": 931.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 45.33,
+   "y": 24.0,
+   "w": 16.0,
+   "h": 866.66,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 626.33,
+   "y": 28.33,
+   "w": 42.67,
+   "h": 775.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 518.67,
+   "y": 32.0,
+   "w": 61.0,
+   "h": 792.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 590.33,
+   "y": 32.33,
+   "w": 18.33,
+   "h": 779.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 161.33,
+   "y": 96.0,
+   "w": 18.0,
+   "h": 794.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 107.67,
+   "y": 96.67,
+   "w": 13.33,
+   "h": 794.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 207.33,
+   "y": 238.33,
+   "w": 12.67,
+   "h": 652.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 134.33,
+   "y": 397.67,
+   "w": 13.0,
+   "h": 493.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.67,
+   "y": 934.0,
+   "w": 65.67,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 621.33,
+   "y": 935.0,
+   "w": 27.67,
+   "h": 10.67,
+   "kind": "small",
+   "confidence": 0.9
+  }
+ ],
+ "_source_file": "展开竖屏 选线路.png"
+}

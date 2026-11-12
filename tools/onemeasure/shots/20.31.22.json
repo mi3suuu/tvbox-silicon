@@ -1,0 +1,266 @@
+{
+  "atomic_blocks": 70,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 253.67,
+      "kind": "small",
+      "w": 67.67,
+      "x": 883.33,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 374.33,
+      "kind": "card-or-video",
+      "w": 327.67,
+      "x": 523.0,
+      "y": 3.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 219.0,
+      "kind": "small",
+      "w": 78.0,
+      "x": 178.33,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 219.01,
+      "kind": "small",
+      "w": 58.0,
+      "x": 270.67,
+      "y": 158.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 38.0,
+      "kind": "small",
+      "w": 48.0,
+      "x": 187.67,
+      "y": 387.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 38.0,
+      "kind": "small",
+      "w": 22.67,
+      "x": 301.0,
+      "y": 387.67
+    },
+    {
+      "confidence": 1.0,
+      "h": 134.67,
+      "kind": "card-or-video",
+      "w": 313.33,
+      "x": 537.67,
+      "y": 404.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 11.33,
+      "kind": "small",
+      "w": 40.0,
+      "x": 27.0,
+      "y": 563.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 11.0,
+      "kind": "small",
+      "w": 38.67,
+      "x": 116.0,
+      "y": 563.0
+    },
+    {
+      "confidence": 0.63,
+      "h": 5.33,
+      "kind": "small",
+      "w": 5.0,
+      "x": 185.33,
+      "y": 563.0
+    },
+    {
+      "confidence": 0.96,
+      "h": 11.0,
+      "kind": "small",
+      "w": 33.0,
+      "x": 191.67,
+      "y": 563.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 11.0,
+      "kind": "small",
+      "w": 44.67,
+      "x": 275.67,
+      "y": 563.0
+    },
+    {
+      "confidence": 0.83,
+      "h": 11.0,
+      "kind": "small",
+      "w": 21.01,
+      "x": 370.33,
+      "y": 563.0
+    },
+    {
+      "confidence": 0.97,
+      "h": 11.0,
+      "kind": "small",
+      "w": 33.67,
+      "x": 403.33,
+      "y": 563.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 14.67,
+      "kind": "small",
+      "w": 65.67,
+      "x": 523.67,
+      "y": 563.33
+    },
+    {
+      "confidence": 0.79,
+      "h": 9.0,
+      "kind": "small",
+      "w": 21.34,
+      "x": 454.0,
+      "y": 564.0
+    },
+    {
+      "confidence": 0.63,
+      "h": 6.0,
+      "kind": "small",
+      "w": 5.33,
+      "x": 77.67,
+      "y": 566.33
+    },
+    {
+      "confidence": 0.9,
+      "h": 10.67,
+      "kind": "small",
+      "w": 27.67,
+      "x": 819.33,
+      "y": 567.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 29.67,
+      "kind": "small",
+      "w": 32.0,
+      "x": 523.0,
+      "y": 599.33
+    },
+    {
+      "confidence": 1.0,
+      "h": 31.67,
+      "kind": "small",
+      "w": 57.33,
+      "x": 567.67,
+      "y": 599.33
+    },
+    {
+      "confidence": 0.87,
+      "h": 13.0,
+      "kind": "small",
+      "w": 20.67,
+      "x": 636.33,
+      "y": 599.67
+    },
+    {
+      "confidence": 0.65,
+      "h": 10.67,
+      "kind": "small",
+      "w": 4.33,
+      "x": 55.67,
+      "y": 602.33
+    },
+    {
+      "confidence": 0.78,
+      "h": 11.0,
+      "kind": "small",
+      "w": 16.66,
+      "x": 112.0,
+      "y": 602.33
+    },
+    {
+      "confidence": 0.73,
+      "h": 11.01,
+      "kind": "small",
+      "w": 12.0,
+      "x": 471.67,
+      "y": 602.33
+    },
+    {
+      "confidence": 0.65,
+      "h": 10.0,
+      "kind": "small",
+      "w": 5.33,
+      "x": 75.67,
+      "y": 603.0
+    },
+    {
+      "confidence": 0.81,
+      "h": 9.0,
+      "kind": "small",
+      "w": 23.0,
+      "x": 151.0,
+      "y": 603.33
+    },
+    {
+      "confidence": 0.97,
+      "h": 9.67,
+      "kind": "small",
+      "w": 38.0,
+      "x": 568.0,
+      "y": 648.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 9.67,
+      "kind": "small",
+      "w": 62.34,
+      "x": 622.33,
+      "y": 648.0
+    }
+  ],
+  "blocks_total": 28,
+  "dual_column": true,
+  "file": "Screenshot Fig 2026-11-11 at 20.31.22.png",
+  "fold_unknown": true,
+  "kinds": {
+    "card-or-video": 2,
+    "small": 26
+  },
+  "logical_size_pt": [
+    951.0,
+    669.0
+  ],
+  "orientation_scores": {
+    "0": 0.8971,
+    "270": 1.1147,
+    "90": 1.1147
+  },
+  "posture": "内屏横持",
+  "rotation_deg": 90,
+  "screen_body": "inner",
+  "seam_len_pt": 32.0,
+  "seam_len_strict_pt": 32.0,
+  "seam_matches_known_fact": false,
+  "seam_status": "detected-partial",
+  "seam_x": [
+    491.0,
+    523.0
+  ],
+  "seam_x_strict": [
+    491.0,
+    523.0
+  ],
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.31.22"
+}

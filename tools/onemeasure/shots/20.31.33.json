@@ -1,0 +1,86 @@
+{
+  "atomic_blocks": 4,
+  "blocks": [
+    {
+      "confidence": 1.0,
+      "h": 661.0,
+      "kind": "card-or-video",
+      "w": 290.67,
+      "x": 511.33,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 610.0,
+      "kind": "small",
+      "w": 19.67,
+      "x": 831.0,
+      "y": 0.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 216.0,
+      "kind": "small",
+      "w": 87.0,
+      "x": 864.0,
+      "y": 16.0
+    },
+    {
+      "confidence": 1.0,
+      "h": 502.67,
+      "kind": "card-or-video",
+      "w": 340.67,
+      "x": 149.0,
+      "y": 158.33
+    }
+  ],
+  "blocks_total": 4,
+  "dual_column": false,
+  "file": "Screenshot Fig 2026-11-11 at 20.31.33.png",
+  "fold_unknown": true,
+  "kinds": {
+    "card-or-video": 2,
+    "small": 2
+  },
+  "logical_size_pt": [
+    951.0,
+    669.0
+  ],
+  "orientation_scores": {
+    "0": 0.871,
+    "270": 1.1481,
+    "90": 1.1481
+  },
+  "posture": "内屏横持",
+  "rotation_deg": 90,
+  "screen_body": "inner",
+  "seam_len_pt": null,
+  "seam_len_strict_pt": null,
+  "seam_matches_known_fact": false,
+  "seam_probe": {
+    "all_black_runs_x": [],
+    "gap": {
+      "ink_frac": 0.1425,
+      "max": 255.0,
+      "mean": 29.71
+    },
+    "left_of_gap": {
+      "ink_frac": 0.2239,
+      "max": 255.0,
+      "mean": 35.87
+    },
+    "right_of_gap": {
+      "ink_frac": 0.6548,
+      "max": 204.0,
+      "mean": 50.06
+    }
+  },
+  "seam_status": "covered-by-overlay",
+  "seam_x": null,
+  "seam_x_strict": null,
+  "stored_size_pt": [
+    669.0,
+    951.0
+  ],
+  "tag": "20.31.33"
+}

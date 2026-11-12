@@ -1,0 +1,183 @@
+{
+ "file": "竖屏选线路.png",
+ "tag": "竖屏选线路",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  669.0,
+  951.0
+ ],
+ "rotation_deg": 0,
+ "orientation_scores": {
+  "0": 1.0485,
+  "90": 0.9538,
+  "270": 0.9538
+ },
+ "screen_body": "inner",
+ "posture": "内屏竖持",
+ "dual_column": false,
+ "seam_status": "absent",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 78,
+ "blocks_total": 18,
+ "kinds": {
+  "small": 11,
+  "text-line": 1,
+  "capsule": 4,
+  "card-or-video": 2
+ },
+ "blocks": [
+  {
+   "x": 595.0,
+   "y": 46.67,
+   "w": 37.67,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 644.0,
+   "y": 46.67,
+   "w": 8.33,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 0.71
+  },
+  {
+   "x": 451.33,
+   "y": 66.33,
+   "w": 51.01,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 521.67,
+   "y": 66.33,
+   "w": 39.66,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 633.67,
+   "y": 66.33,
+   "w": 18.33,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 0.84
+  },
+  {
+   "x": 580.0,
+   "y": 66.67,
+   "w": 41.0,
+   "h": 13.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 337.67,
+   "y": 86.33,
+   "w": 255.0,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 609.67,
+   "y": 86.33,
+   "w": 38.66,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 39.67,
+   "y": 131.67,
+   "w": 258.33,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 320.0,
+   "y": 131.67,
+   "w": 37.33,
+   "h": 21.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 380.67,
+   "y": 131.67,
+   "w": 272.33,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 16.67,
+   "y": 175.67,
+   "w": 288.66,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 384.67,
+   "y": 175.67,
+   "w": 268.33,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 340.0,
+   "y": 184.67,
+   "w": 6.33,
+   "h": 12.0,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 356.67,
+   "y": 184.67,
+   "w": 6.67,
+   "h": 11.33,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 0.0,
+   "y": 234.33,
+   "w": 448.0,
+   "h": 716.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 458.33,
+   "y": 234.33,
+   "w": 8.67,
+   "h": 603.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 484.33,
+   "y": 234.33,
+   "w": 184.67,
+   "h": 716.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  }
+ ],
+ "_source_file": "竖屏选线路.png"
+}

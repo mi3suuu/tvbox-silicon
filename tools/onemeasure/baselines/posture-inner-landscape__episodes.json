@@ -1,0 +1,87 @@
+{
+ "file": "展开横屏双栏 播放暂停中选集.png",
+ "tag": "展开横屏双栏 播放暂停中选集",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  951.0,
+  669.0
+ ],
+ "rotation_deg": 90,
+ "orientation_scores": {
+  "0": 0.871,
+  "90": 1.1481,
+  "270": 1.1481
+ },
+ "screen_body": "inner",
+ "posture": "内屏横持",
+ "dual_column": false,
+ "seam_status": "covered-by-overlay",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 4,
+ "blocks_total": 4,
+ "kinds": {
+  "card-or-video": 2,
+  "small": 2
+ },
+ "blocks": [
+  {
+   "x": 511.33,
+   "y": 0.0,
+   "w": 290.67,
+   "h": 661.0,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 831.0,
+   "y": 0.0,
+   "w": 19.67,
+   "h": 610.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 864.0,
+   "y": 16.0,
+   "w": 87.0,
+   "h": 216.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 149.0,
+   "y": 158.33,
+   "w": 340.67,
+   "h": 502.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  }
+ ],
+ "seam_probe": {
+  "gap": {
+   "mean": 29.71,
+   "max": 255.0,
+   "ink_frac": 0.1425
+  },
+  "left_of_gap": {
+   "mean": 35.87,
+   "max": 255.0,
+   "ink_frac": 0.2239
+  },
+  "right_of_gap": {
+   "mean": 50.06,
+   "max": 204.0,
+   "ink_frac": 0.6548
+  },
+  "all_black_runs_x": []
+ },
+ "_source_file": "展开横屏双栏 播放暂停中选集.png"
+}

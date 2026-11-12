@@ -1,0 +1,431 @@
+{
+ "file": "展开竖屏 暂停播放.png",
+ "tag": "展开竖屏 暂停播放",
+ "stored_size_pt": [
+  669.0,
+  951.0
+ ],
+ "logical_size_pt": [
+  669.0,
+  951.0
+ ],
+ "rotation_deg": 0,
+ "orientation_scores": {
+  "0": 1.1747,
+  "90": 0.8513,
+  "270": 0.8513
+ },
+ "screen_body": "inner",
+ "posture": "内屏竖持",
+ "dual_column": false,
+ "seam_status": "absent",
+ "seam_x": null,
+ "seam_len_pt": null,
+ "seam_x_strict": null,
+ "seam_len_strict_pt": null,
+ "seam_matches_known_fact": false,
+ "fold_unknown": true,
+ "atomic_blocks": 196,
+ "blocks_total": 49,
+ "kinds": {
+  "card-or-video": 2,
+  "small": 41,
+  "text-line": 3,
+  "capsule": 3
+ },
+ "blocks": [
+  {
+   "x": 440.0,
+   "y": 0.0,
+   "w": 169.0,
+   "h": 497.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 631.67,
+   "y": 30.67,
+   "w": 37.33,
+   "h": 467.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 240.33,
+   "y": 86.0,
+   "w": 188.34,
+   "h": 379.67,
+   "kind": "card-or-video",
+   "confidence": 1.0
+  },
+  {
+   "x": 113.0,
+   "y": 96.67,
+   "w": 7.33,
+   "h": 401.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 18.33,
+   "y": 515.67,
+   "w": 354.67,
+   "h": 22.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 240.67,
+   "y": 548.0,
+   "w": 150.0,
+   "h": 18.0,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 150.33,
+   "y": 549.0,
+   "w": 26.01,
+   "h": 16.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 17.0,
+   "y": 550.33,
+   "w": 12.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 0.77
+  },
+  {
+   "x": 46.0,
+   "y": 550.33,
+   "w": 13.0,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 0.78
+  },
+  {
+   "x": 195.33,
+   "y": 550.33,
+   "w": 27.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 0.97
+  },
+  {
+   "x": 73.67,
+   "y": 551.33,
+   "w": 60.99,
+   "h": 11.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 94.33,
+   "y": 576.33,
+   "w": 57.67,
+   "h": 9.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 184.33,
+   "y": 576.33,
+   "w": 13.0,
+   "h": 9.01,
+   "kind": "small",
+   "confidence": 0.72
+  },
+  {
+   "x": 17.0,
+   "y": 576.67,
+   "w": 28.0,
+   "h": 9.0,
+   "kind": "small",
+   "confidence": 0.85
+  },
+  {
+   "x": 68.67,
+   "y": 576.67,
+   "w": 13.67,
+   "h": 9.0,
+   "kind": "small",
+   "confidence": 0.72
+  },
+  {
+   "x": 164.33,
+   "y": 577.0,
+   "w": 9.33,
+   "h": 8.67,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 22.33,
+   "y": 598.33,
+   "w": 63.34,
+   "h": 10.34,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 101.0,
+   "y": 598.33,
+   "w": 19.66,
+   "h": 10.33,
+   "kind": "small",
+   "confidence": 0.8
+  },
+  {
+   "x": 156.33,
+   "y": 598.33,
+   "w": 47.67,
+   "h": 10.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 131.0,
+   "y": 598.67,
+   "w": 12.67,
+   "h": 9.33,
+   "kind": "small",
+   "confidence": 0.72
+  },
+  {
+   "x": 16.0,
+   "y": 632.67,
+   "w": 477.0,
+   "h": 52.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 505.0,
+   "y": 632.67,
+   "w": 147.67,
+   "h": 52.0,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 404.33,
+   "y": 713.67,
+   "w": 210.67,
+   "h": 29.67,
+   "kind": "capsule",
+   "confidence": 1.0
+  },
+  {
+   "x": 88.33,
+   "y": 722.33,
+   "w": 22.01,
+   "h": 12.01,
+   "kind": "small",
+   "confidence": 0.86
+  },
+  {
+   "x": 164.33,
+   "y": 722.33,
+   "w": 31.34,
+   "h": 12.01,
+   "kind": "small",
+   "confidence": 0.98
+  },
+  {
+   "x": 292.0,
+   "y": 722.33,
+   "w": 19.33,
+   "h": 12.01,
+   "kind": "small",
+   "confidence": 0.83
+  },
+  {
+   "x": 346.67,
+   "y": 722.33,
+   "w": 22.33,
+   "h": 12.01,
+   "kind": "small",
+   "confidence": 0.87
+  },
+  {
+   "x": 230.67,
+   "y": 722.67,
+   "w": 22.67,
+   "h": 11.67,
+   "kind": "small",
+   "confidence": 0.86
+  },
+  {
+   "x": 30.67,
+   "y": 723.0,
+   "w": 7.33,
+   "h": 11.0,
+   "kind": "small",
+   "confidence": 0.68
+  },
+  {
+   "x": 64.33,
+   "y": 775.0,
+   "w": 95.67,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 17.0,
+   "y": 776.0,
+   "w": 29.0,
+   "h": 11.33,
+   "kind": "small",
+   "confidence": 0.93
+  },
+  {
+   "x": 24.67,
+   "y": 795.0,
+   "w": 48.66,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 84.67,
+   "y": 795.0,
+   "w": 71.33,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 167.33,
+   "y": 795.0,
+   "w": 63.34,
+   "h": 13.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 248.0,
+   "y": 795.0,
+   "w": 385.34,
+   "h": 13.67,
+   "kind": "text-line",
+   "confidence": 1.0
+  },
+  {
+   "x": 17.33,
+   "y": 815.67,
+   "w": 12.0,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 0.75
+  },
+  {
+   "x": 43.33,
+   "y": 815.67,
+   "w": 58.01,
+   "h": 12.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 17.0,
+   "y": 855.67,
+   "w": 31.34,
+   "h": 14.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 63.67,
+   "y": 855.67,
+   "w": 61.0,
+   "h": 14.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 624.0,
+   "y": 856.0,
+   "w": 22.0,
+   "h": 13.33,
+   "kind": "small",
+   "confidence": 0.89
+  },
+  {
+   "x": 30.33,
+   "y": 885.0,
+   "w": 12.0,
+   "h": 63.67,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 54.33,
+   "y": 885.0,
+   "w": 49.01,
+   "h": 65.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 134.33,
+   "y": 885.0,
+   "w": 87.67,
+   "h": 66.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 362.33,
+   "y": 885.0,
+   "w": 87.0,
+   "h": 66.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 590.33,
+   "y": 885.0,
+   "w": 62.67,
+   "h": 66.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 258.67,
+   "y": 898.67,
+   "w": 8.33,
+   "h": 50.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 486.67,
+   "y": 898.67,
+   "w": 8.67,
+   "h": 50.0,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 282.33,
+   "y": 917.67,
+   "w": 37.33,
+   "h": 32.33,
+   "kind": "small",
+   "confidence": 1.0
+  },
+  {
+   "x": 510.33,
+   "y": 917.67,
+   "w": 37.33,
+   "h": 32.33,
+   "kind": "small",
+   "confidence": 1.0
+  }
+ ],
+ "_source_file": "展开竖屏 暂停播放.png"
+}
