@@ -130,6 +130,9 @@ function request(address, options = {}) {
         timeout: Number(options.timeout || 20000),
         // Yingxia extension: race up to `racers` connections, `hedge` ms apart (see ScriptHTTP.race).
         racers: Number(options.racers || 1), hedge: Number(options.hedge || 0),
+        // Yingxia extension: a per-source proxy (`socks5://host:port`, `http://host:port`) for a site
+        // that only answers certain regions. Omitted unless the source set one.
+        proxy: options.proxy ? String(options.proxy) : undefined,
         redirect: !(options.redirect === 0 || options.redirect === false), encoding: options.encoding || 'utf-8',
         binary: options.buffer === 1 || options.buffer === 2 || options.buffer === 3 };
     const answer = JSON.parse(host('http', JSON.stringify(payload)));
