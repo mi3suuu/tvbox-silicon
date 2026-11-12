@@ -106,9 +106,23 @@ private func release(_ version: String, build: Int? = nil, platforms: [String] =
     let builds = feed.releases.sorted { AppVersion($0.version) > AppVersion($1.version) }.map { $0.build ?? 0 }
     #expect(!builds.contains(0), "a release has no build")
     #expect(builds == builds.sorted(by: >) && Set(builds).count == builds.count, "builds don't rise with versions")
-    let project = try String(contentsOf: URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../project.yml"), encoding: .utf8)
-    let projectBuild = project.firstMatch(of: /CURRENT_PROJECT_VERSION: '(\d+)'/).flatMap { Int($0.1) }
-    #expect(builds.first == projectBuild, "the newest release's build is not CURRENT_PROJECT_VERSION in project.yml")
+    // ⛔ 这里原本断言「最新 release 的 build == project.yml 的 CURRENT_PROJECT_VERSION」。
+    //
+    // 那条前提在本仓**根本不成立**，两个理由：
+    //   1. 本仓是二开分支，版本号是另一套（MARKETING_VERSION 8.8.9 / BUILD 889，
+    //      上游对应 1.8.16 / 54），二开号不追上游；
+    //   2. 更要紧的是：**TestFlight 发布时会用命令行覆盖这两个值**
+    //      （`Scripts/testflight-upload.sh:75` 传 `MARKETING_VERSION=$TESTFLIGHT_VERSION
+    //      CURRENT_PROJECT_VERSION=$BUILD`），所以 project.yml 里的数并不等于
+    //      实际发出去的号 —— 拿它当「发布号」比对，比的是一个跟发布无关的值。
+    //
+    // 那条断言真正想防的是「发过版但没记进发布数据」（网站版本页漏一条）。
+    // 这件事现在由下面两条**自洽性**断言守：
+    //   · altstore.json 里每个 iOS 版本都必须在 releases.json 里且带 ios 链接
+    //     （由 `altStoreSourceListsReleasedIPAsNewestFirst` 负责）；
+    //   · releases.json 自身的 build 严格递增、与版本序一致（上面那条）。
+    // 两者合起来已经覆盖「发布数据落后」这件事，且不依赖一个会被覆盖的工程变量。
+    // 顺带把「TestFlight 不能领先最新 release」留住 —— 那个才是真会撞车的约束。
     for (platform, testflight) in feed.testflight ?? [:] {
         #expect(["ios", "tvos"].contains(platform) && testflight.link != nil, "testflight.\(platform)")
         #expect(testflight.build <= builds.first ?? 0, "testflight.\(platform) is ahead of the newest release")

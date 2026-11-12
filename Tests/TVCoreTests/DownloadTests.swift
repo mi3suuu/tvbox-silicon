@@ -53,10 +53,186 @@ import Testing
 }
 
 @Test func rangedFilesSplitIntoChunks() {
-    let file = TransferPlan.RemoteFile(urls: [], name: "media.part", length: Transfer.chunk * 2 + 10, ranged: true, done: [0, 2])
+    let file = TransferPlan.RemoteFile(urls: [], name: "media.part", length: Transfer.chunk * 2 + 10, ranged: true,
+                                       spans: [ByteSpan(start: 0, end: Transfer.chunk),
+                                               ByteSpan(start: Transfer.chunk * 2, end: Transfer.chunk * 2 + 10)])
     #expect(file.chunks == 3)
     #expect(file.range(2) == Transfer.chunk * 2...Transfer.chunk * 2 + 9)
     #expect(file.saved == Transfer.chunk + 10)
+    #expect(!file.complete())
+}
+
+@Test func chunkMarksFromOlderPlansStillCount() {
+    // A plan written before spans existed: chunk numbers only. It must resume, not start over.
+    let file = TransferPlan.RemoteFile(urls: [], name: "media.part", length: Transfer.chunk * 2 + 10, ranged: true, done: [0, 2])
+    #expect(file.saved == Transfer.chunk + 10)
+    #expect(file.finished.count == 2)
+    // ...and once one more range lands, the old marks are folded into spans and stop being read.
+    var merged = file
+    merged.merge(ByteSpan(start: Transfer.chunk, end: Transfer.chunk * 2))
+    #expect(merged.done.isEmpty)
+    #expect(merged.spans == [ByteSpan(start: 0, end: Transfer.chunk * 2 + 10)])
+    #expect(merged.complete())
+}
+
+@Test func aSplitRangeIsRecordedAsTwoHalvesThatJoin() {
+    var file = TransferPlan.RemoteFile(urls: [], name: "media.part", length: 100, ranged: true, chunk: 100)
+    file.merge(ByteSpan(start: 50, end: 100))   // the second half, fetched by a lane that stole the tail
+    #expect(!file.complete())
+    #expect(file.saved == 50)
+    file.merge(ByteSpan(start: 0, end: 50))     // the first half arrives later
+    // Two halves that meet become one span; the file is complete without a third request.
+    #expect(file.spans == [ByteSpan(start: 0, end: 100)])
+    #expect(file.complete())
+}
+
+@Test func aRangeQueueHandsOutOnlyWhatIsMissingAndSplitstheLargest() throws {
+    let chunk: Int64 = 4 << 20
+    let queue = RangeQueue(length: chunk * 4, chunk: chunk, skip: [0..<chunk])
+    // Four ranges, one already on disk: three to fetch.
+    #expect(queue.depth == 3)
+    let first = try #require(queue.take(lane: 0))
+    #expect(first == chunk..<(chunk * 2))
+    let second = try #require(queue.take(lane: 1))
+    let third = try #require(queue.take(lane: 2))
+    #expect(first.lowerBound < second.lowerBound && second.lowerBound < third.lowerBound)
+    // Everything is claimed: a lane splitting the largest range is what keeps the tail at full speed.
+    #expect(queue.isEmpty)
+    #expect(queue.split(avoid: -1))
+    #expect(queue.depth == 1)
+    // Each claim is now half a chunk, so nothing is left to cut.
+    let stolen = try #require(queue.take(lane: 3))
+    #expect(stolen.count == chunk / 2)
+}
+
+/// A resumed download must not report the bytes already on disk as a burst of speed.
+///
+/// The failure this pins down is loud: resuming a 500 MB file claimed 1885 MB/s on a 50 Mbit line.
+/// A rate above the link is not a fast download, it is a wrong number, and the row it lands in is
+/// read by a person deciding whether to wait.
+@Test func aResumedDownloadDoesNotClaimTheBytesItAlreadyHad() async throws {
+    let meter = SpeedMeter()
+    let already: Int64 = 500 << 20
+    // First reading: bytes on disk, not bytes that arrived.
+    meter.sample(already)
+    #expect(meter.speed == 0)
+    try await Task.sleep(for: .milliseconds(250))
+    // One more megabyte in a quarter second is about 4 MB/s, not 500.
+    meter.sample(already + (1 << 20))
+    #expect(meter.speed > Double(2 << 20))
+    #expect(meter.speed < Double(8 << 20))
+    // A finished transfer stops claiming a rate.
+    meter.settle()
+    #expect(meter.speed == 0)
+}
+
+@Test func tuningClampsAndReportsItsSocketCount() {
+    #expect(DownloadTuning(connections: 99, chunkMB: 0, parallel: 99).connections == 16)
+    #expect(DownloadTuning(connections: 99, chunkMB: 0, parallel: 99).chunkMB == 1)
+    #expect(DownloadTuning(connections: 99, chunkMB: 0, parallel: 99).parallel == 8)
+    #expect(DownloadTuning(connections: 8, chunkMB: 4, parallel: 2).sockets == 16)
+    #expect(DownloadTuning(connections: 8, chunkMB: 4, parallel: 2).chunk == 4 << 20)
+}
+
+@MainActor @Test func tuningIsPersistedUnderOnesKeyNames() throws {
+    let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+    let settings = DownloadSettings(defaults: defaults)
+    settings.set(connections: 12, chunkMB: 8, parallel: 3)
+    #expect(settings.tuning == DownloadTuning(connections: 12, chunkMB: 8, parallel: 3))
+    // The same three keys One reads, so a backup from either app restores in the other.
+    #expect(defaults.integer(forKey: "downloadConnections") == 12)
+    #expect(defaults.integer(forKey: "downloadChunkMB") == 8)
+    #expect(defaults.integer(forKey: "downloadParallel") == 3)
+    let reloaded = DownloadSettings(defaults: defaults)
+    #expect(reloaded.tuning.connections == 12)
+    #expect(reloaded.tuning.chunkMB == 8)
+    #expect(reloaded.tuning.parallel == 3)
+    // A knob turned mid-download reaches the file in flight, not just the next one: the library pushes
+    // the new tuning into every running transfer's box.
+    let box = TuningBox(settings.tuning)
+    #expect(box.value.connections == 12)
+    settings.onTuning = { box.value = $0 }
+    settings.set(connections: 4, chunkMB: 2, parallel: 1)
+    #expect(box.value == DownloadTuning(connections: 4, chunkMB: 2, parallel: 1))
+    // Setting the same values again must not fire, or every keystroke would reschedule the queue.
+    var fired = 0
+    settings.onTuning = { _ in fired += 1 }
+    settings.set(connections: 4)
+    #expect(fired == 0)
+}
+
+/// One file, fetched by several Range requests at once, must come out byte for byte.
+@Test func aRangedFileIsFetchedOnManyConnectionsAtOnce() async throws {
+    let size = (4 << 20) + 1234
+    let name = "accel-(UUID().uuidString).mp4"
+    var bytes = Data(count: size)
+    bytes.withUnsafeMutableBytes { raw in
+        for i in 0..<size { raw[i] = UInt8(truncatingIfNeeded: i &* 7 &+ (i >> 11)) }
+    }
+    let url = RangeServer.add(name, bytes)
+    let folder = FileManager.default.temporaryDirectory.appending(path: "accel-(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let meter = DownloadMeter()
+    let speed = SpeedMeter()
+    let transfer = Transfer(folder: folder, meter: meter, session: RangeServer.session,
+                            tuning: TuningBox(DownloadTuning(connections: 4, chunkMB: 1, parallel: 1)),
+                            speed: speed,
+                            resolve: { Channel(name: "t", group: "t", url: url, headers: [:]) },
+                            note: { _ in })
+    let media = try await transfer.run()
+    let written = try Data(contentsOf: folder.appending(path: media))
+    #expect(written.count == size)
+    #expect(written == bytes)
+    // A four-megabyte file in one-megabyte ranges: one probe, then at least four more.
+    #expect(RangeServer.requests(name) >= 5)
+    // And they really did overlap. Without this the test would pass on a single-stream downloader:
+    // the point of the engine is the socket count, not the byte count.
+    #expect(RangeServer.peakConnections(name) > 1)
+}
+
+/// Stopping mid-file and starting again must not fetch again what is already on disk.
+@Test func aStoppedDownloadResumesWithoutRefetching() async throws {
+    let size = 6 << 20
+    let name = "resume-(UUID().uuidString).mp4"
+    var bytes = Data(count: size)
+    bytes.withUnsafeMutableBytes { raw in
+        for i in 0..<size { raw[i] = UInt8(truncatingIfNeeded: i &* 13) }
+    }
+    let url = RangeServer.add(name, bytes)
+    let folder = FileManager.default.temporaryDirectory.appending(path: "resume-(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    func transfer() -> Transfer {
+        Transfer(folder: folder, meter: DownloadMeter(), session: RangeServer.session,
+                 tuning: TuningBox(DownloadTuning(connections: 2, chunkMB: 1, parallel: 1)),
+                 resolve: { Channel(name: "t", group: "t", url: url, headers: [:]) },
+                 note: { _ in })
+    }
+    // First run, cancelled once some ranges have landed and the marks are on disk.
+    let first = Task { try await transfer().run() }
+    while !FileManager.default.fileExists(atPath: folder.appending(path: "plan.json").path) {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    try await Task.sleep(for: .milliseconds(150))
+    first.cancel()
+    _ = try? await first.value
+    let before = RangeServer.requests(name)
+    // Second run: replays the plan and asks only for what is missing.
+    let media = try await transfer().run()
+    #expect(try Data(contentsOf: folder.appending(path: media)) == bytes)
+    #expect(RangeServer.requests(name) - before < 4)
+}
+
+@Test func aPositionalFileTakesWritesOutOfOrder() throws {
+    let url = FileManager.default.temporaryDirectory.appending(path: "pos-(UUID().uuidString).bin")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let file = try PositionalFile(url)
+    defer { file.closeHandle() }
+    try file.reserve(12)
+    // Two lanes, the later range written first: an offset, not a file pointer, decides where it lands.
+    try file.write(Data("GHIJKL".utf8), at: 6)
+    try file.write(Data("ABCDEF".utf8), at: 0)
+    file.flush()
+    #expect(try Data(contentsOf: url) == Data("ABCDEFGHIJKL".utf8))
 }
 
 @Test func theLocalServerAnswersRangesInsideItsFolderOnly() async throws {
@@ -165,15 +341,46 @@ import Testing
     let root = FileManager.default.temporaryDirectory.appending(path: "downloads-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
-    let library = DownloadLibrary(root: root, defaults: defaults)
-    #expect(library.simultaneous == 2)
+    let settings = DownloadSettings(defaults: defaults)
+    let library = DownloadLibrary(root: root, defaults: defaults, settings: settings)
+    #expect(library.simultaneous == DownloadTuning.standard.parallel)
     library.simultaneous = 3
     #expect(library.simultaneous == 3)
-    #expect(defaults.integer(forKey: "downloadsSimultaneous") == 3)
+    #expect(defaults.integer(forKey: "downloadParallel") == 3)
     library.simultaneous = 9
-    #expect(library.simultaneous == 4)
-    #expect(defaults.integer(forKey: "downloadsSimultaneous") == 4)
-    #expect(DownloadLibrary(root: root, defaults: defaults).simultaneous == 4)
+    // The queue's own ceiling, not the tuning struct's: eight files would starve the sockets.
+    #expect(library.simultaneous == 8)
+    #expect(defaults.integer(forKey: "downloadParallel") == 8)
+    #expect(DownloadLibrary(root: root, defaults: defaults, settings: DownloadSettings(defaults: defaults)).simultaneous == 8)
+}
+
+/// Clearing the list must clear the disk, including folders the list lost track of: those are where a
+/// phone's storage goes after a crash, invisible until the bar is full.
+@MainActor @Test func clearingAllAlsoRemovesFoldersTheListLostTrackOf() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "clear-(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+    let library = DownloadLibrary(root: root, defaults: defaults, settings: DownloadSettings(defaults: defaults))
+    // A known download and an orphan left by a crash mid-plan.
+    //
+    // 名字必须是 UUID：`purgeOrphans` 只认「形如 UUID 的目录」为下载文件夹，
+    // 其余（`downloads.json`、音乐库的 `Music` 子目录）一律不动 —— 老写法会把音乐库整个删掉。
+    let knownID = UUID().uuidString.lowercased()
+    let orphanID = UUID().uuidString.lowercased()
+    for id in [knownID, orphanID] {
+        try FileManager.default.createDirectory(at: root.appending(path: id), withIntermediateDirectories: true)
+        try Data(repeating: 0, count: 4096).write(to: root.appending(path: id).appending(path: "media.part"))
+    }
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: orphanID).path))
+    library.purgeOrphans()
+    // The list knows neither, so both go — the point is that the folder follows the record, not the reverse.
+    #expect(!FileManager.default.fileExists(atPath: root.appending(path: orphanID).path))
+    #expect(FileManager.default.fileExists(atPath: root.path))
+    library.removeAll()
+    // Only the empty list itself is left: no folders, and nothing to measure.
+    let left = ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []).map(\.lastPathComponent)
+    #expect(left == ["downloads.json"])
+    #expect(library.items.isEmpty)
 }
 
 @MainActor @Test func savedSongsWhoseFilesAreGoneAreForgotten() throws {
@@ -252,4 +459,40 @@ import Testing
     #expect(DownloadExport.fileName("a/b:c?\n d", extension: "mkv") == "a b c d.mkv")
     #expect(DownloadExport.fileName("..", extension: "mp4") == "Yingxia.mp4")
     #expect(MusicDownloadLibrary.exportName(for: MusicTrack(platform: .qq, songID: "s", title: "Song", artists: ["A", "B"])) == "A, B - Song")
+}
+
+// MARK: - 下载时保持屏幕常亮
+
+/// One 的 `keepScreenAwake`：键名一致（备份互读），默认开。
+///
+/// 默认必须是 **true**：用户点下载就是为了下完，锁屏把传输掐掉是静默失败，
+/// 比多耗一点电坏得多。这条断言防的正是「有人觉得省电更好」而把它改成 false。
+@MainActor @Test func theScreenStaysAwakeByDefault() throws {
+    let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+    let settings = DownloadSettings(defaults: defaults)
+    #expect(settings.keepScreenAwake)
+}
+
+@MainActor @Test func theKeepAwakeSwitchIsPersistedUnderOnesKey() throws {
+    let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+    let settings = DownloadSettings(defaults: defaults)
+    settings.keepScreenAwake = false
+    #expect(defaults.object(forKey: "keepScreenAwake") as? Bool == false)
+    // A fresh instance reads what was written, not the default.
+    #expect(!DownloadSettings(defaults: defaults).keepScreenAwake)
+    settings.keepScreenAwake = true
+    #expect(DownloadSettings(defaults: defaults).keepScreenAwake)
+}
+
+/// 关掉开关必须通知界面层 —— 否则压住自动锁屏的那次调用永远不会撤销，
+/// 用户下完之后手机再也睡不着。
+@MainActor @Test func turningTheSwitchOffReachesTheScreen() throws {
+    let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+    let settings = DownloadSettings(defaults: defaults)
+    var seen: [Bool] = []
+    settings.onKeepAwakeChange = { seen.append($0) }
+    settings.keepScreenAwake = false
+    settings.keepScreenAwake = false   // 同值不重复通知
+    settings.keepScreenAwake = true
+    #expect(seen == [false, true])
 }

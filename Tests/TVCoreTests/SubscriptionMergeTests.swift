@@ -42,6 +42,31 @@ private func site(_ key: String, _ name: String, type: Int, api: String) -> [Str
     #expect(merged.sites.map { $0.key } == ["x", "y", "w"])
 }
 
+@Test func oneEndpointWrittenThreeWaysIsOneSource() throws {
+    // A collection lists the same CMS with and without its serialisation suffix; importing two such
+    // bundles used to leave three entries for one site, so every search asked it three times.
+    let a = try subscription(["sites": [site("x", "X", type: 1, api: "https://Api.Example/api.php/provide/vod/at/json/")]], origin: first)
+    let b = try subscription(["sites": [site("y", "Y", type: 1, api: "https://api.example/api.php/provide/vod"),
+                                       site("z", "Z", type: 1, api: "https://api.example/api.php/provide/vod/")]], origin: second)
+    #expect(try #require(Subscription.merge([a, b])).sites.map { $0.key } == ["x"])
+    #expect(Site.normalizedAddress("https://API.example:443/api.php/provide/vod/at/xml") == "https://api.example/api.php/provide/vod")
+    #expect(Site.normalizedAddress("http://api.example:80/vod/") == "http://api.example/vod")
+
+    // `/from/…` selects a library and the scheme decides TLS: both stay separate sources.
+    #expect(Site.normalizedAddress("https://api.example/vod/from/mdm3u8/") == "https://api.example/vod/from/mdm3u8")
+    #expect(Site.normalizedAddress("http://api.example/vod") != Site.normalizedAddress("https://api.example/vod"))
+    // A plugin identity is already exact.
+    #expect(Site.normalizedAddress("csp_XBPQ") == "csp_XBPQ")
+}
+
+@Test func aSubscriptionKnowsWhatItOffers() throws {
+    let a = try subscription(["sites": [site("x", "X", type: 1, api: "./api.php/provide/vod/at/json/"),
+                                        site("y", "Y", type: 1, api: "./api.php/provide/vod")]], origin: first)
+    // Import compares these against what is on screen; both entries are the same endpoint.
+    #expect(a.fingerprints.count == 1)
+    #expect(a.fingerprints == Set(a.sites.map { $0.fingerprint(origin: a.origin, spider: a.spiderURL, spiderChecksum: a.spiderChecksum) }))
+}
+
 @Test func mirroredSubscriptionsShareTheirPluginSources() throws {
     // Mirrors of one subscription host the same spider at different addresses, with the same MD5.
     let md5 = ";md5;aa8d37525617af470b3b8dfc91db8669", other = ";md5;0123456789abcdef0123456789abcdef"

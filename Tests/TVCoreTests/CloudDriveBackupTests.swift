@@ -54,7 +54,14 @@ final class WebDAVUploadStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-@Suite("云盘备份通道")
+/// ⛔ 必须 `.serialized`：本套件里 `webDAVRoundTrip()` 与 `webDAVUnauthorized()` 共用
+/// `WebDAVUploadStub` 的**同一份 static 存储**，各自开头都调 `reset()` 清空它。
+/// Swift Testing 默认并行跑同一套件的各条测试 → A 刚 PUT 完、B 的 `reset()` 把存储清了，
+/// 于是 A 的 GET 读回空 Data，断言 `read == payload` 失败。
+///
+/// 症状是**偶发红**（2026-11-12 实测：三次连跑，第一次红、后两次绿），
+/// 这种红最危险 —— 会被当成「重跑一下就好」而掩盖真问题。串行化后不再取决于调度顺序。
+@Suite("云盘备份通道", .serialized)
 struct CloudDriveBackupTests {
 
     @Test("WebDAV 上传再读回，字节一致")

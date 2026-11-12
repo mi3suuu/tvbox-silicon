@@ -84,14 +84,40 @@ import Testing
         #expect(second.route(origin: origin, sourceKey: sourceKey).proxyID == proxy.id)
     }
 
-    // MARK: - 隧道目标（纯构造，不连网）
+    // MARK: - 出口端点解析（纯逻辑，不连网）
 
-    @Test func tunnelReturnsNilForDirectOrMissingProxy() throws {
+    @Test func aSourceWithNoRouteHasNoEndpoint() {
         let box = clean(#function)
         let store = CustomProxyStore(defaults: box)
-        #expect(try store.tunnel(origin: origin, sourceKey: sourceKey, targetHost: "x.com", targetPort: 443) == nil)
+        #expect(store.endpoint(origin: origin, sourceKey: sourceKey) == nil)
         // 指到不存在的 proxy id 也返回 nil（路由失效回落到直连）。
         store.setRoute(.proxy("missing"), origin: origin, sourceKey: sourceKey)
-        #expect(try store.tunnel(origin: origin, sourceKey: sourceKey, targetHost: "x.com", targetPort: 443) == nil)
+        #expect(store.endpoint(origin: origin, sourceKey: sourceKey) == nil)
+    }
+
+    @Test func anAssignedRouteResolvesToItsEndpoint() {
+        let box = clean(#function)
+        let store = CustomProxyStore(defaults: box)
+        let proxy = CustomProxyEndpoint(name: "p", scheme: .http, host: "1.2.3.4", port: 8080)
+        store.upsert(proxy)
+        store.setRoute(.proxy(proxy.id), origin: origin, sourceKey: sourceKey)
+        #expect(store.endpoint(origin: origin, sourceKey: sourceKey)?.id == proxy.id)
+    }
+
+    // MARK: - 整表读写（整机备份 / iCloud 快照用）
+
+    @Test func routesRoundTripThroughTheWholeTableAccessors() {
+        let box = clean(#function)
+        let store = CustomProxyStore(defaults: box)
+        let proxy = CustomProxyEndpoint(name: "p", scheme: .socks5, host: "1.2.3.4", port: 1080)
+        store.upsert(proxy)
+        store.setRoute(.proxy(proxy.id), origin: origin, sourceKey: sourceKey)
+        let table = store.routes
+        #expect(table.count == 1)
+
+        // 换一个实例整表写回，读到的还是同一条。
+        let other = CustomProxyStore(defaults: box)
+        other.replaceRoutes(table)
+        #expect(other.route(origin: origin, sourceKey: sourceKey).proxyID == proxy.id)
     }
 }

@@ -143,6 +143,22 @@ import Testing
         #expect(LocalProxyServer.parse("/x/http/host/80/path") == nil)
     }
 
+    @Test func parseKeepsTheQueryOutOfThePath() {
+        // 查询串里的 "/" 曾被当成路径分隔符：`/d/https/h/443/v.m3u8?a=1/2` 会把 "2" 拼进 path，
+        // 且带查询的地址极易把段数/端口位错位。查询必须原样回到 path 尾部。
+        let t = LocalProxyServer.parse("/d/https/example.com/443/v.m3u8?a=1/2&b=x")
+        #expect(t?.host == "example.com")
+        #expect(t?.port == 443)
+        #expect(t?.path == "/v.m3u8?a=1/2&b=x")
+    }
+
+    @Test func parseTreatsTheQueryAsPartOfTheUpstreamPath() {
+        // 上游收到的是 origin-form 请求行，查询串必须保留，否则签名类地址一律 403。
+        let t = LocalProxyServer.parse("/p/px/https/cdn.example.com/443/live/index.m3u8?token=abc")
+        #expect(t?.proxyID == "px")
+        #expect(t?.path == "/live/index.m3u8?token=abc")
+    }
+
     // MARK: - 边界
 
     @Test func encodedOutputIsAlwaysAValidDerivedURL() {

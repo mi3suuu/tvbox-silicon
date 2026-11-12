@@ -301,6 +301,8 @@ final class RangeServer: URLProtocol, @unchecked Sendable {
     /// Files that answer at most this many requests at once, each a little later, and refuse the rest with 403 (115's CDN).
     nonisolated(unsafe) private static var limits: [String: Int] = [:]
     nonisolated(unsafe) private static var active: [String: Int] = [:]
+    /// The most requests one file ever had in flight at once: the measurement of "in parallel".
+    nonisolated(unsafe) private static var peak: [String: Int] = [:]
     nonisolated(unsafe) private static var refused: [String: Int] = [:]
     nonisolated(unsafe) private static var cancelled: [String: Int] = [:]
     /// Whether this request was answered, so a stop before that is a cancel.
@@ -323,6 +325,8 @@ final class RangeServer: URLProtocol, @unchecked Sendable {
     }
     /// How many requests a file was asked for.
     static func requests(_ name: String) -> Int { lock.withLock { counts[name, default: 0] } }
+    /// How many requests to a file were in flight at the same time at the busiest moment.
+    static func peakConnections(_ name: String) -> Int { lock.withLock { peak[name, default: 0] } }
     /// How many requests a file with a connection limit refused.
     static func refusals(_ name: String) -> Int { lock.withLock { refused[name, default: 0] } }
     /// How many requests to a file with a connection limit were cancelled before their answer.
@@ -338,7 +342,10 @@ final class RangeServer: URLProtocol, @unchecked Sendable {
             if let fault, fault.empty > 0 { Self.faults[name]?.empty -= 1 }
             let limit = Self.limits[name]
             let refuse = limit.map { Self.active[name, default: 0] >= $0 } ?? false
-            if refuse { Self.refused[name, default: 0] += 1 } else if limit != nil { Self.active[name, default: 0] += 1 }
+            if refuse { Self.refused[name, default: 0] += 1 } else {
+                Self.active[name, default: 0] += 1
+                Self.peak[name] = max(Self.peak[name, default: 0], Self.active[name] ?? 0)
+            }
             return (Self.files[name], Self.restOfFile.contains(name), fault, limit != nil, refuse)
         }
         if refuse {

@@ -1,0 +1,115 @@
+import Foundation
+import Network
+import Testing
+@testable import TVCore
+
+/// 回环中继的端到端验证：真起一个 NWListener 当晚辈源站，经中继取一次，比对字节。
+///
+/// 这里锁的是用户实际踩到的那个洞——`LocalProxyServer` 曾经**从未被启动**（`base()` 零调用点），
+/// 所以「配了代理」与「直连」在行为上完全一样，且没有任何报错。纯函数测试看不出来，
+/// 必须真的起监听、真的走一次请求。
+@Suite(.serialized) struct LocalProxyRelayTests {
+
+    /// 一个只认一次请求、回固定体的极小 HTTP 服务。
+    private final class TinyServer: @unchecked Sendable {
+        let listener: NWListener
+        let queue = DispatchQueue(label: "test.tiny.server")
+        private(set) var lastRequestLine = ""
+        private(set) var lastHost = ""
+        private let lock = NSLock()
+        private var seen = false
+
+        init() throws {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+            listener = try NWListener(using: parameters)
+        }
+
+        var port: UInt16 { listener.port?.rawValue ?? 0 }
+
+        func start(respond body: String) async throws {
+            listener.newConnectionHandler = { [self] connection in
+                connection.start(queue: queue)
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
+                    if let data, let head = String(data: data, encoding: .utf8) {
+                        let lines = head.components(separatedBy: "\r\n")
+                        if let first = lines.first {
+                            self.lock.lock()
+                            if !self.seen { self.lastRequestLine = first; self.seen = true }
+                            self.lock.unlock()
+                        }
+                        if let host = lines.first(where: { $0.lowercased().hasPrefix("host:") }) {
+                            self.lock.lock(); self.lastHost = host; self.lock.unlock()
+                        }
+                    }
+                    let payload = Data(body.utf8)
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n" + body
+                    connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                }
+            }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: continuation.resume()
+                    case .failed(let error): continuation.resume(throwing: error)
+                    default: break
+                    }
+                }
+                listener.start(queue: queue)
+            }
+        }
+
+        func stop() { listener.cancel() }
+    }
+
+    /// 中继起来的端口就是 player 会用的那个，且经它取回的字节与源站一致。
+    @Test func theRelayCarriesARequestAndItsResponse() async throws {
+        let origin = try TinyServer()
+        try await origin.start(respond: "hello-through-relay")
+        defer { origin.stop() }
+
+        let base = try await LocalProxyServer.shared.base()
+        // `baseSync` 是播放器读的那个同步出口：异步起好之后它必须已经能看到端口，
+        // 否则 makeItem 里那句 `if let base = baseSync` 永远不成立。
+        let running = try #require(LocalProxyServer.shared.baseSync)
+        #expect(running == base)
+
+        let target = URL(string: "http://127.0.0.1:\(origin.port)/seg/index.m3u8?token=abc")!
+        let relayed = LocalProxyServer.directURL(base: base, url: target)
+        let (data, response) = try await URLSession.shared.data(from: relayed)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: data, as: UTF8.self) == "hello-through-relay")
+    }
+
+    /// 上游收到的是 origin-form 请求行，且 **带查询串**——签名地址丢了查询就是 403，
+    /// 而 encode 把 query 放在 URL 上、parse 又必须把它还回 path 尾部，这一来一回必须闭合。
+    @Test func theUpstreamSeesOriginFormWithItsQuery() async throws {
+        let origin = try TinyServer()
+        try await origin.start(respond: "ok")
+        defer { origin.stop() }
+
+        let base = try await LocalProxyServer.shared.base()
+        let target = URL(string: "http://127.0.0.1:\(origin.port)/live/index.m3u8?token=abc&e=1")!
+        _ = try await URLSession.shared.data(from: LocalProxyServer.directURL(base: base, url: target))
+
+        // 请求行不含绝对地址（那是 forward proxy 的形态，转发给源站会得到 400）。
+        let line = try #require(origin.lastRequestLine.split(separator: "\r\n").first.map(String.init))
+        #expect(line.hasPrefix("GET /live/index.m3u8?token=abc&e=1 "))
+        #expect(!line.contains("http://"))
+        // Host 头必须是源站的，不能被中继自己的 127.0.0.1:port 顶掉。
+        #expect(origin.lastHost.lowercased().hasPrefix("host: 127.0.0.1:"))
+    }
+
+    /// 一个指向已删除代理的路由回落直连，而不是让播放失败：删端点不该搞坏本来能播的东西。
+    @Test func aRouteToAMissingProxyFallsBackToDirect() async throws {
+        let origin = try TinyServer()
+        try await origin.start(respond: "still-here")
+        defer { origin.stop() }
+
+        let base = try await LocalProxyServer.shared.base()
+        let target = URL(string: "http://127.0.0.1:\(origin.port)/x")!
+        let relayed = LocalProxyServer.proxyURL(base: base, url: target, proxyID: "no-such-proxy")
+        let (data, _) = try await URLSession.shared.data(from: relayed)
+        #expect(String(decoding: data, as: UTF8.self) == "still-here")
+    }
+}

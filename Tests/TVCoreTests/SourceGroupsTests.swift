@@ -260,3 +260,54 @@ private func document(_ origin: String, sites: [(key: String, api: String)]) thr
     book.move(silent.id, by: -1)
     #expect(book.groups.map(\.name) == ["不通", "可连"])
 }
+
+// MARK: - 未分组（2026-11-11）
+
+/// 「移到未分组」= 移出所有分组与订阅，但仍留在源列表里。
+///
+/// 关键：它必须与「放回原订阅」(`reassign` 返回 nil) 区分开。两者都叫「移出去」的话，
+/// 用户唯一能做的「移出」动作会把它送回原处 —— 那就是拖了没反应。
+@Test func ungroupedSourcesLeaveTheirSubscriptionButStayListed() throws {
+    let first = try document("https://one.example/a.json", keys: ["a", "b"])
+    let entries = [entry("https://one.example/a.json", name: "One", enabled: true)]
+    let documents = ["https://one.example/a.json": first]
+    let a = try #require(first.sites.first { $0.key == "a" })
+
+    let groups = SourceGroups.make(
+        entries: entries, documents: documents, builtIns: [], builtInOrigin: first.origin,
+        mergedSites: first.sites, pinOrder: [],
+        userHidden: { _ in false }, includeHidden: false, jarURL: nil,
+        reassign: { site, _ in site.key == "a" ? CustomSourceGroup.ungroupedTarget : nil })
+
+    // a 离开了订阅组，但没消失：它落在「未分组」那一组里。
+    let sub = try #require(groups.first { $0.id == "https://one.example/a.json" })
+    #expect(sub.sites.map(\.key) == ["b"])
+    let ungrouped = try #require(groups.first { $0.kind == .other })
+    #expect(ungrouped.title == "Ungrouped")
+    #expect(ungrouped.sites.map(\.key) == ["a"])
+    // 而且它确实还在页面上（不是被隐藏）。
+    #expect(groups.allSatisfy { $0.kind != .hidden })
+}
+
+/// `ungrouped` 不能被「组被删了就回原订阅」那条回落吞掉。
+@Test func ungroupedSurvivesTheDeletedGroupFallback() throws {
+    let first = try document("https://one.example/a.json", keys: ["a"])
+    let entries = [entry("https://one.example/a.json", name: "One", enabled: true)]
+    let documents = ["https://one.example/a.json": first]
+    // customGroups 为空 —— 如果是 `group:xxx` 会回落到原订阅；`ungrouped` 不该回落。
+    let groups = SourceGroups.make(
+        entries: entries, documents: documents, builtIns: [], builtInOrigin: first.origin,
+        mergedSites: first.sites, pinOrder: [],
+        userHidden: { _ in false }, includeHidden: false, jarURL: nil,
+        reassign: { _, _ in CustomSourceGroup.ungroupedTarget }, customGroups: [])
+    #expect(groups.contains { $0.kind == .other })
+    #expect(!groups.contains { $0.id == "https://one.example/a.json" })
+}
+
+/// 哨兵值本身：别让未来重构把 `"ungrouped"` 换成别的字符串而不自知。
+@Test func ungroupedSentinelIsStable() {
+    #expect(CustomSourceGroup.ungroupedTarget == "ungrouped")
+    #expect(CustomSourceGroup.isUngrouped("ungrouped"))
+    #expect(!CustomSourceGroup.isUngrouped("group:abc"))
+    #expect(!CustomSourceGroup.isUngrouped("https://one.example/a.json"))
+}
