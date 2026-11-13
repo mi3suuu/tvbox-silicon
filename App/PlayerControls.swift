@@ -283,6 +283,66 @@ struct PlayerControlsLayout: Equatable {
         UserDefaults.standard.removeObject(forKey: shape.storageKey)
     }
 
+    // MARK: - 一次性迁移：接入「直接显示」集合（#7b）
+
+    /// 把「升级前顶栏里看得见的控件」补进两种「直接显示」集合。
+    ///
+    /// **为什么需要**：`MobilePlayer`（原版皮肤）此前完全不读
+    /// `watchSurfaced` / `fullSurfaced`（`grep -c surfaced App/MobilePlayer.swift` = 0），
+    /// 顶栏是纯槽位驱动。接入过滤后，默认 `watchSurfaced = [.airPlay, .episodes]`、
+    /// `defaultFullSurfaced = []`，于是老用户升级后会看到：观看页顶栏从 N 颗变 2 颗、
+    /// **全屏顶栏一颗不剩**。那不是他们改的配置，是升级造成的 —— 必须先补平。
+    ///
+    /// **为什么逐形态**：控制栏配置按三种形态各自分键存储
+    /// （`Shape.folded/unfolded/sideways`），用户可能排过三套不同布局。
+    /// 只迁一份，另外两个形态升级后照样塌。
+    ///
+    /// **为什么幂等**：用户可能从任意旧版本升上来，「版本号变了就迁」不可靠。
+    /// 判据是「两个集合都还是默认 + 顶栏里有超出默认的控件」，
+    /// 并有 marker 键防重复写盘。连续启动两次，第二次不再写。
+    ///
+    /// 判据与负对照见 `Tests/TVCoreTests/PlayerControlSurfacingTests.swift`。
+    @MainActor
+    static func migrateSurfacingIfNeeded() {
+        let defaults = UserDefaults.standard
+        let marker = PlayerControlSurfacingMigration.markerKey
+        guard defaults.object(forKey: marker) == nil else { return }
+
+        let defaultWatch = defaultWatchSurfaced.map(\.rawValue)
+        let defaultFull = defaultFullSurfaced.map(\.rawValue)
+        var wrote = false
+
+        for shape in Shape.allCases {
+            // 该形态没存过配置 → 用的就是 standard，顶栏 = standard.top，
+            // 与默认集合必然一致（extras 为空），plan 会返回 changed=false。
+            var layout = PlayerControlsLayout(stored: stored(for: shape))
+            let outcome = PlayerControlSurfacingMigration.plan(
+                topSlots: layout.topSlots.map { $0?.rawValue },
+                watchSurfaced: layout.watchSurfaced.map(\.rawValue),
+                fullSurfaced: layout.fullSurfaced.map(\.rawValue),
+                defaultWatch: defaultWatch,
+                defaultFull: defaultFull,
+                alreadyMigrated: false          // marker 已在循环外统一判过一次
+            )
+            guard outcome.changed else { continue }
+            let watch = outcome.watchSurfaced.compactMap { PlayerControl(rawValue: $0) }
+            let full = outcome.fullSurfaced.compactMap { PlayerControl(rawValue: $0) }
+            layout.watchSurfaced = watch
+            layout.fullSurfaced = full
+            defaults.set(layout.stored, forKey: shape.storageKey)
+            wrote = true
+            #if DEBUG
+            print("[PlayerControls] surfacing migrated shape=\(shape.rawValue) watch=\(watch.count) full=\(full.count)")
+            #endif
+        }
+
+        // 无论有没有写，都记 marker：判据已经跑过，不需要每次启动重跑。
+        defaults.set(true, forKey: marker)
+        #if DEBUG
+        print("[PlayerControls] surfacing migration done wrote=\(wrote)")
+        #endif
+    }
+
     /// 当前设备的形态（给播放器各读取点用）。
     ///
     /// ⛔ 判据**不能**读 `interfaceOrientation`（BUG-L）。

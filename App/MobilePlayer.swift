@@ -1109,16 +1109,65 @@ struct MobilePlayerView: View {
         }
     }
 
+    /// 当前布局下「直接显示」允许画出来的控件（#7b）。
+    ///
+    /// ⛔ 原来这里**根本没有读取点**：`grep -c "surfaced" App/MobilePlayer.swift` = 0，
+    /// 而设置页 `PlayerControlsSettingsView` 明写「This layout applies to the Original
+    /// and One skins」—— 原版皮肤就是本文件。于是那套勾选对它完全无效：
+    ///   · 勾上 → `setSurfaced` 顺手 `surfaceInTopRow` 摆进槽位 ⇒ 看起来生效
+    ///   · 取消 → 只从集合删，槽位不动 ⇒ 没有效果
+    ///
+    /// 三形态分流（不是「全屏/非全屏」两支）：
+    ///   · `.inline`         → `watchSurfaced`
+    ///   · `.pageFullScreen` → `fullSurfaced`
+    ///   · `.screen`         → **放行全部**（没有观看页，两份集合的语义都不适用；
+    ///                          若硬套 `fullSurfaced`（默认空数组），独立全屏播放器顶栏会整体清空）
+    ///
+    /// 判据与负对照见 `Sources/TVCore/PlayerControlSurfacing.swift` 的注释与 TVCore 测试。
+    private var surfacedAllowed: Set<String> {
+        _ = controlsOrder   // 与 `controlsLayout` 同源建立依赖，设置页改动能重算
+        // `MobilePlayerLayout` 不是 RawRepresentable（App 层枚举，无 rawValue），
+        // 这里显式映射，避免依赖字符串。
+        let surfacingLayout: PlayerControlSurfacing.Layout
+        switch self.layout {
+        case .screen: surfacingLayout = .screen
+        case .inline: surfacingLayout = .inline
+        case .pageFullScreen: surfacingLayout = .pageFullScreen
+        }
+        let layout = surfacingLayout
+        return PlayerControlSurfacing.allowed(
+            layout: layout,
+            watchSurfaced: controlsLayout.watchSurfaced.map(\.rawValue),
+            fullSurfaced: controlsLayout.fullSurfaced.map(\.rawValue),
+            allControls: PlayerControl.allCases.map(\.rawValue)
+        )
+    }
+
     /// The top-row slots, with controls that do not apply right now left as gaps — so a control the
     /// viewer placed in slot 7 sits at the seventh position whatever the current content offers.
+    ///
+    /// ⛔ 同时过两道：`available`（内容可用性）与 `surfacedAllowed`（用户勾选）。
+    /// 只过前者就是 #7b —— 取消勾选无效。
+    ///
+    /// ⚠️ **只有顶栏过 `surfacedAllowed`。** 设置页的判据是
+    /// `isShownInBar = set.contains(control) && layout.top.contains(control)`
+    /// （`PlayerControlsSettingsView:229-231`）—— 两个集合的语义是
+    /// 「**顶栏**里哪些控件直接显示」，底栏与「更多」不受它管。
+    /// 底栏是传输控制（播放/进度/上下集），「更多」是折叠收纳区，
+    /// 把它们也过滤会让 bottom 6→0、more 19→0，等于把播放器掏空。
     private var topSlots: [PlayerControl?] {
-        controlsLayout.topSlots.map { control in control.flatMap { available($0) ? $0 : nil } }
+        let allowed = surfacedAllowed
+        return controlsLayout.topSlots.map { control in
+            control.flatMap { available($0) && allowed.contains($0.rawValue) ? $0 : nil }
+        }
     }
+
+    /// 底栏只不过 surfaced —— 见 `topSlots` 的说明。
     private var bottomSlots: [PlayerControl?] {
         controlsLayout.bottomSlots.map { control in control.flatMap { available($0) ? $0 : nil } }
     }
 
-    /// The controls left in More, only when they apply.
+    /// The controls left in More, only when they apply. 同样不过 surfaced —— 理由同上。
     private var moreControls: [PlayerControl] { controlsLayout.more.filter(available) }
 
     /// Whether the "more" menu has anything to show: a collapsed control or the picture switches.
