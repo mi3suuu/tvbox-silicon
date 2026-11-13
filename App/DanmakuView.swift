@@ -12,6 +12,17 @@ struct DanmakuOverlay: View {
     var revision = ""
     @AppStorage(DanmakuArea.key) private var area = DanmakuArea.standard
     @AppStorage(DanmakuStyle.fontSizeKey) private var fontSize = DanmakuStyle.standardFontSize
+    /// ⛔ 速度与屏蔽词必须各自声明成 `@AppStorage`，不是为了读值（`BiliDanmakuSpeed.current` /
+    /// `BiliDanmakuFilter.words` 已经能从 UserDefaults 取），而是为了**建立 SwiftUI 依赖** ——
+    /// 两者原来都只被 `DanmakuEngine` 在内部读一次，改 key 不会让这个视图重算，
+    /// 于是「速度」「屏蔽词」两个旋钮拨了没反应（复核 B1 指出）：
+    ///   · 速度的读点在 `restart()`（`:160`），而 `restart()` 只在 layout/size/area/textScale/
+    ///     时间跳变时触发，**没有一项由速度驱动** ⇒ 改速度不重排；
+    ///   · 屏蔽词只在 `load()`（`:84/86`）读，`load()` 由下面 `.task(id:)` 驱动，
+    ///     而那个 id 不含屏蔽词 ⇒ 改词不重载。
+    /// 声明成 `@AppStorage` 之后再分别并入两处触发条件，两条链才真的通。
+    @AppStorage(BiliDanmakuSpeed.key) private var speedRaw = BiliDanmakuSpeed.normal.rawValue
+    @AppStorage(BiliDanmakuFilter.wordsKey) private var blockWordsRaw = ""
     @State private var engine = DanmakuEngine()
     @Environment(\.displayScale) private var scale
 
@@ -31,7 +42,12 @@ struct DanmakuOverlay: View {
         // No `ignoresSafeArea` here: it would win over the caller's, and the iPhone keeps comments below the Dynamic Island.
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-        .task(id: "\(revision):\(comments.count)") { engine.load(comments) }
+        // 屏蔽词进 id：改词必须重新 load 一遍（`load` 内部按 `BiliDanmakuFilter` 过滤）。
+        // `comments.count` 是**未过滤**的原始条数，它不会随屏蔽词变，所以单靠它不够。
+        .task(id: "\(revision):\(comments.count):\(blockWordsRaw)") { engine.load(comments) }
+        // 速度进重排条件：`restart()` 是唯一读 `scrollDuration` 的地方，而它只在这个 id 变化时
+        // 被 `engine` 重新走到 —— 把速度串进来，拨档位才会真的改变横穿时间。
+        .task(id: "speed:\(speedRaw)") { engine.invalidateLayout() }
     }
 }
 
@@ -76,6 +92,17 @@ final class DanmakuEngine: @unchecked Sendable {
     /// Dense tracks (Dandanplay merges several sites, up to 30,000 comments) would otherwise measure and draw
     /// dozens of comments in one frame and stall it; the rest wait a frame, and those a second late are dropped.
     private static let perFrame = 4, onScreen = 150
+
+    /// 丢掉已算好的排布，让下一帧的 `frame(...)` 重新走 `restart()`。
+    ///
+    /// 只有 `restart()` 会读 `BiliDanmakuSpeed.current.scrollDuration`（`:160`），
+    /// 而 `restart()` 的触发条件里没有任何一项由速度驱动 —— 所以拨档位时必须在外部
+    /// 主动作废 layout，否则那一行永远按第一次建布局时的值走。
+    /// 只置空 layout，不动 `comments`/`next`/`active`：下一帧 `restart()` 会按当前
+    /// `time` 重新二分定位，正在屏上的那批会自然重排，不需要整批重新 load。
+    func invalidateLayout() {
+        lock.withLock { layout = nil }
+    }
 
     func load(_ comments: [Danmaku]) {
         // 屏蔽词过滤（二进制实证 `danmaku_filter` / `danmaku_block_switch`）。

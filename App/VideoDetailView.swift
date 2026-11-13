@@ -3235,10 +3235,22 @@ struct VideoDetailView: View {
         }
     }
 
-    /// 哔哩哔哩皮肤的弹幕开关（与 One 分开存，避免互相覆盖）。
-    private var danmakuOnForSkin: Bool {
-        UserDefaults.standard.object(forKey: DanmakuPreference.key) as? Bool ?? true
-    }
+    /// ⛔ 这个 `@AppStorage` **只为建立依赖，不为了读值**。
+    ///
+    /// 原来 `danmakuOnForSkin` 直接读 `UserDefaults`，本视图对它没有 SwiftUI 依赖：
+    /// 在弹幕面板里拨了开关，`VideoDetailView` 的 body 不会因为这个键变化而重算，
+    /// 弹幕层要等到下一次**别的原因**（进度 sampler 每秒 tick、或其他状态变化）才更新 ——
+    /// 用户看到的是「拨了要等一下才生效」，极端情况下（暂停中、无 tick）看起来像没生效。
+    /// 复核 H1 指出这一点。
+    @AppStorage(DanmakuPreference.key) private var danmakuEnabledStored = true
+
+    /// 哔哩哔哩皮肤的弹幕开关。
+    ///
+    /// 注释原来写「与 One 分开存，避免互相覆盖」是**错的**：两边用的是同一个
+    /// `DanmakuPreference.key`（`"danmakuEnabled"`），本来就是同一份值 ——
+    /// 这正是「在 One 里关掉弹幕、切到哔哩哔哩也是关的」的原因，属预期行为，不是缺陷。
+    /// 现在改为读上面的 `@AppStorage`，依赖与语义同时对上。
+    private var danmakuOnForSkin: Bool { danmakuEnabledStored }
 
     /// 当前清晰度的显示名。`PlaybackSession.quality` 只有序号，
     /// 名字在 `qualities` 里；取不到就显示 `Auto`（与哔哩哔哩一致）。
@@ -3252,10 +3264,13 @@ struct VideoDetailView: View {
     }
 
     private func toggleSkinDanmaku() {
-        // 哔哩哔哩的弹幕开关写 `DanmakuPreference.key`；
-        // 这里没有独立的 revision 计数器（那里的 `danmakuRevision` 是播放页私有状态），
-        // 所以只翻存储值 —— 覆盖层本身监听同一个 key。
-        UserDefaults.standard.set(!danmakuOnForSkin, forKey: DanmakuPreference.key)
+        // 哔哩哔哩的弹幕开关写 `DanmakuPreference.key`。
+        //
+        // ⛔ 原注释写「覆盖层本身监听同一个 key」——不实：`DanmakuOverlay` 并不监听这个 key
+        //    （它接收调用方传进来的显隐判断，只 `@AppStorage` 了 area/fontSize 两个样式键）。
+        //    真正让开关生效的是上面那个 `@AppStorage` 建立的依赖 ⇒ 本视图重算 ⇒
+        //    三个 Bili 播放页拿到新的 `danmakuOn` ⇒ 弹幕层出现/消失。
+        danmakuEnabledStored.toggle()
     }
 
     /// 全屏里的「下一集」。没有下一集就不动，不要静默从头开始。
