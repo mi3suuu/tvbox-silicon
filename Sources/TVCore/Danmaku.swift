@@ -256,6 +256,15 @@ public struct DanmakuLayout {
     ///
     /// 越界的 lane 直接丢弃：不播种只是少了碰撞信息（退化成「可能重叠」），
     /// 而强行塞进不存在的行会让 `place()` 的索引假设失效。
+    ///
+    /// ⚠️ **这条 guard 实际不可达，是纵深防御，不是热路径。** 证明：
+    /// 走 `adopt` 的唯一入口是「拨速度」，那边 `keep` 为真的前提是 `geometryChanged == false`，
+    /// 即 size / area / textScale 三者全等；而 lane 数只由这三者（经 `DanmakuLayout.init`）
+    /// 决定 ⇒ 新旧布局的 lane 数必然相等 ⇒ 旧 lane 号必然落界内。
+    /// 换区域/换字号（lane 数真的会变，实测 area 0.75→0.5 时 scroll 13→8）时
+    /// `geometryChanged == true` ⇒ 走清空路径、根本不调 `adopt`。
+    /// 保留它是为了：将来若有人给 `adopt` 加了不经该前提的调用点，这里不会变成数组越界崩溃
+    /// —— 去测试里删掉这条 guard，`adoptingIgnoresLanes...` 会以 signal 5 崩溃而非断言失败。
     public mutating func adopt(_ placements: [Placement]) {
         for p in placements {
             switch p.comment.position {
