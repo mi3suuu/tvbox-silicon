@@ -587,9 +587,25 @@ struct PlayerControlsLayout: Equatable {
         remove(control)
         let index = min(max(slot, 0), Self.slotCount - 1)
         switch zone {
-        case .top: topSlots[index] = control
-        case .bottom: bottomSlots[index] = control
-        case .more: more.append(control)
+        case .top:
+            // ⛔ 目标槽位若已被别人占着，那个控件**不能凭空消失**。
+            //
+            // 原来直接 `topSlots[index] = control` —— 被挤掉的那个控件
+            // 从 topSlots 里被覆盖掉，既不在顶栏、也不在「更多」里，
+            // 于是它**彻底从界面上消失**，用户只剩「我刚才那个按钮呢」。
+            // 现在把被挤掉的那个收进「更多」，功能不丢、位置可再拖回来。
+            if let displaced = topSlots[index], displaced != control, !more.contains(displaced) {
+                more.append(displaced)
+            }
+            topSlots[index] = control
+        case .bottom:
+            if let displaced = bottomSlots[index], displaced != control, !more.contains(displaced) {
+                more.append(displaced)
+            }
+            bottomSlots[index] = control
+        case .more:
+            // 放进「更多」时，若它本来就在 more 里（被 remove 清掉了），加回去即可。
+            more.append(control)
         }
     }
 
