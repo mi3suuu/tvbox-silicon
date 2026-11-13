@@ -197,7 +197,14 @@ typealias MusicTrack = TVCore.MusicTrack
     var canAdvance: Bool { queue?.hasNext == true || repeatMode == .all && (queue?.tracks.count ?? 0) > 1 }
 
     func cycleRepeat() {
-        repeatMode = repeatMode.next
+        setRepeat(repeatMode.next)
+    }
+
+    /// 直接选一个重复档位（不循环）。tvOS 的传输栏是三档菜单而不是一颗轮换键，
+    /// 它需要一个能直接落档的入口；落盘逻辑与 `cycleRepeat` 共用同一处，避免两套写入。
+    func setRepeat(_ mode: MusicRepeatMode) {
+        guard repeatMode != mode else { return }
+        repeatMode = mode
         UserDefaults.standard.set(repeatMode.rawValue, forKey: "musicRepeat")
     }
 
