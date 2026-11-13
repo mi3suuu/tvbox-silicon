@@ -1940,7 +1940,20 @@ struct OneSkinStage: View {
                 Color.clear
                     .frame(width: min(geo.size.width, avail.width),
                            height: min(geo.size.height, slotH))
-                OneSkinPalette.pageBase.ignoresSafeArea()
+                // ⛔ 底色**不再放在 ZStack 内层**（2026-11-13 第三轮）。
+                //
+                // 原来这里是 `OneSkinPalette.pageBase.ignoresSafeArea()`。
+                // `.ignoresSafeArea()` 会让这一层的**理想尺寸 = 整屏**，而 ZStack
+                // 的尺寸是所有子视图尺寸的**最大值** —— 于是底座刚被压到 635，
+                // 又被它顶回 669，溢出协商从这一层重新长出来。
+                //
+                // 实测（真机 8.14.x，同一份 `stage size=951x635`）：
+                //   COLORIGIN gx=-475 gy=-334  ← 父级被压成 0 后居中溢出
+                //   COLORIGIN gx=0    gy=0     ← 正确
+                //   COLORIGIN gx=0    gy=748   ← 顺排到槽位下方，整页在屏幕外
+                // **同样的输入、三次不同落位** = 协商抖动的直接证据；
+                // 用户看到的就是「纯海报」。底色改挂外层 `.background` 后
+                // 它不再参与本层的尺寸协商。
                 // ⛔ 不再经 `@State` 中转。
                 //
                 // 原实现写 `geoShapeNow` 再由 stage 读，而 `@State` 的值要**下一帧**
@@ -1978,6 +1991,9 @@ struct OneSkinStage: View {
                            alignment: .topLeading)
             }
         }
+        // 底色挂在**外层**：`.background` 不参与本层尺寸协商，
+        // 只负责铺满最终容器。`.ignoresSafeArea()` 让它走到物理边缘。
+        .background(OneSkinPalette.pageBase.ignoresSafeArea())
         .ignoresSafeArea()
         // ⛔ 这里**不能**再 `.frame(width:) + .clipped()`。
         //
