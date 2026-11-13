@@ -94,6 +94,26 @@ public enum PlayerControlSurfacing {
 
     /// 过滤一个控件列表（用于「更多」菜单）。这个**要真的删**，不是置 `nil`——
     /// 菜单没有位置概念，留着空位只会在列表里出现空隙。
+    /// 「设置页能勾的那张表」与「底栏槽位」必须**没有交集**。
+    ///
+    /// 这条不是可选的实现细节，`surfaced` 只约束顶栏这件事**依赖它成立**：
+    /// 设置页的 `barControls` 靠 `isRoundButton == false` **隐式**排除掉底栏六项
+    /// （`PlayerControls.isRoundButton` 里 `.backTen/.playPause/.forwardTen/
+    /// .previousEpisode/.nextEpisode/.fullScreen` 全返回 false）。
+    ///
+    /// ⛔ 若某天有人把某个底栏控件的 `isRoundButton` 改成 true，它就会出现在勾选表里，
+    /// 但用户勾上/取消它不会有任何可见变化 —— **「能勾但不生效」，正是本次修的 #7b 同型复发**。
+    /// 复核 t8 判 O3：当时没有任何测试锁住这条不变量。
+    ///
+    /// 所以这里把它变成可断言的事实，而不是靠阅读 `isRoundButton` 的 switch 去推。
+    /// 参数由调用方从真实枚举传入（App 层 `PlayerControl` 不在 TVCore 里）。
+    public static func selectableAndBottomOverlap(
+        selectable: [String],
+        standardBottom: [String]
+    ) -> [String] {
+        Array(Set(selectable).intersection(Set(standardBottom))).sorted()
+    }
+
     public static func filterList(_ controls: [String], allowed: Set<String>) -> [String] {
         controls.filter { allowed.contains($0) }
     }
