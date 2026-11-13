@@ -75,11 +75,31 @@ if [ -x "$K" ]; then
   #   2  Sources/ 塞违规      → 必须红，且点名 marker      （覆盖作用域全宽）
   #   3  干净输入             → 必须**绿**                （不冤枉好）
   #   4  ② 契约破坏（改键名） → 必须红，且点名键名        （覆盖第二道检查）
+  # ⚠️ 哨兵的声明与校验必须都在**门控之外**。
+  # 第六层教训：上一版把「哨兵校验」写在 `if ...; then` 块**内部**，
+  # 把条件改成恒假时连校验一起被跳过 —— 校验与它要校验的东西死在同一段里。
+  # 现在：M2_REQUIRED/M2_RAN/M2_FAIL 在门控外初始化，门控只负责跑矩阵，
+  # 校验由门控外的独立段执行。门控恒假 ⇒ M2_RAN 空 ⇒ 校验照样报红。
+  # M2_REQUIRED 恒为 1：**只要脚本存在，就必须证明矩阵跑过**。
+  # ⚠️ 不能在门控内赋 1 —— 上一版写了 `M2_REQUIRED=1` 在 `if ...; then` 里，
+  #    门控一旦被改恒假/异常跳过，REQUIRED 仍是 0，连校验段一起effacer。
+  #    这是第六层在同一位置复发，实测 EXIT=0 打穿。
+  # 「该不该跑矩阵」由 LATCH_FAIL / LATCH_NO_SELFTEST 决定（下面这个 if），
+  # 但「是否必须留下 4 个哨兵」恒为是 —— 跳过矩阵就等于未校验。
+  M2_REQUIRED=1
+  M2_RAN=""
+  M2_FAIL=""
   if [ -z "$LATCH_FAIL" ] && [ -z "${LATCH_NO_SELFTEST:-}" ]; then
-    M2_FAIL=""
+    # 哨兵：每项矩阵执行后追加编号；段末在门控外校验 4 项齐全。
+    # **未执行 ≠ 通过** —— 判据必须能区分「检查通过」与「检查没跑」。
 
     # 造一个基准 fixture：干净、键名齐全（②应通过）
-    M2_BASE="$(mktemp -d)"
+    M2_BASE="$(mktemp -d 2>/dev/null)" || M2_BASE=""
+    if [ -z "$M2_BASE" ] || [ ! -d "$M2_BASE" ]; then
+      # 环境异常（TMPDIR 不可写 / 磁盘满 / 权限不足）⇒ 本次**未校验**，不是通过
+      M2_FAIL="M2：无法创建临时目录，矩阵未执行（未校验 ≠ 通过）"
+      M2_BASE=""
+    fi
     mkdir -p "$M2_BASE/App" "$M2_BASE/Scripts" "$M2_BASE/Sources/TVCore"
     cp "$K" "$M2_BASE/Scripts/audit-oneskin-keys.sh"
     chmod +x "$M2_BASE/Scripts/audit-oneskin-keys.sh"
@@ -97,12 +117,24 @@ if [ -x "$K" ]; then
     printf 'public enum OneWatchPageModel {}\n' > "$M2_BASE/Sources/TVCore/OneWatchPageModel.swift"
     printf 'enum CleanProbe { static let nothing = 0 }\n' > "$M2_BASE/App/CleanProbe.swift"
 
-    m2run() { ( cd "$1" && ./Scripts/audit-oneskin-keys.sh 2>&1 ); }
+    # cd 失败必须出声并返回 99（哨兵：99 = 未校验，绝不当作通过）。
+    # 子 shell 里悄悄失败是第六层的第二处缺口。
+    m2run() {
+      ( cd "$1" || exit 99
+        ./Scripts/audit-oneskin-keys.sh 2>&1 )
+    }
+
+    # 只在 M2_BASE 真的建出来时才往下走
+    if [ -n "${M2_BASE:-}" ]; then
 
     # ── 3 先跑干净输入：必须绿（不冤枉好）──
     M2_CLEAN_OUT="$(m2run "$M2_BASE")"; M2_CLEAN_RC=$?
-    if [ "$M2_CLEAN_RC" -ne 0 ]; then
+    if [ "$M2_CLEAN_RC" -eq 99 ]; then
+      M2_FAIL="M2-#3：无法进入 fixture 目录，未校验"
+    elif [ "$M2_CLEAN_RC" -ne 0 ]; then
       M2_FAIL="M2-#3：干净输入被判红（见谁都红 = 把门焊死，不是判别力）"
+    else
+      M2_RAN="$M2_RAN 3"
     fi
 
     # ── 1 App/ 塞违规 → 必须红且点名 ──
@@ -111,10 +143,14 @@ if [ -x "$K" ]; then
       m2="$M2_BASE"; cp -R "$M2_BASE" "$m2.app"
       printf 'enum M2ProbeA { static let x = "oneSkin%s" }\n' "$M2_M1" > "$m2.app/App/M2ProbeA.swift"
       out="$(m2run "$m2.app")"; rc=$?
-      if [ "$rc" -eq 0 ]; then
+      if [ "$rc" -eq 99 ]; then
+        M2_FAIL="M2-#1：无法进入 fixture 目录，未校验"
+      elif [ "$rc" -eq 0 ]; then
         M2_FAIL="M2-#1：App/ 塞违规仍判通过"
       elif ! printf '%s' "$out" | grep -q "$M2_M1"; then
         M2_FAIL="M2-#1：判红但未点名放入的违规（$M2_M1）"
+      else
+        M2_RAN="$M2_RAN 1"
       fi
       rm -rf "$m2.app"
     fi
@@ -125,10 +161,14 @@ if [ -x "$K" ]; then
       cp -R "$M2_BASE" "$M2_BASE.src"
       printf 'enum M2ProbeB { static let x = "oneSkin%s" }\n' "$M2_M2" > "$M2_BASE.src/Sources/TVCore/M2ProbeB.swift"
       out="$(m2run "$M2_BASE.src")"; rc=$?
-      if [ "$rc" -eq 0 ]; then
+      if [ "$rc" -eq 99 ]; then
+        M2_FAIL="M2-#2：无法进入 fixture 目录，未校验"
+      elif [ "$rc" -eq 0 ]; then
         M2_FAIL="M2-#2：Sources/ 塞违规仍判通过（作用域覆盖不全 —— 第五层缺口）"
       elif ! printf '%s' "$out" | grep -q "$M2_M2"; then
         M2_FAIL="M2-#2：判红但未点名放入的违规（$M2_M2）"
+      else
+        M2_RAN="$M2_RAN 2"
       fi
       rm -rf "$M2_BASE.src"
     fi
@@ -142,15 +182,37 @@ if [ -x "$K" ]; then
         || sed -i 's/static let speedKey = "oneSkinSpeed"/static let speedKey = "oneSkinSpeedBROKEN"/' \
              "$M2_BASE.key/Sources/TVCore/OneSkinShared.swift"
       out="$(m2run "$M2_BASE.key")"; rc=$?
-      if [ "$rc" -eq 0 ]; then
+      if [ "$rc" -eq 99 ]; then
+        M2_FAIL="M2-#4：无法进入 fixture 目录，未校验"
+      elif [ "$rc" -eq 0 ]; then
         M2_FAIL="M2-#4：改键名后仍判通过（② 契约检查无判别力）"
       elif ! printf '%s' "$out" | grep -q 'speedKey'; then
         M2_FAIL="M2-#4：判红但未点名被改的键（speedKey）"
+      else
+        M2_RAN="$M2_RAN 4"
       fi
       rm -rf "$M2_BASE.key"
     fi
 
-    rm -rf "$M2_BASE"
+    fi   # end: [ -n "$M2_BASE" ]
+
+    [ -n "${M2_BASE:-}" ] && rm -rf "$M2_BASE"
+  fi   # ← 矩阵门控到此结束
+
+  # ── 哨兵校验（门控**之外**，独立执行，不可被门控跳过）──────────────────
+  # 4 项必须都留下执行痕迹。缺任一 = 该项**没跑**（不是通过）。
+  # 门控被改恒假 / mktemp 失败 / 中途 return，都不会留下哨兵 ⇒ 这里报红。
+  # 只对「本应跑矩阵」的情形校验哨兵。旧版脚本/已判定失效的，走上面的
+  # LATCH_NO_SELFTEST / LATCH_FAIL 分支，不在这里重复报「未执行」。
+  if [ "$M2_REQUIRED" = "1" ] && [ -z "${LATCH_NO_SELFTEST:-}" ] && [ -z "$LATCH_FAIL" ]; then
+    if [ -z "$M2_FAIL" ]; then
+      for i in 1 2 3 4; do
+        case " $M2_RAN " in
+          *" $i "*) ;;
+          *) M2_FAIL="M2-#$i 未执行（未校验 ≠ 通过 —— 矩阵没跑，不是矩阵通过）" ;;
+        esac
+      done
+    fi
     [ -n "$M2_FAIL" ] && LATCH_FAIL="$M2_FAIL"
   fi
 
