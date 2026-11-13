@@ -183,7 +183,14 @@ struct OneSkinChrome: View {
     @State private var hideTask: Task<Void, Never>?
     /// 单击与双击的仲裁：单击延迟 0.26s 执行，双击一落就取消它。
     @State private var tapTask: Task<Void, Never>?
-    @State private var showsInfo = false
+    /// 「显示视频信息」开关。**必须与设置页/原生皮肤共用同一个键**
+    /// （`PlaybackInfo.key` = `player.showInfo`）。
+    ///
+    /// ⛔ 原来这里是 `@State` —— 全仓 6 处 `@AppStorage(PlaybackInfo.key)` 声明，
+    /// 唯独 One 不在其中。后果有两条：
+    ///   ① 设置页「显示视频信息」对 One 皮肤**完全无效**；
+    ///   ② 在 One 里点亮那颗 i 键，切一次形态（`@State` 随视图重建归零）就灭了。
+    @AppStorage(PlaybackInfo.key) private var showsInfo = false
     /// 起播耗时浮层。
     ///
     /// One 的 `showPlaybackStats`：把「慢」拆成「解析 / 就绪 / 首帧 / 共几秒」，
