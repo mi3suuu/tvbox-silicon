@@ -602,6 +602,17 @@ import TVCore
     /// 只看它会把「页面内起播」误判成「全局起播」，进而弹出全屏层盖住观看页。
     /// 这个标志由页面 `onAppear` / `onDisappear` 同步维护，不受 scope 内容影响。
     @ObservationIgnored var isWatchPageMounted = false
+    /// 当前分区导航栈的深度，由 `RouteStack` 在 path 变化时写入。
+    ///
+    /// 为什么需要：`onDisappear` 分不清「页面被 pop」和「折叠/展开换了版式」。
+    /// 真机日志（2026-11-13 16:23）里折叠到 466 宽后 `detail onDisappear`
+    /// 紧跟着出现，但 350ms 内**没有** `onAppear`，于是延迟判据永远赢不了，
+    /// 会话被塞进坞 → 屏幕上多一张迷你播放器；而同一时刻 OneSkin 仍在
+    /// 按 `466x644` 正常出帧，页面其实还在。
+    ///
+    /// 导航栈才是「页面还在不在」的权威事实：被 pop 时深度归 0，
+    /// 折叠只是版式变化，深度不变。所有收坞判定都以它为准。
+    @ObservationIgnored var navDepth = 0
     var playbackCatalog: PlaybackCatalog?
     /// [mi3s] 二开：跨源换源的状态（见 `Store+CrossSource.swift`）。
     ///

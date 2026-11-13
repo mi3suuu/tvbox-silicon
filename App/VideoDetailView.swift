@@ -4137,11 +4137,24 @@ struct VideoDetailView: View {
         }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(350))
-            // 页面又活了 = 这是折叠/展开的重挂，不是离场。
-            guard generation == Self.pageGeneration, !store.isWatchPageMounted else {
+            // 判据一：页面又活了（onAppear 跑过 / 挂载标志回来）= 折叠重挂，不是离场。
+            // 判据二：**导航栈里还有页**。
+            //
+            // ⛔ 第二条是这轮的关键。真机日志（16:23）显示折叠到 466 宽时
+            // `detail onDisappear` 会跑，但 350ms 内没有 `onAppear`（SwiftUI 把内容
+            // 移出渲染树又插回，没重复发 appear），第一条判据永远不成立，
+            // 于是同一集被塞进坞、屏幕上多出一张迷你播放器 —— 而那一刻 OneSkin
+            // 仍在按 `466x644` 正常出帧，说明页面根本没走。
+            //
+            // 被 pop 时 `RouteStack` 的 path 会先清空（深度 0），折叠只改版式、
+            // 深度不变。所以「深度 > 0」= 页面还在栈上 = 不许收坞。
+            let stillOnStack = store.navDepth > 0
+            guard generation == Self.pageGeneration,
+                  !store.isWatchPageMounted,
+                  !stillOnStack else {
                 #if DEBUG
                 oneSkinLog("SETTLE cancel gen=\(generation) now=\(Self.pageGeneration) "
-                    + "mounted=\(store.isWatchPageMounted) —— 页面重挂，不收坞")
+                    + "mounted=\(store.isWatchPageMounted) nav=\(store.navDepth) —— 页面还在，不收坞")
                 #endif
                 return
             }
@@ -4176,6 +4189,17 @@ struct VideoDetailView: View {
         // `dock()` → `add()` 本身按频道去重，所以重复登记不会产生两张同集卡片；
         // 但「刚回到前台的那一集又被塞回坞」这件事本身就是错的，得在这里拦住。
         guard !store.floatsInMiniPlayer(store.playing) else { return }
+        // 第三道闸：导航栈里还有页 → 页面根本没走（折叠/展开只是换版式），不许收坞。
+        //
+        // 这一道是兜底：`dockForeground()` 全仓只有小窗键 / 退出键 / 这里三个调用点，
+        // 小窗键与退出键都会先置 `leaveHandled`，所以真正能「凭空冒出一张迷你播放器」
+        // 的只有这里。深度判据把这条路彻底关死，不依赖 onAppear 是否重发。
+        guard store.navDepth == 0 else {
+            #if DEBUG
+            oneSkinLog("SETTLE skip nav=\(store.navDepth) —— 页面仍在栈上，不收坞")
+            #endif
+            return
+        }
         // 其余一切离开方式 → 收进坞继续播。
         _ = SwipeBack.isPending   // 保留读它以免编译器警告；语义上不再分流
         #if DEBUG

@@ -945,6 +945,21 @@ private struct RouteStack<Root: View>: View {
         @Bindable var stack = stack
         NavigationStack(path: $stack.path) { root.routeDestinations() }
             .environment(\.openRoute, stack.opener)
+            // 导航栈深度是「页面还在不在」的唯一权威事实，写进 store 供收坞判定使用。
+            //
+            // ⛔ 只让**当前分区**的栈写：其他分区的栈也有页面时会把深度盖成 1，
+            // 让「已经 pop 干净」被误判成「页面还在」，于是真离场也不收坞。
+            .onChange(of: stack.path.count, initial: true) { _, depth in
+                guard store.section == section else { return }
+                store.navDepth = depth
+                #if DEBUG
+                OneSkinProbe.log("NAVDEPTH section=\(section) depth=\(depth)")
+                #endif
+            }
+            .onChange(of: store.section) { _, now in
+                guard now == section else { return }
+                store.navDepth = stack.path.count
+            }
             .onChange(of: store.pendingRoute) { _, route in
                 guard let route, store.section == section else { return }
                 stack.opener(route)
