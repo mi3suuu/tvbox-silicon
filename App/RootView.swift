@@ -248,7 +248,12 @@ struct RootView: View {
     #endif
     private var platformTabs: some View {
         tabView
-            .onAppear { OneSkinProbe.log("platformTabs onAppear noSidebar=\(phoneTabsWithoutSidebar)") }
+            .onAppear {
+                #if os(iOS)
+                // `OneSkinProbe` 属 OneSkin 文件簇（整体只在 iOS 编译）；tvOS 不要这段调试日志。
+                OneSkinProbe.log("platformTabs onAppear noSidebar=\(phoneTabsWithoutSidebar)")
+                #endif
+            }
             // ⛔ 不要再在这里加 `onChange(of: store.watchPageOpen)` 去切 TabView 样式。
             // 详见 `phoneTabsWithoutSidebar` 的注释：那会把刚 push 进来的选集页直接 pop 掉。
             #if os(tvOS)
@@ -385,7 +390,9 @@ struct RootView: View {
             //
             // 两种样式类型不同，不能写三元；分支本身留着，但条件永不变，
             // SwiftUI 就不会重新生成视图身份，导航栈得以保住。
+            #if os(iOS)
             let _ = OneSkinProbe.log("tabView branch noSidebar=\(phoneTabsWithoutSidebar)")
+            #endif
             if phoneTabsWithoutSidebar {
                 TabView(selection: $store.section) {
                     ForEach(tabs) { item in
@@ -1062,7 +1069,7 @@ extension View {
                 // true，而 UserDefaults.bool(forKey:) 读未写入键返回 false —— 两个
                 // 默认值不一致会让「全新安装 + 从没进过设置页」的用户读出 false，
                 // 白渐隐照样挂回来。必须用 object(forKey:) 判「写过没」。
-                let skinOn = (UserDefaults.standard.object(forKey: "oneSkinEnabled") as? Bool) ?? true
+                let skinOn = (UserDefaults.standard.object(forKey: OneSkinKeys.enabledKey) as? Bool) ?? true
                 if skinOn {
                     safeAreaPadding(.bottom, 40)
                 } else {

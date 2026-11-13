@@ -10,6 +10,19 @@ import CoreGraphics
 /// probe result, the two `UserDefaults` keys the settings screens write, and the fit-mode enum the
 /// Bilibili skin reuses. Keeping those inside the guarded file made macOS/tvOS fail with
 /// `cannot find 'OneSkinLineSample' / 'OneSkin'`, which is why they live here instead.
+/// **One 皮肤全部 `UserDefaults` 键名的唯一真源（single source of truth）。**
+///
+/// 口径（2026-11-13 定）：**全量对齐，不做平台子集。**
+///
+/// 为什么不按「tvOS 只用得到哪几个」裁剪：
+///   · 裁剪后必须维护一份「某键为什么 tvOS 不需要」的清单，而这份清单没有机器校验，
+///     它会随需求漂移 —— 那就是「一套状态两套键」这个缺陷族的复发入口（本项目已出三例）；
+///   · 全部收在这里的边际成本只是几个字符串常量（编译期字面量，零运行期开销）；
+///   · 收全之后 `App/OneSkin.swift` 里**一个键名字面量都不剩**，只剩对这里的引用，
+///     于是「两边字面量分叉」在结构上不可能发生，而不是靠断言在运行期去发现。
+///
+/// ⚠️ 键名是**落盘契约**：改字符串 = 所有用户已存的皮肤偏好静默回落到默认值。
+///    `Scripts/audit-oneskin-keys.sh` 把这份字面量钉住，改键必须同时改那个脚本并有意识地过。
 public enum OneSkinKeys {
     /// The skin switch itself. `@AppStorage` reads and writes this one value everywhere.
     public static let enabledKey = "oneSkinEnabled"
@@ -18,6 +31,11 @@ public enum OneSkinKeys {
     public static let speedKey = "oneSkinSpeed"
     public static let loopKey = "oneSkinLoop"
     public static let fillKey = "oneSkinFill"
+    /// 「自动全屏」开关（参考截图里那颗蓝底蓝字的 chip）。开播即进全屏。
+    /// 消费点在 iOS 皮肤视图里，但键名仍归此处 —— 见上面的「全量对齐」口径。
+    public static let autoFullScreenKey = "oneSkinAutoFullScreen"
+    /// 双列 / 合拢开关。用户手动切换并持久化的偏好，不按屏幕尺寸自动判断。
+    public static let twoColumnKey = "oneSkinTwoColumn"
 }
 
 /// One line's resolved address and headers, produced by the cross-source probe and the episode

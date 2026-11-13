@@ -80,7 +80,7 @@ private struct HideVerticalBarWhenFullScreen: ViewModifier {
     let fullScreen: Bool
 
     func body(content: Content) -> some View {
-        if #available(iOS 27.1, *) {
+        if #available(iOS 27.1, tvOS 27.1, *) {
             content.toolbarVerticalBehavior(fullScreen ? .disabled : .automatic)
         } else {
             content

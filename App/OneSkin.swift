@@ -1,3 +1,100 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// 跨平台工具段（不属于 OneSkin 皮肤，tvOS 也要能编译）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 这些原本混在 OneSkin.swift 里，但它们与皮肤无关：
+//   · `oneSkinLog` / `OneSkinLogSink` —— 日志通道，全仓 21 处引用；
+//   · `OneSkinProbe` —— 调试探针；
+//   · `OneSkinLineSample` —— 线路测速样本（纯 url+headers 数据）。
+// OneSkin 文件簇整体收进 `#if os(iOS)` 后，这些会被一并关掉，
+// 导致非皮肤代码（RootView / VideoDetailView / BiliMetrics）全部编译失败。
+// 故把它们提到守卫之外。
+// 这里在 `#if os(iOS)` 之外，需要自带 import。
+
+import Foundation
+
+enum ROOTRecomputeProbe {
+    nonisolated(unsafe) static var n = 0
+    nonisolated(unsafe) static var last: TimeInterval = 0
+}
+
+@inline(__always)
+func oneSkinLog(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    // os_log 是唯一能被 `devicectl device console` 收走的通道。
+    // 实测：Swift 的 `print` 走 stdout、`FileHandle.standardError` 走 stderr，
+    // 两者在 iOS 上都不进 console 管道（日志里只会看到 NSLog 产生的行）。
+    OneSkinLogSink.log("[OneSkin] " + message())
+    #endif
+}
+
+#if DEBUG
+/// 日志落到 App 自己的 Documents/oneskin.log。
+///
+/// 试过的三条通道都不可靠（实测）：
+///  · `print` → stdout，`devicectl --console` 收不到；
+///  · `FileHandle.standardError` → stderr，同样收不到；
+///  · `os.Logger` → 进系统日志，`devicectl device console` 也只吐几行。
+/// 写文件是唯一能确定取到的：`guest pull` 直接拉出来看。
+private enum OneSkinLogSink {
+    static let url: URL = {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("oneskin.log")
+    }()
+    static let queue = DispatchQueue(label: "oneskin.log")
+
+    /// 单文件硬上限 1MB：超过就整体轮转（删旧、留最后 512KB）。
+    /// 之前无上限，实测一次环路就能写到 8.4MB —— 既是取日志的障碍，
+    /// 也反过来成了「是否成环」的量化指标：正常使用几小时才几百 KB。
+    // ⛔ 实测：`devicectl device copy from` 在 >3MB 时会中途断流
+    //（`peer closed the file service data channel after 3000000 of 3228272 bytes`），
+    // 日志取不出来等于没有探针。降到 1MB 轮转，单次拉取必定成功。
+    // 【合并裁决 2026-11-13 lead】此项取主树版本：主树侧基于上述 devicectl 实测
+    //   从 4MB 降到 1MB；本分支侧仍为旧的 4MB 且无该注释。取实测更新的那个。
+    static let maxBytes = 1024 * 1024
+    static let keepBytes = 512 * 1024
+
+    static func log(_ s: String) {
+        // 同时走 os_log，真机可用 `devicectl device console` 实时抓。
+        #if os(iOS)
+        os_log("%{public}@", log: OSLog(subsystem: "wda.prdc.yingxia", category: "OneSkin"), type: .debug, s)
+        #endif
+        queue.async {
+            let line = s + "\n"
+            if let h = try? FileHandle(forWritingTo: url) {
+                h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+                if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+                   size > maxBytes, let all = try? Data(contentsOf: url) {
+                    try? all.suffix(keepBytes).write(to: url)
+                }
+            } else {
+                try? Data(line.utf8).write(to: url)   // 首次创建
+            }
+        }
+    }
+}
+#endif
+
+/// RootView 侧也能用的日志入口（与 oneSkinLog 同一后端）。
+enum OneSkinProbe {
+    static func log(_ s: String) { oneSkinLog(s) }
+}
+
+/// 一条线路的测速样本。
+struct OneSkinLineSample: Equatable {
+    var url: URL
+    var headers: [String: String] = [:]
+}
+
+#if os(iOS)
+// ⛔ 本文件属 **OneSkin 文件簇**，整体仅 iOS。
+//
+// 判定依据（产品边界，非编译妥协）：
+//   · `OneSkin` 是 iPhone 折叠屏皮肤 —— `OneSkinShape` / `FoldRegion` / `hinge` 全是 Duo 概念；
+//   · `SettingsTV.swift` 里**没有任何 OneSkin 开关** ⇒ tvOS 用户本来就打不开它；
+//   · 用户不可达、语义不适用 ⇒ 不为它维护一套 tvOS 平行实现。
+// 所以这里收进 `#if os(iOS)`，而不是给 tvOS 造替身。
+
 import SwiftUI
 import os
 import AVFoundation
@@ -16,18 +113,28 @@ import TVCore
 /// 主按钮高 50pt / 圆角 13pt、控件胶囊高 33pt。
 enum OneSkin {
 
+    // MARK: - UserDefaults 键名：**不在这里定义**。
+    //
+    // 全部键名归 `TVCore.OneSkinKeys`（`Sources/TVCore/OneSkinShared.swift`）单一真源。
+    // 2026-11-13 之前这里有一份逐字重复的字面量，两份靠人肉保证相同 —— 那是
+    // 「一套状态两套键」缺陷族的入口（本项目已出三例）。现在这里只剩转发引用，
+    // 字面量分叉在结构上不可能发生。
+    //
+    // 为什么转发而不是让调用点直接写 `OneSkinKeys.xxxKey`：`OneSkin.enabledKey`
+    // 这类写法在 App 内有 6 处调用点，转发保持调用点不变、改动面最小。
+
     /// 开关本体。`@AppStorage` 直连，任何页面读写都是同一份值。
-    static let enabledKey = "oneSkinEnabled"
+    static var enabledKey: String { OneSkinKeys.enabledKey }
 
     /// 控制条上三个开关，同样是界面级偏好。
-    static let speedKey = "oneSkinSpeed"
-    static let loopKey = "oneSkinLoop"
-    static let fillKey = "oneSkinFill"
+    static var speedKey: String { OneSkinKeys.speedKey }
+    static var loopKey: String { OneSkinKeys.loopKey }
+    static var fillKey: String { OneSkinKeys.fillKey }
     /// 画面填充模式（适应/填充/铺满/拉伸）。旧 `fillKey` 布尔仍兼容读取。
-    static let fitModeKey = "oneSkinFitMode"
+    static var fitModeKey: String { OneSkinKeys.fitModeKey }
     /// 「自动全屏」开关（参考截图里那颗蓝底蓝字的 chip）。
     /// 开启后**开播即进全屏**；关掉只影响自动行为，手动全屏键照旧。
-    static let autoFullScreenKey = "oneSkinAutoFullScreen"
+    static var autoFullScreenKey: String { OneSkinKeys.autoFullScreenKey }
 
     /// 竖持时「视频 + 所有控件」整体下移的额外留白（pt）。
     ///
@@ -39,7 +146,7 @@ enum OneSkin {
     /// 双列 / 合拢开关。One 用的是 `@AppStorage("one.actor.twoColumn", store: UserDefaults)`
     /// 的 Bool —— 即这是**用户手动切换并持久化的偏好**，不按屏幕尺寸自动判断。
     /// 出处：`sub_10001cda0` 里 `AppStorage(wrappedValue:store:)` 构造 + 字符串 "one.actor.twoColumn"。
-    static let twoColumnKey = "oneSkinTwoColumn"
+    static var twoColumnKey: String { OneSkinKeys.twoColumnKey }
 
     /// 真实 key window 尺寸。
     ///
@@ -64,11 +171,18 @@ enum OneSkin {
         for scene in UIApplication.shared.connectedScenes {
             guard let ws = scene as? UIWindowScene, ws.activationState == .foregroundActive
             else { continue }
+            // ⚠️ `interfaceOrientation` 在 tvOS 不存在（已 appletvos swiftc 实证），
+            //    电视只有一块固定朝向的屏，没有"握持方向"。tvOS 用 bounds 的长短边判定。
+            #if os(tvOS)
+            let b = ws.coordinateSpace.bounds
+            return b.width > b.height
+            #else
             switch ws.interfaceOrientation {
             case .landscapeLeft, .landscapeRight: return true
             case .portrait, .portraitUpsideDown: return false
             default: break
             }
+            #endif
         }
         let b = UIScreen.main.bounds
         return b.width > b.height
@@ -536,76 +650,6 @@ enum OneSkinPalette {
 /// 带序号与时间戳之后，相邻两次的 dt 直接读出环的速度：
 ///   dt ≈ 16 ms  → 每帧一次 = 自反馈环
 ///   dt 很大/为负 → 离散事件（用户点击、形态切换）
-enum ROOTRecomputeProbe {
-    nonisolated(unsafe) static var n = 0
-    nonisolated(unsafe) static var last: TimeInterval = 0
-}
-
-@inline(__always)
-func oneSkinLog(_ message: @autoclosure () -> String) {
-    #if DEBUG
-    // os_log 是唯一能被 `devicectl device console` 收走的通道。
-    // 实测：Swift 的 `print` 走 stdout、`FileHandle.standardError` 走 stderr，
-    // 两者在 iOS 上都不进 console 管道（日志里只会看到 NSLog 产生的行）。
-    OneSkinLogSink.log("[OneSkin] " + message())
-    #endif
-}
-
-#if DEBUG
-/// 日志落到 App 自己的 Documents/oneskin.log。
-///
-/// 试过的三条通道都不可靠（实测）：
-///  · `print` → stdout，`devicectl --console` 收不到；
-///  · `FileHandle.standardError` → stderr，同样收不到；
-///  · `os.Logger` → 进系统日志，`devicectl device console` 也只吐几行。
-/// 写文件是唯一能确定取到的：`guest pull` 直接拉出来看。
-private enum OneSkinLogSink {
-    static let url: URL = {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("oneskin.log")
-    }()
-    static let queue = DispatchQueue(label: "oneskin.log")
-
-    /// 单文件硬上限 4MB：超过就整体轮转（删旧、留最后 2MB）。
-    /// 之前无上限，实测一次环路就能写到 8.4MB —— 既是取日志的障碍，
-    /// 也反过来成了「是否成环」的量化指标：正常使用几小时才几百 KB。
-    // ⛔ 实测：`devicectl device copy from` 在 >3MB 时会中途断流
-    //（`peer closed the file service data channel after 3000000 of 3228272 bytes`），
-    // 日志取不出来等于没有探针。降到 1MB 轮转，单次拉取必定成功。
-    static let maxBytes = 1024 * 1024
-    static let keepBytes = 512 * 1024
-
-    static func log(_ s: String) {
-        // 同时走 os_log，真机可用 `devicectl device console` 实时抓。
-        #if os(iOS)
-        os_log("%{public}@", log: OSLog(subsystem: "wda.prdc.yingxia", category: "OneSkin"), type: .debug, s)
-        #endif
-        queue.async {
-            let line = s + "\n"
-            if let h = try? FileHandle(forWritingTo: url) {
-                h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
-                if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
-                   size > maxBytes, let all = try? Data(contentsOf: url) {
-                    try? all.suffix(keepBytes).write(to: url)
-                }
-            } else {
-                try? Data(line.utf8).write(to: url)   // 首次创建
-            }
-        }
-    }
-}
-#endif
-
-/// RootView 侧也能用的日志入口（与 oneSkinLog 同一后端）。
-enum OneSkinProbe {
-    static func log(_ s: String) { oneSkinLog(s) }
-}
-
-/// 一条线路的测速样本。
-struct OneSkinLineSample: Equatable {
-    var url: URL
-    var headers: [String: String] = [:]
-}
 
 // MARK: - 画面填充模式
 
@@ -3163,8 +3207,13 @@ struct OneSkinStage: View {
                 OneSkinExternalPanel(
                     streamURL: streamURL,
                     onCopy: {
+                        #if os(tvOS)
+                        // tvOS 无系统粘贴板（实证）：不谎报已复制。
+                        copiedLink = false
+                        #else
                         if let u = streamURL { UIPasteboard.general.string = u.absoluteString }
                         copiedLink = true
+                        #endif
                     },
                     onDismiss: { showsMoreMenu = false }
                 )
@@ -4193,11 +4242,15 @@ struct OneSkinStage: View {
 extension View {
     @ViewBuilder
     func oneSkinNoScrollEdgeEffect() -> some View {
+        #if os(tvOS)
+        if #available(tvOS 26.0, *) { self.scrollEdgeEffectHidden() } else { self }
+        #else
         if #available(iOS 26.0, *) {
             self.scrollEdgeEffectHidden()
         } else {
             self
         }
+        #endif
     }
 }
 
@@ -4281,3 +4334,4 @@ private extension View {
         }
     }
 }
+#endif

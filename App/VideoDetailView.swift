@@ -266,14 +266,18 @@ struct VideoDetailView: View {
         liveContainerSize = next
         // 同步给几何层：`OneSkin.fixedScreenSize()` 是静态方法，
         // 读这个静态缓存而不是 `screen.bounds`。
-        OneSkin.cachedLiveContainer = next
+        #if os(iOS)
+        OneSkin.cachedLiveContainer = next   // `OneSkin` 在 tvOS 不存在（One 皮肤只在 iOS）
+        #endif
     }
     /// The picture's own width-over-height, reported by the player once the stream is known.
     /// 16:9 until then, which is what most sources serve and therefore the least surprising guess.
     @State private var playerAspectRatio: CGFloat = 16.0 / 9.0
     /// 画面比例模式（二进制实证 5 种）。持久化到 `OneSkin.fitModeKey`。
+    // 键名走 `BiliAspectMode.storageKey`（与 `OneSkin.fitModeKey` 同值）：
+    // `OneSkin` 属 OneSkin 文件簇（整体只在 iOS 编译），而本 `@State` 在 tvOS 也存在。
     @State private var biliAspectMode: BiliAspectMode = BiliAspectMode.fromStored(
-        UserDefaults.standard.string(forKey: OneSkin.fitModeKey)
+        UserDefaults.standard.string(forKey: BiliAspectMode.storageKey)
     )
     /// 只用来触发 body 重算（滤镜存在 UserDefaults，不是 @State）。
     @State private var biliColorFilterTick: UInt = 0
@@ -536,7 +540,12 @@ struct VideoDetailView: View {
         // 会把 Backdrop 那层浅色（244,246,251）铺在最底下，OneSkin 的半透明黑压不住它，
         // 结果整页发白 —— 控件和文字全部看不清，像素判读也全是噪声。
         // One 实测底色是 #000 / #0E0E0E，所以皮肤开着时不挂主题底。
+        #if os(iOS)
         .modifier(ScreenBackdropIfNeeded(enabled: !oneSkinActive))
+        #else
+        // `oneSkinActive` 是 iOS-only；本平台没有 One 皮肤 → 主题底恒启用。
+        .modifier(ScreenBackdropIfNeeded(enabled: true))
+        #endif
         #endif
         .screenTitle(video.name).task {
             store.searchModel.suspend()
@@ -587,7 +596,9 @@ struct VideoDetailView: View {
                 showsAllEpisodes = true
             }
             #endif
-            #if DEBUG
+            #if DEBUG && os(iOS)
+            // 仅 iOS：本段读写的 `showsAllEpisodes` / `choosingDownloads` / `watchChannel` /
+            // `activeEpisodes` / `play` 都声明在 `#if os(iOS)` 段内（One 皮肤配套 UI）。
             // `-qaDownloadPicker 1` / `-qaEpisodesSheet 1`：截图用的抽屉直开入口。
             // 两者同层，不能同时为 true（iOS 同层只剩一个 presenter），打开一个先关另一个。
             if UserDefaults.standard.bool(forKey: "qaDownloadPicker") {
@@ -612,8 +623,11 @@ struct VideoDetailView: View {
             //
             // ⛔ 用**自己的**句柄，不走 `startRequest`（见 `lineSampleTask` 的说明）。
             //    重复 onAppear（折叠/展开重建）先取消上一轮，避免两轮同时解析。
+            #if os(iOS)
+            // `buildLineSamples` / `lineSampleTask` 属 iOS-only（多线路测速菜单是 iPhone 概念）。
             lineSampleTask?.cancel()
             lineSampleTask = Task { await buildLineSamples() }
+            #endif
             #if DEBUG
             let switchDelay = UserDefaults.standard.double(forKey: "qaSwitchEpisode")
             oneSkinLog("detail onAppear watchPageOpen=\(store.watchPageOpen) qaSwitchEpisode=\(switchDelay)")
@@ -843,7 +857,13 @@ struct VideoDetailView: View {
         }
         // 换源的反馈与换线共用同一个条位：两者都是「刚才那个动作的结果」，
         // 分成两条会在短时间内叠成两层，而用户只关心最新那条。
-        if let notice = crossSourceNotice ?? lineNotice {
+        #if os(iOS)
+        let barNotice: String? = crossSourceNotice ?? lineNotice
+        #else
+        // `crossSourceNotice` 在 iOS 段声明（换源是 iPhone 的跨源切换）；tvOS 只有换线提示。
+        let barNotice: String? = lineNotice
+        #endif
+        if let notice = barNotice {
             HStack(spacing: 12) {
                 Image(systemName: "info.circle.fill").foregroundStyle(Brand.accent)
                 Text(notice).font(.subheadline.weight(.medium))
@@ -1386,6 +1406,10 @@ struct VideoDetailView: View {
     /// The episodes in the order the lists show them. Only the lists: Play and the next episode still follow the source.
     private func shownOrder(_ items: [Episode]) -> [Episode] { reversesEpisodes ? items.reversed() : items }
 
+    #if os(iOS)
+    // 仅 iOS：选集抽屉的分页 / 筛选 / 搜索 —— 依赖 `episodeFilter`/`episodeQuery`/
+    // `episodePage`/`episodePageSize`/`currentEpisodeID`/`watchChannel`，
+    // 均声明在 `#if os(iOS)` 段内。tvOS 没有 iPhone 选集抽屉。
     // MARK: 选集抽屉的分页 / 筛选 / 搜索
 
     /// 搜索 + 筛选之后的集（按当前排序）。空搜索 = 全集。
@@ -1477,6 +1501,7 @@ struct VideoDetailView: View {
         guard start < end else { return [] }
         return Array(all[start..<end])
     }
+    #endif
 
     private func episodeList(_ items: [Episode]) -> some View {
         // A chip fits about six characters before it truncates (《一…); longer names get rows.

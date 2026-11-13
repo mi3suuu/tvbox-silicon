@@ -174,13 +174,23 @@ struct ProxySettingsView: View {
     }
 
     private func copyLoonRule() {
-        #if os(iOS) || os(tvOS)
+        // 三个平台各不相同，不能两分支：
+        //   · iOS   → UIPasteboard
+        //   · macOS → NSPasteboard（AppKit）
+        //   · tvOS  → 两者都不可用（UIPasteboard 标 unavailable，NSPasteboard 属 AppKit 不编入）
+        // 原来写的是 `#if os(iOS) || os(tvOS)` → UIPasteboard，tvOS 编译不过。
+        #if os(iOS)
         UIPasteboard.general.string = LoonSRCPortRule.fragment
-        #else
+        ruleCopied = true
+        #elseif os(macOS)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(LoonSRCPortRule.fragment, forType: .string)
-        #endif
         ruleCopied = true
+        #else
+        // tvOS 没有系统粘贴板：电视端无法把规则文本交给外部剪贴板。
+        // 置 false，让按钮保持「Copy Loon Rule」原文，不谎报已复制。
+        ruleCopied = false
+        #endif
     }
 }
 

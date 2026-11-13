@@ -1,3 +1,12 @@
+#if os(iOS)
+// ⛔ 本文件属 **OneSkin 文件簇**，整体仅 iOS。
+//
+// 判定依据（产品边界，非编译妥协）：
+//   · `OneSkin` 是 iPhone 折叠屏皮肤 —— `OneSkinShape` / `FoldRegion` / `hinge` 全是 Duo 概念；
+//   · `SettingsTV.swift` 里**没有任何 OneSkin 开关** ⇒ tvOS 用户本来就打不开它；
+//   · 用户不可达、语义不适用 ⇒ 不为它维护一套 tvOS 平行实现。
+// 所以这里收进 `#if os(iOS)`，而不是给 tvOS 造替身。
+
 import Foundation
 import CoreGraphics
 import SwiftUI
@@ -88,6 +97,10 @@ struct OneSkinFixedPicture: View {
 
 /// 只画 `AVPlayerLayer` 的透明宿主。不用 `AVPlayerViewController`：
 /// AVKit 会自己接管布局，无视 SwiftUI 给的 frame，也无视 `clipsToBounds`。
+///
+/// iOS / tvOS 共用：`UIViewRepresentable`、`UIView`、`AVPlayerLayer` 在 tvOS 均有
+/// （实测：`xcrun --sdk appletvos swiftc -typecheck -target arm64-apple-tvos17.0`
+/// 一个完整 `UIViewRepresentable` 遵从体，EXIT=0；负对照 `UIPasteboard` EXIT=1）。
 struct OneSkinFixedPlayerLayer: UIViewRepresentable {
     let player: AVPlayer
     let videoGravity: AVLayerVideoGravity
@@ -216,5 +229,4 @@ final class OneSkinFixedPlayerView: UIView {
         #endif
     }
 }
-
-
+#endif

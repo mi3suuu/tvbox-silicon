@@ -1,7 +1,8 @@
 import SwiftUI
 import TVCore
 
-#if os(iOS)
+#if os(iOS) || os(tvOS)
+// ⚠️ 本文件在 tvOS 也可编译：零 iOS-only 依赖（纯数据模型 + UserDefaults/L10n）。
 /// One control the player can place in its top bar, its bottom transport row, or leave in the "⋯" menu.
 ///
 /// The player's chrome is a row of round glass buttons over the picture, a row of transport controls
@@ -333,6 +334,9 @@ struct PlayerControlsLayout: Equatable {
     /// - 合拢 / 展开竖持（`.column` / `.fullBleed`）→ `.unfolded`
     ///   两者都是竖持语义，共用「展开竖持」那一套；窄屏再单独落 `.folded`。
     /// - 展开横持（`.split`）→ `.sideways`
+    #if os(iOS)
+    // 仅 iOS：参数类型 `OneSkinShape` 属 OneSkin 文件簇（整体只在 iOS 编译）。
+    // 两个方法的调用方 `current(forSkinShape:)` 与 `OneSkin.swift` 都在簇内。
     @MainActor
     static func shape(for skinShape: OneSkinShape, width: CGFloat) -> Shape {
         // ⛔ `split` 必须**先于**任何宽度闸门返回。
@@ -372,6 +376,7 @@ struct PlayerControlsLayout: Equatable {
     static func current(forSkinShape skinShape: OneSkinShape, width: CGFloat) -> PlayerControlsLayout {
         PlayerControlsLayout(stored: stored(for: shape(for: skinShape, width: width)))
     }
+    #endif
 
     /// 按当前形态读一份布局（播放器与皮肤都走这个，不要再自己读裸键）。
     ///

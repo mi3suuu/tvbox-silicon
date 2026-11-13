@@ -1,0 +1,286 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════
+# 本仓库统一 pre-commit 闸门（**入库版本**）
+#
+# 部署方式：由 `Scripts/install-hooks.sh` **复制到 `<common-dir>/hooks/pre-commit`**，
+# 不使用 `core.hooksPath`。原因见文件末尾「为什么不用 hooksPath」。
+#
+# 覆盖范围：本仓库 21 个 worktree **共享同一个 common-dir**（已实测），
+# 因此装一次即全部生效；新 clone 需各跑一次 install-hooks.sh。
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+[ "${AIGATE_SKIP:-0}" = "1" ] && { echo "⚠ AIGATE_SKIP=1 跳过全部闸门（留痕）"; exit 0; }
+
+# ── ⓿ 门闩：由**门闩自己**造坏输入，验证这道门有没有判别力 ────────────────────
+#
+# 本项目这条线上被打穿四层，逐层记录（每一层都是「判据看不见自己瞎在哪」）：
+#   1  静默跳过        —— 脚本不存在时什么也不发生
+#   2  静默禁门        —— core.hooksPath 指向缺失目录时 common hooks 静默失效
+#   3  恒真自校验      —— grep 自己文件里的 marker 字符串（那串就写在它自己上方）
+#   4  信任被测方自述  —— 假脚本 `--selftest` 打印 "SELFTEST: OK" 就能过
+#
+# 第 3 层之后我改用「调用 --selftest」，但那是**被测方提供的入口**：
+# 假脚本预置一句 "SELFTEST: OK; exit 0" 即可骗过。实测确被打穿（COMMIT_EXIT=0）。
+#
+# 所以门闩必须同时做两件事，缺一不可：
+#
+#   M1 结论不可伪造：给 selftest 传一个**本次现生成**的 nonce，要求它回显在 OK 行。
+#      假脚本不知道这个值 ⇒ 造不出合法 OK。直接手工跑时脚本自生成，不影响可用性。
+#
+#   M2 不信自述，自己造坏输入：门闩在临时副本里**亲手塞一个已知违规**，
+#      然后调用被测脚本，要求它必须变红。被测方无法预置答案——它不知道门闩
+#      会在哪里放什么。这才是「判别力」判据，而不是「你说你行」。
+#
+# M2 还兼作 M1 的兜底：即使 --selftest 被伪造，M2 走的是**正常检查路径**
+# 而不是被测方可以特判的自检入口。
+K="$ROOT/Scripts/audit-oneskin-keys.sh"
+if [ -x "$K" ]; then
+  LATCH_FAIL=""
+
+  # ── M1：结论不可伪造 ──
+  LATCH_NONCE="n$(printf '%s%s' "$$" "$RANDOM" | tr -d '0-9' | cut -c1-10)"
+  LATCH_NONCE="z${LATCH_NONCE:-fallback}"
+  M1_OUT="$(ONESKIN_SELFTEST_NONCE="$LATCH_NONCE" "$K" --selftest 2>&1)"
+  M1_RC=$?
+
+  # 区分两件事，不能混为一谈（实测踩过误拦）：
+  #   · 脚本**不支持**自检（旧版本，把 --selftest 当普通参数忽略）→ 无自检能力
+  #   · 脚本支持自检但**自检失败**（坏了 / 被裁剪 / 假脚本）→ 门失效
+  # 前者在未合并本分支的树里必然出现（那些树的脚本还是旧版），
+  # 若一并判红就会阻断 20 棵树的正常提交 —— 那是误拦，不是发现问题。
+  if ! printf '%s' "$M1_OUT" | grep -q 'SELFTEST:'; then
+    LATCH_NO_SELFTEST=1
+  elif [ "$M1_RC" -ne 0 ]; then
+    LATCH_FAIL="M1：selftest 自检失败（脚本抓不到已知违规）"
+  elif ! printf '%s' "$M1_OUT" | grep -q "SELFTEST: OK nonce=$LATCH_NONCE"; then
+    LATCH_FAIL="M1：selftest 未回显本次 nonce（结论不可信 —— 可能不是真脚本在回答）"
+  fi
+
+  # ── M2：四输入矩阵 —— 判别力的完整定义是「能抓坏 **且** 不冤枉好」 ──
+  #
+  # 第五层教训（2026-11-13）：上一版 M2 只喂**一个方向**的坏输入（App/ 一条），
+  # 于是只扫 App/ 的假脚本能被判为「有判别力」。实测：
+  #   假脚本只扫 App/  →  M2 的 App/ 违规它抓到了 ⇒ 通过
+  #   但 Sources/ 塞违规 →  它漏检（GATE: PASS），真脚本则报红
+  # 即：**坏输入覆盖不全 = 判据以为验过，实际只验了一个角**。
+  #
+  # 另一处更根本的缺失：只有正样本。任何「见谁都红」的机器都能过只有正样本的
+  # 判据 —— 而它在真实仓库上会把每次提交都拦死，等于把门焊死。所以必须有负样本。
+  #
+  # 四输入矩阵，缺任一不成立：
+  #   1  App/ 塞违规          → 必须红，且点名 marker
+  #   2  Sources/ 塞违规      → 必须红，且点名 marker      （覆盖作用域全宽）
+  #   3  干净输入             → 必须**绿**                （不冤枉好）
+  #   4  ② 契约破坏（改键名） → 必须红，且点名键名        （覆盖第二道检查）
+  # ⚠️ 哨兵的声明与校验必须都在**门控之外**。
+  # 第六层教训：上一版把「哨兵校验」写在 `if ...; then` 块**内部**，
+  # 把条件改成恒假时连校验一起被跳过 —— 校验与它要校验的东西死在同一段里。
+  # 现在：M2_REQUIRED/M2_RAN/M2_FAIL 在门控外初始化，门控只负责跑矩阵，
+  # 校验由门控外的独立段执行。门控恒假 ⇒ M2_RAN 空 ⇒ 校验照样报红。
+  # M2_REQUIRED 恒为 1：**只要脚本存在，就必须证明矩阵跑过**。
+  # ⚠️ 不能在门控内赋 1 —— 上一版写了 `M2_REQUIRED=1` 在 `if ...; then` 里，
+  #    门控一旦被改恒假/异常跳过，REQUIRED 仍是 0，连校验段一起effacer。
+  #    这是第六层在同一位置复发，实测 EXIT=0 打穿。
+  # 「该不该跑矩阵」由 LATCH_FAIL / LATCH_NO_SELFTEST 决定（下面这个 if），
+  # 但「是否必须留下 4 个哨兵」恒为是 —— 跳过矩阵就等于未校验。
+  M2_REQUIRED=1
+  M2_RAN=""
+  M2_FAIL=""
+  if [ -z "$LATCH_FAIL" ] && [ -z "${LATCH_NO_SELFTEST:-}" ]; then
+    # 哨兵：每项矩阵执行后追加编号；段末在门控外校验 4 项齐全。
+    # **未执行 ≠ 通过** —— 判据必须能区分「检查通过」与「检查没跑」。
+
+    # 造一个基准 fixture：干净、键名齐全（②应通过）
+    M2_BASE="$(mktemp -d 2>/dev/null)" || M2_BASE=""
+    if [ -z "$M2_BASE" ] || [ ! -d "$M2_BASE" ]; then
+      # 环境异常（TMPDIR 不可写 / 磁盘满 / 权限不足）⇒ 本次**未校验**，不是通过
+      M2_FAIL="M2：无法创建临时目录，矩阵未执行（未校验 ≠ 通过）"
+      M2_BASE=""
+    fi
+    mkdir -p "$M2_BASE/App" "$M2_BASE/Scripts" "$M2_BASE/Sources/TVCore"
+    cp "$K" "$M2_BASE/Scripts/audit-oneskin-keys.sh"
+    chmod +x "$M2_BASE/Scripts/audit-oneskin-keys.sh"
+    {
+      echo 'public enum OneSkinKeys {'
+      printf '    public static let enabledKey = "oneSkinEnabled"\n'
+      printf '    public static let fitModeKey = "oneSkinFitMode"\n'
+      printf '    public static let speedKey = "oneSkinSpeed"\n'
+      printf '    public static let loopKey = "oneSkinLoop"\n'
+      printf '    public static let fillKey = "oneSkinFill"\n'
+      printf '    public static let autoFullScreenKey = "oneSkinAutoFullScreen"\n'
+      printf '    public static let twoColumnKey = "oneSkinTwoColumn"\n'
+      echo '}'
+    } > "$M2_BASE/Sources/TVCore/OneSkinShared.swift"
+    printf 'public enum OneWatchPageModel {}\n' > "$M2_BASE/Sources/TVCore/OneWatchPageModel.swift"
+    printf 'enum CleanProbe { static let nothing = 0 }\n' > "$M2_BASE/App/CleanProbe.swift"
+
+    # cd 失败必须出声并返回 99（哨兵：99 = 未校验，绝不当作通过）。
+    # 子 shell 里悄悄失败是第六层的第二处缺口。
+    m2run() {
+      ( cd "$1" || exit 99
+        ./Scripts/audit-oneskin-keys.sh 2>&1 )
+    }
+
+    # 只在 M2_BASE 真的建出来时才往下走
+    if [ -n "${M2_BASE:-}" ]; then
+
+    # ── 3 先跑干净输入：必须绿（不冤枉好）──
+    M2_CLEAN_OUT="$(m2run "$M2_BASE")"; M2_CLEAN_RC=$?
+    if [ "$M2_CLEAN_RC" -eq 99 ]; then
+      M2_FAIL="M2-#3：无法进入 fixture 目录，未校验"
+    elif [ "$M2_CLEAN_RC" -ne 0 ]; then
+      M2_FAIL="M2-#3：干净输入被判红（见谁都红 = 把门焊死，不是判别力）"
+    else
+      M2_RAN="$M2_RAN 3"
+    fi
+
+    # ── 1 App/ 塞违规 → 必须红且点名 ──
+    if [ -z "$M2_FAIL" ]; then
+      M2_M1="leakapp$(printf '%s' "$RANDOM" | tr '0-9' 'qrstuvwx')"
+      m2="$M2_BASE"; cp -R "$M2_BASE" "$m2.app"
+      printf 'enum M2ProbeA { static let x = "oneSkin%s" }\n' "$M2_M1" > "$m2.app/App/M2ProbeA.swift"
+      out="$(m2run "$m2.app")"; rc=$?
+      if [ "$rc" -eq 99 ]; then
+        M2_FAIL="M2-#1：无法进入 fixture 目录，未校验"
+      elif [ "$rc" -eq 0 ]; then
+        M2_FAIL="M2-#1：App/ 塞违规仍判通过"
+      elif ! printf '%s' "$out" | grep -q "$M2_M1"; then
+        M2_FAIL="M2-#1：判红但未点名放入的违规（$M2_M1）"
+      else
+        M2_RAN="$M2_RAN 1"
+      fi
+      rm -rf "$m2.app"
+    fi
+
+    # ── 2 Sources/ 塞违规 → 必须红且点名（这是 N3 打穿的那条）──
+    if [ -z "$M2_FAIL" ]; then
+      M2_M2="leaksrc$(printf '%s' "$RANDOM" | tr '0-9' 'qrstuvwx')"
+      cp -R "$M2_BASE" "$M2_BASE.src"
+      printf 'enum M2ProbeB { static let x = "oneSkin%s" }\n' "$M2_M2" > "$M2_BASE.src/Sources/TVCore/M2ProbeB.swift"
+      out="$(m2run "$M2_BASE.src")"; rc=$?
+      if [ "$rc" -eq 99 ]; then
+        M2_FAIL="M2-#2：无法进入 fixture 目录，未校验"
+      elif [ "$rc" -eq 0 ]; then
+        M2_FAIL="M2-#2：Sources/ 塞违规仍判通过（作用域覆盖不全 —— 第五层缺口）"
+      elif ! printf '%s' "$out" | grep -q "$M2_M2"; then
+        M2_FAIL="M2-#2：判红但未点名放入的违规（$M2_M2）"
+      else
+        M2_RAN="$M2_RAN 2"
+      fi
+      rm -rf "$M2_BASE.src"
+    fi
+
+    # ── 4 ② 契约破坏（改一个键名）→ 必须红且点名该键 ──
+    if [ -z "$M2_FAIL" ]; then
+      cp -R "$M2_BASE" "$M2_BASE.key"
+      # 把 speedKey 的**值**改掉（键名不变）⇒ ② 契约必须报出来
+      sed -i '' 's/static let speedKey = "oneSkinSpeed"/static let speedKey = "oneSkinSpeedBROKEN"/' \
+        "$M2_BASE.key/Sources/TVCore/OneSkinShared.swift" 2>/dev/null \
+        || sed -i 's/static let speedKey = "oneSkinSpeed"/static let speedKey = "oneSkinSpeedBROKEN"/' \
+             "$M2_BASE.key/Sources/TVCore/OneSkinShared.swift"
+      out="$(m2run "$M2_BASE.key")"; rc=$?
+      if [ "$rc" -eq 99 ]; then
+        M2_FAIL="M2-#4：无法进入 fixture 目录，未校验"
+      elif [ "$rc" -eq 0 ]; then
+        M2_FAIL="M2-#4：改键名后仍判通过（② 契约检查无判别力）"
+      elif ! printf '%s' "$out" | grep -q 'speedKey'; then
+        M2_FAIL="M2-#4：判红但未点名被改的键（speedKey）"
+      else
+        M2_RAN="$M2_RAN 4"
+      fi
+      rm -rf "$M2_BASE.key"
+    fi
+
+    fi   # end: [ -n "$M2_BASE" ]
+
+    [ -n "${M2_BASE:-}" ] && rm -rf "$M2_BASE"
+  fi   # ← 矩阵门控到此结束
+
+  # ── 哨兵校验（门控**之外**，独立执行，不可被门控跳过）──────────────────
+  # 4 项必须都留下执行痕迹。缺任一 = 该项**没跑**（不是通过）。
+  # 门控被改恒假 / mktemp 失败 / 中途 return，都不会留下哨兵 ⇒ 这里报红。
+  # 只对「本应跑矩阵」的情形校验哨兵。旧版脚本/已判定失效的，走上面的
+  # LATCH_NO_SELFTEST / LATCH_FAIL 分支，不在这里重复报「未执行」。
+  if [ "$M2_REQUIRED" = "1" ] && [ -z "${LATCH_NO_SELFTEST:-}" ] && [ -z "$LATCH_FAIL" ]; then
+    if [ -z "$M2_FAIL" ]; then
+      for i in 1 2 3 4; do
+        case " $M2_RAN " in
+          *" $i "*) ;;
+          *) M2_FAIL="M2-#$i 未执行（未校验 ≠ 通过 —— 矩阵没跑，不是矩阵通过）" ;;
+        esac
+      done
+    fi
+    [ -n "$M2_FAIL" ] && LATCH_FAIL="$M2_FAIL"
+  fi
+
+  if [ -n "$LATCH_FAIL" ]; then
+    echo "════ 提交被拦：One 键名门自检失败（这道门已失效）════"
+    echo "  $LATCH_FAIL"
+    [ -n "${M1_OUT:-}" ] && printf '%s\n' "$M1_OUT" | sed 's/^/    M1| /'
+    [ -n "${M2_OUT:-}" ] && printf '%s\n' "$M2_OUT" | sed 's/^/    M2| /' | head -12
+    echo "  ⇒ 修复后重试：./Scripts/audit-oneskin-keys.sh --selftest"
+    exit 1
+  fi
+fi
+
+# ── ① 断言强度闸门（通用，来自 ~/.dsh/discipline）─────────────────────────────
+G="$HOME/.dsh/discipline/lint-agent-diff.sh"
+if [ -x "$G" ]; then
+  "$G" --repo "$ROOT" --base HEAD || {
+    echo "════ 提交被拦：测试断言被削弱或改成恒真 ════"
+    echo "删断言/自比对 = 把某类缺陷从检测器里永久删除。"
+    echo "正确做法：期望值来自被测产物，断言仍指向真实值。"
+    exit 1; }
+else
+  echo "⚠️  $G 不存在 ⇒ 本次提交**未校验**断言强度（E1/E2/E3）。"
+fi
+
+# ── ② One 皮肤键名闸门 ────────────────────────────────────────────────────────
+# 「一套状态两套键」是本项目已出三例的缺陷族。两道：
+#   ① oneSkin* 字面量越出单一真源；② 键名字面量被改（= 用户已存偏好静默丢失）。
+#
+# 该脚本随分支 fix/tvos-platform-guards 提交；未合并的树里没有它。缺失时**必须出声**，
+# 且只在本次提交确实触及 One 相关文件时才吵 —— 每棵树每次提交都刷告警会进盲区，
+# 噪音式告警与静默跳过在效果上等价，只是前者更贵。
+K="$ROOT/Scripts/audit-oneskin-keys.sh"
+if [ -x "$K" ]; then
+  "$K" || {
+    echo "════ 提交被拦：One 皮肤键名越界或被改 ════"
+    echo "键名是落盘契约：改字符串 = 所有用户已存的皮肤偏好静默回落默认值。"
+    echo "① 越界：把字面量改成引用 TVCore.OneSkinKeys；"
+    echo "② 改键：确认是有意的偏好迁移，同时更新脚本里的 PINNED 并说明迁移。"
+    exit 1; }
+else
+  TOUCHED=$(git diff --cached --name-only \
+    | grep -E '^(App/OneSkin|App/BiliMetrics|App/RootView|Sources/TVCore/OneSkinShared)\.swift$' || true)
+  if [ -n "$TOUCHED" ]; then
+    echo "⚠️  本树没有 One 皮肤键名闸门（Scripts/audit-oneskin-keys.sh 不存在）"
+    echo "    本次提交涉及：$TOUCHED"
+    echo "    该门禁随分支 fix/tvos-platform-guards 提交；本树 ${ROOT} 未包含它。"
+    echo "    ⇒ 本次提交**未校验**：oneSkin* 字面量唯一性 / 键名落盘契约。"
+    echo "    需要这道门：合入 fix/tvos-platform-guards，或手工比对 TVCore.OneSkinKeys。"
+    echo "    （不阻断提交：这是覆盖范围披露，不是违规。）"
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 为什么不用 core.hooksPath（实测 git 2.54.0，2026-11-13）
+#
+# `core.hooksPath` 是**每仓库**配置，21 个 worktree 共享。当它指向的目录
+# **不存在**时，git **不回落** `<common-dir>/hooks`，而是认为「无钩子」并
+# **完全静默**。三组对照：
+#   未设 hooksPath          → common 钩子运行 ✅
+#   设 hooksPath=缺失目录   → common 钩子**静默不运行**（旧闸门一并失效）
+#   设 hooksPath=存在目录   → 新钩子运行
+#
+# 即：在入库目录尚未检出的 20 棵树里，切换 hooksPath 会让它们同时失去
+# 新旧两道门且无提示。本轮曾实际踩过这个坑（已撤销止血）。
+#
+# 因此改为复制到 `<common-dir>/hooks/pre-commit`：
+#   · 不依赖任何路径存在性，陷阱在结构上不存在；
+#   · 21 棵树共享 common-dir ⇒ 装一次全生效（已实测）；
+#   · 上面的⓿门闩补上「装了旧版/手工改过」这一路。
+# ═══════════════════════════════════════════════════════════════════════════
