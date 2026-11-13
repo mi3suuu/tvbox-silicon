@@ -3570,15 +3570,25 @@ struct VideoDetailView: View {
                 // 挂在 `watchPageLifecycleBody` 而不是各皮肤内部：三个 Bili 页面
                 // （全集/横屏/竖屏）都从这里进，且只有这里拿得到 `playerSession`。
                 //
-                // ⛔ 闭包体里不要用 `[self]` 读 `playerSession`：本视图是 struct，
-                //    捕获副本后读的是**闭包创建那一刻**的快照，换集后就是旧会话。
-                //    这里取一个局部强引用（`PlaybackSession` 是 `@Observable final class`），
-                //    到点时如果会话已换，闭包里拿到的仍是当初那一个 —— 所以额外判一层
-                //    「它还是当前会话吗」。
-                let owningSession = playerSession
-                BiliPlayerExtras.shared.onSleep = { [weak owningSession] in
-                    guard let owningSession else { return }
-                    owningSession.player.pause()
+                // ⛔ 闭包体里不要捕获 `self` 读 `playerSession`：本视图是 struct，
+                //    捕获副本读的是**闭包创建那一刻**的快照。
+                //
+                // ⛔ 也不要现在就取 `let owningSession = playerSession` ——
+                //    `playerSession` 是 `onStageSession` / `opened:` 回调**之后**才赋值的
+                //    （`:3771/:3787`），`onAppear` 那一刻它通常是 nil。
+                //    那样会挂上一个「捕获了 nil」的闭包，到点直接 return ——
+                //    **等于把「什么都没发生」从原来的「没赋值」挪到了「赋了个空值」，
+                //    症状一模一样，更难查。**（第一版就是这么写的，自己抓出来了。）
+                //
+                // 正确做法：闭包只捕获「怎么找到当前会话」，**到点那一刻现取**。
+                //
+                // ⛔ 也不能捕获 `watchChannel`：它可能是 nil（`store.playing` 为空、
+                //    或该频道不在 `watchScopes` 里），那样同样是「捕获了个空值」。
+                //    直接读 `store.playing` —— 它就是 `watchChannel` 的源，
+                //    且在到点那一刻取，拿到的一定是**当时**正在播的那一集。
+                BiliPlayerExtras.shared.onSleep = { [weak store] in
+                    guard let store, let channel = store.playing else { return }
+                    store.playbackSession(for: channel).player.pause()
                     Diagnostics.shared.record(.info, "bili", "sleep timer paused playback")
                 }
                 BiliPlayerExtras.shared.resumeSleepIfNeeded()
