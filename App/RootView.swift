@@ -1069,7 +1069,7 @@ extension View {
                 // true，而 UserDefaults.bool(forKey:) 读未写入键返回 false —— 两个
                 // 默认值不一致会让「全新安装 + 从没进过设置页」的用户读出 false，
                 // 白渐隐照样挂回来。必须用 object(forKey:) 判「写过没」。
-                let skinOn = (UserDefaults.standard.object(forKey: "oneSkinEnabled") as? Bool) ?? true
+                let skinOn = (UserDefaults.standard.object(forKey: OneSkinKeys.enabledKey) as? Bool) ?? true
                 if skinOn {
                     safeAreaPadding(.bottom, 40)
                 } else {

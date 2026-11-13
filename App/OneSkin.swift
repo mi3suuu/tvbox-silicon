@@ -13,16 +13,6 @@
 
 import Foundation
 
-/// OneSkin 的 UserDefaults 键名。**跨平台**（tvOS 也要能读这些键）。
-///
-/// 为什么要单独一层：`OneSkin` 枚举整段收在 `#if os(iOS)` 里（tvOS 不要 One 皮肤），
-/// 但 `VideoDetailView` 的 `@AppStorage` 属性在 tvOS 仍存在 —— 它们只需要键名字符串。
-/// 这里的值与 `OneSkin.enabledKey` / `OneSkin.speedKey` **必须逐字相同**。
-enum OneSkinKeys {
-    static let enabled = "oneSkinEnabled"
-    static let speed   = "oneSkinSpeed"
-}
-
 enum ROOTRecomputeProbe {
     nonisolated(unsafe) static var n = 0
     nonisolated(unsafe) static var last: TimeInterval = 0
@@ -118,18 +108,28 @@ import TVCore
 /// 主按钮高 50pt / 圆角 13pt、控件胶囊高 33pt。
 enum OneSkin {
 
+    // MARK: - UserDefaults 键名：**不在这里定义**。
+    //
+    // 全部键名归 `TVCore.OneSkinKeys`（`Sources/TVCore/OneSkinShared.swift`）单一真源。
+    // 2026-11-13 之前这里有一份逐字重复的字面量，两份靠人肉保证相同 —— 那是
+    // 「一套状态两套键」缺陷族的入口（本项目已出三例）。现在这里只剩转发引用，
+    // 字面量分叉在结构上不可能发生。
+    //
+    // 为什么转发而不是让调用点直接写 `OneSkinKeys.xxxKey`：`OneSkin.enabledKey`
+    // 这类写法在 App 内有 6 处调用点，转发保持调用点不变、改动面最小。
+
     /// 开关本体。`@AppStorage` 直连，任何页面读写都是同一份值。
-    static let enabledKey = "oneSkinEnabled"
+    static var enabledKey: String { OneSkinKeys.enabledKey }
 
     /// 控制条上三个开关，同样是界面级偏好。
-    static let speedKey = "oneSkinSpeed"
-    static let loopKey = "oneSkinLoop"
-    static let fillKey = "oneSkinFill"
+    static var speedKey: String { OneSkinKeys.speedKey }
+    static var loopKey: String { OneSkinKeys.loopKey }
+    static var fillKey: String { OneSkinKeys.fillKey }
     /// 画面填充模式（适应/填充/铺满/拉伸）。旧 `fillKey` 布尔仍兼容读取。
-    static let fitModeKey = "oneSkinFitMode"
+    static var fitModeKey: String { OneSkinKeys.fitModeKey }
     /// 「自动全屏」开关（参考截图里那颗蓝底蓝字的 chip）。
     /// 开启后**开播即进全屏**；关掉只影响自动行为，手动全屏键照旧。
-    static let autoFullScreenKey = "oneSkinAutoFullScreen"
+    static var autoFullScreenKey: String { OneSkinKeys.autoFullScreenKey }
 
     /// 竖持时「视频 + 所有控件」整体下移的额外留白（pt）。
     ///
@@ -141,7 +141,7 @@ enum OneSkin {
     /// 双列 / 合拢开关。One 用的是 `@AppStorage("one.actor.twoColumn", store: UserDefaults)`
     /// 的 Bool —— 即这是**用户手动切换并持久化的偏好**，不按屏幕尺寸自动判断。
     /// 出处：`sub_10001cda0` 里 `AppStorage(wrappedValue:store:)` 构造 + 字符串 "one.actor.twoColumn"。
-    static let twoColumnKey = "oneSkinTwoColumn"
+    static var twoColumnKey: String { OneSkinKeys.twoColumnKey }
 
     /// 真实 key window 尺寸。
     ///
