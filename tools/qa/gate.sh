@@ -243,6 +243,76 @@ else
   fi
 fi
 
+# ── 门禁 2.7：并行会话纪律（A8）──────────────────────────────────────
+# A8「先探测兄弟会话 → 避重 → 必须做则开分支 → 第三方评审后才合并 → PEERS.md 登记」
+# 此前没有强制手段，实测因此出过三次事故：
+#   ① gate.sh 被两路同时改 → 语法错误
+#   ② project.yml 被另一路改版本号 → 门禁重跑 0 passed
+#   ③ build/UITestCheck/build.db 被锁 → 构建失败
+#
+# ⚠️ 本关用 strict 档：未登记（RC=3）判红。
+#    决策理由：本项目的并行冲突是真实发生过的，代价远大于「必须先登记」的麻烦；
+#    若对未登记放行，A8 就退化成建议。日常提交走 pre-commit 的 loose 档即可。
+#
+# ⚠️ 本关不能证明「没有并发」，只能看见愿意登记的会话。
+#    它必须与门禁 4 的「构建版本 == 已装版本」回读配套：后者抓已发生的污染，本关只降概率。
+step "门禁 2.7 · 并行会话纪律（A8）"
+PEER_GATE=""
+for cand in "$ROOT/tools/qa/peer-gate.sh" "$HOME/Documents/windows11/编程工具/mac/dsh-toolkit/bin/peer-gate"; do
+  [ -x "$cand" ] && PEER_GATE="$cand" && break
+done
+if [ -n "$PEER_GATE" ]; then
+  # ⛔ strict 之前必须自动刷新本路 last_seen，否则 30 分钟后表过期 → 门禁对所有文件永久红。
+  #    实测（2026-11-13）：把 last_seen 调到 40 分钟前，连「本路已声明的干净文件」也 RC=1。
+  #    这个刷新由门禁自己做，不依赖人记得手写时间戳。
+  if [ -f PEERS.md ]; then
+    python3 - PEERS.md <<'PEERREFRESH'
+import re,sys,datetime
+p=sys.argv[1]
+try: lines=open(p,encoding='utf-8').read().split('\n')
+except OSError: sys.exit(0)
+now=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+in_self=False; done=False
+for i,l in enumerate(lines):
+    if re.match(r'^##\s+',l): in_self=False
+    if re.match(r'^-\s*self:\s*true',l.strip()): in_self=True
+    if in_self and re.match(r'^-\s*last_seen:',l.strip()) and not done:
+        lines[i]=re.sub(r'(last_seen:\s*).*', '\\g<1>'+now, l); done=True
+if done: open(p,'w',encoding='utf-8').write('\n'.join(lines))
+PEERREFRESH
+  fi
+  # ⛔ 冲突比对只在「显式声明本次要动哪些文件」时做，参数用 PEER_TARGETS 传入：
+  #       PEER_TARGETS="App/A.swift App/B.swift" ./tools/qa/gate.sh
+  #    为什么不用 `git status` 全量：那拿到的是「磁盘上已被改过的文件」，不是「本次要改的文件」。
+  #    实测（2026-11-13）：用 git status 全量会把路 B 的 8 个在途文件全报成冲突 → 主树上每次门禁必然红
+  #    → 人就会去关掉它。这与「strict 遇过期表必然红」是同一个失效模式。
+  #    默认值来源（映霞建议，2026-11-13 采纳）：
+  #      ① PEER_TARGETS 显式传入（最高优先，人明确说"我要改这些"）
+  #      ② git diff --cached —— 已 git add 的 = 本次打算提交的，语义正是"我要改的"
+  #      ③ 都没有 → 只验表健康
+  #    用 --cached 而不是 git status 全量：全量含别人在途的 8 个文件，会永久误报；
+  #    用 --cached 则不需要任何人额外记忆，`git add` 本身就是"声张我要提交"这个动作。
+  if [ -n "${PEER_TARGETS:-}" ]; then
+    PEER_ARGS="$PEER_TARGETS"
+  else
+    PEER_ARGS=$(git -C "$ROOT" diff --cached --name-only 2>/dev/null | tr '\n' ' ')
+  fi
+  PEER_GATE_STRICT=strict "$PEER_GATE" $PEER_ARGS >/tmp/gate-peer.log 2>&1
+  PEER_RC=$?
+  case "$PEER_RC" in
+    0) grep -E "✔" /tmp/gate-peer.log | head -3; ok "并行会话登记有效" ;;
+    1) grep -E "✘|⚠|══" /tmp/gate-peer.log | head -8
+       fail "并行会话冲突/登记表失效 —— 按 A8 处理（见 PEERS.md）" ;;
+    2) grep -E "✘" /tmp/gate-peer.log | head -5
+       fail "并行纪律环境错（RC=2）—— PEERS.md 缺失或仓库根不对，先修环境" ;;
+    3) grep -E "✘|⚠" /tmp/gate-peer.log | head -5
+       fail "有改动文件未登记（RC=3）—— 先写进 PEERS.md 再跑门禁" ;;
+    *) fail "并行纪律探针异常退出（RC=${PEER_RC}）" ;;
+  esac
+else
+  echo "（未找到 peer-gate，跳过门禁 2.7。接入方式见 dsh-toolkit/bin/peer-gate --help）"
+fi
+
 # ── 门禁 3：UITests 类型检查（见文件头「门禁 3 与门禁 4 的分工」）──────────
 # 主工程没有 test target，`xcodebuild -scheme TVBox-*` 编不到 UITests/。
 # 所以必须单独 type-check，否则测试代码写错了也发现不了。

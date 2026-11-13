@@ -12,3 +12,4 @@
 #
 # 消失即判红：删掉它 = 把该类缺陷从测试里永久删除。
 label CONTAINS %@", "1.8"|UITests/DuoAcceptanceUITests.swift|断言版本号是唯一能证明「被测包 == 刚装的包」的手段（而非陈旧副本），改成自比对/读 plist 自比会让该缺陷永不被发现
+meter.speed < Double(8 << 20)|Tests/TVCoreTests/DownloadTests.swift|上限断言是唯一能抓「把已下载字节当成新到达字节算速度」的护栏（曾报 1885MB/s 于 50Mbit 线路）。删掉或放宽会让该类错数重新出现；改测试时钟可以，改阈值不行
