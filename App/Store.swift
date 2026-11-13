@@ -1640,8 +1640,17 @@ import TVCore
         pruneGroupOrder()
         // 真删记账只增不减会跟着同步/备份无限膨胀。按现存订阅地址回收一次 ——
         // 放在这里而不是删订阅处，是因为「哪些订阅还活着」只有重建后才是最终答案。
-        var live = Set(environmentSubscriptions.map(\.address))
-        if let landed = subscription?.origin.absoluteString { live.insert(landed) }
+        //
+        // ⛔ 口径必须**逐订阅**取两个地址（输入地址 + 落地 origin），
+        // 不能只算合并后的 `subscription.origin`：`Subscription.merge` 只保留**第一个**
+        // 订阅的 origin（`SubscriptionMerge`：`origin: first.origin`），
+        // 于是「第 2..N 个订阅发生重定向」那批真删记账会漏在 live 之外、被当孤儿删掉。
+        // 详情与理由见 `DeletedSources.liveOrigins`（那边是可被 TVCore 判据直接覆盖的纯函数）。
+        let live = DeletedSources.liveOrigins(
+            entries: environmentSubscriptions,
+            landedOrigin: { documents[$0]?.origin },
+            mergedOrigin: subscription?.origin
+        )
         deletedSources.prune(live: live)
     }
 
