@@ -379,6 +379,12 @@ struct MobilePlayerView: View {
     @State private var swipeStart: Double?
     /// Sliding up or down: the brightness on the left, the volume on the right, from where the slide began.
     @AppStorage(PictureLevel.key) private var slidesLevels = true
+    /// 双击左右跳过 10 秒；关掉后双击改为播放/暂停（上游 1.8.12 的开关）。
+    ///
+    /// ⛔ 融合时这条判据丢了：上游 `972a75a` 在这一行加了 `doubleTapSkips &&`，
+    /// 我方 `41930c4` 在同一行加了 `!controlsLocked &&` —— 两侧改同一行，
+    /// 融合只能留一份，我方版本留存，开关的行为层整条消失（UI 也一并没了）。
+    @AppStorage(PictureDoubleTap.key) private var doubleTapSkips = true
     @State private var level: (volume: Bool, start: Double, value: Double)?
     @State private var leveling = false
     @State private var levelTask: Task<Void, Never>?
@@ -627,7 +633,8 @@ struct MobilePlayerView: View {
 
     private func tapped(_ x: CGFloat, _ width: CGFloat) {
         // Locked controls: a tap only shows or hides them; it never pauses or skips.
-        let zone = PictureTaps.zone(x: x, width: width, seekable: !controlsLocked && seekable && showsTransport && playingOn == nil && !pip.active)
+        // `doubleTapSkips` off: two taps anywhere play or pause, and the sides don't skip.
+        let zone = PictureTaps.zone(x: x, width: width, seekable: doubleTapSkips && !controlsLocked && seekable && showsTransport && playingOn == nil && !pip.active)
         switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone) {
         case .toggleControls:
             // Locked controls stay put: a tap may reveal the chrome (so the lock button stays reachable)
@@ -1102,16 +1109,65 @@ struct MobilePlayerView: View {
         }
     }
 
+    /// 当前布局下「直接显示」允许画出来的控件（#7b）。
+    ///
+    /// ⛔ 原来这里**根本没有读取点**：`grep -c "surfaced" App/MobilePlayer.swift` = 0，
+    /// 而设置页 `PlayerControlsSettingsView` 明写「This layout applies to the Original
+    /// and One skins」—— 原版皮肤就是本文件。于是那套勾选对它完全无效：
+    ///   · 勾上 → `setSurfaced` 顺手 `surfaceInTopRow` 摆进槽位 ⇒ 看起来生效
+    ///   · 取消 → 只从集合删，槽位不动 ⇒ 没有效果
+    ///
+    /// 三形态分流（不是「全屏/非全屏」两支）：
+    ///   · `.inline`         → `watchSurfaced`
+    ///   · `.pageFullScreen` → `fullSurfaced`
+    ///   · `.screen`         → **放行全部**（没有观看页，两份集合的语义都不适用；
+    ///                          若硬套 `fullSurfaced`（默认空数组），独立全屏播放器顶栏会整体清空）
+    ///
+    /// 判据与负对照见 `Sources/TVCore/PlayerControlSurfacing.swift` 的注释与 TVCore 测试。
+    private var surfacedAllowed: Set<String> {
+        _ = controlsOrder   // 与 `controlsLayout` 同源建立依赖，设置页改动能重算
+        // `MobilePlayerLayout` 不是 RawRepresentable（App 层枚举，无 rawValue），
+        // 这里显式映射，避免依赖字符串。
+        let surfacingLayout: PlayerControlSurfacing.Layout
+        switch self.layout {
+        case .screen: surfacingLayout = .screen
+        case .inline: surfacingLayout = .inline
+        case .pageFullScreen: surfacingLayout = .pageFullScreen
+        }
+        let layout = surfacingLayout
+        return PlayerControlSurfacing.allowed(
+            layout: layout,
+            watchSurfaced: controlsLayout.watchSurfaced.map(\.rawValue),
+            fullSurfaced: controlsLayout.fullSurfaced.map(\.rawValue),
+            allControls: PlayerControl.allCases.map(\.rawValue)
+        )
+    }
+
     /// The top-row slots, with controls that do not apply right now left as gaps — so a control the
     /// viewer placed in slot 7 sits at the seventh position whatever the current content offers.
+    ///
+    /// ⛔ 同时过两道：`available`（内容可用性）与 `surfacedAllowed`（用户勾选）。
+    /// 只过前者就是 #7b —— 取消勾选无效。
+    ///
+    /// ⚠️ **只有顶栏过 `surfacedAllowed`。** 设置页的判据是
+    /// `isShownInBar = set.contains(control) && layout.top.contains(control)`
+    /// （`PlayerControlsSettingsView:229-231`）—— 两个集合的语义是
+    /// 「**顶栏**里哪些控件直接显示」，底栏与「更多」不受它管。
+    /// 底栏是传输控制（播放/进度/上下集），「更多」是折叠收纳区，
+    /// 把它们也过滤会让 bottom 6→0、more 19→0，等于把播放器掏空。
     private var topSlots: [PlayerControl?] {
-        controlsLayout.topSlots.map { control in control.flatMap { available($0) ? $0 : nil } }
+        let allowed = surfacedAllowed
+        return controlsLayout.topSlots.map { control in
+            control.flatMap { available($0) && allowed.contains($0.rawValue) ? $0 : nil }
+        }
     }
+
+    /// 底栏只不过 surfaced —— 见 `topSlots` 的说明。
     private var bottomSlots: [PlayerControl?] {
         controlsLayout.bottomSlots.map { control in control.flatMap { available($0) ? $0 : nil } }
     }
 
-    /// The controls left in More, only when they apply.
+    /// The controls left in More, only when they apply. 同样不过 surfaced —— 理由同上。
     private var moreControls: [PlayerControl] { controlsLayout.more.filter(available) }
 
     /// Whether the "more" menu has anything to show: a collapsed control or the picture switches.

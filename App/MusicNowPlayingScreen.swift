@@ -44,7 +44,7 @@ struct MusicNowPlayingScreen: View {
             quality(music)
             transport(music)
             MusicVolumeSlider().padding(.top, 4)
-            bottomBar
+            bottomBar(music)
         }
         .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 6)
         .foregroundStyle(.white)
@@ -164,8 +164,17 @@ struct MusicNowPlayingScreen: View {
         .accessibilityLabel(L10n.text(label))
     }
 
-    private var bottomBar: some View {
+    private func bottomBar(_ music: MusicPlaybackSession) -> some View {
         HStack {
+            // 重复 / 随机：iOS 上原来**没有任何入口**。
+            //
+            // `MusicPlaybackSession` 早就有 `cycleRepeat()` / `toggleShuffle()`、
+            // 有 `repeatMode` 的三态（off/all/one）、有 `.one`/`.all` 的真实消费
+            // （`:500` 的单曲循环、`:191` 的整队回卷、`:197` 的 `canAdvance`）——
+            // 但调用点只有 `MusicMacPlayer`（整文件 `#if os(macOS)`）。
+            // iOS / tvOS 上这台机器造好了却没装按钮，用户根本没法切。
+            musicButton(music.shuffled ? "shuffle.circle.fill" : "shuffle",
+                        label: "Shuffle", on: music.shuffled) { music.toggleShuffle() }
             Spacer()
             toggle(.lyrics, symbol: "quote.bubble", label: "Lyrics")
             Spacer()
@@ -173,8 +182,33 @@ struct MusicNowPlayingScreen: View {
             Spacer()
             toggle(.queue, symbol: "list.bullet", label: "Up Next")
             Spacer()
+            musicButton(music.repeatMode.symbol,
+                        label: music.repeatMode.label,
+                        on: music.repeatMode != .off) { music.cycleRepeat() }
         }
         .frame(height: 50)
+    }
+
+    /// 与 `toggle` 同尺寸的图标键，但用于**不在** `MusicPanel` 枚举里的动作
+    /// （重复/随机是播放状态，不是面板开关）。
+    ///
+    /// ⛔ 开启态**不能**用 `Color.accentColor`（第一版就是这么写的，复核指出）：
+    ///   本屏强制 dark、背景是封面平均色的暗蒙版，而本机**没有自定义 AccentColor**
+    ///   （`find . -path "*AccentColor*"` 为空）⇒ 取系统蓝，在深色彩色蒙版上对比度掉，
+    ///   且与同屏 `toggle` 那套「`tint.blend(.black, 0.4)` 前景 + 白色圆底」体系不一致。
+    ///   这里直接沿用 `toggle` 的高亮语言，两处看起来才是一套。
+    private func musicButton(_ symbol: String, label: String, on: Bool,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.body.weight(.semibold))
+                .foregroundStyle(on ? AnyShapeStyle(tint.blend(with: .black, by: 0.4)) : AnyShapeStyle(.secondary))
+                .frame(width: 40, height: 40)
+                .background(on ? Color.white.opacity(0.9) : .clear, in: Circle())
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(L10n.text(label))
+        .accessibilityAddTraits(on ? [.isSelected] : [])
     }
 
     private func toggle(_ target: Panel, symbol: String, label: String) -> some View {

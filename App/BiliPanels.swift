@@ -856,11 +856,21 @@ struct BiliDanmuSettingsView: View {
 struct BiliMorePlaybackSettingsView: View {
     var onClose: () -> Void = {}
     @AppStorage(OneSkin.fitModeKey) private var fitModeRaw = OneSkinFitMode.fit.rawValue
-    /// 我们独有的画质增强。键是全局的（`VideoEnhancement.upscaleKey` /
-    /// `smoothKey`），与 One 皮肤、原版播放器共用同一个开关 ——
-    /// 在这里翻转会立刻影响实际播放，不需要额外的同步通道。
-    @AppStorage(VideoEnhancement.upscaleKey) private var upscalesVideo = false
-    @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
+    /// ⛔ 这里原来还有两个画质增强开关（`upscalesVideo` / `smoothsVideo`，键是
+    ///    `VideoEnhancement.upscaleKey` / `smoothKey`，全局共享）。**已移除**，因为它是个假开关：
+    ///
+    ///    · 三个哔哩哔哩播放页（`BiliPortraitPage:166` / `BiliLandscapePage:96` /
+    ///      `BiliFullScreenPage:79`）画的都是 `BiliSkinPicture` ——
+    ///      `BiliSkin.swift:307` 的一条裸 `AVPlayerLayer`，**没有任何增强渲染层**。
+    ///      `grep -c EnhancedVideoSurface Bili*.swift` 在 13 个文件上全为 0。
+    ///    · 键是全局的，所以在哔哩哔哩里拨这个开关：自身画面毫无变化，
+    ///      但全局键被写成 true —— 之后切回 One 或原版，增强莫名开着。**跨皮肤键污染**。
+    ///
+    ///    补实现需要给上面三页各接一层 `EnhancedVideoSurface`，且必须与各自的
+    ///    `AVPlayerLayer` **边缘完全对齐**（见 `MobilePlayer:429` 的注释：对齐不准会
+    ///    在侧边留一条页面色、或把画面裁掉）。三页几何各自不同，且整条链受
+    ///    `canUpscale` 门槛限制 —— 该值在模拟器恒 false，改完连触发都验不了。
+    ///    ⇒ 登记为 P2「补实现」，等有真机（OS 26）再动，不在这里盲改。
     /// 广告拦截总开关。三个皮肤与 HLS 代理、设置页共用同一个键。
     @AppStorage(AdSkip.key) private var skipsAds = true
 
@@ -874,19 +884,8 @@ struct BiliMorePlaybackSettingsView: View {
                     get: { fitModeRaw == "fit" },
                     set: { fitModeRaw = $0 ? "fit" : "fill" }
                 ))
-                // ★ 我们独有的增强项，按哔哩哔哩的面板款式补入（分组标题 + 整宽开关行，
-                //   与上面的 Screen / Background 完全同款）。哔哩哔哩本体没有这两项，
-                //   但能力已存在于 `VideoEnhancement`，不暴露就等于白白丢掉。
-                //   条件渲染：设备不支持时连分组标题都不画，避免出现按了没反应的开关。
-                if VideoEnhancement.canUpscale || VideoEnhancement.canSmooth {
-                    biliSectionTitle(L10n.text("Picture Enhancement"))
-                    if VideoEnhancement.canUpscale {
-                        biliToggleRow(L10n.text("Sharper Picture"), $upscalesVideo)
-                    }
-                    if VideoEnhancement.canSmooth {
-                        biliToggleRow(L10n.text("Smooth Motion"), $smoothsVideo)
-                    }
-                }
+                // 画质增强的两个开关**已从这里移除** —— 哔哩哔哩皮肤没有增强渲染层，
+                // 摆在这里是假开关（拨了没反应，还会污染全局键）。理由见上面属性区的注释。
                 // 广告拦截：哔哩哔哩本体没有这个开关，但能力早就在
                 //（`AdSkip` + `AdSignatureLibrary` + HLS 代理），不暴露就等于白丢。
                 // 与 One、原版播放器、设置页共用 `player.skipAds` 一个键。

@@ -590,8 +590,21 @@ struct SitesView: View {
                 // 全都已隐藏 ⇒ 这一按是「显示」，否则是「隐藏」。一个按钮两个方向，
                 // 因为它描述的是这批源的状态，不是两个互不相干的功能。
                 let show = hidden.count == picked.count
-                store.setHidden(!show, for: picked)
-                note(show ? L10n.text("Shown %lld sources.", picked.count) : L10n.text("Hidden %lld sources.", picked.count))
+                // ⛔ 必须用 `setHidden` 的**返回值**报数，不能用 `picked.count`。
+                //
+                // `Store.setHidden(_:for:)` 是 `@discardableResult`，且它的整段注释
+                // 都在说明「返回值描述实际改到了几条」，就是为了避免这个谎：
+                //   · 取消隐藏时它会先剔掉已真删的源（否则「显示全部」会让删掉的源复活）；
+                //   · 集合没实际变化时它返回 0（`hiddenSources.revision` 没动）。
+                // 而这里原来把返回值丢掉了、改用 `picked.count` 上报 ——
+                // 于是「勾了 12 个、其中 5 个已删」时，界面说「已显示 12 个源」，
+                // 实际只有 7 个被改；这就是它注释里写的「同一个谎」。
+                let changed = store.setHidden(!show, for: picked)
+                if changed == 0 {
+                    note(L10n.text("Nothing changed."))
+                } else {
+                    note(show ? L10n.text("Shown %lld sources.", changed) : L10n.text("Hidden %lld sources.", changed))
+                }
             } label: {
                 Label(L10n.text("Hide"), systemImage: "eye.slash")
                     .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
@@ -600,8 +613,11 @@ struct SitesView: View {
             .accessibilityIdentifier("sources.batch.hide")
 
             Button {
-                store.setPinned(true, for: picked)
-                note(L10n.text("Pinned %lld sources.", picked.count))
+                // 同「隐藏」那颗：`setPinned` 也返回实际改动条数（`pinnedSources.revision`
+                // 没动时返回 0），必须用它报数而不是 `picked.count`。
+                let changed = store.setPinned(true, for: picked)
+                note(changed == 0 ? L10n.text("Nothing changed.")
+                                  : L10n.text("Pinned %lld sources.", changed))
             } label: {
                 Label(L10n.text("Pin"), systemImage: "pin")
                     .font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
@@ -642,8 +658,9 @@ struct SitesView: View {
                     Label(L10n.text("Answered to Direct, Silent to Proxy"), systemImage: "arrow.triangle.branch")
                 }
                 Button {
-                    store.setPinned(false, for: picked)
-                    note(L10n.text("Unpinned %lld sources.", picked.count))
+                    let changed = store.setPinned(false, for: picked)
+                    note(changed == 0 ? L10n.text("Nothing changed.")
+                                      : L10n.text("Unpinned %lld sources.", changed))
                 } label: {
                     Label(L10n.text("Unpin"), systemImage: "pin.slash")
                 }

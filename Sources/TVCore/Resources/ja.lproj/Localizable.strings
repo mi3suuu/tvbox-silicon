@@ -2595,3 +2595,6 @@
 "Tick sources to move just those; with nothing ticked the move applies to everything in the scope above. A move only changes which group lists a source — it still plays through its own subscription, and it survives a refresh." = "移動したいソースだけを選択してください。何も選択しない場合、移動は上記の範囲内のすべてに適用されます。移動はソースを一覧するグループが変わるだけで、再生は元の購読を通り、更新後も維持されます。";
 "Unreachable Group" = "到達不可グループ";
 "Your Groups" = "自分のグループ";
+"Double-Tap to Skip" = "ダブルタップでスキップ";
+"Double-tap the left or right of the video to skip 10 seconds. Turn this off and a double tap plays or pauses instead." = "動画の左側または右側をダブルタップすると10秒スキップします。オフにすると、ダブルタップで再生/一時停止になります。";
+"Nothing changed." = "変更はありませんでした。";

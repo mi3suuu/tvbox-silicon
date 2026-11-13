@@ -141,4 +141,43 @@ import Observation
         defaults.set(keys, forKey: storageKey)
         revision += 1
     }
+
+    // MARK: - `prune` 的 live 口径
+
+    /// 算出 `prune(live:)` 该收的那组地址。
+    ///
+    /// ⛔ **必须逐订阅取两个地址，不能只取合并后的 `subscription.origin`。**
+    ///
+    /// 键里存的是 `site.origin(or:)` = `provenance?.origin ?? 订阅地址`，即
+    /// **每个订阅自己的落地地址**（重定向 / 镜像 / http→https 后与用户输入不同）。
+    /// 而 `Subscription.merge` 的结果只保留 **第一个订阅** 的 origin
+    /// （`SubscriptionMerge`：`origin: first.origin`）。
+    ///
+    /// 所以只喂合并结果的 origin，会让「第 2..N 个订阅发生过重定向」这条路径漏掉 ——
+    /// 那批真删记账在 live 里查不到、被当孤儿回收，用户重加同一订阅时源仍显示已删、
+    /// 永远不出现，且没有任何入口能救。
+    ///
+    /// 这与 `forget(origins:)` 是同一对键的同一件事：那边三处调用都做了双地址，
+    /// 这里曾经只做一边（第 4 次同款漏）。抽成静态纯函数，是为了让判据能在 TVCore 里真跑。
+    ///
+    /// - Parameters:
+    ///   - entries: 当前环境里的订阅条目（`Store.environmentSubscriptions`）。
+    ///   - landedOrigin: 按订阅地址查「该订阅实际落地的 origin」，取不到返回 nil
+    ///     （`Store` 侧实现为 `documents[address]?.origin`）。
+    ///   - mergedOrigin: 合并结果自身的 origin（`subscription?.origin`），兜底。
+    public static func liveOrigins(
+        entries: [SubscriptionEntry],
+        landedOrigin: (String) -> URL?,
+        mergedOrigin: URL? = nil
+    ) -> Set<String> {
+        var live = Set<String>()
+        for entry in entries {
+            // 用户输入 / 同步来的地址本身：未重定向时键里存的就是它。
+            if let typed = URL(string: entry.address) { live.insert(typed.absoluteString) }
+            // 该订阅实际落地的地址：键里真正存的那个。
+            if let landed = landedOrigin(entry.address) { live.insert(landed.absoluteString) }
+        }
+        if let mergedOrigin { live.insert(mergedOrigin.absoluteString) }
+        return live
+    }
 }

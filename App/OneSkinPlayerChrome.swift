@@ -166,6 +166,14 @@ struct OneSkinChrome: View {
     @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
     /// 广告拦截总开关。与设置页、原版播放器、HLS 代理**同一个键**（`player.skipAds`）。
     @AppStorage(AdSkip.key) private var skipsAds = true
+    /// 竖滑调亮度/音量（设置页「滑动调亮度与音量」）。
+    ///
+    /// ⛔ 以前这里没有这个开关，`dragged()` 只判几何位置就直接改亮度/音量 ——
+    /// 用户在设置里关掉后**照样生效**。原生皮肤（`MobilePlayerView`）是判
+    /// `parent?.levels == true` 的，两套皮肤行为分叉。
+    @AppStorage(PictureLevel.key) private var slidesLevels = true
+    /// 双击左右跳过 10 秒；关掉后双击改为播放/暂停（上游 1.8.12 的开关，见 `PictureDoubleTap`）。
+    @AppStorage(PictureDoubleTap.key) private var doubleTapSkips = true
 
     /// 控件锁：手势与遮挡层全部失效（只有「解锁」还能点）。
     @State private var locked = false
@@ -175,7 +183,14 @@ struct OneSkinChrome: View {
     @State private var hideTask: Task<Void, Never>?
     /// 单击与双击的仲裁：单击延迟 0.26s 执行，双击一落就取消它。
     @State private var tapTask: Task<Void, Never>?
-    @State private var showsInfo = false
+    /// 「显示视频信息」开关。**必须与设置页/原生皮肤共用同一个键**
+    /// （`PlaybackInfo.key` = `player.showInfo`）。
+    ///
+    /// ⛔ 原来这里是 `@State` —— 全仓 6 处 `@AppStorage(PlaybackInfo.key)` 声明，
+    /// 唯独 One 不在其中。后果有两条：
+    ///   ① 设置页「显示视频信息」对 One 皮肤**完全无效**；
+    ///   ② 在 One 里点亮那颗 i 键，切一次形态（`@State` 随视图重建归零）就灭了。
+    @AppStorage(PlaybackInfo.key) private var showsInfo = false
     /// 起播耗时浮层。
     ///
     /// One 的 `showPlaybackStats`：把「慢」拆成「解析 / 就绪 / 首帧 / 共几秒」，
@@ -262,10 +277,28 @@ struct OneSkinChrome: View {
     @State private var showsDanmakuList = false
     /// 投屏（DLNA 接收端 + AirPlay）。与旧播放器同一份浏览器。
     @State private var playOn = PlayOnBrowser()
-    /// 画质增强的处理器：每页一份，绑到当前 player 上（见 `prepareEnhancer`）。
-    /// 两个开关都关着时为 nil —— 空闲的 `AVSampleBufferDisplayLayer` 被反复挂上摘下
-    /// 在 Duo 折展时是 use-after-free 风险（`VideoEnhancement.enabled` 的注释记着这条）。
-    @State private var enhancer: VideoEnhancer?
+    /// 画质增强的处理器**归会话所有**，这里只读（见 `session.enhancer`）。
+    ///
+    /// ⛔ 这里原来写的是 `@State private var enhancer: VideoEnhancer?` + 一个
+    ///    `prepareEnhancer()` 工厂。那条路把「谁拥有 enhancer」从会话挪到了视图，
+    ///    于是丢掉了会话天然给它的三件东西，三个都已实测确认：
+    ///
+    ///    ① **生命周期绑定**：`PlaybackSession.enhancer` 是 `let`、在 `init` 里建，
+    ///       会话换 ⇒ enhancer 跟着换，天然 1:1。视图 `@State` 不会跟着会话走 ——
+    ///       一旦本页原地换新会话，旧会话释放后 `VideoEnhancer.player`（`weak`）变 nil，
+    ///       `refresh()` 首行 `guard let player` 永久早退 ⇒ enhancer 成空壳，
+    ///       而消费端 `if let enhancer` 仍为真、画面层照画最后一帧。
+    ///    ② **创建时机**：视图级创建意味着一开始开关是关的时候没有 enhancer，
+    ///       所以必须另挂 `onChange` 去补建（原来那两个 `onChange` 就是为此存在），
+    ///       而补建路径一旦漏挂一处（N1 就是这么漏的）用户就看到「开了没反应」。
+    ///       会话级创建没有这个窗口 —— 会话建立时无论开关状态都建好。
+    ///    ③ **空闲管线回收**：`makeEngineIfNeeded()` 在开关关掉时会把 `engine` 释放回 nil
+    ///       并 `detachOutput()` 拆干净，所以「会话级总有一个 enhancer」不等于
+    ///       「总持有一条 GPU 管线」。原注释担心的 use-after-free 由那一层守住，
+    ///       不需要靠「视图层先不建」来守。
+    ///
+    /// 原版播放器（`MobilePlayer:429`）早就是读 `session.enhancer`，本条只是把 One 对齐。
+    private var enhancer: VideoEnhancer? { session?.enhancer }
 
     private var session: PlaybackSession? { kit.session }
     private var channel: Channel? { kit.channel }
@@ -482,7 +515,11 @@ struct OneSkinChrome: View {
         .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
         .task(id: channel.map { $0.url.absoluteString }) { await loadSubtitles() }
-        .task(id: itemIdentity) { await tracksTask(); prepareEnhancer() }
+        .task(id: itemIdentity) { await tracksTask() }
+        // ⛔ 原来这里还有两个 `.onChange(of: upscalesVideo|smoothsVideo) { prepareEnhancer() }`，
+        //    用来补「播放中打开开关」的创建时机。enhancer 改成会话所有后**不需要了** ——
+        //    它随会话建好，与开关状态无关；开关的开关效果由消费端 `if let enhancer,
+        //    VideoEnhancement.enabled`（`:455`）与 `makeEngineIfNeeded()` 的惰性建管线负责。
         .task(id: skipKey) { await loadSkipMarkers() }
         // 锁屏 / 控制中心：接上遥控键，并在状态变化时重写信息。
         // `initial: true` 覆盖「进页面时就已经在播」这一常见情形。
@@ -1655,13 +1692,6 @@ struct OneSkinChrome: View {
         clock.attach(player)
     }
 
-    /// 画质增强的处理器：只有开关真的开着才建（见 `enhancer` 的说明）。
-    /// 换集后 `player.currentItem` 变了，增强器自己跟着 item 走，不需要重建。
-    private func prepareEnhancer() {
-        guard VideoEnhancement.enabled, let player = session?.player else { return }
-        if enhancer == nil { enhancer = VideoEnhancer(player: player) }
-    }
-
     // MARK: - 视频信息
 
     @ViewBuilder private var infoLayer: some View {
@@ -1943,7 +1973,10 @@ struct OneSkinChrome: View {
         tapTask?.cancel(); tapTask = nil
         guard boost == nil else { return }
         guard let session else { return }
-        let zone = PictureTaps.zone(x: Double(location.x), width: Double(winW), seekable: seekable)
+        // `seekable: false` 让 `zone(...)` 恒回 `.middle`（见 `PictureTaps.zone`）——
+        // 关掉「双击跳过」后双击中间/左右都变成播放暂停，与原生皮肤同一语义。
+        let zone = PictureTaps.zone(x: Double(location.x), width: Double(winW),
+                                    seekable: seekable && doubleTapSkips)
         // ⛔ 不再走 `taps.tap(at:in:)`：那个方法内部自己数双击间隔，
         //    而 `handleTap` 已经数过一遍（0.30s 窗口）。两套计数叠加会让
         //    第二下双击被它判成「新的一次 streak 起点」，跳过永远不触发。
@@ -1975,7 +2008,7 @@ struct OneSkinChrome: View {
                                             moved: value.translation.width,
                                             width: winW,
                                             duration: duration)
-        } else if PictureLevel.slides(fromY: value.startLocation.y, height: winH) {
+        } else if slidesLevels, PictureLevel.slides(fromY: value.startLocation.y, height: winH) {
             let volume = value.startLocation.x > winW / 2
             if level == nil {
                 let start = volume ? Double(AVAudioSession.sharedInstance().outputVolume)

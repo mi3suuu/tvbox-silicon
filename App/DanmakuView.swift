@@ -12,6 +12,17 @@ struct DanmakuOverlay: View {
     var revision = ""
     @AppStorage(DanmakuArea.key) private var area = DanmakuArea.standard
     @AppStorage(DanmakuStyle.fontSizeKey) private var fontSize = DanmakuStyle.standardFontSize
+    /// ⛔ 速度与屏蔽词必须各自声明成 `@AppStorage`，不是为了读值（`BiliDanmakuSpeed.current` /
+    /// `BiliDanmakuFilter.words` 已经能从 UserDefaults 取），而是为了**建立 SwiftUI 依赖** ——
+    /// 两者原来都只被 `DanmakuEngine` 在内部读一次，改 key 不会让这个视图重算，
+    /// 于是「速度」「屏蔽词」两个旋钮拨了没反应（复核 B1 指出）：
+    ///   · 速度的读点在 `restart()`（`:160`），而 `restart()` 只在 layout/size/area/textScale/
+    ///     时间跳变时触发，**没有一项由速度驱动** ⇒ 改速度不重排；
+    ///   · 屏蔽词只在 `load()`（`:84/86`）读，`load()` 由下面 `.task(id:)` 驱动，
+    ///     而那个 id 不含屏蔽词 ⇒ 改词不重载。
+    /// 声明成 `@AppStorage` 之后再分别并入两处触发条件，两条链才真的通。
+    @AppStorage(BiliDanmakuSpeed.key) private var speedRaw = BiliDanmakuSpeed.normal.rawValue
+    @AppStorage(BiliDanmakuFilter.wordsKey) private var blockWordsRaw = ""
     @State private var engine = DanmakuEngine()
     @Environment(\.displayScale) private var scale
 
@@ -31,7 +42,13 @@ struct DanmakuOverlay: View {
         // No `ignoresSafeArea` here: it would win over the caller's, and the iPhone keeps comments below the Dynamic Island.
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-        .task(id: "\(revision):\(comments.count)") { engine.load(comments) }
+        // 屏蔽词进 id：改词必须重新 load 一遍（`load` 内部按 `BiliDanmakuFilter` 过滤）。
+        // `comments.count` 是**未过滤**的原始条数，它不会随屏蔽词变，所以单靠它不够。
+        .task(id: "\(revision):\(comments.count):\(blockWordsRaw)") { engine.load(comments) }
+        // 速度进重排条件：`restart()` 是唯一读 `scrollDuration` 的地方，而它只在这个 id 变化时
+        // 被 `engine` 重新走到 —— 把速度串进来，拨档位才会真的改变横穿时间。
+        // 拨速度：屏上弹幕继续飘（清屏会闪），后续新弹幕按新速度进。
+        .task(id: "speed:\(speedRaw)") { engine.invalidateLayout(preservingOnScreen: true) }
     }
 }
 
@@ -71,11 +88,34 @@ final class DanmakuEngine: @unchecked Sendable {
     private var next = 0
     private var active: [Active] = []
     private var lastTime = -1.0
+    /// 下一次 `restart()` 是否保留屏上弹幕。由 `invalidateLayout(preservingOnScreen:)` 设置，
+    /// `restart()` 消费后立即复位 —— 它只描述「这次作废」的意图，不能泄漏到之后任何一次重建。
+    private var preserveOnRestart = false
     /// Rendered text, reused: busy tracks repeat the same few words, and drawing text is the costly part.
     private var images: [String: CGImage] = [:]
     /// Dense tracks (Dandanplay merges several sites, up to 30,000 comments) would otherwise measure and draw
     /// dozens of comments in one frame and stall it; the rest wait a frame, and those a second late are dropped.
     private static let perFrame = 4, onScreen = 150
+
+    /// 丢掉已算好的排布，让下一帧的 `frame(...)` 重新走 `restart()`。
+    ///
+    /// 只有 `restart()` 会读 `BiliDanmakuSpeed.current.scrollDuration`（`:199`），
+    /// 而 `restart()` 的触发条件里没有任何一项由速度驱动 —— 所以拨档位时必须在外部
+    /// 主动作废 layout，否则那一行永远按第一次建布局时的值走。
+    ///
+    /// ⛔ `preservingOnScreen` 必须由**调用方显式说明意图**，不能让 `frame()` 去猜。
+    ///
+    /// 因为置空 layout 有两种来源，用户预期完全相反：
+    ///   · 拨速度档位 → 屏上的弹幕应当继续飘（清屏会闪一下），只是后续按新速度；
+    ///   · 改屏蔽词   → 被新词过滤掉的弹幕应当**立刻消失**，保留反而是错的。
+    /// 我上一版让 `frame()` 用「size/area/textScale 都没变」自己推断，结果把这两种
+    /// 混成一种：改词时被过滤的弹幕还挂在屏上画 6–13 秒，比没修更糟（复核 N1b）。
+    func invalidateLayout(preservingOnScreen: Bool) {
+        lock.withLock {
+            layout = nil
+            preserveOnRestart = preservingOnScreen
+        }
+    }
 
     func load(_ comments: [Danmaku]) {
         // 屏蔽词过滤（二进制实证 `danmaku_filter` / `danmaku_block_switch`）。
@@ -86,12 +126,33 @@ final class DanmakuEngine: @unchecked Sendable {
             : comments.filter { !BiliDanmakuFilter.isBlocked($0.text) }
 
         lock.withLock {
-            // Live comments only grow at the end: keep the layout and what is already on screen.
-            if !self.comments.isEmpty, visible.count > self.comments.count,
-               visible.first == self.comments.first {
+            // ⛔ 快路径（实时弹幕只往后追加时，保住 layout 与 `next`，不重排）必须**只对真追加**生效。
+            //
+            // 原条件只有「条数变多 + 首条相同」。它当年只可能被「实时弹幕增长」走到，
+            // 所以够用。但 `blockWordsRaw` 接进 `.task(id:)` 之后，**「移除屏蔽词」第一次能走到这里**
+            // —— 而这恰好也是「条数变多 + 首条通常不变」⇒ 命中快路径 ⇒ `next` 仍指向
+            // 旧（已过滤）数组的索引，而 `comments` 已是新的更长数组 ⇒ **索引错位、弹幕重放**。
+            // 复核 t5 的 O1 指出：屏蔽「哈哈」这类已消费的早期高频短词再移除，会重放约 9 条。
+            //
+            // 收紧条件：`visible` 必须**以旧 `comments` 为前缀**（即旧数组的每一条都原样在
+            // 新数组的同一位置）。只有真追加才满足；移除屏蔽词会让旧数组的中间冒出条目，
+            // 前缀关系立刻破裂，于是落到下面「重排」路径。
+            //
+            // 逐条比较而不是比 count/首元素：屏蔽词命中数组中间时，首元素与长度都可能不变
+            // 或看起来像追加，只有前缀比较能可靠区分「追加」与「插回」。
+            let isAppend = !self.comments.isEmpty && visible.count > self.comments.count
+                && visible.starts(with: self.comments)
+            if isAppend {
                 self.comments = visible; return
             }
-            self.comments = visible; layout = nil
+            // ⛔ 这里必须把 `preserveOnRestart` 一起复位成 false。
+            //
+            // 改屏蔽词走的就是这条路径（`.task(id:)` 里 `blockWordsRaw` 变了 → `load`）：
+            // 被新词过滤掉的弹幕必须**立刻消失**，保留屏上那批是错的（复核 N1b）。
+            // 而 `preserveOnRestart` 是上一次「拨速度」可能留下的 true ——
+            // 若正好在它被 `frame()` 消费之前用户又改了屏蔽词，两个信号会串在一起。
+            // 置 layout=nil 的每一条路径都必须显式说明自己的意图，不许继承上一条。
+            self.comments = visible; layout = nil; preserveOnRestart = false
         }
     }
 
@@ -101,7 +162,14 @@ final class DanmakuEngine: @unchecked Sendable {
             // A new size, area or text size, or a seek (any jump the clock would not make by itself), starts over at `time`.
             if layout == nil || size != self.size || area != self.area || textScale != self.textScale
                 || time < lastTime - 0.3 || time > lastTime + 2 {
-                restart(at: time, size: size, area: area, textScale: textScale)
+                // 是否保留屏上弹幕，只认调用方显式设置的意图，**不自己推断**：
+                // 换尺寸/换区域/换字号/进度跳变这些情况旧位置确实失效，一律清空重排，
+                // 所以那几种情况下 `preserveOnRestart` 一律按 false 处理。
+                let geometryChanged = size != self.size || area != self.area
+                    || textScale != self.textScale || time < lastTime - 0.3 || time > lastTime + 2
+                let keep = preserveOnRestart && !geometryChanged
+                preserveOnRestart = false
+                restart(at: time, size: size, area: area, textScale: textScale, keepOnScreen: keep)
             }
             lastTime = time
             var budget = Self.perFrame
@@ -147,7 +215,15 @@ final class DanmakuEngine: @unchecked Sendable {
         return image
     }
 
-    private func restart(at time: Double, size: CGSize, area: DanmakuArea, textScale: Double) {
+    /// `keepOnScreen`：换布局时**保留正在飘的那批**。
+    ///
+    /// 拨速度档位只改 `scrollDuration`，画面尺寸/区域/字号都没变 ——
+    /// 这时若照常 `active = []`，屏上的弹幕会先全部消失、再从此刻重新排，
+    /// 用户看到的是「一拨速度，弹幕闪一下」。而 `Active` 里存的是 `DanmakuLayout.Placement`
+    /// （含 `start` 与 `speed`），换布局后按新 `speed` 继续算 x 即可，不需要重建。
+    /// 尺寸/区域/字号变化、以及进度跳变，仍然走原来的清空重建（那些情况下旧位置确实失效）。
+    private func restart(at time: Double, size: CGSize, area: DanmakuArea, textScale: Double,
+                         keepOnScreen: Bool = false) {
         self.size = size; self.area = area; self.textScale = textScale
         // About 43pt on a 1080p TV, 22pt in a small Mac window. From the shorter side: an upright iPhone's full-screen
         // player is tall and narrow, and its height made the text twice the size it is when the phone is turned.
@@ -155,10 +231,20 @@ final class DanmakuEngine: @unchecked Sendable {
         fontSize = min(44, max(15, min(size.width, size.height) * 0.04)) * textScale
         // 弹幕速度（二进制实证 `danmaku_speed`）：`scrollDuration` 是「横穿屏幕所需秒数」，
         // 越小越快。之前硬编码默认 9，界面上没有入口。
+        // 旧布局的三张碰撞表在下面被整个换掉，先把它要保留下来的那些 placement 抓出来。
+        let carried: [DanmakuLayout.Placement] = keepOnScreen ? active.map(\.placement) : []
         layout = DanmakuLayout(width: size.width, height: size.height * 0.96,
                                laneHeight: fontSize * 1.35, scrollArea: area.share,
                                scrollDuration: BiliDanmakuSpeed.current.scrollDuration)
-        active = []
+        if keepOnScreen {
+            // ⛔ 光保住 `active` 不够（我曾以为够，错了）。`active` 只决定「画什么」，
+            //    位置分配只查 `scrolling`/`top`/`bottom` 三张表 —— 表若留空，
+            //    `place()` 看到每行都是 nil，新弹幕全部挤进 lane 0，与屏上旧弹幕叠同一行。
+            //    所以必须把旧 placement 播种进新布局（复核 N1）。
+            layout?.adopt(carried)
+        } else {
+            active = []
+        }
         var low = 0, high = comments.count
         while low < high { let mid = (low + high) / 2; if comments[mid].time < time { low = mid + 1 } else { high = mid } }
         next = low

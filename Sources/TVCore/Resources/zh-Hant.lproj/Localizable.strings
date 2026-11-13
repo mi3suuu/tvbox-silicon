@@ -2595,3 +2595,6 @@
 "Tick sources to move just those; with nothing ticked the move applies to everything in the scope above. A move only changes which group lists a source — it still plays through its own subscription, and it survives a refresh." = "勾選源即可只移動這些；未勾選時，移動會套用到上方範圍內的全部。移動只改變源列在哪個分組——它仍透過所屬訂閱播放，重新整理後依然保留。";
 "Unreachable Group" = "無法連線分組";
 "Your Groups" = "你的分組";
+"Double-Tap to Skip" = "雙擊快轉倒轉";
+"Double-tap the left or right of the video to skip 10 seconds. Turn this off and a double tap plays or pauses instead." = "雙擊影片左側或右側可快轉或倒轉 10 秒。關閉後，雙擊將改為播放或暫停。";
+"Nothing changed." = "沒有變化。";

@@ -16,8 +16,15 @@ struct MusicPlayerScreen: View {
     var body: some View {
         let music = store.music
         // Read here so the transport bar is rebuilt whenever what it lists changes.
+        //
+        // ⛔ `repeatMode` 与 `shuffled` 必须进 revision，否则那两颗键的标题/勾选态永远停在第一次
+        //    建菜单时的样子：`updateUIViewController` 只在 revision 变化时才重写
+        //    `transportBarCustomMenuItems`，而循环重复/随机**都不会改 queue.index、
+        //    也不会改 tracks.count**（随机只是把后面几首重排，数量不变）——
+        //    只靠上面那几个分量，拨完档位菜单纹丝不动，用户会以为没生效。
         let revision = [String(music.queue?.index ?? -1), String(music.queue?.tracks.count ?? 0), String(music.attempts.count),
-                        music.selection?.candidate.id ?? "", String(music.lyrics != nil), String(music.lyricsOffset), String(showsLyrics)]
+                        music.selection?.candidate.id ?? "", String(music.lyrics != nil), String(music.lyricsOffset), String(showsLyrics),
+                        music.repeatMode.rawValue, String(music.shuffled)]
             .joined(separator: "|")
         MusicNativePlayer(store: store, showsLyrics: $showsLyrics, revision: revision)
             .ignoresSafeArea()
@@ -77,6 +84,42 @@ private struct MusicNativePlayer: UIViewControllerRepresentable {
             items.append(UIAction(title: L10n.text("Next"), subtitle: next, image: UIImage(systemName: "forward.end.fill"),
                                   attributes: next == nil ? [.disabled] : []) { _ in music.next() })
         }
+        // 重复 / 随机：tvOS 上原来和 iOS 一样**没有任何入口**。
+        //
+        // `MusicPlaybackSession` 早就有 `cycleRepeat()`（三态 off/all/one，落盘到 "musicRepeat"）
+        // 与 `toggleShuffle()`，消费端也是真的：
+        //   · `repeatMode == .one` 的真实消费点是 `songEnded()`（MusicPlaybackSession:507）——
+        //     `if repeatMode == .one || repeatMode == .all && queue?.tracks.count == 1 { seek(0); play() }`；
+        //   · `canAdvance`（:197）判 `repeatMode == .all`；
+        //   · `toggleShuffle()` 会真的重排队列（保存 `unshuffled` 原序以便还原）。
+        //
+        // ⛔ 这里原来写「`advance()` 里有 `.one` 的单曲循环」是**错的**（复核 Q3 指出，我已核）：
+        //    `advance()` 是纯队列推进，不看 repeatMode；单曲循环全部发生在 `songEnded()`。
+        //    引用位置写错会误导后来者去 `advance()` 里找消费点，什么也找不到。
+        // 但调用点只有 `MusicMacPlayer`（整文件 `#if os(macOS)`）⇒ tvOS 用户切不了。
+        //
+        // 这里用 `transportBarCustomMenuItems` 而不是自绘按钮：Apple TV 的焦点引擎由
+        // `AVPlayerViewController` 自己管，菜单项是**已经焦点可达的既有通道**，
+        // 往里面加条目不需要碰焦点/遥控器手势，也不会挤占画面上的安全区。
+        //
+        // ⚠️ 这两项**不受上面 `queue.tracks.count > 1` 的门控**：
+        //    「随机」在一首歌的队列上是无意义的，但「循环单曲」恰恰是单曲队列最常用的场景。
+        //    依据是 `songEnded()`（:507）那条判据：
+        //    `repeatMode == .one || repeatMode == .all && queue?.tracks.count == 1`
+        //    —— 这里 `tracks.count == 1` 被**显式当作 `.all` 也该重播的情形**写进了代码，
+        //    也就是说「单曲队列」正是设计时考虑过的场景。放进 `tracks.count > 1` 的 `if` 里
+        //    会让最有用的那种用法消失。
+        //    （原注释写「在 `advance()` 里」，位置错，已订正。）
+        items.append(UIAction(title: L10n.text("Shuffle"),
+                              image: UIImage(systemName: music.shuffled ? "shuffle.circle.fill" : "shuffle"),
+                              state: music.shuffled ? .on : .off) { _ in music.toggleShuffle() })
+        items.append(UIMenu(title: music.repeatMode.label,
+                            image: UIImage(systemName: music.repeatMode.symbol),
+                            children: [
+                                UIAction(title: L10n.text("Repeat Off"), state: music.repeatMode == .off ? .on : .off) { _ in music.setRepeat(.off) },
+                                UIAction(title: L10n.text("Repeat All"), state: music.repeatMode == .all ? .on : .off) { _ in music.setRepeat(.all) },
+                                UIAction(title: L10n.text("Repeat One"), state: music.repeatMode == .one ? .on : .off) { _ in music.setRepeat(.one) },
+                            ]))
         if let lyrics = music.lyrics, !lyrics.lines.isEmpty {
             let binding = $showsLyrics
             items.append(UIAction(title: L10n.text("Lyrics"), image: UIImage(systemName: showsLyrics ? "quote.bubble.fill" : "quote.bubble"),

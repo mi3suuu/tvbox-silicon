@@ -2819,7 +2819,7 @@ struct VideoDetailView: View {
                                              set: { store.autoPlayNext = $0 }))
                 BiliPSToggleChip(text: L10n.text("Loop playback"),
                                  on: Binding(get: { playerSession?.looping ?? false },
-                                             set: { playerSession?.looping = $0 }))
+                                             set: { setSkinLooping($0) }))
             }
         }
     }
@@ -2831,8 +2831,28 @@ struct VideoDetailView: View {
     }
 
     private func applyPlayMode(_ mode: BiliPlayMode) {
-        playerSession?.looping = mode.loopsCurrent
+        setSkinLooping(mode.loopsCurrent)
         store.autoPlayNext = mode.autoAdvances
+    }
+
+    /// 循环开关的**唯一写入口**：同时写会话与 `OneSkin.loopKey` 偏好。
+    ///
+    /// ⛔ 为什么必须双写（复核 t7 的 H1）：
+    ///   两种皮肤对这个偏好的写入口径原本不一致 ——
+    ///   · One 的 chip（`OneSkin.swift:3570`）：`loop.toggle()` 写偏好 **+** `session?.looping`
+    ///   · Bili 的 6 个入口：**只写会话**，从不写偏好
+    ///   ⇒ Bili 里开循环 → 切回 One ⇒ `seedLoopPreference()` 用偏好的 old 值（false）
+    ///     覆盖会话的 true —— **用户在 Bili 里开的循环被 One 吃掉了**。
+    ///   `OneSkin.loopKey` 是全局共享的（两个皮肤同一个键），所以两个入口必须同口径。
+    ///
+    /// 另一个原因：`seedLoopPreference()` 只负责「启动对齐」，它读的正是这个偏好 ——
+    /// 偏好若从不被 Bili 写入，重启后 One 仍会按旧值把它盖掉。
+    ///
+    /// 单向性：这里写的是「用户明确选择的循环状态」，所以偏好与会话**同时**设成同一个值，
+    /// 不存在「谁覆盖谁」的问题 —— 它们本来就是同一个语义的两个载体。
+    func setSkinLooping(_ on: Bool) {
+        playerSession?.looping = on
+        UserDefaults.standard.set(on, forKey: OneSkin.loopKey)
     }
 
     /// 把自定义菜单项映射成一行（点击后切到对应面板段）。
@@ -2936,7 +2956,7 @@ struct VideoDetailView: View {
                             ),
                             loopPlayback: Binding(
                                 get: { playerSession?.looping ?? false },
-                                set: { playerSession?.looping = $0 }
+                                set: { setSkinLooping($0) }
                             )
                         )
                         // 实测垂直范围：上沿在归一化 y≈0.400（678 × 0.40 ≈ 271pt），铺到屏幕底。
@@ -2995,7 +3015,8 @@ struct VideoDetailView: View {
                                                       advances: store.autoPlayNext)
                                 },
                                 set: { mode in
-                                    playerSession?.looping = mode.loopsCurrent
+                                    // 走统一入口（会话 + 偏好双写），理由见 `setSkinLooping` 的注释。
+                                    setSkinLooping(mode.loopsCurrent)
                                     store.autoPlayNext = mode.autoAdvances
                                 }
                             ),
@@ -3055,7 +3076,7 @@ struct VideoDetailView: View {
                             ),
                             loopPlayback: Binding(
                                 get: { playerSession?.looping ?? false },
-                                set: { playerSession?.looping = $0 }
+                                set: { setSkinLooping($0) }
                             ),
                             backgroundAudio: Binding(
                                 get: { BiliPlayerExtras.shared.backgroundAudio },
@@ -3159,7 +3180,8 @@ struct VideoDetailView: View {
                                                       advances: store.autoPlayNext)
                                 },
                                 set: { mode in
-                                    playerSession?.looping = mode.loopsCurrent
+                                    // 走统一入口（会话 + 偏好双写），理由见 `setSkinLooping` 的注释。
+                                    setSkinLooping(mode.loopsCurrent)
                                     store.autoPlayNext = mode.autoAdvances
                                 }
                             ),
@@ -3331,6 +3353,7 @@ struct VideoDetailView: View {
                 summary: detail?.name ?? "",
                 isFavorite: store.favorites.contains(videoFavorite()),
                 pip: biliPip,
+                danmakuOn: danmakuOnForSkin,
                 onBack: { leavePlayer() },
                 onCast: {},
                 onMore: { biliPanel = .actionMenu },
@@ -3388,10 +3411,22 @@ struct VideoDetailView: View {
         }
     }
 
-    /// 哔哩哔哩皮肤的弹幕开关（与 One 分开存，避免互相覆盖）。
-    private var danmakuOnForSkin: Bool {
-        UserDefaults.standard.object(forKey: DanmakuPreference.key) as? Bool ?? true
-    }
+    /// ⛔ 这个 `@AppStorage` **只为建立依赖，不为了读值**。
+    ///
+    /// 原来 `danmakuOnForSkin` 直接读 `UserDefaults`，本视图对它没有 SwiftUI 依赖：
+    /// 在弹幕面板里拨了开关，`VideoDetailView` 的 body 不会因为这个键变化而重算，
+    /// 弹幕层要等到下一次**别的原因**（进度 sampler 每秒 tick、或其他状态变化）才更新 ——
+    /// 用户看到的是「拨了要等一下才生效」，极端情况下（暂停中、无 tick）看起来像没生效。
+    /// 复核 H1 指出这一点。
+    @AppStorage(DanmakuPreference.key) private var danmakuEnabledStored = true
+
+    /// 哔哩哔哩皮肤的弹幕开关。
+    ///
+    /// 注释原来写「与 One 分开存，避免互相覆盖」是**错的**：两边用的是同一个
+    /// `DanmakuPreference.key`（`"danmakuEnabled"`），本来就是同一份值 ——
+    /// 这正是「在 One 里关掉弹幕、切到哔哩哔哩也是关的」的原因，属预期行为，不是缺陷。
+    /// 现在改为读上面的 `@AppStorage`，依赖与语义同时对上。
+    private var danmakuOnForSkin: Bool { danmakuEnabledStored }
 
     /// 当前清晰度的显示名。`PlaybackSession.quality` 只有序号，
     /// 名字在 `qualities` 里；取不到就显示 `Auto`（与哔哩哔哩一致）。
@@ -3405,10 +3440,13 @@ struct VideoDetailView: View {
     }
 
     private func toggleSkinDanmaku() {
-        // 哔哩哔哩的弹幕开关写 `DanmakuPreference.key`；
-        // 这里没有独立的 revision 计数器（那里的 `danmakuRevision` 是播放页私有状态），
-        // 所以只翻存储值 —— 覆盖层本身监听同一个 key。
-        UserDefaults.standard.set(!danmakuOnForSkin, forKey: DanmakuPreference.key)
+        // 哔哩哔哩的弹幕开关写 `DanmakuPreference.key`。
+        //
+        // ⛔ 原注释写「覆盖层本身监听同一个 key」——不实：`DanmakuOverlay` 并不监听这个 key
+        //    （它接收调用方传进来的显隐判断，只 `@AppStorage` 了 area/fontSize 两个样式键）。
+        //    真正让开关生效的是上面那个 `@AppStorage` 建立的依赖 ⇒ 本视图重算 ⇒
+        //    三个 Bili 播放页拿到新的 `danmakuOn` ⇒ 弹幕层出现/消失。
+        danmakuEnabledStored.toggle()
     }
 
     /// 全屏里的「下一集」。没有下一集就不动，不要静默从头开始。
@@ -3639,7 +3677,34 @@ struct VideoDetailView: View {
             playerSession?.setSpeed(Float(value))
         }
         .onAppear {
+            #if DEBUG
+            // ★ 时序探针：`-qaLogSkinSeed 1` 时打印「onAppear 那一刻 playerSession 是否已就绪」。
+            //
+            // 为什么需要它：B1 的整个论证建立在「onAppear 时 playerSession 为 nil」这一步上，
+            // 而这一步此前**只是时序推演，没有任何运行时读数**（复核 t7 与我本人都是推的）。
+            // 有了这行，模拟器上跑一次 `-qaLogSkinSeed 1 -qaOneSkin -qaSection home -qaPage detail:...`
+            // 就能把「推演」变成「读数」——不必等真机。
+            // 判据：日志出现 `SEED onAppear session=nil` ⇒ 旧写法必失效；`session=有` ⇒ 需要重新审。
+            NSLog("SEED onAppear session=%@ speed=%.2f",
+                  playerSession == nil ? "nil" : "ready", oneSkinSpeed)
+            #endif
             if oneSkinSpeed != 1 { playerSession?.setSpeed(Float(oneSkinSpeed)) }
+        }
+        // ⛔ 只有 `onAppear` 是不够的 —— 这条我自己在本文件别处写过理由，却漏了这里。
+        //
+        // `playerSession` 的唯一赋值源是 `onStageSession`（在 `watchStage:3845`，
+        // 属于 `watchStage` 视图），而上面那个 `onAppear` 在 `oneSkinBody` 内 ——
+        // **两者不在同一视图层级，onAppear 必然先跑**，那一刻 `playerSession` 还是 nil，
+        // `?.` 把整句静默丢弃。且 `OneSkinStage` 调用处无 `.id()`，identity 不变，
+        // onAppear 不会因会话就绪而重跑。
+        // 后果（用户可感知）：One 里设 1.5× 退出重进 → chip 显示 1.5×，实际按 1.0× 播。
+        //
+        // 判时序要看**视图层级**，不看行号先后（`:3491 < :3845` 只是佐证）。
+        // 与 `armSleepTimer()` 双挂（onAppear + onChange(watchChannel)）同一修法；
+        // 也与 loop 的 `seedLoopPreference()` 同一形态 —— 修一个宿主时必须扫同文件的同构写法。
+        .onChange(of: playerSession != nil) { _, ready in
+            guard ready, oneSkinSpeed != 1 else { return }
+            playerSession?.setSpeed(Float(oneSkinSpeed))
         }
         // [mi3s] 方向锁 / 转屏 / 折展收全屏 / 换集清会话，全部**不在这里写**：
         // 已统一到 `watchPageLifecycle()`，由 `body` 在 `watchBody` 外层挂一次。
@@ -3717,11 +3782,68 @@ struct VideoDetailView: View {
     ///   · 折叠态钉竖屏、展开后交还给设备（不主动请求横屏）；
     ///   · **转屏不再自动进全屏**：横屏就是双列选集页，全屏只由全屏键进入；
     ///   · 换集清掉上一集的会话；离页收回页面 scope、解除方向锁。
+    /// 把定时关闭的到点动作挂到 `BiliPlayerExtras` 单例上。
+    ///
+    /// 为什么需要多次调用：`playerSession` 由 `onStageSession` / `opened:` 回调赋回，
+    /// `onAppear` 那一刻通常是 nil；换集后也可能变化。所以 `onAppear` 调一次、
+    /// `playerSession` 非空状态变化时再调一次。
+    private func armSleepTimer() {
+        let sessionNow = playerSession
+        let channelNow = watchChannel
+        BiliPlayerExtras.shared.onSleep = { [weak sessionNow] in
+            guard let sessionNow else { return }
+            // 校验：它仍是「正在播这一集」的那个会话。不是就什么都不做 ——
+            // 宁可不暂停，也不能误停别的集、更不能新建空会话。
+            guard let channel = channelNow, sessionNow.isPlaying(channel) else { return }
+            sessionNow.player.pause()
+            Diagnostics.shared.record(.info, "bili", "sleep timer paused playback")
+        }
+        BiliPlayerExtras.shared.resumeSleepIfNeeded()
+    }
+
     private func watchPageLifecycleBody<Content: View>(_ content: Content) -> some View {
         content
             .onAppear {
                 store.isWatchPageMounted = true
                 store.watchPageScopes.formUnion(watchScopes)
+                // ⛔ 定时关闭：把到点时要做的事挂上，并把已存的到点时刻接回来。
+                //
+                // `BiliPlayerExtras` 是单例（Duo 合拢/展开会把观看页整个撕掉重建，
+                // `@State` 每次归零 —— 定时关闭会静默消失），注释里写明
+                // 「页面出现时把 `onSleep` 重新挂上就行」——**但从来没有任何地方挂过它**。
+                //
+                // 后果：`startSleep` 的四个入口都通、ticker 每秒真跑、到点真调
+                // `self.onSleep?()`，而 `onSleep` 恒为 nil ⇒ **到点什么都不会发生**。
+                // `?.()` 这个可选调用让整条链在类型层面完全合法，编译器不会提醒。
+                // 而且 `sleepBadge` 也没有 UI 消费 —— 用户连「设没设上」都看不到。
+                //
+                // 挂在 `watchPageLifecycleBody` 而不是各皮肤内部：三个 Bili 页面
+                // （全集/横屏/竖屏）都从这里进，且只有这里拿得到 `playerSession`。
+                //
+                // ⛔ 闭包体里不要捕获 `self` 读 `playerSession`：本视图是 struct，
+                //    捕获副本读的是**闭包创建那一刻**的快照。
+                //
+                // ⛔ 也不要现在就取 `let owningSession = playerSession` ——
+                //    `playerSession` 是 `onStageSession` / `opened:` 回调**之后**才赋值的
+                //    （`:3771/:3787`），`onAppear` 那一刻它通常是 nil。
+                //    那样会挂上一个「捕获了 nil」的闭包，到点直接 return ——
+                //    **等于把「什么都没发生」从原来的「没赋值」挪到了「赋了个空值」，
+                //    症状一模一样，更难查。**（第一版就是这么写的，自己抓出来了。）
+                //
+                // 正确做法：把「当前会话」以**弱引用**带上，到点那一刻再校验它还是不是当前那个。
+                //
+                // ⛔ 不能用 `store.playbackSession(for: store.playing)` 现取 —— 它遇到
+                //    新频道会**新建一个空会话并把 `activeSession` 换掉**（`Store.swift:551-555`），
+                //    等于到点那一刻把真正在播的会话踢掉。`playing` 的 didSet 还会在
+                //    `activeSessionChannel != playing` 时主动把 `activeSession` 清空，
+                //    那种状态下现取必然新建空会话。**定时关闭不该顺手破坏播放状态。**
+                //
+                // ⛔ 也不能在 arm 时就把值固定下来（第一版错法，见 `d29fb84`）。
+                //
+                // 折中：`onAppear` 时 `playerSession` 常常还是 nil，所以**不能只挂一次** ——
+                // 下面的 `.onChange(of: watchChannel)` 会在频道就绪/换集后再挂一次，
+                // 保证最终挂上的是有值的那个。
+                armSleepTimer()
                 // ⛔ 这里**不再动坞**。
                 //
                 // 上一版写的是 `store.miniPlayerActive = false`（「回到观看页，小窗授权作废」）。
@@ -3775,6 +3897,17 @@ struct VideoDetailView: View {
                 }
                 #endif
             }
+            // ⛔ 这里必须监听 `watchChannel`，**不能**监听 `playerSession == nil`。
+            //
+            // `playerSession` 在**换集时保持不变**（`:2350-2352` 注释自己写明），
+            // 所以 `playerSession == nil` 这个 Bool 换集时是 `false → false`，**不触发**。
+            // 那样闭包会一直绑着**换集前**的 `channelNow`，到点 `isPlaying(旧频道)` 为假
+            // ⇒ 静默 return，连日志都没有。症状与原 P0 一样，只是触发条件从
+            // 「从未挂载」变成「换过集」。（fix-reviewer ④ 指出，成立。）
+            //
+            // `watchChannel` 由 `store.playing` 派生，换集会变，且 `Channel` 是 `Hashable`
+            // （`Models.swift:322`），可以直接作为 `onChange` 的观测值。
+            .onChange(of: watchChannel) { _, _ in armSleepTimer() }
             .onChange(of: watchScopes) { old, new in
                 store.watchPageScopes.subtract(old.subtracting(new)); store.watchPageScopes.formUnion(new)
             }

@@ -125,17 +125,24 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         layer.videoGravity = .resizeAspect
         layer.isHidden = true
         layer.backgroundColor = nil
-        // Only build the pipeline when the viewer actually switched an enhancement on. With both switches
-        // off there is nothing to process, and the idle layer/pipeline is a use-after-free hazard across a
-        // Duo fold/unfold (SIGSEGV / SIGILL on scene teardown).
-        guard VideoEnhancement.enabled else { return }
-        #if !targetEnvironment(simulator)
-        if #available(macOS 26, iOS 26, tvOS 26, *) {
-            engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in
-                Task { @MainActor [weak self] in self?.apply(status, summary: summary, note: note, format: format) }
-            }
-        }
-        #endif
+        // ⛔ 这里**不再** `guard VideoEnhancement.enabled else { return }`。
+        //
+        // 原来那样写有三个连锁后果（用户可感知）：
+        //   ① 增强关着时 `return` 在 `engine` 创建**之前**（原 :131 vs :134），
+        //      连下面的 `itemObservation` 和 250ms 刷新定时器都一起没建；
+        //   ② 于是播放中把开关打开 → `refresh()` 首行 `guard let engine` 直接返回，
+        //      **永远不会生效**；用户看到的是「开了没反应」；
+        //   ③ 全仓零处 `onChange(of: upscalesVideo|smoothsVideo)`，没有任何重建入口。
+        //   ⇒ 唯一出路是退出重进（那时才会以 enabled=true 重建）。
+        //
+        // 但原来那个 guard 不是没理由的，注释写明：空闲的 layer/pipeline 在 Duo
+        // 折叠/展开时是 use-after-free 隐患（SIGSEGV / SIGILL on scene teardown）。
+        //
+        // 折中：**监听照建，pipeline 惰性建**。
+        //   · `itemObservation` 与刷新定时器无条件建立（它们本身不持有 GPU 资源）；
+        //   · `engine` 保持 nil 直到 `refresh()` 发现「开关真的开着且设备支持」才创建
+        //     （见 `makeEngineIfNeeded()`）——那个时刻与「关着就建」的场景不同，
+        //     是用户明确打开之后才付出代价，也就绕开了折叠期空闲 pipeline 的隐患。
         itemObservation = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
@@ -164,7 +171,71 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         Task { @MainActor [weak self] in self?.refresh() }
     }
 
+    /// 按需创建增强管线。
+    ///
+    /// 只有「开关真的开着 + 设备支持」才建，且只在第一次需要时建一次。
+    /// 这样 `init` 不必因为开关关着就整个提前返回（那会让运行期开启永远无效），
+    /// 又不会在没有增强需求时长期持有一条空闲管线（Duo 折叠期的 use-after-free 隐患）。
+    /// 把已挂到 item 上的 output 与观察者全部拆除。
+    ///
+    /// 抽出来给两处共用：
+    ///   · `refresh()` 的常规换 item 路径
+    ///   · `makeEngineIfNeeded()` 的「增强被关掉」路径 —— 那条路径会 `return`，
+    ///     走不到 `refresh()` 的清理段，所以必须自己调一次。
+    private func detachOutput() {
+        if let item, let output { item.remove(output) }
+        // ⛔ 不能写 `if let jumpObserver { ...; jumpObserver = nil }` ——
+        //    `if let jumpObserver` 会引入同名的**局部常量**，遮蔽属性，
+        //    于是那行赋值对 `let` 报错（编译期就抓到）。
+        if let observer = jumpObserver {
+            NotificationCenter.default.removeObserver(observer)
+            jumpObserver = nil
+        }
+        layer.controlTimebase = nil
+        output = nil
+        item = nil
+    }
+
+    private func makeEngineIfNeeded() {
+        // ⛔ 先处理「开关被关掉」：**必须把 engine 释放回 nil**。
+        //
+        // 原来只做了「从没开过就不建」，漏了另一半 —— `engine` 一旦创建就**永不释放**
+        // （无 `engine = nil`、`VideoEnhancer` 也无 deinit），所以「开过一次再关掉」
+        // 会永久持有一条空闲 pipeline 跨 Duo 折叠/展开，
+        // 正是 `init` 原注释要避免的 use-after-free 场景。
+        // 复核（fix-reviewer ③）指出这一点，成立。
+        if !VideoEnhancement.enabled {
+            if engine != nil {
+                engine = nil
+                layer.flush()
+                // ⛔ 必须**自己拆干净**，不能只置 nil 就 return。
+                //
+                // `refresh()` 主体（下方 `if current !== item ...` 那段）是原来唯一做
+                // teardown 的地方：`item.remove(output)`、移除 `jumpObserver`、
+                // `layer.controlTimebase = nil`。而 `makeEngineIfNeeded()` 里一旦 `return`，
+                // `refresh()` 紧接着的 `guard let engine` 必失败 ⇒ **那些清理永远到不了**。
+                //
+                // 第一版就是这么错的（复核 R0 指出）：把「关掉时拆干净」
+                // 换成了「只置 nil 就撒手」。而**改前 `3dd8dbc` 关掉时其实是拆干净的**
+                // —— 因为 `current` 为 nil、`output` 为 nil，`nil !== item` 成立，进了清理分支。
+                detachOutput()
+                Diagnostics.shared.record(.info, "enhance", "pipeline released (enhancement off)")
+            }
+            return
+        }
+        guard engine == nil else { return }
+        #if !targetEnvironment(simulator)
+        if #available(macOS 26, iOS 26, tvOS 26, *) {
+            engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in
+                Task { @MainActor [weak self] in self?.apply(status, summary: summary, note: note, format: format) }
+            }
+        }
+        #endif
+    }
+
     private func refresh() {
+        // 开关可能是在播放中途打开的（设置页 / 播放器内开关），所以每次刷新都先补建管线。
+        makeEngineIfNeeded()
         guard let engine, let player else { return }
         let defaults = UserDefaults.standard
         var next = VideoEnhancementOptions(upscale: VideoEnhancement.canUpscale && defaults.bool(forKey: VideoEnhancement.upscaleKey),
@@ -176,12 +247,13 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         #endif
         let current = (next.upscale || next.smooth) ? player.currentItem : nil
         if current !== item || (current != nil && output == nil) {
-            if let item, let output { item.remove(output) }
-            if let jumpObserver { NotificationCenter.default.removeObserver(jumpObserver) }
-            jumpObserver = nil
-            item = current; output = nil
-            layer.controlTimebase = nil
+            // 与「增强被关掉」那条路径共用同一份拆除逻辑（见 `detachOutput`）。
+            // 注意顺序：先 `engine.setTimebaseReady(false)`，再拆 output ——
+            // 反过来的话引擎可能还在等一个已被移除的 output 的时刻表。
             engine.setTimebaseReady(false)
+            detachOutput()
+            item = current
+            output = nil
             if let current {
                 let made = AVPlayerItemVideoOutput(pixelBufferAttributes: [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,

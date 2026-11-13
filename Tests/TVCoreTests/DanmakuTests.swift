@@ -23,6 +23,95 @@ struct DanmakuTests {
         #expect(comments[1].position == .top)
     }
 
+    /// 拨速度档位时不清屏，但只保住 active 不保碰撞表 ⇒ 新弹幕会挤进已占用的行。
+    /// `adopt` 就是补这一步：把屏上已有的 placement 播种进新布局的三张表。
+    @Test func adoptingOnScreenPlacementsKeepsNewOnesOutOfTheirLanes() {
+        let comment = Danmaku(time: 0, position: .scroll, text: "on screen")
+        // 旧布局：屏上已经有一条，占住了 lane 0。
+        var old = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        // 第一次落位就是「屏上那条」，直接留用（第二次 place 会落到别的行，不能拿来当它）。
+        let resident = old.place(comment, width: 200, at: 0)!
+        #expect(resident.lane == 0)
+
+        // 新布局（换速度后）：不 adopt 时它以为满屏是空的，新弹幕落回 lane 0 —— 与屏上那条重叠。
+        var without = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 6)
+        #expect(without.place(Danmaku(time: 0, position: .scroll, text: "new"), width: 200, at: 0.5)?.lane == 0)
+
+        // adopt 之后，lane 0 被认作已占用，新弹幕挪到下一行。
+        var with = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 6)
+        with.adopt([resident])
+        #expect(with.place(Danmaku(time: 0, position: .scroll, text: "new"), width: 200, at: 0.5)?.lane != 0)
+    }
+
+    /// 同一行被 adopt 多条时，留 start 最新的那条：只有它决定下一颗能不能进。
+    @Test func adoptingKeepsTheNewestPlacementPerLane() {
+        let comment = Danmaku(time: 0, position: .scroll, text: "x")
+        var laidOut = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        let early = laidOut.place(comment, width: 100, at: 0)!
+        // 手工造一条同 lane、更晚开始的 placement（模拟同一行先后两条）。
+        let late = DanmakuLayout.Placement(comment: comment, start: 5, width: 100, lane: early.lane, speed: early.speed)
+
+        var layout = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        layout.adopt([late, early])   // 顺序故意反着给
+        // 若留下的是 early（start 0），`place` 会认为该行早就空了；留下 late 才正确挡住。
+        #expect(layout.place(Danmaku(time: 0, position: .scroll, text: "y"), width: 200, at: 5.2) != nil)
+        var again = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        again.adopt([late, early])
+        // lane 0 被 late 占着，新弹幕应去别的行（或本帧无处可放），总之不能是 lane 0。
+        #expect(again.place(Danmaku(time: 0, position: .scroll, text: "y"), width: 200, at: 5.2)?.lane != early.lane)
+    }
+
+    /// 顶栏固定弹幕也要播种：`place(.scroll)` 会读 `top[lane]` 避开还钉在那里的顶栏弹幕，
+    /// 所以只播 `scrolling` 不够（这是我第一版漏掉的一半）。
+    @Test func adoptingAlsoSeedsPinnedCommentsThatScrollingOnesMustAvoid() {
+        let pinned = Danmaku(time: 0, position: .top, text: "pinned")
+        var old = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        let resident = old.place(pinned, width: 100, at: 0)!
+        #expect(resident.lane == 0)
+
+        // ⛔ 这里不能断言「一定换行」——我第一版就是这么写的，红了才发现是对代码的误解。
+        //    `place(.scroll)` 对 `top[lane]` 的判据是「滚动弹幕到达右边时，顶栏是否已经消失」
+        //    （见 Danmaku.swift 那条 `guard time + (width - right)/speed >= pinned.start + fixedDuration`）。
+        //    顶栏还在、但滚动弹幕能在它消失前穿过去时，**允许共用该行**，这是设计意图。
+        //
+        //    所以「播没播 top」正确的判据是：**换一个顶栏会挡住的情形**，看两者结论是否不同。
+        //    顶栏刚出现（start=0）且滚动弹幕很慢（width 很大）时，它会来不及穿过去 ⇒ 必须换行；
+        //    不播 top 时这个约束不存在，它就会占 lane 0。
+        let slow = Danmaku(time: 0, position: .scroll, text: String(repeating: "s", count: 400))
+
+        var without = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        let unseeded = without.place(slow, width: 3000, at: 0.1)
+
+        var with = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        with.adopt([resident])
+        let seeded = with.place(slow, width: 3000, at: 0.1)
+
+        // 未播种：lane 0 空着，直接占它。
+        #expect(unseeded?.lane == 0)
+        // 播种后：lane 0 有顶栏弹幕挡着，必须换行（或本帧无处可放）。
+        #expect(seeded?.lane != 0)
+    }
+
+    /// 底部固定弹幕单独一张表，也要播（`place(.bottom)` 只读 `bottom`）。
+    @Test func adoptingSeedsTheBottomTableToo() {
+        let low = Danmaku(time: 0, position: .bottom, text: "low")
+        var old = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        let resident = old.place(low, width: 100, at: 0)!
+        var with = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        with.adopt([resident])
+        // 同一张表里同一条还钉着，第二条底部弹幕不得再占同一行。
+        #expect(with.place(Danmaku(time: 0, position: .bottom, text: "low2"), width: 100, at: 0.5)?.lane != resident.lane)
+    }
+
+    /// 越界 lane 必须被丢弃，不许把 place() 的索引假设搞坏。
+    @Test func adoptingIgnoresLanesTheNewLayoutDoesNotHave() {
+        let comment = Danmaku(time: 0, position: .scroll, text: "x")
+        var layout = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
+        let outOfRange = DanmakuLayout.Placement(comment: comment, start: 0, width: 100, lane: 99, speed: 100)
+        layout.adopt([outOfRange])   // 不该崩，也不该影响正常落位
+        #expect(layout.place(comment, width: 200, at: 0)?.lane == 0)
+    }
+
     @Test func layoutKeepsCommentsApartAndDropsWhatDoesNotFit() {
         var layout = DanmakuLayout(width: 1000, height: 400, laneHeight: 50, scrollArea: 0.5, scrollDuration: 10)
         #expect(layout.scrollLanes == 4 && layout.fixedLanes == 2)

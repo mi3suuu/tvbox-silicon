@@ -42,6 +42,10 @@ import TVCore
         DownloadsLifecycle.install()
         // 观看页皮肤：首次启动把旧版布尔迁移成三态值，之后读到的就是稳定值。
         PlaySkin.adoptCurrentIfNeeded()
+        // 播放器控件「直接显示」集合：接入 surfacing 过滤后，把老用户升级前
+        // 顶栏里看得见的控件补进集合，否则观看页顶栏会缩水、全屏顶栏会清空。
+        // 逐形态（折叠外屏/展开竖持/展开横持）、幂等（marker 键）。见 #7b。
+        PlayerControlsLayout.migrateSurfacingIfNeeded()
         #endif
         SubtitleTranslationSetup.install()
         // [mi3s] 出口代理：回环中继必须在播放前起来。此前 `LocalProxyServer.base()` 零调用点，

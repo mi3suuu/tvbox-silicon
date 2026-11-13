@@ -156,7 +156,20 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     /// 转屏与锁定是顶栏的**结构位**（一直在，不归布局管），transport 那几个属于底栏，
     /// 因此不在这张表里：把它们勾上不会有任何可见变化，那就是在骗人。
     static var barControls: [PlayerControl] {
-        allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }
+        // ⛔ 这张表必须是 `standardBottom` 的**不相交**补集，否则「能勾但不生效」会复发。
+        //
+        // `surfaced` 两个集合只约束**顶栏**，这个设计成立的前提是「底栏控件根本进不了勾选表」。
+        // 而排除是**隐式**的（靠 `isRoundButton` 返回 false），没有任何东西阻止有人日后
+        // 把某个底栏控件的 `isRoundButton` 改成 true —— 那时它会出现在勾选表里，
+        // 用户勾上/取消却没有任何可见变化，正是本次修的 #7b 同型复发。
+        // 复核 t8 判 O3：当时没有测试锁这条不变量。这里用 Debug 断言把它变成运行期事实。
+        let controls = allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }
+        assert(
+            Set(controls).isDisjoint(with: Set(Self.standardBottom)),
+            "barControls 与 standardBottom 出现交集 ⇒ 底栏控件进了勾选表，"
+            + "勾上/取消将无可见变化（「能勾但不生效」）。检查 isRoundButton 的 switch。"
+        )
+        return controls
     }
 
     /// 这个名字在**本机**真的能画出来吗。
@@ -282,6 +295,70 @@ struct PlayerControlsLayout: Equatable {
     /// 把当前形态的配置清掉，重新回到默认。
     static func reset(_ shape: Shape) {
         UserDefaults.standard.removeObject(forKey: shape.storageKey)
+    }
+
+    // MARK: - 一次性迁移：接入「直接显示」集合（#7b）
+
+    /// 把「升级前顶栏里看得见的控件」补进两种「直接显示」集合。
+    ///
+    /// **为什么需要**：`MobilePlayer`（原版皮肤）此前完全不读
+    /// `watchSurfaced` / `fullSurfaced`（`grep -c surfaced App/MobilePlayer.swift` = 0），
+    /// 顶栏是纯槽位驱动。接入过滤后，默认 `watchSurfaced = [.airPlay, .episodes]`、
+    /// `defaultFullSurfaced = []`，于是老用户升级后会看到：观看页顶栏从 N 颗变 2 颗、
+    /// **全屏顶栏一颗不剩**。那不是他们改的配置，是升级造成的 —— 必须先补平。
+    ///
+    /// **为什么逐形态**：控制栏配置按三种形态各自分键存储
+    /// （`Shape.folded/unfolded/sideways`），用户可能排过三套不同布局。
+    /// 只迁一份，另外两个形态升级后照样塌。
+    ///
+    /// **为什么幂等**：用户可能从任意旧版本升上来，「版本号变了就迁」不可靠。
+    /// 判据是「两个集合都还是默认 + **顶栏里有任何可见控件**」，并有 marker 键防重复写盘。
+    /// 连续启动两次，第二次不再写。
+    ///
+    /// ⛔ 判据原先是「顶栏里有**超出默认**的控件」，已修正 —— 那条会漏掉整整一类用户：
+    /// 顶栏正好是默认两颗时 extras 为空 ⇒ 不迁移 ⇒ 全屏顶栏照样是空的（`fullSurfaced = []`）。
+    /// 复核 t8 判 O1：注释当时仍写旧判据，与实现不符。这一行已同步。
+    ///
+    /// 判据与负对照见 `Tests/TVCoreTests/PlayerControlSurfacingTests.swift`。
+    @MainActor
+    static func migrateSurfacingIfNeeded() {
+        let defaults = UserDefaults.standard
+        let marker = PlayerControlSurfacingMigration.markerKey
+        guard defaults.object(forKey: marker) == nil else { return }
+
+        let defaultWatch = defaultWatchSurfaced.map(\.rawValue)
+        let defaultFull = defaultFullSurfaced.map(\.rawValue)
+        var wrote = false
+
+        for shape in Shape.allCases {
+            // 该形态没存过配置 → 用的就是 standard，顶栏 = standard.top，
+            // 与默认集合必然一致（extras 为空），plan 会返回 changed=false。
+            var layout = PlayerControlsLayout(stored: stored(for: shape))
+            let outcome = PlayerControlSurfacingMigration.plan(
+                topSlots: layout.topSlots.map { $0?.rawValue },
+                watchSurfaced: layout.watchSurfaced.map(\.rawValue),
+                fullSurfaced: layout.fullSurfaced.map(\.rawValue),
+                defaultWatch: defaultWatch,
+                defaultFull: defaultFull,
+                alreadyMigrated: false          // marker 已在循环外统一判过一次
+            )
+            guard outcome.changed else { continue }
+            let watch = outcome.watchSurfaced.compactMap { PlayerControl(rawValue: $0) }
+            let full = outcome.fullSurfaced.compactMap { PlayerControl(rawValue: $0) }
+            layout.watchSurfaced = watch
+            layout.fullSurfaced = full
+            defaults.set(layout.stored, forKey: shape.storageKey)
+            wrote = true
+            #if DEBUG
+            print("[PlayerControls] surfacing migrated shape=\(shape.rawValue) watch=\(watch.count) full=\(full.count)")
+            #endif
+        }
+
+        // 无论有没有写，都记 marker：判据已经跑过，不需要每次启动重跑。
+        defaults.set(true, forKey: marker)
+        #if DEBUG
+        print("[PlayerControls] surfacing migration done wrote=\(wrote)")
+        #endif
     }
 
     /// 当前设备的形态（给播放器各读取点用）。
@@ -515,9 +592,25 @@ struct PlayerControlsLayout: Equatable {
         remove(control)
         let index = min(max(slot, 0), Self.slotCount - 1)
         switch zone {
-        case .top: topSlots[index] = control
-        case .bottom: bottomSlots[index] = control
-        case .more: more.append(control)
+        case .top:
+            // ⛔ 目标槽位若已被别人占着，那个控件**不能凭空消失**。
+            //
+            // 原来直接 `topSlots[index] = control` —— 被挤掉的那个控件
+            // 从 topSlots 里被覆盖掉，既不在顶栏、也不在「更多」里，
+            // 于是它**彻底从界面上消失**，用户只剩「我刚才那个按钮呢」。
+            // 现在把被挤掉的那个收进「更多」，功能不丢、位置可再拖回来。
+            if let displaced = topSlots[index], displaced != control, !more.contains(displaced) {
+                more.append(displaced)
+            }
+            topSlots[index] = control
+        case .bottom:
+            if let displaced = bottomSlots[index], displaced != control, !more.contains(displaced) {
+                more.append(displaced)
+            }
+            bottomSlots[index] = control
+        case .more:
+            // 放进「更多」时，若它本来就在 more 里（被 remove 清掉了），加回去即可。
+            more.append(control)
         }
     }
 

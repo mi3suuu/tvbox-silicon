@@ -14,6 +14,8 @@ struct PlaybackSettingsView: View {
         adSkipCount == 0 ? nil : String(adSkipCount)
     }
     @AppStorage(PictureLevel.key) private var slidesLevels = true
+    /// 双击左右跳过 10 秒；关掉后双击改为播放/暂停（上游 1.8.12 的开关）。
+    @AppStorage(PictureDoubleTap.key) private var doubleTapSkips = true
     @AppStorage(VideoEnhancement.upscaleKey) private var upscalesVideo = false
     @AppStorage(VideoEnhancement.smoothKey) private var smoothsVideo = false
     @AppStorage(PlaybackInfo.key) private var showsPlaybackInfo = false
@@ -153,6 +155,15 @@ struct PlaybackSettingsView: View {
             SettingsGroup(footer: L10n.text("Slide up or down on the left of the video to change the brightness, or on the right to change the volume.")) {
                 Toggle(isOn: $slidesLevels) {
                     FormLabel(symbol: "sun.max.fill", tint: .yellow, title: L10n.text("Slide for Brightness and Volume"))
+                }
+                .settingsSwitch()
+            }
+            // 上游 1.8.12 `972a75a` 的开关。融合时整条链被吃掉：
+            // 定义（`PictureDoubleTap`）在，行为门与这个 Toggle 都没了，
+            // 用户失去「把双击改成播放/暂停」的能力，且没有任何入口能看出曾经有过。
+            SettingsGroup(footer: L10n.text("Double-tap the left or right of the video to skip 10 seconds. Turn this off and a double tap plays or pauses instead.")) {
+                Toggle(isOn: $doubleTapSkips) {
+                    FormLabel(symbol: "goforward.10", tint: .green, title: L10n.text("Double-Tap to Skip"))
                 }
                 .settingsSwitch()
             }

@@ -48,6 +48,8 @@ struct BiliLandscapePage: View {
     var pictureFraction: CGFloat = 0.63
     /// 画中画控制器：交给 `BiliSkinPicture` 把画面登记成 PiP 内容源（见 `BiliPortraitPage.pip` 的说明）。
     var pip: PictureInPicture? = nil
+    /// 弹幕开关。与 Portrait / 全屏读同一个 `DanmakuPreference.key`（经 `danmakuOnForSkin` 传入）。
+    var danmakuOn: Bool = true
 
     var onBack: () -> Void = {}
     var onCast: () -> Void = {}
@@ -100,6 +102,15 @@ struct BiliLandscapePage: View {
                                  pip: pip)
                     .aspectRatio(aspectRatio, contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 弹幕层（Bili 皮肤原来没有）。与 Portrait 同源同写法：
+                // 共用 session 的 danmaku，叠在画面之上、控件之下。
+                if danmakuOn, !session.danmaku.isEmpty {
+                    DanmakuOverlay(player: session.player,
+                                   comments: session.danmaku,
+                                   opacity: session.danmakuOpacity,
+                                   revision: session.danmakuRevision)
+                        .allowsHitTesting(false)
+                }
             }
             HStack(spacing: 0) {
                 iconButton("chevron.backward", "Back", onBack)

@@ -184,3 +184,92 @@ private func suite(_ tag: String) -> String { "deleted.\(tag)." + UUID().uuidStr
     deleted.prune(live: [])
     #expect(deleted.contains(kept, origin: origin))
 }
+
+// MARK: - `prune` 的 live 口径（S5-F1）
+
+/// 缺陷本体：`prune` 曾只把**合并结果**的 origin 当 live。
+///
+/// `Subscription.merge` 只保留**第一个**订阅的 origin，而键里存的是
+/// **每个订阅各自的** `site.origin(or:)`（落地地址）。于是「第 2..N 个订阅发生重定向」
+/// 这条路径上，那批真删记账会被当孤儿回收 —— 用户重加同一订阅时源仍显示已删、永远不出现。
+///
+/// 本测试直接对 `DeletedSources.liveOrigins` 判口，用老口径作负对照。
+@Test @MainActor func pruneLiveOriginsCoverEverySubscriptionsLandedOrigin() throws {
+    // 三个订阅：第 1、3 个重定向过，第 2 个没有。
+    let typed1 = URL(string: "https://feed-a.example/sub.json")!
+    let landed1 = URL(string: "https://cdn-a.example/mirror/sub.json")!
+    let typed2 = URL(string: "https://feed-b.example/sub.json")!
+    let typed3 = URL(string: "https://feed-c.example/sub.json")!
+    let landed3 = URL(string: "https://cdn-c.example/edge/sub.json")!
+
+    let entries = [
+        SubscriptionEntry(address: typed1.absoluteString),
+        SubscriptionEntry(address: typed2.absoluteString),
+        SubscriptionEntry(address: typed3.absoluteString),
+    ]
+    let landed: [String: URL] = [
+        typed1.absoluteString: landed1,
+        typed3.absoluteString: landed3,
+    ]
+
+    // 新口径：逐订阅取两个地址
+    let fixed = DeletedSources.liveOrigins(
+        entries: entries,
+        landedOrigin: { landed[$0] },
+        mergedOrigin: landed1        // merge 只保留第一个订阅的 origin
+    )
+
+    // 老口径：只取 address + 合并结果的 origin（这就是缺陷）
+    var legacy = Set(entries.map(\.address))
+    legacy.insert(landed1.absoluteString)
+
+    // ① 第 3 个订阅的落地地址：新口径有，老口径没有 —— 这就是被漏掉的那条路径
+    #expect(fixed.contains(landed3.absoluteString))
+    #expect(!legacy.contains(landed3.absoluteString))
+
+    // ② 老口径能覆盖的，新口径必须全都有（不能为了修一处丢另一处）
+    #expect(fixed.isSuperset(of: legacy))
+
+    // ③ 负对照：用老口径的 live 去 prune，第 3 个订阅的真删记账会被误删
+    let name = suite("prune-live")
+    let defaults = try #require(UserDefaults(suiteName: name))
+    defer { defaults.removePersistentDomain(forName: name) }
+
+    let siteC = source("c")
+    let deletedLegacy = DeletedSources(defaults: defaults)
+    deletedLegacy.insert(siteC, origin: landed3)
+    #expect(deletedLegacy.contains(siteC, origin: landed3))
+    deletedLegacy.prune(live: legacy)
+    // ⚠️ 老口径下这条记账被删掉了 —— 证明缺陷真实存在（不是想象）
+    #expect(!deletedLegacy.contains(siteC, origin: landed3))
+
+    // ④ 正对照：同样的数据，用新口径 prune，记账必须留住
+    let name2 = suite("prune-live-fixed")
+    let defaults2 = try #require(UserDefaults(suiteName: name2))
+    defer { defaults2.removePersistentDomain(forName: name2) }
+    let deletedFixed = DeletedSources(defaults: defaults2)
+    deletedFixed.insert(siteC, origin: landed3)
+    #expect(deletedFixed.contains(siteC, origin: landed3))
+    deletedFixed.prune(live: fixed)
+    #expect(deletedFixed.contains(siteC, origin: landed3))
+}
+
+/// 收口：`liveOrigins` 在拿不到落地 origin（documents 还没落盘 / 没订阅）时不能崩，
+/// 且空订阅 + 无合并 origin 必须返回空集 —— 而 `prune` 对空集是「还没算出来」的保护语义。
+@Test @MainActor func pruneLiveOriginsDegradeSafely() throws {
+    // 无订阅、无合并 origin → 空集（交给 prune 的保护分支，不清任何记账）
+    let empty = DeletedSources.liveOrigins(entries: [], landedOrigin: { _ in nil }, mergedOrigin: nil)
+    #expect(empty.isEmpty)
+
+    // 有订阅但拿不到落地 origin → 至少保留 address
+    let typed = URL(string: "https://feed.example/sub.json")!
+    let onlyTyped = DeletedSources.liveOrigins(
+        entries: [SubscriptionEntry(address: typed.absoluteString)],
+        landedOrigin: { _ in nil }
+    )
+    #expect(onlyTyped == [typed.absoluteString])
+
+    // 非法 address 字符串不能崩、也不能产生垃圾项
+    let junk = DeletedSources.liveOrigins(entries: [SubscriptionEntry(address: "")], landedOrigin: { _ in nil })
+    #expect(junk.isEmpty)
+}

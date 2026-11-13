@@ -159,12 +159,27 @@ import TVCore
     var isPaused: Bool { session.paused }
     var isLoading: Bool { session.loading }
 
-    /// 卡片画面比例取**实际画面**：唯一真源是 `presentationSize`（项目铁律）。
+    /// 卡片画面比例取**实际画面**：唯一真源仍是 `presentationSize`，
+    /// 但必须读 `session.presentationAspect` 这个**可观察镜像**。
+    ///
+    /// ⛔ 原来直接读 `session.player.currentItem?.presentationSize` —— 那是普通属性，
+    /// 不是 SwiftUI 可观察源：源比例就绪后卡片**不会重算**，一直按回退值 16/9 排版。
+    /// 竖屏源（9:16）于是被排成扁条，画面 `resizeAspect` 居中 ⇒ 左右留白，
+    /// 正是用户报的「竖屏源小窗缩到最小右侧有白边」。
+    /// 镜像由 `PlaybackSession.updateSkipping(_:)` 每采样 tick 同步。
     var aspectRatio: CGFloat {
-        let size = session.player.currentItem?.presentationSize ?? .zero
-        guard size.width > 0, size.height > 0 else { return 16.0 / 9 }
-        let ratio = size.width / size.height
-        return (ratio.isFinite && ratio > 0.2 && ratio < 6) ? ratio : 16.0 / 9
+        let r = DockCardAspect.resolved(session.presentationAspect)
+        #if DEBUG
+        // 探针（真机判据）：卡片实际拿去算高度用的比例，与它读到的镜像值。
+        // #16 的缺陷形态是「取数方式两种」——`fraction` 读 @Observable（会刷新），
+        // `aspectRatio` 过去读 `AVPlayerItem.presentationSize`（普通属性、不刷新），
+        // 于是竖源永远停在回退 16/9、卡片按横比例量高，右侧留白。
+        // 真机验收：竖源（nat=1080x1920）时 resolved 必须 ≈0.5625 而不是 1.7778；
+        // 且换集期间不得跳回 fallback（`from()` 返回 nil 时保留上次好值）。
+        oneSkinLog("DOCKASPECT mirrored=\(String(format: "%.4f", session.presentationAspect)) "
+            + "resolved=\(String(format: "%.4f", r)) fallback=\(r == DockCardAspect.fallback)")
+        #endif
+        return r
     }
 
     /// 播放进度（0…1），卡片底边那条细线用。
@@ -819,6 +834,18 @@ struct VideoTaskCard: View {
     var ownScale: CGFloat = 1
     /// 这张卡捏合时回报新的 scale（由坞写回 `perCardScale[task.id]`）。
     var onScaleChange: ((CGFloat) -> Void)? = nil
+    /// 这一张在坞里的**位置**与**总数**（`applyMuting` 用的是同一对值）。
+    ///
+    /// ⛔ 这两个数必须与 `VideoTasks.applyMuting()` 传给
+    /// `DockAudioPolicy.output(isActive:taskIndex:taskCount:override:)` 的**完全一致**。
+    /// 曾经这里写死 `taskIndex: 0, taskCount: 1` —— 于是卡片按「坞里只有我一路」算音量，
+    /// 而实际出声按真实路数算：
+    ///   · `.mixed` 下活跃那路实际是 `1/n`，卡片却显示满格；
+    ///   · `.dimmed` / `.focused` 的活跃判断也按「唯一那张」算，图标随之失真。
+    /// 用户看到的就是「这一张图标是静音，得按 + 才出声」——
+    /// **图标说的和听到的不是一回事**，因为两处口径分叉。
+    var taskIndex: Int = 0
+    var taskCount: Int = 1
 
     private var scaledWidth: CGFloat { width * ownScale }
     private var height: CGFloat { scaledWidth / task.aspectRatio }
@@ -854,7 +881,8 @@ struct VideoTaskCard: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel(Text(task.isPaused ? "Play" : "Pause"))
 
-                        DockVolumeButton(task: task, isActive: isActive)
+                        DockVolumeButton(task: task, isActive: isActive,
+                                         taskIndex: taskIndex, taskCount: taskCount)
                     }
                     .padding(6)
                 }
@@ -960,21 +988,37 @@ private struct DockVolumeButton: View {
     let task: VideoTask
     /// 它是不是当前选中的那一张（全局 `.focused` 下只有这张出声）。
     let isActive: Bool
+    /// 这一张在坞里的位置与总数 —— **必须与 `applyMuting()` 用同一对值**，
+    /// 否则图标/滑杆与实际听到的声音分叉（见 `VideoTaskCard.taskIndex` 的注释）。
+    var taskIndex: Int = 0
+    var taskCount: Int = 1
 
     /// 这一张现在**实际**的音量（0…1），用于图标分档与滑杆初值。
     ///
     /// 优先级与 `DockAudioPolicy.output` 一致：卡片设定 → 全局档位。
     private var effectiveVolume: Float {
-        DockAudioPolicy.current
-            .output(isActive: isActive, taskIndex: 0, taskCount: 1, override: task.audioOverride)
-            .volume
+        let out = DockAudioPolicy.current
+            .output(isActive: isActive, taskIndex: taskIndex, taskCount: taskCount,
+                    override: task.audioOverride)
+        #if DEBUG
+        // 探针（真机判据）：UI 侧算出来的音量与它用的入参。
+        // #14 的缺陷形态正是「入参两套」——这里若与 applyMuting 的真实
+        // index/count 不一致，图标/滑杆就会与实际听到的声音分叉。
+        // 真机验收：坞里挂 2 张卡 → 日志里两张卡的 idx/count 必须分别是 0/2、1/2，
+        // 且 muted 与图标一致。旧的写死版本恒为 0/1。
+        oneSkinLog("DOCKVOL idx=\(taskIndex) count=\(taskCount) active=\(isActive) "
+            + "muted=\(out.isMuted) vol=\(String(format: "%.3f", out.volume)) "
+            + "override=\(task.audioOverride.map { "\($0)" } ?? "nil")")
+        #endif
+        return out.volume
     }
 
     /// 现在到底出不出声。`isMuted` 与 `volume == 0` 都算「不出声」——
     /// 图标要按用户听到的结果画，不能只信其中一个字段。
     private var isSilent: Bool {
         let output = DockAudioPolicy.current
-            .output(isActive: isActive, taskIndex: 0, taskCount: 1, override: task.audioOverride)
+            .output(isActive: isActive, taskIndex: taskIndex, taskCount: taskCount,
+                    override: task.audioOverride)
         return output.isMuted || output.volume <= 0.001
     }
 
@@ -1146,7 +1190,9 @@ struct VideoTaskDock: View {
                                       isActive: task.id == store.videoTasks.activeTaskID, pip: pip,
                                       coveredByForeground: coveredByForeground,
                                       ownScale: perCardScale[task.id] ?? 1,
-                                      onScaleChange: { perCardScale[task.id] = $0 })
+                                      onScaleChange: { perCardScale[task.id] = $0 },
+                                      taskIndex: index,
+                                      taskCount: store.videoTasks.tasks.count)
                             .offset(perCardOffset[task.id] ?? slot)
                             .gesture(
                                 // 只挪这一张。`translation` 是相对**起手点**的累计量，
