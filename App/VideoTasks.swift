@@ -159,12 +159,16 @@ import TVCore
     var isPaused: Bool { session.paused }
     var isLoading: Bool { session.loading }
 
-    /// 卡片画面比例取**实际画面**：唯一真源是 `presentationSize`（项目铁律）。
+    /// 卡片画面比例取**实际画面**：唯一真源仍是 `presentationSize`，
+    /// 但必须读 `session.presentationAspect` 这个**可观察镜像**。
+    ///
+    /// ⛔ 原来直接读 `session.player.currentItem?.presentationSize` —— 那是普通属性，
+    /// 不是 SwiftUI 可观察源：源比例就绪后卡片**不会重算**，一直按回退值 16/9 排版。
+    /// 竖屏源（9:16）于是被排成扁条，画面 `resizeAspect` 居中 ⇒ 左右留白，
+    /// 正是用户报的「竖屏源小窗缩到最小右侧有白边」。
+    /// 镜像由 `PlaybackSession.updateSkipping(_:)` 每采样 tick 同步。
     var aspectRatio: CGFloat {
-        let size = session.player.currentItem?.presentationSize ?? .zero
-        guard size.width > 0, size.height > 0 else { return 16.0 / 9 }
-        let ratio = size.width / size.height
-        return (ratio.isFinite && ratio > 0.2 && ratio < 6) ? ratio : 16.0 / 9
+        DockCardAspect.resolved(session.presentationAspect)
     }
 
     /// 播放进度（0…1），卡片底边那条细线用。

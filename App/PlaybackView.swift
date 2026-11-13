@@ -79,6 +79,20 @@ import TVCore
     let subtitles = SubtitleCues()
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
+    /// 当前画面的宽高比（宽÷高）。**可观察的镜像**，不是每次去问 `presentationSize`。
+    ///
+    /// ⛔ 为什么必须镜像：`AVPlayerItem.presentationSize` 是**普通属性**，
+    /// 不是 SwiftUI 可观察源。视图里直接 `session.player.currentItem?.presentationSize`
+    /// 算出来的值，在源比例就绪后**不会触发重算** —— 它只在别的可观察值变化时顺带重算一次。
+    ///
+    /// 后果（用户报的「竖屏源小窗缩到最小，右侧有白边」）：
+    /// 坞卡片的高度 = `宽 / aspectRatio`。`aspectRatio` 一直停在回退值 16/9，
+    /// 于是竖屏源（9:16）的卡片被排成 16:9 的扁条，画面按 `resizeAspect`
+    /// 居中缩放 ⇒ **左右出现的正是那条留白**。
+    ///
+    /// 现在由 `updateSkipping(_:)` 每个采样 tick 同步一次（那里本来就每 tick 跑、
+    /// 且已经拿着 `item`），值变了才写，避免无意义的观察抖动。
+    private(set) var presentationAspect: CGFloat = 16.0 / 9.0
     /// 这一集是否**能记住**片头片尾标记（按作品存）。
     ///
     /// 没有 scope 时 `applySkipSettings` 会静默返回 —— 意思是「跳片头」这个开关
@@ -290,6 +304,14 @@ import TVCore
     private func updateSkipping(_ item: AVPlayerItem) {
         let time = player.currentTime().seconds
         position = time.isFinite ? max(0, time) : 0
+        // 画面比例镜像：值变了才写（见 `presentationAspect` 的注释）。
+        let size = item.presentationSize
+        if size.width > 0, size.height > 0 {
+            let ratio = size.width / size.height
+            if ratio.isFinite, ratio > 0.2, ratio < 6, abs(ratio - presentationAspect) > 0.001 {
+                presentationAspect = ratio
+            }
+        }
         let length = item.duration.seconds
         duration = length.isFinite ? max(0, length) : 0
         guard skipScope != nil, !editingSkip, !seekingSegment, pendingResume == nil, !restoringPosition,
