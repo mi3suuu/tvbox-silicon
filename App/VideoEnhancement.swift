@@ -176,6 +176,26 @@ private protocol EnhancementEngine: AnyObject, Sendable {
     /// 只有「开关真的开着 + 设备支持」才建，且只在第一次需要时建一次。
     /// 这样 `init` 不必因为开关关着就整个提前返回（那会让运行期开启永远无效），
     /// 又不会在没有增强需求时长期持有一条空闲管线（Duo 折叠期的 use-after-free 隐患）。
+    /// 把已挂到 item 上的 output 与观察者全部拆除。
+    ///
+    /// 抽出来给两处共用：
+    ///   · `refresh()` 的常规换 item 路径
+    ///   · `makeEngineIfNeeded()` 的「增强被关掉」路径 —— 那条路径会 `return`，
+    ///     走不到 `refresh()` 的清理段，所以必须自己调一次。
+    private func detachOutput() {
+        if let item, let output { item.remove(output) }
+        // ⛔ 不能写 `if let jumpObserver { ...; jumpObserver = nil }` ——
+        //    `if let jumpObserver` 会引入同名的**局部常量**，遮蔽属性，
+        //    于是那行赋值对 `let` 报错（编译期就抓到）。
+        if let observer = jumpObserver {
+            NotificationCenter.default.removeObserver(observer)
+            jumpObserver = nil
+        }
+        layer.controlTimebase = nil
+        output = nil
+        item = nil
+    }
+
     private func makeEngineIfNeeded() {
         // ⛔ 先处理「开关被关掉」：**必须把 engine 释放回 nil**。
         //
@@ -188,8 +208,17 @@ private protocol EnhancementEngine: AnyObject, Sendable {
             if engine != nil {
                 engine = nil
                 layer.flush()
-                output = nil
-                item = nil
+                // ⛔ 必须**自己拆干净**，不能只置 nil 就 return。
+                //
+                // `refresh()` 主体（下方 `if current !== item ...` 那段）是原来唯一做
+                // teardown 的地方：`item.remove(output)`、移除 `jumpObserver`、
+                // `layer.controlTimebase = nil`。而 `makeEngineIfNeeded()` 里一旦 `return`，
+                // `refresh()` 紧接着的 `guard let engine` 必失败 ⇒ **那些清理永远到不了**。
+                //
+                // 第一版就是这么错的（复核 R0 指出）：把「关掉时拆干净」
+                // 换成了「只置 nil 就撒手」。而**改前 `3dd8dbc` 关掉时其实是拆干净的**
+                // —— 因为 `current` 为 nil、`output` 为 nil，`nil !== item` 成立，进了清理分支。
+                detachOutput()
                 Diagnostics.shared.record(.info, "enhance", "pipeline released (enhancement off)")
             }
             return
@@ -218,12 +247,13 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         #endif
         let current = (next.upscale || next.smooth) ? player.currentItem : nil
         if current !== item || (current != nil && output == nil) {
-            if let item, let output { item.remove(output) }
-            if let jumpObserver { NotificationCenter.default.removeObserver(jumpObserver) }
-            jumpObserver = nil
-            item = current; output = nil
-            layer.controlTimebase = nil
+            // 与「增强被关掉」那条路径共用同一份拆除逻辑（见 `detachOutput`）。
+            // 注意顺序：先 `engine.setTimebaseReady(false)`，再拆 output ——
+            // 反过来的话引擎可能还在等一个已被移除的 output 的时刻表。
             engine.setTimebaseReady(false)
+            detachOutput()
+            item = current
+            output = nil
             if let current {
                 let made = AVPlayerItemVideoOutput(pixelBufferAttributes: [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,

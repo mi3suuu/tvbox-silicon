@@ -191,14 +191,19 @@ struct MusicNowPlayingScreen: View {
 
     /// 与 `toggle` 同尺寸的图标键，但用于**不在** `MusicPanel` 枚举里的动作
     /// （重复/随机是播放状态，不是面板开关）。
-    /// 开启态用强调色，与 macOS 侧 `MusicMacButton(on:)` 的视觉一致。
+    ///
+    /// ⛔ 开启态**不能**用 `Color.accentColor`（第一版就是这么写的，复核指出）：
+    ///   本屏强制 dark、背景是封面平均色的暗蒙版，而本机**没有自定义 AccentColor**
+    ///   （`find . -path "*AccentColor*"` 为空）⇒ 取系统蓝，在深色彩色蒙版上对比度掉，
+    ///   且与同屏 `toggle` 那套「`tint.blend(.black, 0.4)` 前景 + 白色圆底」体系不一致。
+    ///   这里直接沿用 `toggle` 的高亮语言，两处看起来才是一套。
     private func musicButton(_ symbol: String, label: String, on: Bool,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 20))
-                .foregroundStyle(on ? Color.accentColor : .primary)
-                .frame(width: 44, height: 44)
+            Image(systemName: symbol).font(.body.weight(.semibold))
+                .foregroundStyle(on ? AnyShapeStyle(tint.blend(with: .black, by: 0.4)) : AnyShapeStyle(.secondary))
+                .frame(width: 40, height: 40)
+                .background(on ? Color.white.opacity(0.9) : .clear, in: Circle())
                 .contentShape(.rect)
         }
         .buttonStyle(.plain)

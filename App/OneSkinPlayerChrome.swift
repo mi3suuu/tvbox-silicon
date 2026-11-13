@@ -498,6 +498,10 @@ struct OneSkinChrome: View {
         .environment(\.colorScheme, .dark)
         .task(id: channel.map { $0.url.absoluteString }) { await loadSubtitles() }
         .task(id: itemIdentity) { await tracksTask(); prepareEnhancer() }
+        // 播放中打开画质增强：`prepareEnhancer()` 的唯一旧调用点挂在 `itemIdentity` 上，
+        // 只在换集时跑。这里补两个 `onChange`，开关一动就尝试建起来（幂等，建过就 no-op）。
+        .onChange(of: upscalesVideo) { _, _ in prepareEnhancer() }
+        .onChange(of: smoothsVideo) { _, _ in prepareEnhancer() }
         .task(id: skipKey) { await loadSkipMarkers() }
         // 锁屏 / 控制中心：接上遥控键，并在状态变化时重写信息。
         // `initial: true` 覆盖「进页面时就已经在播」这一常见情形。
@@ -1670,8 +1674,21 @@ struct OneSkinChrome: View {
         clock.attach(player)
     }
 
-    /// 画质增强的处理器：只有开关真的开着才建（见 `enhancer` 的说明）。
-    /// 换集后 `player.currentItem` 变了，增强器自己跟着 item 走，不需要重建。
+    /// 画质增强的处理器：只在需要时建一次，**且允许在播放中途被补建**。
+    ///
+    /// ⛔ 两个坑，都是「看代码像对、用户就是打不开」：
+    ///
+    /// ① 原来这里 `guard VideoEnhancement.enabled else { return }` ——
+    ///    播放中把「锐化/60fps」打开时，`enhancer` 仍是 nil，而
+    ///    唯一调用点 `.task(id: itemIdentity)`（`:500`）**只在换集时触发**，
+    ///    全文件 `onChange(of: upscalesVideo|smoothsVideo)` = 0
+    ///    ⇒ 用户开开关毫无反应，只有换一集才生效。
+    ///    （`3dd8dbc` 修了原版 `PlaybackView` 的同一问题，但 One 走的是这条独立的建法，
+    ///     **没被那次修复覆盖**。复核 N1 与 S2 审计 P1-1 各自独立发现。）
+    ///
+    /// ② 消费端 `:454` 的判定是 `if let enhancer, VideoEnhancement.enabled` ——
+    ///    所以 `enhancer` 一旦建好就不必销毁：开关关掉时它自然不被画。
+    ///    这里保持「建了就不拆」的原设计，避免在 One 这条路径上引入资源生命周期问题。
     private func prepareEnhancer() {
         guard VideoEnhancement.enabled, let player = session?.player else { return }
         if enhancer == nil { enhancer = VideoEnhancer(player: player) }
