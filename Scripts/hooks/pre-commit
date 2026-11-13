@@ -14,32 +14,32 @@ cd "$ROOT" || exit 1
 
 [ "${AIGATE_SKIP:-0}" = "1" ] && { echo "⚠ AIGATE_SKIP=1 跳过全部闸门（留痕）"; exit 0; }
 
-# ── ⓿ 门闩：运行中的钩子必须是「功能完整版」 ──────────────────────────────────
-# 目的：任何绕过 install-hooks.sh 的部署路径（手工 cp 旧版、改了入库版忘了装）
-# 都在这里当场暴露，而不是"看着像有门、实际是旧门"。
+# ── ⓿ 门闩：证明两道门**真的能跑、真的能抓** ─────────────────────────────────
 #
-# ⚠️ 为什么**不**拿本树的 Scripts/hooks/pre-commit 做 sha256 基准（本轮实测踩过）：
-#   各 worktree 停在不同 commit，本树文件版本各不相同，而 common hooks 只可能装
-#   一个版本 ⇒ 必然误拦某棵树。实测：临时树基于 c312d29（旧版 4455B）建，
-#   common 装的是新版 6323B，门闩直接拦下合法提交。
+# ⚠️ 这里不能 grep 自己文件里的字符串。本项目已因此出过第三层同源缺陷：
+#   首版门闩检查「自己体内有没有 'audit-oneskin-keys.sh' 这个 marker」，
+#   而那个 marker 就写在它自己上方的声明行里 ⇒ **恒真**。
+#   实测：把 One 门的实体整段删掉、只留 marker 声明行，门闩仍判「功能完整」，
+#   提交照常落地。**校验的对象与依据是同一份东西。**
 #
-# 改为**功能自检**：本脚本必须包含每道门的关键函数调用。缺任何一段 = 旧版/被删。
-# 这是「能力在不在」的判断，与版本号无关，跨树恒成立。
-REQUIRED_MARKERS=(
-  'lint-agent-diff.sh'          # ① 断言强度门
-  'audit-oneskin-keys.sh'       # ② One 键名门
-)
-MISSING=""
-for m in "${REQUIRED_MARKERS[@]}"; do
-  grep -q -- "$m" "$0" || MISSING="$MISSING $m"
-done
-if [ -n "$MISSING" ]; then
-  echo "════ 提交被拦：运行中的钩子功能不完整 ════"
-  echo "  运行中：$0"
-  echo "  缺少关键段：$MISSING"
-  echo "  ⇒ 当前闸门是旧版或被手工裁剪过，对应门禁实际不存在。"
-  echo "  正确做法：./Scripts/install-hooks.sh"
-  exit 1
+# 所以改为**实际调用一次**：让每道门自己证明「我在且我能抓」。
+#   · One 键名门：`audit-oneskin-keys.sh --selftest` —— 它在临时 fixture 里
+#     造一个带随机 nonce 的已知违规，要求自己抓到。抓不到即 exit 1。
+#   · 断言强度门：见下方 ①，工具缺失时出声说明未校验（不静默）。
+#
+# 脚本不存在（分支未合并的树）时无法自检 —— 那是「尚未合并」不是「装错了」，
+# 不阻断，但由 ② 段的覆盖披露出声。
+K="$ROOT/Scripts/audit-oneskin-keys.sh"
+if [ -x "$K" ]; then
+  SELFTEST_OUT="$("$K" --selftest 2>&1)"
+  SELFTEST_RC=$?
+  if [ "$SELFTEST_RC" -ne 0 ]; then
+    echo "════ 提交被拦：One 键名门自检失败（这道门已失效）════"
+    echo "$SELFTEST_OUT"
+    echo "  ⇒ 脚本存在但抓不到已知违规：逻辑被改坏 / 被裁剪 / 依赖漂移。"
+    echo "  修复后重试：./Scripts/audit-oneskin-keys.sh --selftest"
+    exit 1
+  fi
 fi
 
 # ── ① 断言强度闸门（通用，来自 ~/.dsh/discipline）─────────────────────────────
