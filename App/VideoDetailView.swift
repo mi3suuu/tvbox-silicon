@@ -3551,6 +3551,25 @@ struct VideoDetailView: View {
     ///   · 折叠态钉竖屏、展开后交还给设备（不主动请求横屏）；
     ///   · **转屏不再自动进全屏**：横屏就是双列选集页，全屏只由全屏键进入；
     ///   · 换集清掉上一集的会话；离页收回页面 scope、解除方向锁。
+    /// 把定时关闭的到点动作挂到 `BiliPlayerExtras` 单例上。
+    ///
+    /// 为什么需要多次调用：`playerSession` 由 `onStageSession` / `opened:` 回调赋回，
+    /// `onAppear` 那一刻通常是 nil；换集后也可能变化。所以 `onAppear` 调一次、
+    /// `playerSession` 非空状态变化时再调一次。
+    private func armSleepTimer() {
+        let sessionNow = playerSession
+        let channelNow = watchChannel
+        BiliPlayerExtras.shared.onSleep = { [weak sessionNow] in
+            guard let sessionNow else { return }
+            // 校验：它仍是「正在播这一集」的那个会话。不是就什么都不做 ——
+            // 宁可不暂停，也不能误停别的集、更不能新建空会话。
+            guard let channel = channelNow, sessionNow.isPlaying(channel) else { return }
+            sessionNow.player.pause()
+            Diagnostics.shared.record(.info, "bili", "sleep timer paused playback")
+        }
+        BiliPlayerExtras.shared.resumeSleepIfNeeded()
+    }
+
     private func watchPageLifecycleBody<Content: View>(_ content: Content) -> some View {
         content
             .onAppear {
@@ -3580,18 +3599,20 @@ struct VideoDetailView: View {
                 //    **等于把「什么都没发生」从原来的「没赋值」挪到了「赋了个空值」，
                 //    症状一模一样，更难查。**（第一版就是这么写的，自己抓出来了。）
                 //
-                // 正确做法：闭包只捕获「怎么找到当前会话」，**到点那一刻现取**。
+                // 正确做法：把「当前会话」以**弱引用**带上，到点那一刻再校验它还是不是当前那个。
                 //
-                // ⛔ 也不能捕获 `watchChannel`：它可能是 nil（`store.playing` 为空、
-                //    或该频道不在 `watchScopes` 里），那样同样是「捕获了个空值」。
-                //    直接读 `store.playing` —— 它就是 `watchChannel` 的源，
-                //    且在到点那一刻取，拿到的一定是**当时**正在播的那一集。
-                BiliPlayerExtras.shared.onSleep = { [weak store] in
-                    guard let store, let channel = store.playing else { return }
-                    store.playbackSession(for: channel).player.pause()
-                    Diagnostics.shared.record(.info, "bili", "sleep timer paused playback")
-                }
-                BiliPlayerExtras.shared.resumeSleepIfNeeded()
+                // ⛔ 不能用 `store.playbackSession(for: store.playing)` 现取 —— 它遇到
+                //    新频道会**新建一个空会话并把 `activeSession` 换掉**（`Store.swift:551-555`），
+                //    等于到点那一刻把真正在播的会话踢掉。`playing` 的 didSet 还会在
+                //    `activeSessionChannel != playing` 时主动把 `activeSession` 清空，
+                //    那种状态下现取必然新建空会话。**定时关闭不该顺手破坏播放状态。**
+                //
+                // ⛔ 也不能在 arm 时就把值固定下来（第一版错法，见 `d29fb84`）。
+                //
+                // 折中：`onAppear` 时 `playerSession` 常常还是 nil，所以**不能只挂一次** ——
+                // 下面的 `.onChange(of: playerSession)` 会在会话真正就绪后再挂一次，
+                // 保证最终挂上的是有值的那个。
+                armSleepTimer()
                 // ⛔ 这里**不再动坞**。
                 //
                 // 上一版写的是 `store.miniPlayerActive = false`（「回到观看页，小窗授权作废」）。
@@ -3645,6 +3666,9 @@ struct VideoDetailView: View {
                 }
                 #endif
             }
+            // `playerSession` 是 `onStageSession` / `opened:` 回调之后才就绪的，
+            // `onAppear` 那一刻通常是 nil。会话一就绪就重挂一次，保证定时关闭挂到真有值的那个。
+            .onChange(of: playerSession == nil) { _, _ in armSleepTimer() }
             .onChange(of: watchScopes) { old, new in
                 store.watchPageScopes.subtract(old.subtracting(new)); store.watchPageScopes.formUnion(new)
             }
