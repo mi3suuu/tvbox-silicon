@@ -981,6 +981,22 @@ struct OneSkinStage: View {
     /// `choose(quality:)`/`chooseAudio(_:)`。nil（未开播）时画质/音轨 chip 隐藏。
     var session: PlaybackSession? = nil
 
+    /// 把持久化的「循环」偏好播种到当前会话。
+    ///
+    /// 幂等：只读 `@AppStorage` 的 `loop` 并赋给 `session.looping`，不产生其它副作用，
+    /// 所以可以在 `onAppear` 与 `onChange(of: session != nil)` 两处都调。
+    /// 为什么需要它：`session.looping` 是新建 `PlaybackSession` 时的默认 false，
+    /// 而用户偏好可能早就是 true（上次开着循环退出的）—— 不播种就出现
+    /// 「chip 亮着、播完不循环」。（S2-P1-3）
+    ///
+    /// ⚠️ 这里**不**沿用 `:3521` 那颗 chip 里的写法（`loop.toggle(); session?.looping = loop`）：
+    /// 那是「用户动作」，会翻转偏好；这里是「启动对齐」，只能单向赋值。
+    /// 两件事共用一个变量但语义相反，混在一起就会变成「一进页面就取反」。
+    private func seedLoopPreference() {
+        guard let session, session.looping != loop else { return }
+        session.looping = loop
+    }
+
     /// 已播秒数与总时长。One 的进度条两端是「已播 / 剩余」，
     /// 没有真值就画不出正确的进度，所以由调用方从 `PlaybackSession` 传入。
     // ⛔ `position` / `duration` 已从本视图移除。
@@ -1887,6 +1903,22 @@ struct OneSkinStage: View {
                 }
             }
             #endif
+            // ── 循环开关必须在这里**播种**一次 ──
+            //
+            // ⛔ S2-P1-3：`oneSkinLoop` 是 `@AppStorage` 持久化的用户偏好，
+            //    而 `session.looping` 才是真正驱动「播完回零重播」的开关
+            //    （`PlaybackView` 的 didPlayToEnd 分支读它）。
+            //    原来全文件只有**一处**写入 `session?.looping = loop`：
+            //    `:3521` 那颗「循环」chip 的 Button 里 —— 也就是**只有用户亲手点过才会同步**。
+            //    后果：用户把循环开着、退出 App、重进来 → `loop` 仍是 true（界面 chip 是亮的），
+            //    但新会话的 `looping` 是默认 false ⇒ **播完不循环，chip 却显示已开**。
+            //    这是「界面说开着、功能没开」的典型形态。
+            seedLoopPreference()
+        }
+        // 会话晚于页面就绪时（`session` 由父视图异步给出）再播一次；
+        // `seedLoopPreference()` 是幂等的（只赋值，不做副作用）。
+        .onChange(of: session != nil) { _, ready in
+            if ready { seedLoopPreference() }
         }
         .onChange(of: isFullScreen) { _, new in
             guard !debugBlockFullScreen else { return }
