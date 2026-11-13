@@ -129,6 +129,12 @@ struct OneSkinFixedPlayerLayer: UIViewRepresentable {
         // ⚠️ 一个 AVPlayer 同时只能驱动一条 AVPlayerLayer：PiP 悬浮窗在跑的时候，
         // 这条内嵌 layer 再抢 player，悬浮窗就只剩声音。`shouldRender` 是那只闸。
         let renders = pip?.shouldRender(view.renderLayer) ?? true
+        // 探针：把「闸的判决」与「实际绑定」分两格记，`renders=0 player=1`
+        // 这种组合（闸说别渲染、layer 上却还挂着 player）与
+        // `renders=1 player=0`（闸放行、却没绑上）指向完全不同的病因。
+        #if DEBUG
+        view.noteIntent(renders: renders, gravity: videoGravity)
+        #endif
         view.update(player: renders ? player : nil, gravity: videoGravity)
         // ⛔ **无论是否渲染都必须 attach**。
         //
@@ -150,6 +156,9 @@ final class OneSkinFixedPlayerView: UIView {
     }
     #if DEBUG
     private var lastLogged = ""
+    /// 上一次 `updateUIView` 收到的「是否要渲染」。与 `layoutSubviews` 的日志对齐，
+    /// 才能区分「闸没放行」与「闸放行了但 layer 仍没绑上」。
+    private var lastRenders: Bool?
     #endif
 
     /// `UIViewRepresentable` 会问宿主「你想要多大」。不回答的话它按父级
@@ -177,6 +186,15 @@ final class OneSkinFixedPlayerView: UIView {
         setNeedsLayout()
     }
 
+    #if DEBUG
+    /// 记下本帧「闸想让不渲染」。纯读取，不改任何行为。
+    func noteIntent(renders: Bool, gravity: AVLayerVideoGravity) {
+        lastRenders = renders
+        intentGravity = gravity
+    }
+    private var intentGravity: AVLayerVideoGravity = .resizeAspect
+    #endif
+
     /// 给画中画控制器当内容源用的那条 layer。
     var renderLayer: AVPlayerLayer { playerLayer }
 
@@ -196,7 +214,6 @@ final class OneSkinFixedPlayerView: UIView {
         #if DEBUG
         // 探针必须区分「没绑 player」「绑了但没画面」「有画面但被裁」。
         // 只看 videoRect 会把三种情况混成一个 0x0。
-        let hasPlayer = playerLayer.player != nil
         let hidden = isHidden || playerLayer.isHidden
         let alpha = Int(playerLayer.opacity * 100)
         let superL = superview != nil
@@ -210,8 +227,8 @@ final class OneSkinFixedPlayerView: UIView {
         let inWindow = (wr.minY >= -2 && wr.maxY <= wb.height + 2
                         && wr.minX >= -2 && wr.maxX <= wb.width + 2)
         _ = inWindow
+        _ = winRect
         // 父链：定位「布局 frame 与预期不符」的来源。
-        // 竖屏源 inW=0 (y=714) 但上层 pictureColumn 报 at=(0,0)，差 714 必须找到在哪一层产生的。
         // ⛔ 用 convert(.., to: window) 而不是 to: nil。
         // to: nil 会带上每一层的 transform/仿射，横屏源正常显示时也报 y=818 > 屏高 669，
         // 说明那个值不是屏幕坐标，不能判越界。window 坐标才是真屏幕位置。
@@ -224,7 +241,37 @@ final class OneSkinFixedPlayerView: UIView {
             cur = v.superview
             depth += 1
         }
-        let line = "fixedLayer chain=\(chain) wb=\(Int(wb.width))x\(Int(wb.height)) inW=\(inWindow ? 1 : 0) winW=\(Int(wr.minX)),\(Int(wr.minY)),\(Int(wr.width))x\(Int(wr.height)) view=\(Int(bounds.width))x\(Int(bounds.height)) fixed=\(Int(fixedSize.width))x\(Int(fixedSize.height)) layer=\(Int(playerLayer.frame.width))x\(Int(playerLayer.frame.height)) videoRect=\(Int(playerLayer.videoRect.width))x\(Int(playerLayer.videoRect.height)) pl=\(hasPlayer ? 1 : 0) win=\(inWindow ? 1 : 0) hid=\(hidden ? 1 : 0) op=\(alpha) sup=\(superL ? 1 : 0) gravity=\(playerLayer.videoGravity.rawValue)"
+        // ── 出帧链判定（一次一行，按 `verdict` 直接读结论）──────────────────
+        //
+        // 这个探针是为「时间在走、像素不动」设计的。链路是：
+        //   session.player → item(status/presentationSize) → 闸 shouldRender
+        //   → layer.player 绑没绑 → layer.frame 多大 → layer 在不在屏内/被没被盖
+        // 六格分别对应六种互斥病因，`verdict` 把它们收敛成一个词：
+        //   GOOD      六格全通。若此时画面仍不动 → 病因不在本条链上（见 REPORT 的「未覆盖」）
+        //   NO-PLAYER layer.player == nil → **闸把它摘掉了**（或被别处置空）
+        //   GATE-OFF  renders=0：闸明确要求不渲染（画中画在别处跑）
+        //   ZERO-FRAME layer 的 frame 宽或高为 0 → 没尺寸，画不出
+        //   OFFSCREEN 在窗口外 → 画了但用户看不见
+        //   HIDDEN    isHidden / opacity 0 / 无 superview
+        // ⛔ 不要用 videoRect 判：正常显示的横源也报 0x0。
+        // ⛔ 不要用 inW 判：竖源与横源都是 0，横源却正常。
+        let hasPlayer = playerLayer.player != nil
+        let layerW = Int(playerLayer.frame.width), layerH = Int(playerLayer.frame.height)
+        let gateWanted = lastRenders.map { $0 ? 1 : 0 } ?? -1
+        let verdict: String = {
+            if !hasPlayer { return gateWanted == 0 ? "GATE-OFF" : "NO-PLAYER" }
+            if layerW < 1 || layerH < 1 { return "ZERO-FRAME" }
+            if !superL || hidden || alpha == 0 { return "HIDDEN" }
+            if !inWindow { return "OFFSCREEN" }
+            return "GOOD"
+        }()
+        let line = "fixedLayer verdict=\(verdict) gate=\(gateWanted) pl=\(hasPlayer ? 1 : 0) "
+            + "layer=\(layerW)x\(layerH) fixed=\(Int(fixedSize.width))x\(Int(fixedSize.height)) "
+            + "view=\(Int(bounds.width))x\(Int(bounds.height)) "
+            + "win=\(inWindow ? 1 : 0) wb=\(Int(wb.width))x\(Int(wb.height)) "
+            + "rect=\(Int(wr.minX)),\(Int(wr.minY)),\(Int(wr.width))x\(Int(wr.height)) "
+            + "hid=\(hidden ? 1 : 0) op=\(alpha) sup=\(superL ? 1 : 0) "
+            + "gravity=\(playerLayer.videoGravity.rawValue) chain=\(chain)"
         if line != lastLogged { lastLogged = line; oneSkinLog(line) }
         #endif
     }

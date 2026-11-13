@@ -2470,6 +2470,30 @@ struct PlayerLayerView: UIViewRepresentable {
     /// player: an `AVPlayer` drives one layer's video at a time, and a second layer would steal the
     /// picture from the floating window, leaving it audio-only.
     private static weak var sourceLayer: AVPlayerLayer?
+    /// 浮窗是**AVKit 托管**的（全屏播放器的 `AVPlayerViewController`），而不是我们自建的
+    /// `AVPictureInPictureController`。
+    ///
+    /// ⛔ 这个位必须单独存在，不能只靠 `isActive`：
+    ///
+    /// 两条浮窗通路**共用同一个进程级 `isActive`**，但只有自建那条会填 `sourceLayer`：
+    ///   · 自建（One / 哔哩哔哩皮肤）：`willStartPictureInPicture` 里
+    ///     `isActive = true` **且** `sourceLayer = self.layer`；
+    ///   · AVKit（全屏播放器）：`report(active:)` 里只写 `isActive = true`
+    ///     —— AVKit 不把它的 picture layer 交给我们，`sourceLayer` 保持 nil。
+    ///
+    /// 于是「`isActive == true` + `sourceLayer == nil`」有两种完全相反的含义：
+    /// AVKit 正浮着（**应当继续渲染**），或者标记是僵尸（**应当清掉**）。
+    /// 旧代码把两者合并成同一条分支并按「僵尸」处理，后果是：
+    /// 全屏播放器起过一次浮窗之后，`isActive` 被错误清零、`sourceLayer` 被清空，
+    /// 而 One 皮肤那一侧同时读同一个全局量 —— 内嵌画面被摘掉、占位撤回、
+    /// item 依然 ready、时间依然走，用户看到的就是**只有压暗海报**。
+    ///
+    /// 现在把这条语义显式记下来，`decide` 的第 ② 支据此直接放行。
+    private(set) static var avkitHostedActive = false
+    #if DEBUG
+    /// `logDecision` 的去重缓存：只在意「判定结果发生了变化」，不刷屏。
+    private static var lastDecisionLine = ""
+    #endif
     /// Called on the main actor when Picture in Picture starts or stops, so the session can turn off
     /// its queued-advance while PiP is active (AVKit's queue is unreliable inside the floating window).
     var onActiveChange: (@MainActor (Bool) -> Void)?
@@ -2501,44 +2525,92 @@ struct PlayerLayerView: UIViewRepresentable {
     /// Whether `layer` should render the player right now. While Picture in Picture is up, only the
     /// running controller's source layer renders; the inline picture is covered by the player's
     /// placeholder instead.
+    /// Whether `layer` should render the player right now. While Picture in Picture is up, only the
+    /// running controller's source layer renders; the inline picture is covered by the player's
+    /// placeholder instead.
+    ///
+    /// 判定本体在 `TVCore.PiPRenderGate`（纯函数、有单测）。这里只做两件事：
+    /// 把 App 侧的六个事实凑成它的输入，以及按判决执行「清僵尸标记」这个副作用。
+    ///
+    /// ⛔ 为什么要搬走：返回 false 会让 `updateUIView` 静默执行 `view.update(player: nil)` ——
+    /// 不报错、item 照样 ready、时间照样走，只有像素不动。这个失败形态和
+    /// 「片源没画面」「窗口几何算错」完全同形，此前各消耗过数轮排查；
+    /// 而写在本 iOS-only 文件里就进不了测试目标，只能靠真机碰运气。
     func shouldRender(_ layer: AVPlayerLayer) -> Bool {
-        if !Self.isActive { return true }
-        // ⛔ 不能只比「是不是那唯一一个 sourceLayer」。
-        //
-        // ## 实测故障（2026-11-13，用户报「部分视频只出海报」）
-        // 真机日志：源完全正常、item readyToPlay、窗口几何全对，
-        // 但画面就是不显示：
-        //   VIDSRC st=1 dur=77.6 ext=mp4 n=1 nat=1080x1920 codec=hvc1 pbt=true
-        //   PICCHK ok avPlayer=yes item=true status=1 ps=1080x1920 win=371x659
-        // 同进程里 `PiP START auto=on liveSessions=1` 出现过 2 次。
-        //
-        // 机制：`Self.sourceLayer` 是**全进程唯一**的槽位。PiP 一旦起过，
-        // 它就指向那一条 layer；本页这条 `!== sourceLayer` → 返回 false
-        // → `updateUIView` 里 `view.update(player: nil)` → **画面被摘掉**，
-        // 只剩海报兜底。
-        //
-        // 而复位只发生在 `pictureInPictureControllerDidStopPictureInPicture`。
-        // 若那次回调没来（PiP 被系统收掉、App 挂起、控制器被替换），
-        // `isActive` 会永远停在 true —— 画面再也回不来。
-        //
-        // ## 修法
-        // 1. `sourceLayer` 已经不在任何视图层级里（被回收/换页）→ 认为 PiP 已失效；
-        // 2. 当前进程没有任何活跃 PiP 控制器 → 同样认为已失效。
-        // 两者都让本页面恢复渲染，不再被一个僵尸槽位永久挡死。
-        if Self.sourceLayer === layer { return true }
-        if let sourceLayer = Self.sourceLayer {
-            if sourceLayer.superlayer == nil, sourceLayer.player == nil {
-                // 源 layer 已经脱离视图树且不再持有 player → 僵尸槽位，清掉它
-                Self.sourceLayer = nil
-                Self.isActive = false
-                return true
-            }
-        } else {
-            // isActive 为真但 sourceLayer 已空 → 无效状态
-            Self.isActive = false
-            return true
+        let source = Self.sourceLayer
+        let verdict = PiPRenderGate.verdict(.init(
+            isActive: Self.isActive,
+            avkitHostedActive: Self.avkitHostedActive,
+            hasController: Self.current != nil,
+            hasSource: source != nil,
+            sourceMatchesLayer: source === layer,
+            // 「内容源已脱离」只在**确实有**内容源时才成立。
+            sourceDetached: source.map { $0.superlayer == nil && $0.player == nil } ?? false
+        ))
+        if verdict.clearsGlobals { Self.clearStalePiP() }
+        #if DEBUG
+        logDecision(verdict, layer: layer)
+        #endif
+        return verdict.renders
+    }
+
+    /// 清掉一个**已证明**失效的画中画全局标记。
+    ///
+    /// 只在这条链上清：`isActive` / `sourceLayer` 是进程全局量，
+    /// 留着就会把**下一个**页面的画面也一起挡死（页面换一条新 layer，
+    /// 它永远不等于那个旧槽位）。
+    private static func clearStalePiP() {
+        #if DEBUG
+        // 探针：谁清的、清之前是什么。这条出现 = 我们去救了一次僵尸标记。
+        let stack = Thread.callStackSymbols.dropFirst(1).prefix(6)
+            .map { $0.split(separator: " ").dropFirst(2).first.map(String.init) ?? "" }
+            .joined(separator: "<")
+        oneSkinLog("PIPSTALE clear isActive=1 srcSet=\(sourceLayer == nil ? 0 : 1) cur=\(current == nil ? 0 : 1) stack=\(stack)")
+        #endif
+        Self.isActive = false
+        Self.sourceLayer = nil
+    }
+
+    #if DEBUG
+    /// 每次判定结果变化时打一行。
+    ///
+    /// 与 `OneSkinFixedPlayerView.layoutSubviews` 的 `fixedLayer` 行用 `layer=` 对齐，
+    /// 两行一起读就能把「闸放行了吗 / 绑上了吗 / frame 是多少」一次分开。
+    private func logDecision(_ decision: PiPRenderGate.Verdict, layer: AVPlayerLayer) {
+        let line = "PICGATE dec=\(decision.name) act=\(Self.isActive ? 1 : 0) "
+            + "avkit=\(Self.avkitHostedActive ? 1 : 0) "
+            + "srcSet=\(Self.sourceLayer == nil ? 0 : 1) "
+            + "mine=\(Self.sourceLayer === layer ? 1 : 0) "
+            + "cur=\(Self.current == nil ? 0 : 1) "
+            + "pipUp=\(Self.current?.isPictureInPictureActive == true ? 1 : 0) "
+            + "layer=\(UInt(bitPattern: ObjectIdentifier(layer).hashValue) % 100000) "
+            + "lp=\(layer.player == nil ? 0 : 1) "
+            + "ready=\(layer.isReadyForDisplay ? 1 : 0) "
+            + "px=\(Int(layer.frame.width))x\(Int(layer.frame.height))"
+        if line != Self.lastDecisionLine {
+            Self.lastDecisionLine = line
+            oneSkinLog(line)
         }
-        return false
+    }
+    #endif
+
+    /// 纯读探针：本页此刻会不会被闸放行。
+    ///
+    /// **不传 layer、不改任何状态**——只回答「如果不是我这条 layer，
+    /// 闸会不会拒绝」。用于 `OneSkin.pictureColumn` 那一行 `PICCHK`：
+    /// 它必须能与 `fixedLayer` 的 `verdict` 对上，否则「avPlayer 非 nil
+    /// 但画面空」永远分不清是闸还是别处。
+    ///
+    /// ⛔ 故意不传真 layer：`shouldRender` 对僵尸槽位有副作用（会清全局标记），
+    /// 探针不能成为「靠打日志才修好」的那种修法。
+    func shouldRenderProbe() -> String {
+        if !Self.isActive { return "NOPIP" }
+        let parts = "act=1 avkit=\(Self.avkitHostedActive ? 1 : 0) "
+            + "srcSet=\(Self.sourceLayer == nil ? 0 : 1) cur=\(Self.current == nil ? 0 : 1)"
+        if Self.avkitHostedActive { return "AVKIT(\(parts))" }
+        if Self.current == nil { return "STALE-nocontroller(\(parts))" }
+        if Self.sourceLayer == nil { return "STALE-nosource(\(parts))" }
+        return "YIELD-possible(\(parts))"
     }
 
     func attach(_ layer: AVPlayerLayer) {
@@ -2715,6 +2787,22 @@ struct PlayerLayerView: UIViewRepresentable {
     /// `AVPlayerViewController` 出现/消失时登记，PiP 按钮与状态都读它。
     func register(host: AVPlayerViewController?) {
         Self.avkitHost = host
+        // ⛔ 宿主消失 = AVKit 那条浮窗通路**已经不可能再浮**。
+        //
+        // `avkitHostedActive` 是进程级静态量，而它的唯一写入点
+        // （`report(active:)` 的 `now == false`）依赖 AVKit 回调；
+        // 页面被 pop、全屏播放器被销毁时，那次回调**不保证送达**
+        // （`dismantleUIViewController` 只把 delegate 置 nil，然后这个实例再也不会收到任何回调）。
+        //
+        // 不复位就会永久卡在 true：`PiPRenderGate` 的第 ③ 支会一直放行，
+        // 而第 ④⑤⑥ 支（僵尸清理）**永远走不到** —— 自建通路那边真出僵尸时
+        // 我们再也没机会去救。这是一个只会把「画面回不来」变成「永远回不来」的泄漏。
+        if host == nil {
+            Self.avkitHostedActive = false
+            // `isActive` 的语义是「**有**浮窗在跑」。AVKit 这条没了，
+            // 只剩自建那条还算数；没有就归零。
+            if Self.current == nil { Self.isActive = false }
+        }
     }
 
     /// `AVPlayerViewControllerDelegate` 的 PiP 回调转进来：页面据此显示/撤掉占位。
@@ -2722,6 +2810,20 @@ struct PlayerLayerView: UIViewRepresentable {
         guard active != now else { return }
         active = now
         Self.isActive = now
+        // ⛔ AVKit 这条浮窗通路**没有** `AVPlayerLayer` 可登记 —— 它的画面在
+        // `AVPlayerViewController` 自己的 controller 里。所以这里绝不能写
+        // `sourceLayer`，但**必须**把「这次是 AVKit 托管的」记下来，
+        // 否则 `decide` 会把「isActive 真 + sourceLayer 空」误判成僵尸标记并清掉，
+        // 连带把 One/哔哩哔哩皮肤的内嵌画面摘掉（见 `avkitHostedActive` 的注释）。
+        Self.avkitHostedActive = now
+        if !now {
+            // AVKit 浮窗收掉了：若全局槽位此刻确实指向一条**已经不在树上**的 layer，
+            // 那是自建通路遗留的僵尸，顺手清；否则别碰（可能是另一条通路正用着）。
+            if let src = Self.sourceLayer, src.superlayer == nil, src.player == nil {
+                Self.sourceLayer = nil
+            }
+            if Self.sourceLayer == nil { Self.isActive = false }
+        }
         onActiveChange?(now)
     }
     #endif
@@ -2805,6 +2907,8 @@ struct PlayerLayerView: UIViewRepresentable {
             Self.isActive = true
             Self.current = self.controller
             Self.sourceLayer = self.layer
+            // 自建通路起来了：浮窗由我们自己托管，AVKit 那条不算数。
+            Self.avkitHostedActive = false
             self.active = true
             self.onActiveChange?(true)
             // ★ 探针：PiP 是**谁**、在**什么状态**下起来的。
@@ -2826,7 +2930,13 @@ struct PlayerLayerView: UIViewRepresentable {
             Self.isActive = false
             Self.current = nil
             Self.sourceLayer = nil
+            // 自建通路收掉了。
+            //
+            // ⚠️ 不能顺手把 `avkitHostedActive` 一起清，也要把 `isActive` 交还给 AVKit 那条：
+            // 两条通路可以由不同页面各自持有，谁收都不该把对方的状态带走。
+            // `isActive` 的语义是「**有**浮窗在跑」，所以这里按剩下的那条重算。
             self.active = false
+            Self.isActive = Self.avkitHostedActive
             self.onActiveChange?(false)
             self.rebind()
             Diagnostics.shared.record(.info, "player", "PiP stopped")
