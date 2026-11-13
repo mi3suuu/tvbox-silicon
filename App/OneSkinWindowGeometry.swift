@@ -290,11 +290,14 @@ final class OneSkinFixedPlayerView: UIView {
         // ★ 父层子视图普查：`d1 y=881` 但 `d2 y=0 h=669` —— `d1` 超出了父层 212pt。
         // `d1` 与 `d2` 之间没有中间层，说明 `d1` 是 `d2` 内**多个垂直堆叠兄弟**之一。
         // 打出兄弟数量与各自的 origin.y，才能看清是谁占掉了前面 881pt。
+        // 用**视图链本身**取父级（不靠类型名匹配，那在 iOS 27 上改名了）。
         var siblingInfo = "-"
-        if let d2 = window?.subviews.first(where: { String(describing: type(of: $0)).contains("HostingView") }) {
-            let sibs = d2.subviews
-            let ys = sibs.prefix(6).map { Int($0.frame.minY) }
+        if let parent = superview?.superview {
+            let sibs = parent.subviews
+            let ys = sibs.prefix(8).map { Int($0.frame.minY) }
             siblingInfo = "n=\(sibs.count) y=\(ys.map(String.init).joined(separator: ","))"
+                + " par=\(Int(parent.frame.minY))+\(Int(parent.frame.height))"
+                + " pcls=\(String(describing: type(of: parent)).suffix(18))"
         }
 
         let line = "fixedLayer sib=\(siblingInfo) verdict=\(verdict) inst=#\(instanceID) gate=\(gateWanted) "

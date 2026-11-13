@@ -41,6 +41,13 @@ extension Store {
     /// 与 `stopPlaying()` 的分工：那个会跑会话收尾（历史存档、停流），这个**只摘槽**。
     func dockForeground() {
         guard let channel = playing else { return }
+        #if DEBUG && os(iOS)
+        // 折叠/展开不该走这里 —— 打出来源，下次复现一眼能分开是谁干的。
+        let callers = Thread.callStackSymbols.dropFirst(1).prefix(5)
+            .compactMap { $0.split(separator: " ").dropFirst(3).first.map(String.init) }
+            .joined(separator: "<")
+        oneSkinLog("DOCK channel=\(channel.name) stack=\(callers)")
+        #endif
         let session = playbackSession(for: channel)
         videoTasks.dock(channel: channel, session: session, store: self)
         // 摘前台槽：`playing = nil` 的 didSet 只清 `activeSession` / `presentingPlayer`，

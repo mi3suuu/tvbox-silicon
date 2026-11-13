@@ -6,6 +6,16 @@ struct VideoDetailView: View {
     /// 自动旋转回归钩子的单实例闸；转屏会重复触发 `onAppear`。
     @MainActor private static var qaRotateCycleRunning = false
     #endif
+    #if os(iOS)
+    /// 「页面还活着」的代数。`onAppear` 每跑一次就 +1。
+    ///
+    /// 用途只有一个：判断某次 `onDisappear` 到底是**离场**，还是**折叠/展开把页面重挂了一次**。
+    ///
+    /// ⛔ 必须是**静态**的，不能是 `@State`：折叠重挂会换掉页面身份，
+    /// 新实例的 `@State` 全是初始值 —— 旧实例挂的延时任务在新实例里既看不到也取消不掉，
+    /// 于是「展开一下」照样会把这一集塞进坞里（用户报的迷你播放器就是这么冒出来的）。
+    @MainActor private static var pageGeneration = 0
+    #endif
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.dismiss) private var dismiss
     @Environment(Store.self) private var store
@@ -15,6 +25,9 @@ struct VideoDetailView: View {
     var resume: PlaybackHistoryEntry? = nil
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// 只在 `scheduleSettlePlaybackOnLeave()` 里读：已经退到后台时不能等宽限窗，
+    /// 否则退场裁决会先看到「没有载体」而去起应用外浮窗。
+    @Environment(\.scenePhase) private var scenePhase
     // ⛔ 全屏状态必须**跨页面身份重建存活**（mi3s 2026-11-09）：
     // 设备日志（oneskin.log）铁证：detail onAppear 反复触发 133 次（页面身份重建循环），
     // @State fullScreen 每次重建归零 —— 用户点全屏后 fs=true 铺满一帧，页面一重建
@@ -631,6 +644,11 @@ struct VideoDetailView: View {
         }
         .onAppear {
             store.watchPageOpen = true
+            #if os(iOS)
+            // 页面回来了 = 上一次 `onDisappear` 不是离场（折叠/展开的重挂）。
+            // 代数 +1 会让那次挂起的「收进坞」判定在到期时自行作废。
+            Self.pageGeneration &+= 1
+            #endif
             // 进页面就为每条线路解析一个可测速地址（不阻塞首帧）。
             //
             // ⛔ 用**自己的**句柄，不走 `startRequest`（见 `lineSampleTask` 的说明）。
@@ -670,21 +688,14 @@ struct VideoDetailView: View {
         .onDisappear {
             store.watchPageOpen = false
             store.isWatchPageMounted = false
-            // 页面真的走了（不是折叠换版式）—— 按「怎么走的」决定这一集的去向。
+            // 页面走了 —— 但**先别急着**决定这一集去哪：折叠/展开同样会跑 `onDisappear`，
+            // 而它只是换了个版式，不是离场。判据见 `scheduleSettlePlaybackOnLeave()`。
             //
-            // 用户的两条规则（2026-11-11）：
-            //   · 选集页**返回上一层**要关掉音频（要求 4 的前半）；
-            //   · 但**左滑返回**例外，它把画面收进迷你播放器继续播（要求 4 的后半）。
-            //
-            // 判据不是「有没有在播」，而是这一次退出的**意图**：
-            //   · `leaveHandled` —— 用户按了小窗键，会话已经登记进坞，别动；
-            //   · `SwipeBack.isPending` —— 左滑系统手势，同样收进坞；
-            //   · 其余（返回键 / 导航栏 Back / 程序化 dismiss）—— 停掉这一集。
-            //
-            // ⛔ 只在 watchLayout 真在播时处理；折叠/展开也会跑 onDisappear，那两种由
-            // `watchPageLifecycleBody.onDisappear` 单独管（它只清 scope，不停播）。
+            // 去向规则（2026-11-12 用户裁决）：
+            //   只要没按「退出」键，离开播放页就一律收进迷你播放器继续播；
+            //   `leaveHandled` 为真时（小窗键 / 退出键已自行处理）不重复处理。
             #if os(iOS)
-            settlePlaybackOnLeave()
+            scheduleSettlePlaybackOnLeave()
             #endif
             // ⛔ 离开观看页必须**归还载体声明**。
             //
@@ -4095,6 +4106,49 @@ struct VideoDetailView: View {
     ///
     ///   **只要没按「退出」键，离开播放页就一律收进迷你播放器继续播。**
     ///
+    /// 离场后**延迟**再决定这一集去哪 —— 折叠/展开不能被当成分手。
+    ///
+    /// 用户报的原话：「展开切合拢、合拢切展开，会产生迷你播放器，这个是不应该的」。
+    ///
+    /// 成因：Duo 折叠 / 展开会把观看页重挂一次（`onDisappear` 紧跟 `onAppear`，
+    /// 本文件头部的日志记录里 `detail onAppear` 曾反复触发 133 次）。把
+    /// `settlePlaybackOnLeave()` 直接写在 `onDisappear` 里，等于把「换了个版式」
+    /// 判成「离开了播放页」→ `dockForeground()` → 主界面上凭空冒出一张迷你播放器，
+    /// 而页面其实还在，于是前台没了会话、播放在坞里跑。
+    ///
+    /// ⛔ 判据不能靠尺寸/宽高关系（折叠前后可能一模一样），也不能靠 `@State`：
+    /// 重挂会换掉页面身份，新实例既看不到也取消不掉旧实例挂的任务。
+    /// 只用一条**事实**：页面回来了（`onAppear` 里 `pageGeneration += 1`），
+    /// 那次离场就不成立。宽限窗取 0.35s ≈ 一次 pop 动画；真离场时迷你播放器
+    /// 正好在页面退场动画结束时出现，用户看不到延迟。
+    private func scheduleSettlePlaybackOnLeave() {
+        Self.pageGeneration &+= 1
+        let generation = Self.pageGeneration
+        #if DEBUG
+        oneSkinLog("detail onDisappear gen=\(generation) playing=\(store.playing?.name ?? "nil") "
+            + "mounted=\(store.isWatchPageMounted) docked=\(store.videoTasks.hasTasks) phase=\(String(describing: scenePhase))")
+        #endif
+        // 已经退到后台：不会再有「折叠重挂」这回事，立刻结算。
+        // 等 350ms 的话，退场裁决会先看到「页面上没有画面」而去起应用外浮窗，
+        // 于是「返回 + 立刻上滑回主屏」会变成「浮窗 + 坞里还有一张卡」两层。
+        if scenePhase == .background {
+            settlePlaybackOnLeave()
+            return
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            // 页面又活了 = 这是折叠/展开的重挂，不是离场。
+            guard generation == Self.pageGeneration, !store.isWatchPageMounted else {
+                #if DEBUG
+                oneSkinLog("SETTLE cancel gen=\(generation) now=\(Self.pageGeneration) "
+                    + "mounted=\(store.isWatchPageMounted) —— 页面重挂，不收坞")
+                #endif
+                return
+            }
+            settlePlaybackOnLeave()
+        }
+    }
+
     /// 只要用户在播放页（选集页 / 全屏播放页）上没有点那颗明确的退出按钮，
     /// 无论是按返回键、导航栏 Back、左滑手势还是程序化 dismiss，
     /// 都应该把小窗留在坞里 —— 而不是把音频关掉。
@@ -4112,10 +4166,8 @@ struct VideoDetailView: View {
         guard store.playing != nil else { return }
         // ⛔ 折叠 / 展开（Duo）也会跑 `onDisappear`，那种「本页没走」的情况不该动播放。
         //
-        // ⚠️ 判据不能用 `watchLayout`：折叠态下它本来就是 false，那条判据会把真正的
-        // 返回也一起挡掉。
-        //
-        // 真正的判据是「坞里已经登记着同一集了吗」。从坞里点卡片回来后，
+        // 第一道闸在 `scheduleSettlePlaybackOnLeave()`（页面回来就不收坞）；
+        // 这里是第二道：「坞里已经登记着同一集了吗」。从坞里点卡片回来后，
         // `VideoTaskCenter.take` 已把它从坞里摘掉、`adoptSession` 交给前台；
         // 若这一页随后因清栈/重压/形态重建再跑一次 `onDisappear`，无条件
         // `dockForeground()` 就会把它**重新塞回坞里** —— 坞里凭空多一张卡片
@@ -4126,6 +4178,9 @@ struct VideoDetailView: View {
         guard !store.floatsInMiniPlayer(store.playing) else { return }
         // 其余一切离开方式 → 收进坞继续播。
         _ = SwipeBack.isPending   // 保留读它以免编译器警告；语义上不再分流
+        #if DEBUG
+        oneSkinLog("SETTLE dock playing=\(store.playing?.name ?? "nil") gen=\(Self.pageGeneration)")
+        #endif
         store.dockForeground()
     }
 
