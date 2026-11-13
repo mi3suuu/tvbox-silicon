@@ -277,10 +277,28 @@ struct OneSkinChrome: View {
     @State private var showsDanmakuList = false
     /// 投屏（DLNA 接收端 + AirPlay）。与旧播放器同一份浏览器。
     @State private var playOn = PlayOnBrowser()
-    /// 画质增强的处理器：每页一份，绑到当前 player 上（见 `prepareEnhancer`）。
-    /// 两个开关都关着时为 nil —— 空闲的 `AVSampleBufferDisplayLayer` 被反复挂上摘下
-    /// 在 Duo 折展时是 use-after-free 风险（`VideoEnhancement.enabled` 的注释记着这条）。
-    @State private var enhancer: VideoEnhancer?
+    /// 画质增强的处理器**归会话所有**，这里只读（见 `session.enhancer`）。
+    ///
+    /// ⛔ 这里原来写的是 `@State private var enhancer: VideoEnhancer?` + 一个
+    ///    `prepareEnhancer()` 工厂。那条路把「谁拥有 enhancer」从会话挪到了视图，
+    ///    于是丢掉了会话天然给它的三件东西，三个都已实测确认：
+    ///
+    ///    ① **生命周期绑定**：`PlaybackSession.enhancer` 是 `let`、在 `init` 里建，
+    ///       会话换 ⇒ enhancer 跟着换，天然 1:1。视图 `@State` 不会跟着会话走 ——
+    ///       一旦本页原地换新会话，旧会话释放后 `VideoEnhancer.player`（`weak`）变 nil，
+    ///       `refresh()` 首行 `guard let player` 永久早退 ⇒ enhancer 成空壳，
+    ///       而消费端 `if let enhancer` 仍为真、画面层照画最后一帧。
+    ///    ② **创建时机**：视图级创建意味着一开始开关是关的时候没有 enhancer，
+    ///       所以必须另挂 `onChange` 去补建（原来那两个 `onChange` 就是为此存在），
+    ///       而补建路径一旦漏挂一处（N1 就是这么漏的）用户就看到「开了没反应」。
+    ///       会话级创建没有这个窗口 —— 会话建立时无论开关状态都建好。
+    ///    ③ **空闲管线回收**：`makeEngineIfNeeded()` 在开关关掉时会把 `engine` 释放回 nil
+    ///       并 `detachOutput()` 拆干净，所以「会话级总有一个 enhancer」不等于
+    ///       「总持有一条 GPU 管线」。原注释担心的 use-after-free 由那一层守住，
+    ///       不需要靠「视图层先不建」来守。
+    ///
+    /// 原版播放器（`MobilePlayer:429`）早就是读 `session.enhancer`，本条只是把 One 对齐。
+    private var enhancer: VideoEnhancer? { session?.enhancer }
 
     private var session: PlaybackSession? { kit.session }
     private var channel: Channel? { kit.channel }
@@ -497,11 +515,11 @@ struct OneSkinChrome: View {
         .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
         .task(id: channel.map { $0.url.absoluteString }) { await loadSubtitles() }
-        .task(id: itemIdentity) { await tracksTask(); prepareEnhancer() }
-        // 播放中打开画质增强：`prepareEnhancer()` 的唯一旧调用点挂在 `itemIdentity` 上，
-        // 只在换集时跑。这里补两个 `onChange`，开关一动就尝试建起来（幂等，建过就 no-op）。
-        .onChange(of: upscalesVideo) { _, _ in prepareEnhancer() }
-        .onChange(of: smoothsVideo) { _, _ in prepareEnhancer() }
+        .task(id: itemIdentity) { await tracksTask() }
+        // ⛔ 原来这里还有两个 `.onChange(of: upscalesVideo|smoothsVideo) { prepareEnhancer() }`，
+        //    用来补「播放中打开开关」的创建时机。enhancer 改成会话所有后**不需要了** ——
+        //    它随会话建好，与开关状态无关；开关的开关效果由消费端 `if let enhancer,
+        //    VideoEnhancement.enabled`（`:455`）与 `makeEngineIfNeeded()` 的惰性建管线负责。
         .task(id: skipKey) { await loadSkipMarkers() }
         // 锁屏 / 控制中心：接上遥控键，并在状态变化时重写信息。
         // `initial: true` 覆盖「进页面时就已经在播」这一常见情形。
@@ -1672,26 +1690,6 @@ struct OneSkinChrome: View {
     private func attachClock() {
         guard let player = session?.player else { return }
         clock.attach(player)
-    }
-
-    /// 画质增强的处理器：只在需要时建一次，**且允许在播放中途被补建**。
-    ///
-    /// ⛔ 两个坑，都是「看代码像对、用户就是打不开」：
-    ///
-    /// ① 原来这里 `guard VideoEnhancement.enabled else { return }` ——
-    ///    播放中把「锐化/60fps」打开时，`enhancer` 仍是 nil，而
-    ///    唯一调用点 `.task(id: itemIdentity)`（`:500`）**只在换集时触发**，
-    ///    全文件 `onChange(of: upscalesVideo|smoothsVideo)` = 0
-    ///    ⇒ 用户开开关毫无反应，只有换一集才生效。
-    ///    （`3dd8dbc` 修了原版 `PlaybackView` 的同一问题，但 One 走的是这条独立的建法，
-    ///     **没被那次修复覆盖**。复核 N1 与 S2 审计 P1-1 各自独立发现。）
-    ///
-    /// ② 消费端 `:454` 的判定是 `if let enhancer, VideoEnhancement.enabled` ——
-    ///    所以 `enhancer` 一旦建好就不必销毁：开关关掉时它自然不被画。
-    ///    这里保持「建了就不拆」的原设计，避免在 One 这条路径上引入资源生命周期问题。
-    private func prepareEnhancer() {
-        guard VideoEnhancement.enabled, let player = session?.player else { return }
-        if enhancer == nil { enhancer = VideoEnhancer(player: player) }
     }
 
     // MARK: - 视频信息
