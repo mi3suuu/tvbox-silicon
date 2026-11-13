@@ -351,7 +351,15 @@ enum QALaunch {
         // 不读订阅、不连网络，所以不受「本机没配订阅 / 网络慢」影响 —— 这是唯一能
         // 稳定复现四种形态版式的入口（真机折叠只能手掰，模拟器又要先过播放链路）。
         if page == "one-preview" {
+            #if os(iOS)
             OneSkinQAHost(shapeKey: UserDefaults.standard.string(forKey: "qaOneShape") ?? "column")
+            #else
+            // `OneSkinQAHost` 定义在 OneSkinPreview.swift（`#if DEBUG && os(iOS)`）。
+            // 它是**给 iPhone 逐像素比对 One 皮肤版式**的 QA 宿主：读 `-qaOneShape`
+            // 造四种形态的 mock 数据。tvOS 没有这套比对流程（电视端不做皮肤像素对齐），
+            // 也没有 OneSkin 皮肤可预览，故此处不做等价实现，只给出可见的说明。
+            Text("one-preview is an iPhone-only QA page")
+            #endif
         // Pages that need no subscription, so an App Store build (`-qaAppStore 1`) can show them before one is added.
         } else if section == self.section, store.subscription == nil, page == "cloud-accounts" {
             CloudDriveView()

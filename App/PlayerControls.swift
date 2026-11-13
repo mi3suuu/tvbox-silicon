@@ -1,7 +1,8 @@
 import SwiftUI
 import TVCore
 
-#if os(iOS)
+#if os(iOS) || os(tvOS)
+// ⚠️ 本文件在 tvOS 也可编译：零 iOS-only 依赖（纯数据模型 + UserDefaults/L10n）。
 /// One control the player can place in its top bar, its bottom transport row, or leave in the "⋯" menu.
 ///
 /// The player's chrome is a row of round glass buttons over the picture, a row of transport controls

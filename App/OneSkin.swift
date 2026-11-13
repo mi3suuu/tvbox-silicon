@@ -64,11 +64,18 @@ enum OneSkin {
         for scene in UIApplication.shared.connectedScenes {
             guard let ws = scene as? UIWindowScene, ws.activationState == .foregroundActive
             else { continue }
+            // ⚠️ `interfaceOrientation` 在 tvOS 不存在（已 appletvos swiftc 实证），
+            //    电视只有一块固定朝向的屏，没有"握持方向"。tvOS 用 bounds 的长短边判定。
+            #if os(tvOS)
+            let b = ws.coordinateSpace.bounds
+            return b.width > b.height
+            #else
             switch ws.interfaceOrientation {
             case .landscapeLeft, .landscapeRight: return true
             case .portrait, .portraitUpsideDown: return false
             default: break
             }
+            #endif
         }
         let b = UIScreen.main.bounds
         return b.width > b.height
@@ -2959,8 +2966,13 @@ struct OneSkinStage: View {
                 OneSkinExternalPanel(
                     streamURL: streamURL,
                     onCopy: {
+                        #if os(tvOS)
+                        // tvOS 无系统粘贴板（实证）：不谎报已复制。
+                        copiedLink = false
+                        #else
                         if let u = streamURL { UIPasteboard.general.string = u.absoluteString }
                         copiedLink = true
+                        #endif
                     },
                     onDismiss: { showsMoreMenu = false }
                 )
@@ -3989,11 +4001,15 @@ struct OneSkinStage: View {
 extension View {
     @ViewBuilder
     func oneSkinNoScrollEdgeEffect() -> some View {
+        #if os(tvOS)
+        if #available(tvOS 26.0, *) { self.scrollEdgeEffectHidden() } else { self }
+        #else
         if #available(iOS 26.0, *) {
             self.scrollEdgeEffectHidden()
         } else {
             self
         }
+        #endif
     }
 }
 

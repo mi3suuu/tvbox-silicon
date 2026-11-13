@@ -1,5 +1,8 @@
-#if os(iOS)
+#if os(iOS) || os(tvOS)
 import SwiftUI
+// ⚠️ 本文件在 tvOS 也可编译：它只用 CGFloat/CGRect/EdgeInsets 与
+//    `UIApplication.shared.appWindowScene`（该扩展在 os(iOS)||os(tvOS) 可用）。
+//    已用 appletvos swiftc 实证无 iOS-only 符号。
 
 // MARK: - One 播放页几何驱动（哔哩哔哩折叠屏适配架构移植）
 //

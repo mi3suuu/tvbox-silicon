@@ -1,5 +1,6 @@
-#if os(iOS)
+#if os(iOS) || os(tvOS)
 import SwiftUI
+// ⚠️ 本文件在 tvOS 也可编译：只用 CGFloat/CGRect 与 `UIApplication`（tvOS 有）。
 import TVCore   // OneSkinSafeArea.topUp（遮挡补量的唯一真源）
 
 // MARK: - 折叠分界层（对齐 One 1.7.0 的 FoldSplit 体系）
@@ -349,7 +350,7 @@ struct FoldRegionProbe: View {
     }
 
     var body: some View {
-        if #available(iOS 27.1, *) {
+        if #available(iOS 27.1, tvOS 27.1, *) {
             GeometryReader { proxy in
                 Color.clear
                     .onAppear { read(proxy) }
@@ -403,7 +404,7 @@ struct FoldRegionProbe: View {
         }
     }
 
-    @available(iOS 27.1, *)
+    @available(iOS 27.1, tvOS 27.1, *)
     private func read(_ proxy: GeometryProxy) {
         #if DEBUG
         // 直接打印系统返回的原始区域数，确认是「系统不给」还是「我们解析错」。
@@ -430,7 +431,7 @@ private struct RereadFoldOnHingeChange: ViewModifier {
     let onStatus: (Bool?) -> Void
 
     func body(content: Content) -> some View {
-        if #available(iOS 27.1, *) {
+        if #available(iOS 27.1, tvOS 27.1, *) {
             content.onHingeChange { old, new in
                 // 只在**折痕状态**真的变了时重读；纯角度抖动（半折时手抖）不重读，
                 // 否则每一帧都要重查 reserved regions。

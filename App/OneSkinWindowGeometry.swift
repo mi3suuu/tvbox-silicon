@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import SwiftUI
 import AVFoundation
+import AVKit          // tvOS 段的 `VideoPlayer` 在 AVKit（iOS 段用不到，多 import 无副作用）
 import QuartzCore
 import TVCore
 
@@ -86,8 +87,12 @@ struct OneSkinFixedPicture: View {
     }
 }
 
+#if os(iOS)
 /// 只画 `AVPlayerLayer` 的透明宿主。不用 `AVPlayerViewController`：
 /// AVKit 会自己接管布局，无视 SwiftUI 给的 frame，也无视 `clipsToBounds`。
+///
+/// ⚠️ 本段仅 iOS：它用 `UIViewRepresentable`，而 **tvOS 没有 `UIViewRepresentable`**
+/// （已用 `xcrun --sdk appletvos swiftc -typecheck` 实证）。
 struct OneSkinFixedPlayerLayer: UIViewRepresentable {
     let player: AVPlayer
     let videoGravity: AVLayerVideoGravity
@@ -187,4 +192,26 @@ final class OneSkinFixedPlayerView: UIView {
     }
 }
 
+#else
+// ═══════════════════════════════════════════════════════════════════════════
+// tvOS 版画面宿主
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// tvOS 没有 `UIViewRepresentable`（实证），所以不能沿用 iOS 那条
+// 「自己造 UIView 装 AVPlayerLayer」的路。
+// 改用 AVKit 的原生 SwiftUI 视图 `VideoPlayer`：它在 tvOS 上就是系统播放器，
+// 自带正确的焦点/遥控器行为，比手搓 layer 更合适电视端。
+/// 与 iOS 版 `OneSkinFixedPlayerLayer` 同名的 tvOS 实现，让 `OneSkinFixedPicture` 零分支编译。
+struct OneSkinFixedPlayerLayer: View {
+    let player: AVPlayer
+    let videoGravity: AVLayerVideoGravity
+    let size: CGSize
+    var pip: PictureInPicture? = nil
 
+    var body: some View {
+        VideoPlayer(player: player)
+            .frame(width: size.width, height: size.height)
+            .clipped()
+    }
+}
+#endif

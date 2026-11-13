@@ -3,7 +3,7 @@ import TVCore
 
 struct SiteView: View {
     @Environment(Store.self) private var store
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) var dismiss
     let site: Site
     let origin: URL
     let jarURL: URL?
@@ -19,10 +19,10 @@ struct SiteView: View {
     /// The Bilibili login this page loaded with; signing in or out reloads it with the account's lists.
     @State private var bilibiliLogin = BilibiliAccount.load().cookie
     private var initialLoading: Bool { browser.videos.isEmpty && browser.error == nil && (browser.busy || !browser.loaded) }
-    private var client: CatalogClient { CatalogClient(site: site, origin: origin, jarURL: jarURL) }
+    var client: CatalogClient { CatalogClient(site: site, origin: origin, jarURL: jarURL) }
     @State private var requestTask: Task<Void, Never>?
 
-    private func startRequest(_ operation: @escaping @MainActor () async -> Void) {
+    func startRequest(_ operation: @escaping @MainActor () async -> Void) {
         requestTask?.cancel()
         requestTask = Task {
             guard !Task.isCancelled else { return }
@@ -235,13 +235,13 @@ struct SiteView: View {
     // [mi3s] 二开融合（D-11 回填）：追加下一页而不清空当前列表。
     // CatalogBrowser.loadMore(client:) 自带 hasMore/loadingMore/moreError 三态与去重，
     // UI 只负责触发与呈现。
-    private func loadMore() async {
+    func loadMore() async {
         await browser.loadMore(client: client)
     }
 
     // [mi3s] 二开融合（D-11 回填）：底部续页状态条，三态与上游一致
     // （加载中 / 加载更多 / 重试），文案沿用上游 key。
-    @ViewBuilder private var loadMoreFooter: some View {
+    @ViewBuilder var loadMoreFooter: some View {
         if let message = browser.moreError {
             VStack(spacing: 10) {
                 Text(message).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)

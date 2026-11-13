@@ -3073,4 +3073,101 @@ private struct HandoffStream: Identifiable {
     let url: URL
     var id: String { url.absoluteString }
 }
+#else
+// ═══════════════════════════════════════════════════════════════════════════
+// tvOS 段：本文件 iOS 段里被跨平台视图引用的两个能力类型
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 实测依据（`xcrun --sdk appletvos swiftc -typecheck`，tvOS 27.2 SDK）：
+//   AVPictureInPictureController            → tvOS **有**
+//   AVPictureInPictureController.isPictureInPictureSupported() → tvOS **有**
+//   AVPlayerLayer                           → tvOS **有**
+//   UIViewRepresentable                     → tvOS **无**
+//   UIPasteboard                            → tvOS **无**
+//
+// 所以：
+//   · `MediaTracks` 纯 AVFoundation，tvOS 完整支持 → 原样移植（真实现，非空壳）。
+//   · `PictureInPicture` 底层 AVKit 类型 tvOS 都有，但**电视端没有「App 外悬浮小窗」场景**，
+//     故保留完整 API 形状让调用点零分支编译，行为上不宣称可用。
+//   · `MobilePlayerView` / `PlayerLayerView` 依赖 `UIViewRepresentable`（tvOS 真没有），
+//     那部分仍留在 iOS 段 —— 它们是 iPhone 专用的画面宿主。
+
+import SwiftUI
+import AVKit
+import TVCore
+
+/// 音轨 / 内嵌字幕轨的读写口。与 iOS 版逐行同义（纯 AVFoundation，tvOS 原生支持）。
+@MainActor @Observable final class MediaTracks {
+    struct Group {
+        let group: AVMediaSelectionGroup
+        let options: [AVMediaSelectionOption]
+    }
+    private(set) var audio: Group?
+    private(set) var legible: Group?
+    private var revision = 0
+    @ObservationIgnored private weak var item: AVPlayerItem?
+
+    func load(_ item: AVPlayerItem?) async {
+        self.item = item; audio = nil; legible = nil
+        guard let item else { return }
+        let asset = item.asset
+        let audible = try? await asset.loadMediaSelectionGroup(for: .audible)
+        let subtitles = try? await asset.loadMediaSelectionGroup(for: .legible)
+        guard !Task.isCancelled, self.item === item else { return }
+        audio = audible.map { Group(group: $0, options: $0.options) }
+        legible = subtitles.map { group in
+            Group(group: group, options: group.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) })
+        }
+    }
+
+    func selected(in group: Group) -> AVMediaSelectionOption? {
+        _ = revision
+        return item?.currentMediaSelection.selectedMediaOption(in: group.group)
+    }
+
+    func select(_ option: AVMediaSelectionOption?, in group: Group) {
+        item?.select(option, in: group.group)
+        revision += 1
+    }
+}
+
+/// 画中画（tvOS 段）。
+///
+/// tvOS 是机顶盒，接的是电视，**没有 App 外悬浮小窗的使用场景**；
+/// 但为让 OneSkin 等跨平台视图零分支编译，保留与 iOS 版一致的 API 形状。
+/// `supported` 恒 false 是**诚实反映本平台不用 PiP**，不是能力缺失的借口。
+@MainActor @Observable final class PictureInPicture: NSObject {
+    let supported = false
+    private(set) var possible = false
+    private(set) var active = false
+    var canToggle: Bool { possible || active }
+
+    static var isSupportedForPlayback: Bool { false }
+    private(set) static var isActive = false
+    private(set) static var current: AVPictureInPictureController?
+
+    var onActiveChange: (@MainActor (Bool) -> Void)?
+
+    private let adoptsRunningController: Bool
+
+    init(adoptsRunningController: Bool = true) {
+        self.adoptsRunningController = adoptsRunningController
+        super.init()
+    }
+
+    /// 与 iOS 版同名同签名：`attach(_:)` 不带标签。
+    /// tvOS 不做 App 外小窗，故只记住图层、不建 controller。
+    private weak var layer: AVPlayerLayer?
+
+    /// tvOS 下 PiP 永不活跃，任何图层都可正常渲染 —— 恒 true。
+    func shouldRender(_ layer: AVPlayerLayer) -> Bool { true }
+
+    func attach(_ layer: AVPlayerLayer) { self.layer = layer }
+    func detach() { layer = nil }
+    func start() {}
+    func stop() {}
+    func suspendAutomaticFloating() {}
+    func resumeAutomaticFloating() {}
+}
+
 #endif

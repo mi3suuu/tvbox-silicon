@@ -7,8 +7,8 @@ struct VideoDetailView: View {
     @MainActor private static var qaRotateCycleRunning = false
     #endif
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @Environment(\.dismiss) private var dismiss
-    @Environment(Store.self) private var store
+    @Environment(\.dismiss) var dismiss
+    @Environment(Store.self) var store
     let video: Video
     let client: CatalogClient
     /// Opened from Continue Watching: on an iPhone the page resumes it at once.
@@ -136,7 +136,7 @@ struct VideoDetailView: View {
     ///     并在每次解析前主动等待 `busy`，把脚本线程让给正在起播的那一次。
     /// 这样「播放不被 4~9 条线路堵住」和「线路菜单有数」同时成立。
     @State private var lineSampleTask: Task<Void, Never>?
-    @State private var detail: Video?
+    @State var detail: Video?
     /// Short labels (第1集) for lines whose episode names are file names, by episode id (#318). Display only.
     @State private var episodeLabels: [Episode.ID: String] = [:]
     @State private var error: String?
@@ -150,7 +150,7 @@ struct VideoDetailView: View {
     /// video's list around never flips every other video's.
     @State private var reversesEpisodes = false
     /// Play takes over focus from the loading placeholder; otherwise nothing is focused once details load.
-    @FocusState private var playFocused: Bool
+    @FocusState var playFocused: Bool
     /// ⛔ **2026-11-09 根治「横竖屏切换后界面一直推移 / 得重启才恢复」**
     ///
     /// 这两个值以前是 `.onGeometryChange` 写回的 @State，却又驱动
@@ -270,13 +270,13 @@ struct VideoDetailView: View {
     /// (image.tmdb.org is blocked on some networks, #237).
     @State private var loadedBackdrop: URL?
     /// The episode whose playback is being prepared; its row and the Play button show progress.
-    @State private var loadingEpisode: Episode.ID?
+    @State var loadingEpisode: Episode.ID?
     /// A failed or blocked playback attempt, shown as an inline banner beside the artwork.
     @State private var playbackIssue: PlaybackIssue?
     @State private var signingIn: CloudDrive?
     /// A sign-in the source's CatPawOpen bundle runs itself (UC's TV token).
     @State private var bundleSignIn: BundleSignIn?
-    @State private var choosingDownloads = false
+    @State var choosingDownloads = false
     /// 从选集卡上的下载角标进来时要预勾的集；从页面底部「下载」进来时为空。
     @State private var downloadPreselect: Set<String> = []
     /// How many episodes were just queued, shown briefly under the header.
@@ -295,7 +295,7 @@ struct VideoDetailView: View {
     private var activeFlag: String { flags.contains(selectedFlag ?? "\u{0}") ? selectedFlag! : (flags.first ?? "") }
     /// The active line's episodes. `activeFlag` goes through every episode, so it is read once, not once per episode:
     /// in the filter it made each page update quadratic (4 lines of 1,000 episodes took seconds, and iOS killed the app).
-    private var activeEpisodes: [Episode] {
+    var activeEpisodes: [Episode] {
         let flag = activeFlag
         return (detail?.episodes ?? []).filter { $0.flag == flag }
     }
@@ -316,7 +316,7 @@ struct VideoDetailView: View {
         760
         #endif
     }
-    private func startRequest(_ operation: @escaping @MainActor () async -> Void) {
+    func startRequest(_ operation: @escaping @MainActor () async -> Void) {
         let previous = requestTask
         previous?.cancel()
         requestTask = Task {
@@ -812,7 +812,7 @@ struct VideoDetailView: View {
                 .frame(maxWidth: .infinity).padding(.horizontal, Layout.gutter).padding(.bottom, 24)
         }
     }
-    @ViewBuilder private var playbackBanner: some View {
+    @ViewBuilder var playbackBanner: some View {
         if let count = queuedNotice {
             HStack(spacing: 12) {
                 Image(systemName: "arrow.down.circle.fill").foregroundStyle(Brand.accent)
@@ -999,15 +999,15 @@ struct VideoDetailView: View {
     }
     #endif
     /// TMDB's story when it has one, else the source's synopsis.
-    private func synopsisText(_ detail: Video) -> String {
+    func synopsisText(_ detail: Video) -> String {
         if let story = tmdb.details?.story, !story.isEmpty { return story }
         return detail.synopsis
     }
     /// The lookup's progress or its question, then TMDB's cast, facts and notice, under the page's own content.
-    @ViewBuilder private var tmdbStatus: some View {
+    @ViewBuilder var tmdbStatus: some View {
         TMDBLookupStatus(lookup: tmdb)
     }
-    @ViewBuilder private var tmdbExtras: some View {
+    @ViewBuilder var tmdbExtras: some View {
         VStack(alignment: .leading, spacing: 22) {
             if let details = tmdb.details {
                 if !details.cast.isEmpty { TMDBCastRow(cast: details.cast) }
@@ -1127,7 +1127,7 @@ struct VideoDetailView: View {
     /// The details, with the list's poster when the details came without one.
     func currentVideo() -> Video { (detail ?? video).keepingPoster(video.poster, headers: video.posterHeaders) }
 
-    private func videoFavorite() -> FavoriteItem {
+    func videoFavorite() -> FavoriteItem {
         .video(FavoriteVideo(origin: client.origin, site: client.site, video: currentVideo()))
     }
 
@@ -1135,7 +1135,7 @@ struct VideoDetailView: View {
         .episode(FavoriteEpisode(video: FavoriteVideo(origin: client.origin, site: client.site, video: currentVideo()), episodeFlag: episode.flag, episodeName: episode.name, episodeID: episode.id))
     }
 
-    @ViewBuilder private var playControl: some View {
+    @ViewBuilder var playControl: some View {
         if let detail {
             if let first = activeEpisodes.first ?? detail.episodes.first {
                 // Beside the poster on a phone there is no room for both labels: Download drops to its icon.
@@ -1284,7 +1284,7 @@ struct VideoDetailView: View {
     private var hasBackdrop: Bool {
         tmdb.details?.backdrop != nil && tmdb.details?.backdrop == loadedBackdrop
     }
-    @ViewBuilder private var episodePanel: some View {
+    @ViewBuilder var episodePanel: some View {
         if let detail {
             if detail.episodes.isEmpty {
                 noEpisodes(detail)
@@ -1553,7 +1553,7 @@ struct VideoDetailView: View {
     private func download(_ episode: Episode) -> DownloadItem? {
         DownloadLibrary.shared.visibleItem(for: DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin))
     }
-    private func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
+    func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
         #if DEBUG
         oneSkinLog("play episode=\(episode.name) flag=\(episode.flag) busy=\(busy)")
         #endif
@@ -1659,7 +1659,7 @@ struct VideoDetailView: View {
         #endif
     }
     /// Where the viewer stopped last time, for Continue.
-    private var watchHistory: PlaybackHistoryEntry? {
+    var watchHistory: PlaybackHistoryEntry? {
         store.visibleHistory.first { watchScopes.contains($0.context.id) }
     }
     /// The line of the episode playing, else of the one watched last, while the details still have it: the page opens

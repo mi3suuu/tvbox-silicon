@@ -327,12 +327,22 @@ struct TVSettingsField: View {
     @Binding var text: String
     /// Words rather than an address: the usual keyboard, with capitals and corrections.
     var prose = false
+    /// 密码类字段（cookie/token/密码）。iOS 侧用 `SecureField`，tvOS 没有该控件，
+    /// 但电视上这些值同样不该明文摆在屏幕上 —— 用圆点遮住当前值，编辑仍走弹窗输入。
+    var secret = false
     @State private var editing = false
     @State private var draft = ""
     @State private var cancelled = false
+
+    /// 行尾显示的值：secret 且非空时遮蔽，与 iOS `SecureField` 的观感一致。
+    private var displayValue: String {
+        if text.isEmpty { return L10n.text("Not set") }
+        return secret ? String(repeating: "•", count: min(text.count, 12)) : text
+    }
+
     var body: some View {
         Button { draft = text; cancelled = false; editing = true } label: {
-            TVSettingsRowLabel(title: title, value: text.isEmpty ? L10n.text("Not set") : text)
+            TVSettingsRowLabel(title: title, value: displayValue)
         }
         .glassRow()
         .alert(title, isPresented: $editing) {

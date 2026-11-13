@@ -1948,8 +1948,29 @@ extension View {
     }
 }
 
-#if os(tvOS)
+#if os(tvOS) && TVOS_DETAIL_PAGE_WIP
+// ═══════════════════════════════════════════════════════════════════════════
+// ⛔ 隔离中：Apple TV 的视频详情页（`bilibiliTVPage` / `tvDetailPage`）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 这段代码**从未编译通过过**，不是"平台守卫缺失"，而是**半成品**：
+// 它引用了 4 个全仓不存在的符号 —— `bilibiliCreator` / `sourceExtras` /
+// `sourceRelated` / `tvScrolled`（`tvScrolled` 只在 DiscoverDetailView 有同名私有属性）。
+// `bilibiliTVPage` 与 `tvDetailPage` 也因此没有任何调用方（grep 零命中）。
+//
+// 它需要的是**功能补全**（UP 主数据从哪来、sourceExtras/sourceRelated 怎么拼），
+// 不是平台隔离能解决的，也超出本次「tvOS 可编译性清理」的范围。
+// 故用 `TVOS_DETAIL_PAGE_WIP` 编译开关隔离：默认不参与编译，tvOS 能过；
+// 谁要接着做这份页面，打开开关就会重新看到全部待补点。
+//
+// 补全清单：
+//   1. `bilibiliCreator: (mid: Int, name: String)?` —— 需要 VideoDetailView 拿到 UP 主信息
+//   2. `sourceExtras: some View` —— 片源附加信息区
+//   3. `sourceRelated: some View` —— 相关推荐区
+//   4. `@State tvScrolled: Bool` —— 滚动状态（放 VideoDetailView 类体，不能放 extension）
+//   5. `@FocusState tvHeroFocus: TVHeroItem?` + `@State showsTVSynopsis` 同理
 extension VideoDetailView {
+
     /// Apple TV's page for a Bilibili video (#256): the page's own Play, parts and notices inside BilibiliTVVideoPage.
     var bilibiliTVPage: some View {
         let current = currentVideo()
