@@ -508,7 +508,18 @@ struct VideoDetailView: View {
             _ = size
             // ═══════ POSTURE 探测：每次容器尺寸提交后打印一次完整判据 ═══════
             // 建立 6 形态 × 全屏/非全屏 的实测矩阵，之后据此一次定案判据表。
-            if UserDefaults.standard.bool(forKey: "qaLogPosture") {
+            //
+            // ★ 2026-11-13 第四轮：「打满」—— 不再需要 `qaLogPosture` 开关。
+            //   这一行是**形态判定的唯一入口证据**（页面级 `oneSkinShape` 就是
+            //   在这里被算出来的）；旧版要显式传 `-qaLogPosture 1` 才有输出，
+            //   而真机上用户只装包、不会带启动参数 —— 等于这行日志永远不存在。
+            //   现在 DEBUG 下无条件打，用 gate 限流防刷爆。
+            do {
+                let shapeName = oneSkinShape.logName
+                if OneSkinProbeGate.allow(
+                    "POSTURE",
+                    value: "\(shapeName)|\(Int(size.width))x\(Int(size.height))"
+                ) {
                 let sb = UIApplication.shared.appWindowScene?.screen.bounds.size ?? .zero
                 let fg = foldGap
                 let hf = horizontalFold
@@ -518,7 +529,7 @@ struct VideoDetailView: View {
                 let fgStr: String = fg == nil ? "nil" : (fg!.isVertical ? "vertical" : "horizontal")
                 let hfStr: String = hf == nil ? "nil" : (hf!.isHorizontal ? "horizontal" : "other")
                 let idiomStr: String = (UIDevice.current.userInterfaceIdiom == .phone) ? "phone" : "other"
-                let a = "POSTURE shape=\(oneSkinShape.logName) container=\(Int(size.width))x\(Int(size.height))"
+                let a = "POSTURE shape=\(shapeName) container=\(Int(size.width))x\(Int(size.height))"
                 let b = " screen=\(Int(sb.width))x\(Int(sb.height)) cachedLive=\(lcStr)"
                 let c = " hSize=\(String(describing: sizeClass)) vSize=\(String(describing: verticalSizeClass)) idiom=\(idiomStr)"
                 let d = " orient=\(UIDevice.current.orientation.rawValue) foldGap=\(fgStr) hFold=\(hfStr)"
@@ -526,6 +537,7 @@ struct VideoDetailView: View {
                 let f = " landScreen=\(landscapeScreen) portExp=\(portraitExpanded) fs=\(fullScreen)"
                 let segSafe = " safe=\(Int(ins.top)),\(Int(ins.bottom)),\(Int(ins.leading)),\(Int(ins.trailing))"
                 let _ = oneSkinLog(a + b + c + d + e + f + segSafe)
+                }
             }
             #else
             containerWidth = size.width
@@ -3902,9 +3914,36 @@ struct VideoDetailView: View {
                              // 把 PlaybackView 实际持有的会话交回本页：选集页
                              // 画面层据此长期绑定同一个 AVPlayer（换集只换 item）。
                              onStageSession: { session in
-                                 playerSession = session
+                                 // ⛔⛔ 2026-11-13 第四轮：**空会话不许顶掉有 item 的会话。**
+                                 //
+                                 // 用户给出的三组合矩阵把范围锁死了：
+                                 //   竖源 + 横持双栏 ❌ 纯海报
+                                 //   竖源 + 竖持单列 ✅
+                                 //   横源 + 横持双栏 ✅
+                                 // 「横源 + 横持」正常 ⇒ 布局与分栏代码没问题（否则它也坏）。
+                                 // 真正的差别在**会话**：坏的那一帧日志是
+                                 //   `PICCHK ok avPlayer=yes item=false status=-1`
+                                 //   `stage=ps=0 lgs=0 wc=1`
+                                 // —— 三档全空，只剩 `store.currentSession(for:)` 那个**空会话**，
+                                 //   于是 `player.currentItem == nil`，画面层走 `OneSkinPosterWash`
+                                 //   画海报。竖持时 `ps=1`（本页强引用还在）所以正常。
+                                 //
+                                 // 原先这里无条件赋值：横持引起的 `PlaybackView` 重建会回调
+                                 // 一个**新造的、还没挂 item 的**会话，把上一帧那个正在播的
+                                 // 覆盖掉，且 `lastGoodSession` 一起被污染 —— 之后每一帧都取到
+                                 // 空会话，**再也回不来**（不是掉一帧，是永久掉）。
+                                 //
+                                 // 现在：只有「带 item」的会话才有资格覆盖；空会话只在当前也空时
+                                 // 才补位（首次进入/换集过渡）。正在播的东西不会被顶掉。
+                                 let incomingHasItem = session.player.currentItem != nil
+                                 let currentHasItem = playerSession?.player.currentItem != nil
+                                 if incomingHasItem || !currentHasItem {
+                                     playerSession = session
+                                 }
                                  // 记下「确定在播」的那一个，供 store 清槽后继续取用。
-                                 lastGoodSession = session
+                                 if incomingHasItem || lastGoodSession == nil {
+                                     lastGoodSession = session
+                                 }
                              })
             }
             if covered { watchCover.transition(.opacity) }

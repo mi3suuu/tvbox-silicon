@@ -18,6 +18,31 @@ enum ROOTRecomputeProbe {
     nonisolated(unsafe) static var last: TimeInterval = 0
 }
 
+/// 探针限流闸（2026-11-13 第四轮：把 OneSkin 探针「打满」）。
+///
+/// 为什么要闸：这些探针全在 body / GeometryReader 里，一旦掉进自激环
+/// 就是每秒几百行；`OneSkinLogSink` 只有 1MB 上限（`devicectl` 取不出更大的），
+/// 刷爆后真正的证据会被轮转掉。
+///
+/// 闸的策略是「**完整性优先、重复降噪**」：
+///   · 同一 `key` 前 `always` 次**全打**（覆盖首帧、转屏当帧、分支切换）；
+///   · 之后只要 `value` 变了就**立刻再打**（任何状态跳变都不漏）；
+///   · 完全重复的稳态才降频到每 `every` 次一行。
+/// 这样「打满」= 不丢任何分支和任何变化，而不是无脑每帧一行。
+enum OneSkinProbeGate {
+    nonisolated(unsafe) private static var counts: [String: Int] = [:]
+    nonisolated(unsafe) private static var lastValue: [String: String] = [:]
+
+    static func allow(_ key: String, value: String = "-",
+                      always: Int = 4, every: Int = 90) -> Bool {
+        let n = (counts[key] ?? 0) + 1
+        counts[key] = n
+        if n <= always { lastValue[key] = value; return true }
+        if lastValue[key] != value { lastValue[key] = value; return true }
+        return n % every == 0
+    }
+}
+
 @inline(__always)
 func oneSkinLog(_ message: @autoclosure () -> String) {
     #if DEBUG
@@ -419,6 +444,17 @@ enum OneSkin {
         let cap = max(screenLong, floorDim)
         let clamped = CGSize(width: min(proxy.width, cap),
                             height: min(proxy.height, cap))
+        #if DEBUG
+        do {
+            let v = "\(Int(proxy.width))x\(Int(proxy.height))/\(Int(screen.width))x\(Int(screen.height))"
+            if OneSkinProbeGate.allow("AVAIL", value: v) {
+                oneSkinLog("AVAIL raw proxy=\(Int(proxy.width))x\(Int(proxy.height)) "
+                    + "screen=\(Int(screen.width))x\(Int(screen.height)) long=\(Int(screenLong)) "
+                    + "floor=\(Int(floorDim)) cap=\(Int(cap)) fs=\(fullScreen) "
+                    + "→ \(Int(clamped.width))x\(Int(clamped.height))")
+            }
+        }
+        #endif
         return quantize(clamped)
     }
 
@@ -1799,15 +1835,32 @@ struct OneSkinStage: View {
                 // 灰带内**不可能**因为亚点尺寸差翻转 —— 断了「差 1pt 就换版式」的环。
                 let w = max(geo.size.width, 1)
                 let h = max(geo.size.height, 1)
-                // 决定性地打印「本帧走了哪个分支」，钉死 geo 震荡时判错的路径。
-                let _ = oneSkinLog("SHAPEPICK geo=\(Int(w))x\(Int(h)) page=\(shape.logName) qaCol=\(UserDefaults.standard.bool(forKey: "qaOneSkinColumn")) qaLand=\(UserDefaults.standard.bool(forKey: "qaOneSkinLandscape")) qaShape=\(UserDefaults.standard.string(forKey: "qaOneShape") ?? "-")")
-                if w > h * 1.15 { return .split }            // 明确横：双栏
-                if h > w * 1.15 {                            // 明确竖
-                    return w >= 500 ? .fullBleed : .column   // 内屏宽版 / 外屏单列
+                // ★ 2026-11-13 第四轮：「打满」—— 不再只打输入，还要打**命中哪个分支**。
+                //   之前 SHAPEPICK 只给出 geo 尺寸，日志里看不出到底进了 w>h 还是灰带，
+                //   排查时只能靠人肉重算阈值。现在 via= 直接给出生效条件。
+                let picked: OneSkinShape
+                let via: String
+                let ratio = w / h
+                if w > h * 1.15 {
+                    picked = .split
+                    via = "wide(\(String(format: "%.3f", ratio))≥1.15)"
+                } else if h > w * 1.15 {
+                    picked = w >= 500 ? .fullBleed : .column
+                    via = "tall(\(String(format: "%.3f", ratio))≤0.870)w≥500=\(w >= 500)"
+                } else {
+                    picked = shape == .split ? .split : (w >= 500 ? .fullBleed : .column)
+                    via = "gray(\(String(format: "%.3f", ratio)))page=\(shape.logName)"
                 }
-                // 近似方形：容器自己判不出方向，用页面级离散形态裁决，
-                // 不让 ±1pt 决定整页版式。
-                return shape == .split ? .split : (w >= 500 ? .fullBleed : .column)
+                if OneSkinProbeGate.allow("SHAPEPICK", value: "\(Int(w))x\(Int(h))\(via)") {
+                    let _ = oneSkinLog("SHAPEPICK geo=\(Int(w))x\(Int(h)) ratio=\(String(format: "%.3f", ratio)) "
+                        + "page=\(shape.logName) → \(picked.logName) via=\(via) "
+                        + "qa=[col=\(UserDefaults.standard.bool(forKey: "qaOneSkinColumn")) "
+                        + "land=\(UserDefaults.standard.bool(forKey: "qaOneSkinLandscape")) "
+                        + "wide=\(UserDefaults.standard.bool(forKey: "qaOneSkinWide")) "
+                        + "half=\(UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold")) "
+                        + "shape=\(UserDefaults.standard.string(forKey: "qaOneShape") ?? "-")]")
+                }
+                return picked
             }()
             let _ = oneSkinLog("BUILDMARK v20261113-1410-axis-hysteresis")
             // ★★★ 轴判决单行摘要（红果案的决定性证据）。
@@ -1986,14 +2039,66 @@ struct OneSkinStage: View {
                     // ignoresSafeArea 想要的效果，那块是 Home 指示条区域）。
                     // 结果：版式的每一个绝对坐标一个字都不用改，但父级不再
                     // 拿到一个比它自己还大的子视图，溢出协商从根上不存在。
+                    // ★★★ 2026-11-13 第四轮（真因）：**上报高必须等于父级高**。
+                    //
+                    // 前三轮都停在「内容用 635 排、上报也用 635」，结果：
+                    //   父级给 669 → 子视图只认领 635 → 剩余 34 无处安放
+                    //   → SwiftUI 每帧重做溢出协商 → 三种落位轮转：
+                    //     gy=-334（父级压成 0 后居中）/ gy=0（正确）/ gy=748（顺排下方）
+                    // 用户看到的稳定性取决于哪一帧被呈现 —— 竖屏源因为窗口最接近
+                    // 容器高，最常被呈现的是坏帧，所以「只有竖源、只有双栏」中招。
+                    //
+                    // 正确语义：**内部排版用槽位 635（避开 Home 指示条），
+                    // 但对外认领整屏 669（= 父级实际给的空间）**。
+                    // 认领值 = 父级值，协商从定义上不存在；多出的 34pt 由
+                    // `.ignoresSafeArea()` 让内容自然延伸过去（那本就是指示条区域）。
                     .frame(width: min(useAvail.width, avail.width),
-                           height: min(useAvail.height, slotH),
+                           height: min(geo.size.height, avail.height),
                            alignment: .topLeading)
             }
+            // ★ 2026-11-13 第四轮：**stage 最终落位探针**（STAGEFRAME）。
+            //
+            // 这是「只有海报」判据链的最后一环：前面所有日志都对、布局也进了双栏，
+            // 但整块被 SwiftUI 摆到屏幕外时，用户看到的就只有背景海报。
+            // 旧日志里 HSPLIT/COLORIGIN 只覆盖**部分分支**（双栏、画面列），
+            // 单列与全屏分支完全没有落位数据 —— 这里一次性补齐。
+            //
+            // 量的是 `ZStack` 本身（stage 的祖先）：它的尺寸 = 子视图最大值
+            // = stage 上报的 frame；它的 global origin = 整块真正落点。
+            //   · `local`  = 本层最终被分配的尺寸（应 ≈ slotH 的槽位）
+            //   · `global` = 窗口坐标系原点（负值 / 大于屏高 = 已跑到屏幕外）
+            .background(
+                GeometryReader { p in
+                    let f = p.frame(in: .global)
+                    let d = "STAGEFRAME local=\(Int(p.size.width))x\(Int(p.size.height)) "
+                        + "global=\(Int(f.minX)),\(Int(f.minY)) "
+                        + "geo=\(Int(geo.size.width))x\(Int(geo.size.height)) "
+                        + "avail=\(Int(avail.width))x\(Int(avail.height)) "
+                        + "slot=\(Int(slotH)) shape=\(geoShape.logName)"
+                    Color.clear
+                        .onAppear { let _ = oneSkinLog(d) }
+                        .onChange(of: p.size) { _, _ in let _ = oneSkinLog(d) }
+                        .onChange(of: f.minX) { _, _ in let _ = oneSkinLog(d) }
+                        .onChange(of: f.minY) { _, _ in let _ = oneSkinLog(d) }
+                }
+            )
         }
         // 底色挂在**外层**：`.background` 不参与本层尺寸协商，
         // 只负责铺满最终容器。`.ignoresSafeArea()` 让它走到物理边缘。
-        .background(OneSkinPalette.pageBase.ignoresSafeArea())
+        //
+        // ★ 2026-11-13 第四轮：**海报取色底也收到这里**。
+        //
+        // 它原先是 `stage` 里 `Group` 的第一个子视图（`.ignoresSafeArea()`），
+        // 于是参与 ZStack 的尺寸协商、把内容顶出槽位（详见 stage 里删除处的注释）。
+        // 移到 `.background` 后它在内容层**之下**、不参与任何尺寸计算，
+        // 同时保持「整页铺海报取色」的视觉（页面底 → 海报取色，自下而上）。
+        .background(
+            ZStack {
+                OneSkinPalette.pageBase
+                OneSkinBackdropLayer(image: posterImage)
+            }
+            .ignoresSafeArea()
+        )
         .ignoresSafeArea()
         // ⛔ 这里**不能**再 `.frame(width:) + .clipped()`。
         //
@@ -2033,9 +2138,10 @@ struct OneSkinStage: View {
         //
         // 正确位置见 `body` 外面的 `OneSkinViewportProbe`：那里只放一个
         // 中性的、不参与内容计算的容器来量尺寸。
-        .background(
-            OneSkinBackdropLayer(image: posterImage).ignoresSafeArea()
-        )
+        //
+        // ★ 2026-11-13 第四轮：这里原来还有一层 `OneSkinBackdropLayer`，
+        //   与上面合并后的背景重复（同一张海报叠两遍 = 两次模糊滤镜）。
+        //   现已并入上面那个 `.background(ZStack { pageBase; backdrop })`。
         .foregroundStyle(OneSkinPalette.primary)
         // ★ 形态切换的**视觉**过渡。
         //
@@ -2263,6 +2369,26 @@ struct OneSkinStage: View {
     ///    drifted."
     /// 所以这里绝不能按方向分叉成两棵视图树。用 AnyLayout 只换 axis，
     /// 播放器身份在每个折叠/转向/全屏之间保持不变。
+    /// 分支内部容器的实测探针（2026-11-13 第四轮「打满」）。
+    ///
+    /// `STAGEFRAME` 量的是整块落位，但当整块**看起来正常**而内容消失时，
+    /// 需要知道**这一支自己的 VStack** 拿了多大、落在哪。
+    /// 尤其「竖版塞进横容器」：VStack 内容高 ≈ 951 而槽位只有 635，
+    /// 这一行会直接给出 `size=951x951 global=0,-xxx` 这类铁证。
+    private func childFrameProbe(_ tag: String, picH: CGFloat, detailH: CGFloat) -> some View {
+        GeometryReader { p in
+            let f = p.frame(in: .global)
+            let d = "CHILD[\(tag)] size=\(Int(p.size.width))x\(Int(p.size.height)) "
+                + "global=\(Int(f.minX)),\(Int(f.minY)) "
+                + "picH=\(Int(picH)) detailH=\(Int(detailH))"
+            Color.clear
+                .onAppear { let _ = oneSkinLog(d) }
+                .onChange(of: p.size) { _, _ in let _ = oneSkinLog(d) }
+                .onChange(of: f.minX) { _, _ in let _ = oneSkinLog(d) }
+                .onChange(of: f.minY) { _, _ in let _ = oneSkinLog(d) }
+        }
+    }
+
     @ViewBuilder private func stage(_ size: CGSize,
                                     ratioBase: CGSize,
                                     fitMode: OneSkinFitMode,
@@ -2387,6 +2513,28 @@ struct OneSkinStage: View {
         //   · 都用扣除 → 环断了但坐标缩 10.3%、胶囊条偏上 60.8pt
         // 详见 `OneSkinGeometry.ratioBase` 的注释。
         let ratio = ratioBase
+        // ★ 2026-11-13 第四轮：**分支探针**。
+        //
+        // 此前 stage 里六个分支（fullScreen / folded / halfFold / fullBleed /
+        // HStack 双栏 / VStack 单列）没有任何一行日志说明「本帧到底走了哪条」。
+        // 排查「横持出不了双栏」时，第一步必须能回答：
+        //   是判形错了（没进 splitHStack），还是进了但落位错了（看 STAGEFRAME）。
+        // 这两件事在旧日志里分不开。
+        let branchName: String = {
+            if fullScreenNow { return "fullScreen" }
+            if folded { return "folded" }
+            if liveShape == .halfFold { return "halfFold" }
+            if liveShape == .fullBleed { return "fullBleed" }
+            if landscapeNow { return "splitHStack" }
+            return "columnVStack"
+        }()
+        #if DEBUG
+        if OneSkinProbeGate.allow("BRANCH", value: "\(branchName)|\(Int(box.width))x\(Int(box.height))") {
+            let _ = oneSkinLog("BRANCH → \(branchName) box=\(Int(box.width))x\(Int(box.height)) "
+                + "shape=\(liveShape.logName) land=\(landscapeNow) fs=\(fullScreenNow) "
+                + "folded=\(folded) sess=\(session == nil ? "nil" : "ok") eps=\(episodes.count)")
+        }
+        #endif
         #if DEBUG
         let _ = oneSkinLog("stage size=\(Int(size.width))x\(Int(size.height)) box=\(Int(box.width))x\(Int(box.height)) shape=\(liveShape.logName) land=\(landscapeNow) ratioBase=\(Int(ratioBase.width))x\(Int(ratioBase.height))")
         // ★ 几何自检（每个形态都打）：单一基准是否成立 = box 与 ratioBase 的差是否
@@ -2445,19 +2593,25 @@ struct OneSkinStage: View {
         // screen.bounds（含被 safe area 吃掉的部分），实际可用高度更小，
         // 会让画面列比屏幕矮一截（控件条因此浮在屏幕中部）。
         Group {
-            // ★ 整页铺**海报取色**底，不是纯色。
+            // ⛔⛔ 2026-11-13 第四轮：**这里原来有一层 `OneSkinBackdropLayer`，已删除。**
             //
-            // 之前只有 `pictureColumn` 内部有 `OneSkinBackdropLayer`，它只管画面列；
-            // 竖屏是上下布局，下半屏没有底色，直接透到外层的 `DetailAurora`
-            // → `Backdrop()`（浅色 246,248,252）—— 那就是「底部渐隐白层」。
+            // 它是「横持只剩海报」的真凶 —— 真机日志（`fixedLayer` chain）：
+            //   d2 HostingView        0,0  951x669   ← 容器正确
+            //   d1 _UIInheritedView   0,881 523x287  ← 画面被顺排到屏幕外
+            // 而 SwiftUI 侧同一帧是 `COLORIGIN gy=748`、`STAGEFRAME global=951,0`。
             //
-            // ⛔ 别用 `OneSkinPalette.pageBase` 这种纯色顶在这里：
-            // 试过了，它会把 One 的整页海报取色（顶部暗 → 14% 峰值 → 底部近黑
-            // 的三停渐变）整个盖成一片死黑，用户立刻能看出来「背景变纯黑了」。
-            // `OneSkinBackdropLayer` 才是那套取色算法，复用它，只是铺满整页。
-            OneSkinBackdropLayer(image: posterImage)
-                .ignoresSafeArea()
-
+            // 成因：`OneSkinBackdropLayer(...).ignoresSafeArea()` 挂在 `Group` 的
+            // **第一个子视图**上。`.ignoresSafeArea()` 让它的理想尺寸 = 整屏 + 安全区
+            // （横持 ≈ 951×703），而 `ZStack` 的尺寸 = 所有子视图的**最大值** ——
+            // 于是内层 ZStack 变成 703 高，外层 `.frame(height: 635)` 只上报 635，
+            // 内容比槽位高 68pt ⇒ SwiftUI 每帧重做溢出协商，实测同一输入出现
+            //   global = 0,0 / -475,-334 / 951,0      （横向顺排一整个屏宽）
+            //   gy     = 0 / 748 / 881                （纵向顺排到槽位下方）
+            // 三种落位。落在屏幕外的那些帧，用户看到的就是「纯海报」。
+            //
+            // 底色/海报取色改由**外层 `.background` 统一铺**（见 body 末尾的
+            // `.background(OneSkinPageBackdrop(...))`）：`.background` 不参与
+            // 本层的尺寸协商，铺多大都不会把内容顶出容器。
             if fullScreenNow {
                 // 全屏态（One 五态里的两态：全屏横屏 / 全屏竖屏）。
                 // 语义 = 画面铺满可用空间，右栏与底部胶囊条都不画，
@@ -2537,6 +2691,7 @@ struct OneSkinStage: View {
                                  shapeOverride: liveShape)
                         .frame(width: box.width, height: detailH)
                 }
+                .background(childFrameProbe("fullBleed", picH: picH, detailH: detailH))
             } else if landscapeNow {
                 // 对齐用 .top 而非 .center：detailColumn 的 ScrollView 内容
                 // 通常高于列高，.center 会让它上下各溢出一半，首帧就停在中间
@@ -2644,6 +2799,7 @@ struct OneSkinStage: View {
                                  shapeOverride: liveShape)
                         .frame(width: box.width, height: max(box.height - picH, 1))
                 }
+                .background(childFrameProbe("column", picH: picH, detailH: max(box.height - picH, 1)))
             }
         }
         // 底部胶囊条：必须在 stage **之上**单独一层。
