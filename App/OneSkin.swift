@@ -343,6 +343,34 @@ enum OneSkin {
         }
     }
 
+    /// 上一次真正用于排版的可用尺寸（抗塌陷闸门用，见 `guardCollapse`）。
+    @MainActor private static var lastLaidOut: CGSize?
+
+    /// 挡掉**容器塌陷帧**。
+    ///
+    /// 真机日志（2026-11-13 16:29，开合摆动时）：
+    ///   `SLOT content=951x669` → `483x676` → **`84x685`** → `483x676` → `787x649` → `951x669`
+    /// 84pt 那一帧按它重排，画面被挤成 `84x46` 一条、两列全部重算，
+    /// 下一帧又弹回来 —— 用户看到的就是「推移」。
+    ///
+    /// 84pt 在物理上不可能：最窄的合拢外屏也有 466pt。
+    /// 它来自 Duo 开合动画里 NavigationStack / TabView 的过渡布局，
+    /// 属于**系统中间帧**，不是可用空间。
+    ///
+    /// 规则：非全屏时，若容器宽度塌到 240pt 以下而上一次还在 240pt 以上，
+    /// 沿用上一次的尺寸 —— 这一帧不重排，等下一帧正常值到来。
+    /// 只丢弃中间帧，不影响任何真实形态（466 / 951 / 382 全部 > 240）。
+    @MainActor static func guardCollapse(_ size: CGSize, fullScreen: Bool) -> CGSize {
+        guard size.width > 1, size.height > 1 else { return size }
+        let prev = lastLaidOut
+        if !fullScreen, size.width < 240, let prev, prev.width > 240 {
+            // 高度同样别跟着塌：按上一次的高度，但不放大到超过它。
+            return CGSize(width: prev.width, height: max(size.height, prev.height))
+        }
+        lastLaidOut = size
+        return size
+    }
+
     /// 把尺寸量化成**离散桶**（对应哔哩哔哩折叠屏适配里的 `lastHingeStatus`）。
     ///
     /// 参考：哔哩哔哩 9.18.0 用 `HingeStatus` 枚举 + `lastHingeStatus` 缓存，
@@ -1841,6 +1869,17 @@ struct OneSkinStage: View {
                 let picked: OneSkinShape
                 let via: String
                 let ratio = w / h
+                // ⛔ 塌陷帧（Duo 开合过渡里实测 84pt 宽）不许参与轴判定。
+                //
+                // 那一帧 `h > w*1.15` 必然成立，会把整页判成竖版单列，
+                // 与 stage 侧（被 `guardCollapse` 沿用成 951）直接错配 ——
+                // 正是「双栏帧按单列排」那类错配的老坑。
+                // 这种宽度在物理上不存在（最窄合拢外屏 466），
+                // 轴一律交回页面级离散判据。
+                if w < 240 {
+                    let _ = oneSkinLog("SHAPEPICK geo=\(Int(w))x\(Int(h)) 塌陷帧 → 用页面级 \(shape.logName)")
+                    return shape
+                }
                 if w > h * 1.15 {
                     picked = .split
                     via = "wide(\(String(format: "%.3f", ratio))≥1.15)"
@@ -1943,7 +1982,17 @@ struct OneSkinStage: View {
             // 之前我加过 `.frame`，反而让内容显式声明成容器大小、
             // 与内部的 669 打架，`origin` 更糟。基线本来就没有 `.frame`，
             // 唯一的错是 `useAvail` 用了物理屏而不是容器做上限。
-            let bucketed = stageIsLandscape ? liveAvail : OneSkin.stableBucket(liveAvail, step: 8)
+            // 抗塌陷：Duo 开合的过渡布局会给出生理上不可能的宽度（实测 84pt），
+            // 按它重排整页会瞬间挤成一条再弹回 —— 用户看到的「推移」。
+            // 闸门只丢这类中间帧，真实形态（466 / 382 / 951）一律放行。
+            let guarded = OneSkin.guardCollapse(liveAvail, fullScreen: fullScreenNow)
+            #if DEBUG
+            if Int(guarded.width) != Int(liveAvail.width) {
+                let _ = oneSkinLog("COLLAPSE guard raw=\(Int(liveAvail.width))x\(Int(liveAvail.height)) "
+                    + "→ keep=\(Int(guarded.width))x\(Int(guarded.height))")
+            }
+            #endif
+            let bucketed = stageIsLandscape ? guarded : OneSkin.stableBucket(guarded, step: 8)
             // ★★ 根治（2026-11-13 第三轮）：`useAvail.height` 必须 = **槽位高**，
             //    不再用整屏高 669。真机铁证（fig-oneskin4.log 同一进程 origin 乱跳）：
             //      HSPLIT-C origin=0,0 / 0,673 / 0,266 / 0,491 / -475,-334
