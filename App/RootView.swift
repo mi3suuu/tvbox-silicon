@@ -337,17 +337,37 @@ struct RootView: View {
     /// （用户切回来还在），只是不画 —— 所以这里是「隐藏坞的绘制」，
     /// 不是「清空坞」。`applyMuting()` 那条链路照旧管声音。
     private var dockCoveredByForeground: Bool {
-        if store.presentingPlayer { return true }
+        // ⛔ 观看页在场也必须让位 —— 哪怕 `playing == nil`。
+        //
+        // 原来只有下面 `playsInWatchPage(store.playing)` 一条判据，而它对
+        // `playing == nil` **恒为 false**（`Store+Playback.swift:9`:
+        // `guard let scope = channel?.historyContext?.id else { return false }`）。
+        //
+        // 于是用户停在观看页里、但这一集没有挂到 `store.playing` 的那一刻
+        // （关掉前台这一集、换一集起播的间隙、坞里挂着别的集），
+        // 判据全部为 false ⇒ 坞照画 ⇒ 用户看到的正是
+        // 「坞在不该出现时出现」。这正是原报告里「`playing=nil` 的场景判不出」。
+        //
+        // `store.isWatchPageMounted` 就是为这一帧准备的（`Store.swift:584-591`）：
+        // 它由观看页 `onAppear`/`onDisappear` **同步**维护，不受 scope 内容影响，
+        // 所以页面刚推入、`onAppear` 还没跑那一帧也可靠。
+        // `Store.swift:518` 早已用它做同一类判定（决定要不要弹全屏播放器）——
+        // 同一份判据在两处分叉，坞这边漏了。现在两边一致。
         let r = store.playsInWatchPage(store.playing)
+        let covered = DockCoverage.isCoveredByForeground(
+            presentingPlayer: store.presentingPlayer,
+            isWatchPageMounted: store.isWatchPageMounted,
+            playsInWatchPage: r
+        )
         #if DEBUG
         // 探针：坞该不该让位的判据在真机上到底怎么取值。
-        // 用户报「展开横屏时坞仍画着」——要么这两个判据都是 false，
+        // 用户报「展开横屏时坞仍画着」——要么这几个判据都是 false，
         // 要么判出来了但 `.opacity` 没接上。日志能一眼分开。
         if store.videoTasks.hasTasks {
-            oneSkinLog("DOCKCOVER presenting=\(store.presentingPlayer) inWatch=\(r) playing=\(store.playing?.name ?? "nil") scopes=\(store.watchPageScopes.count)")
+            oneSkinLog("DOCKCOVER presenting=\(store.presentingPlayer) mounted=\(store.isWatchPageMounted) inWatch=\(r) covered=\(covered) playing=\(store.playing?.name ?? "nil") scopes=\(store.watchPageScopes.count)")
         }
         #endif
-        return r
+        return covered
     }
 
     @ViewBuilder private var videoMiniPlayer: some View {
