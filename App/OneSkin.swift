@@ -2640,8 +2640,27 @@ struct OneSkinStage: View {
         // 当容器尺寸都会让这里出现非零的「应为 0」项。
         do {
             let dx = Int(ratioBase.width - box.width), dy = Int(ratioBase.height - box.height)
-            // 期望值必须与 driver 同公式（按屏宽比例），不能再写死 47。
-            let expectDX = landscapeNow ? Int((ratioBase.width * 0.0494).rounded()) : 0
+            // ⛔ 2026-11-13 真机实测定案：横持**不扣右让位**，所以 dX 的期望恒为 0。
+            //
+            // 原判据 `landscapeNow ? Int(ratioBase.width * 0.0494) : 0`（951→47 / 669→33）
+            // 是一个**从未存在过的期望**：`availableScreenSize(landscape:)`（本文件 :327）
+            // 横持只扣 `ins.bottom`，注释写明「左右已被 ignoresSafeArea 让出，
+            // 再扣一次就是重复」。于是 `box.width` 恒等于 `ratioBase.width`
+            // ⇒ `dx = ratioBase.width - box.width` 数学上必为 0，而期望却是 47，
+            // 每帧误报 ⚠MIXED。
+            //
+            // 真机证据（2026-11-13 17:02，iPhone Duo 内屏横持）：
+            //   20 / 20 条 GEOM 行全部 `box宽 == ratio宽`，`dX=0`
+            //   → 这不是「相位对不齐」，是期望值本身错了。
+            //
+            // 修法：期望值与**实际扣让位的条件同源**，即与
+            // `availableScreenSize(landscape:)` 完全一致 —— 两种形态都只扣底部，
+            // 右缘 0。若将来横持真的开始扣右让位，必须同时改 :327 与这里，
+            // 否则这条自检又会变成恒真或恒假。
+            //
+            // 注意这不是把检测器删掉：`dx` 仍逐帧与期望值比对，任何一次
+            // 「box 宽被别的子视图拿 ratio 当容器而缩窄」仍会立刻报 ⚠MIXED。
+            let expectDX = 0
             // ★ dY 的期望值不再是 0：非全屏时 `box` 会扣掉底部安全区（P1-4 修正），
             //   全屏时四边全忽略、扣 0。自检必须跟着这个口径走，
             //   否则每一帧都会报 ⚠MIXED，真出问题时反而看不见。
