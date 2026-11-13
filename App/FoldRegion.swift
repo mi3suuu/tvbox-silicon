@@ -216,6 +216,10 @@ struct OcclusionInsets: Equatable, Sendable {
 }
 
 // MARK: - 遮挡 → 几何层
+#if os(iOS)
+// 仅 iOS：`OneSkinOcclusionInsets` 属 OneSkin 文件簇（`OneSkinGeometryDriver.swift`），
+// 而该簇整体只在 iOS 编译（见其文件头说明：tvOS 不要 One 皮肤）。
+// 本扩展的唯一调用方 `OneSkin.swift:1852/1941` 也在该簇内。
 extension OcclusionInsets {
     /// 交给 `OneSkinGeometryDriver` 的形状（P1-8 / 16.1）。
     ///
@@ -226,6 +230,7 @@ extension OcclusionInsets {
         OneSkinOcclusionInsets(left: left, right: right, top: top, bottom: bottom)
     }
 }
+#endif
 
 // MARK: - 折叠感知的双列布局
 
@@ -410,7 +415,9 @@ struct FoldRegionProbe: View {
         // 直接打印系统返回的原始区域数，确认是「系统不给」还是「我们解析错」。
         let d = proxy.reservedRegions(kind: .division)
         let o = proxy.reservedRegions(kind: .occlusion)
+        #if os(iOS)
         OneSkinProbe.log("FOLDRAW division=\(d.count) occlusion=\(o.count) frames=\(d.map { "\(Int($0.frame.minX)),\(Int($0.frame.maxX)),\(Int($0.frame.minY)),\(Int($0.frame.maxY))" }.joined(separator: "|"))")
+        #endif
         #endif
         onChange(proxy.reservedRegions(kind: .division).map(\.frame),
                  proxy.reservedRegions(kind: .occlusion).map(\.frame))

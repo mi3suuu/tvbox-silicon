@@ -378,47 +378,6 @@ actor OneSkinPosterCache {
 // 现在几何只由 `OneSkinStage` 根部 GeometryReader 在闭包内直接使用，
 // 不写任何 @State；`VideoDetailView` 侧则只在离散形态变化时采样一次。
 
-#else
-// ═══════════════════════════════════════════════════════════════════════════
-// tvOS 段：本文件被跨平台视图引用的部分
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// iOS 段围绕 `UIVisualEffectView` / `UIViewRepresentable` 写，tvOS 二者都没有（实证），整段不搬。
-// 但 `OneSkinPosterWash` 是**纯 SwiftUI**（UIImage + Image(uiImage:) + blur + 渐变），
-// tvOS 全部支持 → 原样移植，是真实现，不是空壳。
-import SwiftUI
-import TVCore
-
-/// 海报虚化铺底。与 iOS 版逐行同义。
-struct OneSkinPosterWash: View {
-    let image: UIImage?
-    var dim: Double = 0.38
-    var radius: CGFloat = 26
-
-    var body: some View {
-        ZStack {
-            Color.black
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .scaleEffect(1.18)
-                    .blur(radius: radius)
-                Color.black.opacity(dim)
-                LinearGradient(
-                    stops: [
-                        .init(color: .black.opacity(dim * 0.40), location: 0),
-                        .init(color: .black.opacity(dim * 0.06), location: 0.5),
-                        .init(color: .black.opacity(dim * 0.55), location: 1)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            }
-        }
-        .clipped()
-    }
-}
 #endif
 
 // MARK: - 主题底开关

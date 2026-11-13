@@ -114,6 +114,9 @@ import TVCore
                         // 后台模式，系统会让它继续出声，画面由系统自己停。
                         // 不在这里 setActive(false)：那会把正在播的音轨一起掐掉，
                         // 再回到前台还要重新起一次，接不上。
+                        #if os(iOS)
+                        // `BiliPlayerExtras` 定义在 BiliSkin.swift（iOS-only）。
+                        // tvOS/macOS 没有「后台听视频」这个二开开关，跳过即可。
                         if !BiliPlayerExtras.shared.backgroundAudio {
                             // 不裸取 activeSession（它是 private）：按正在播的 channel 问 Store 要，
                             // channel 一致时它返回的就是那个会话，不会新建。
@@ -121,6 +124,7 @@ import TVCore
                                 store.playbackSession(for: channel).player.pause()
                             }
                         }
+                        #endif
                         // [mi3s] 二开：隐私保险库退到后台即重新上锁。一次解锁只对给出它的那一刻有效，
                         // 把手机递给别人时被隐藏的源/订阅不会被看到。没有密码时 lock() 是空操作。
                         store.relockVaultOnBackground()

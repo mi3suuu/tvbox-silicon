@@ -288,8 +288,11 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         applying = Task { [weak self] in
             var criteria = wanted
             if let asset { criteria = try? await asset.load(.preferredDisplayCriteria) }
-            // The HDR mode the player switched to before the item opened (`HDRDisplay`) stays until it stops.
-            if criteria == nil, HDRDisplay.requested != nil { return }
+            // The HDR mode the player switched to before the item opened stays until it stops.
+            // ⚠️ 原写的是 `HDRDisplay.requested` —— `HDRDisplay`（Sources/TVCore）**没有**这个成员；
+            //    正确的是本方法开头已取到的 `request`（= `enhancer?.displayRequest`）。
+            //    闭包里 `self` 是弱引用可选值，故直接用捕获到的 `request`，不再经 self 取一次。
+            if criteria == nil, request != nil { return }
             // The controller joins its window a moment after it is made.
             for _ in 0..<20 {
                 guard !Task.isCancelled, let self else { return }

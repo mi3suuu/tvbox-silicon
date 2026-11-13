@@ -355,6 +355,13 @@ enum BiliAspectMode: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// UserDefaults 键名。**必须与 `OneSkin.fitModeKey` 同值**（"oneSkinFitMode"）。
+    ///
+    /// 为什么在这里再写一份：`OneSkin` 属 OneSkin 文件簇（整体只在 iOS 编译），
+    /// 而 `biliAspectMode` 这个 `@State` 在 tvOS 也要存在，其初始化器不能引用 OneSkin。
+    /// 收口到本枚举后，两处引用同一常量，改键名只需改这一处。
+    static let storageKey = "oneSkinFitMode"
+
     /// 落盘用的键值（复用 `OneSkin.fitModeKey`，扩展取值）。
     var stored: String { rawValue }
 
@@ -410,7 +417,8 @@ enum BiliAspectMode: String, CaseIterable, Identifiable {
     /// 当前生效的模式（直接读 `UserDefaults`，供三个页面共用，
     /// 避免每页各存一份 @State 导致不同步）。
     static var current: BiliAspectMode {
-        fromStored(UserDefaults.standard.string(forKey: OneSkin.fitModeKey))
+        // 用本枚举的 storageKey（与 OneSkin.fitModeKey 同值）；OneSkin 只在 iOS 编译。
+        fromStored(UserDefaults.standard.string(forKey: storageKey))
     }
 
     static func fromStored(_ v: String?) -> BiliAspectMode {

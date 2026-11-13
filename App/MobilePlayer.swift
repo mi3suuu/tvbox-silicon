@@ -3156,7 +3156,6 @@ import TVCore
     }
 
     /// 与 iOS 版同名同签名：`attach(_:)` 不带标签。
-    /// tvOS 不做 App 外小窗，故只记住图层、不建 controller。
     private weak var layer: AVPlayerLayer?
 
     /// tvOS 下 PiP 永不活跃，任何图层都可正常渲染 —— 恒 true。
@@ -3164,10 +3163,29 @@ import TVCore
 
     func attach(_ layer: AVPlayerLayer) { self.layer = layer }
     func detach() { layer = nil }
-    func start() {}
-    func stop() {}
-    func suspendAutomaticFloating() {}
-    func resumeAutomaticFloating() {}
+
+    // ⛔ 以下**故意不留静默 no-op**。
+    //
+    // tvOS 是机顶盒，接的是电视，没有「App 外悬浮小窗」这个场景 —— 所以这些动作
+    // 在本平台**不该被调用**。`supported == false` 会让所有入口（按钮 `.disabled`、
+    // 退场裁决 `pipPossible`）提前拦住，用户看不到可点的 PiP。
+    //
+    // 如果哪天有人绕过了那层门控调到这里，那是**调用方的缺陷**，必须当场炸出来，
+    // 而不是变成"按钮点了没反应"的永久之谜。这正是本轮在清的那类缺陷：
+    // 界面上有入口、拨了没反应。
+    //
+    // 判据一行：**tvOS 上 PiP 没有实现，也不假装有。**
+    private func unsupported(_ what: String) -> Never {
+        fatalError("PictureInPicture.\(what) is unavailable on tvOS; "
+                 + "check PictureInPicture.supported / canToggle before calling. "
+                 + "tvOS has no App-outside floating window.")
+    }
+
+    func start() { unsupported("start()") }
+    func stop() { unsupported("stop()") }
+    func toggle() { unsupported("toggle()") }
+    func suspendAutomaticFloating() { unsupported("suspendAutomaticFloating()") }
+    func resumeAutomaticFloating() { unsupported("resumeAutomaticFloating()") }
 }
 
 #endif

@@ -248,7 +248,12 @@ struct RootView: View {
     #endif
     private var platformTabs: some View {
         tabView
-            .onAppear { OneSkinProbe.log("platformTabs onAppear noSidebar=\(phoneTabsWithoutSidebar)") }
+            .onAppear {
+                #if os(iOS)
+                // `OneSkinProbe` 属 OneSkin 文件簇（整体只在 iOS 编译）；tvOS 不要这段调试日志。
+                OneSkinProbe.log("platformTabs onAppear noSidebar=\(phoneTabsWithoutSidebar)")
+                #endif
+            }
             // ⛔ 不要再在这里加 `onChange(of: store.watchPageOpen)` 去切 TabView 样式。
             // 详见 `phoneTabsWithoutSidebar` 的注释：那会把刚 push 进来的选集页直接 pop 掉。
             #if os(tvOS)
@@ -385,7 +390,9 @@ struct RootView: View {
             //
             // 两种样式类型不同，不能写三元；分支本身留着，但条件永不变，
             // SwiftUI 就不会重新生成视图身份，导航栈得以保住。
+            #if os(iOS)
             let _ = OneSkinProbe.log("tabView branch noSidebar=\(phoneTabsWithoutSidebar)")
+            #endif
             if phoneTabsWithoutSidebar {
                 TabView(selection: $store.section) {
                     ForEach(tabs) { item in

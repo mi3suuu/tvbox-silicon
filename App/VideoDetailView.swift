@@ -7,8 +7,8 @@ struct VideoDetailView: View {
     @MainActor private static var qaRotateCycleRunning = false
     #endif
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @Environment(\.dismiss) var dismiss
-    @Environment(Store.self) var store
+    @Environment(\.dismiss) private var dismiss
+    @Environment(Store.self) private var store
     let video: Video
     let client: CatalogClient
     /// Opened from Continue Watching: on an iPhone the page resumes it at once.
@@ -136,7 +136,7 @@ struct VideoDetailView: View {
     ///     并在每次解析前主动等待 `busy`，把脚本线程让给正在起播的那一次。
     /// 这样「播放不被 4~9 条线路堵住」和「线路菜单有数」同时成立。
     @State private var lineSampleTask: Task<Void, Never>?
-    @State var detail: Video?
+    @State private var detail: Video?
     /// Short labels (第1集) for lines whose episode names are file names, by episode id (#318). Display only.
     @State private var episodeLabels: [Episode.ID: String] = [:]
     @State private var error: String?
@@ -150,7 +150,7 @@ struct VideoDetailView: View {
     /// video's list around never flips every other video's.
     @State private var reversesEpisodes = false
     /// Play takes over focus from the loading placeholder; otherwise nothing is focused once details load.
-    @FocusState var playFocused: Bool
+    @FocusState private var playFocused: Bool
     /// ⛔ **2026-11-09 根治「横竖屏切换后界面一直推移 / 得重启才恢复」**
     ///
     /// 这两个值以前是 `.onGeometryChange` 写回的 @State，却又驱动
@@ -249,14 +249,18 @@ struct VideoDetailView: View {
         liveContainerSize = next
         // 同步给几何层：`OneSkin.fixedScreenSize()` 是静态方法，
         // 读这个静态缓存而不是 `screen.bounds`。
-        OneSkin.cachedLiveContainer = next
+        #if os(iOS)
+        OneSkin.cachedLiveContainer = next   // `OneSkin` 在 tvOS 不存在（One 皮肤只在 iOS）
+        #endif
     }
     /// The picture's own width-over-height, reported by the player once the stream is known.
     /// 16:9 until then, which is what most sources serve and therefore the least surprising guess.
     @State private var playerAspectRatio: CGFloat = 16.0 / 9.0
     /// 画面比例模式（二进制实证 5 种）。持久化到 `OneSkin.fitModeKey`。
+    // 键名走 `BiliAspectMode.storageKey`（与 `OneSkin.fitModeKey` 同值）：
+    // `OneSkin` 属 OneSkin 文件簇（整体只在 iOS 编译），而本 `@State` 在 tvOS 也存在。
     @State private var biliAspectMode: BiliAspectMode = BiliAspectMode.fromStored(
-        UserDefaults.standard.string(forKey: OneSkin.fitModeKey)
+        UserDefaults.standard.string(forKey: BiliAspectMode.storageKey)
     )
     /// 只用来触发 body 重算（滤镜存在 UserDefaults，不是 @State）。
     @State private var biliColorFilterTick: UInt = 0
@@ -270,13 +274,13 @@ struct VideoDetailView: View {
     /// (image.tmdb.org is blocked on some networks, #237).
     @State private var loadedBackdrop: URL?
     /// The episode whose playback is being prepared; its row and the Play button show progress.
-    @State var loadingEpisode: Episode.ID?
+    @State private var loadingEpisode: Episode.ID?
     /// A failed or blocked playback attempt, shown as an inline banner beside the artwork.
     @State private var playbackIssue: PlaybackIssue?
     @State private var signingIn: CloudDrive?
     /// A sign-in the source's CatPawOpen bundle runs itself (UC's TV token).
     @State private var bundleSignIn: BundleSignIn?
-    @State var choosingDownloads = false
+    @State private var choosingDownloads = false
     /// 从选集卡上的下载角标进来时要预勾的集；从页面底部「下载」进来时为空。
     @State private var downloadPreselect: Set<String> = []
     /// How many episodes were just queued, shown briefly under the header.
@@ -295,7 +299,7 @@ struct VideoDetailView: View {
     private var activeFlag: String { flags.contains(selectedFlag ?? "\u{0}") ? selectedFlag! : (flags.first ?? "") }
     /// The active line's episodes. `activeFlag` goes through every episode, so it is read once, not once per episode:
     /// in the filter it made each page update quadratic (4 lines of 1,000 episodes took seconds, and iOS killed the app).
-    var activeEpisodes: [Episode] {
+    private var activeEpisodes: [Episode] {
         let flag = activeFlag
         return (detail?.episodes ?? []).filter { $0.flag == flag }
     }
@@ -316,7 +320,7 @@ struct VideoDetailView: View {
         760
         #endif
     }
-    func startRequest(_ operation: @escaping @MainActor () async -> Void) {
+    private func startRequest(_ operation: @escaping @MainActor () async -> Void) {
         let previous = requestTask
         previous?.cancel()
         requestTask = Task {
@@ -519,7 +523,12 @@ struct VideoDetailView: View {
         // 会把 Backdrop 那层浅色（244,246,251）铺在最底下，OneSkin 的半透明黑压不住它，
         // 结果整页发白 —— 控件和文字全部看不清，像素判读也全是噪声。
         // One 实测底色是 #000 / #0E0E0E，所以皮肤开着时不挂主题底。
+        #if os(iOS)
         .modifier(ScreenBackdropIfNeeded(enabled: !oneSkinActive))
+        #else
+        // `oneSkinActive` 是 iOS-only；本平台没有 One 皮肤 → 主题底恒启用。
+        .modifier(ScreenBackdropIfNeeded(enabled: true))
+        #endif
         #endif
         .screenTitle(video.name).task {
             store.searchModel.suspend()
@@ -570,7 +579,9 @@ struct VideoDetailView: View {
                 showsAllEpisodes = true
             }
             #endif
-            #if DEBUG
+            #if DEBUG && os(iOS)
+            // 仅 iOS：本段读写的 `showsAllEpisodes` / `choosingDownloads` / `watchChannel` /
+            // `activeEpisodes` / `play` 都声明在 `#if os(iOS)` 段内（One 皮肤配套 UI）。
             // `-qaDownloadPicker 1` / `-qaEpisodesSheet 1`：截图用的抽屉直开入口。
             // 两者同层，不能同时为 true（iOS 同层只剩一个 presenter），打开一个先关另一个。
             if UserDefaults.standard.bool(forKey: "qaDownloadPicker") {
@@ -595,8 +606,11 @@ struct VideoDetailView: View {
             //
             // ⛔ 用**自己的**句柄，不走 `startRequest`（见 `lineSampleTask` 的说明）。
             //    重复 onAppear（折叠/展开重建）先取消上一轮，避免两轮同时解析。
+            #if os(iOS)
+            // `buildLineSamples` / `lineSampleTask` 属 iOS-only（多线路测速菜单是 iPhone 概念）。
             lineSampleTask?.cancel()
             lineSampleTask = Task { await buildLineSamples() }
+            #endif
             #if DEBUG
             let switchDelay = UserDefaults.standard.double(forKey: "qaSwitchEpisode")
             oneSkinLog("detail onAppear watchPageOpen=\(store.watchPageOpen) qaSwitchEpisode=\(switchDelay)")
@@ -812,7 +826,7 @@ struct VideoDetailView: View {
                 .frame(maxWidth: .infinity).padding(.horizontal, Layout.gutter).padding(.bottom, 24)
         }
     }
-    @ViewBuilder var playbackBanner: some View {
+    @ViewBuilder private var playbackBanner: some View {
         if let count = queuedNotice {
             HStack(spacing: 12) {
                 Image(systemName: "arrow.down.circle.fill").foregroundStyle(Brand.accent)
@@ -826,7 +840,13 @@ struct VideoDetailView: View {
         }
         // 换源的反馈与换线共用同一个条位：两者都是「刚才那个动作的结果」，
         // 分成两条会在短时间内叠成两层，而用户只关心最新那条。
-        if let notice = crossSourceNotice ?? lineNotice {
+        #if os(iOS)
+        let barNotice: String? = crossSourceNotice ?? lineNotice
+        #else
+        // `crossSourceNotice` 在 iOS 段声明（换源是 iPhone 的跨源切换）；tvOS 只有换线提示。
+        let barNotice: String? = lineNotice
+        #endif
+        if let notice = barNotice {
             HStack(spacing: 12) {
                 Image(systemName: "info.circle.fill").foregroundStyle(Brand.accent)
                 Text(notice).font(.subheadline.weight(.medium))
@@ -999,15 +1019,15 @@ struct VideoDetailView: View {
     }
     #endif
     /// TMDB's story when it has one, else the source's synopsis.
-    func synopsisText(_ detail: Video) -> String {
+    private func synopsisText(_ detail: Video) -> String {
         if let story = tmdb.details?.story, !story.isEmpty { return story }
         return detail.synopsis
     }
     /// The lookup's progress or its question, then TMDB's cast, facts and notice, under the page's own content.
-    @ViewBuilder var tmdbStatus: some View {
+    @ViewBuilder private var tmdbStatus: some View {
         TMDBLookupStatus(lookup: tmdb)
     }
-    @ViewBuilder var tmdbExtras: some View {
+    @ViewBuilder private var tmdbExtras: some View {
         VStack(alignment: .leading, spacing: 22) {
             if let details = tmdb.details {
                 if !details.cast.isEmpty { TMDBCastRow(cast: details.cast) }
@@ -1127,7 +1147,7 @@ struct VideoDetailView: View {
     /// The details, with the list's poster when the details came without one.
     func currentVideo() -> Video { (detail ?? video).keepingPoster(video.poster, headers: video.posterHeaders) }
 
-    func videoFavorite() -> FavoriteItem {
+    private func videoFavorite() -> FavoriteItem {
         .video(FavoriteVideo(origin: client.origin, site: client.site, video: currentVideo()))
     }
 
@@ -1135,7 +1155,7 @@ struct VideoDetailView: View {
         .episode(FavoriteEpisode(video: FavoriteVideo(origin: client.origin, site: client.site, video: currentVideo()), episodeFlag: episode.flag, episodeName: episode.name, episodeID: episode.id))
     }
 
-    @ViewBuilder var playControl: some View {
+    @ViewBuilder private var playControl: some View {
         if let detail {
             if let first = activeEpisodes.first ?? detail.episodes.first {
                 // Beside the poster on a phone there is no room for both labels: Download drops to its icon.
@@ -1284,7 +1304,7 @@ struct VideoDetailView: View {
     private var hasBackdrop: Bool {
         tmdb.details?.backdrop != nil && tmdb.details?.backdrop == loadedBackdrop
     }
-    @ViewBuilder var episodePanel: some View {
+    @ViewBuilder private var episodePanel: some View {
         if let detail {
             if detail.episodes.isEmpty {
                 noEpisodes(detail)
@@ -1369,6 +1389,10 @@ struct VideoDetailView: View {
     /// The episodes in the order the lists show them. Only the lists: Play and the next episode still follow the source.
     private func shownOrder(_ items: [Episode]) -> [Episode] { reversesEpisodes ? items.reversed() : items }
 
+    #if os(iOS)
+    // 仅 iOS：选集抽屉的分页 / 筛选 / 搜索 —— 依赖 `episodeFilter`/`episodeQuery`/
+    // `episodePage`/`episodePageSize`/`currentEpisodeID`/`watchChannel`，
+    // 均声明在 `#if os(iOS)` 段内。tvOS 没有 iPhone 选集抽屉。
     // MARK: 选集抽屉的分页 / 筛选 / 搜索
 
     /// 搜索 + 筛选之后的集（按当前排序）。空搜索 = 全集。
@@ -1460,6 +1484,7 @@ struct VideoDetailView: View {
         guard start < end else { return [] }
         return Array(all[start..<end])
     }
+    #endif
 
     private func episodeList(_ items: [Episode]) -> some View {
         // A chip fits about six characters before it truncates (《一…); longer names get rows.
@@ -1553,7 +1578,7 @@ struct VideoDetailView: View {
     private func download(_ episode: Episode) -> DownloadItem? {
         DownloadLibrary.shared.visibleItem(for: DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin))
     }
-    func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
+    private func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
         #if DEBUG
         oneSkinLog("play episode=\(episode.name) flag=\(episode.flag) busy=\(busy)")
         #endif
@@ -1659,7 +1684,7 @@ struct VideoDetailView: View {
         #endif
     }
     /// Where the viewer stopped last time, for Continue.
-    var watchHistory: PlaybackHistoryEntry? {
+    private var watchHistory: PlaybackHistoryEntry? {
         store.visibleHistory.first { watchScopes.contains($0.context.id) }
     }
     /// The line of the episode playing, else of the one watched last, while the details still have it: the page opens
