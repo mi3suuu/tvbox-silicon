@@ -3108,23 +3108,35 @@ struct OneSkinStage: View {
                 // 用户报「竖屏源只有背景海报」。日志已证几何正确
                 // （win=371x659、detailColumn 428x669 都在），所以问题只可能在：
                 //   ① `avPlayer` 为 nil → 走 else 画海报；
-                //   ② layer 建了但 `playerLayer.player` 没绑上 → videoRect 0×0；
+                //   ② layer 建了但 `playerLayer.player` 没绑上 → 画面空；
                 //   ③ 宿主 bounds 把 layer 裁掉了。
                 // 这三条一次打清，不再逐层猜。
+                //
+                // ⛔ 2026-11-13 补第 ④ 条：`gate`。
+                //
+                // 上一版的探针只能证明「avPlayer 非 nil、item ready、几何正确」，
+                // 而这三条**同时成立时画面仍可以完全不显示** —— 因为还有一处
+                // 会把 player 从 layer 上摘掉却不碰 avPlayer：
+                // `OneSkinFixedPlayerLayer.updateUIView` 里
+                //   `view.update(player: renders ? player : nil)`
+                // 其中 `renders = pip?.shouldRender(...)`。
+                // 不把这一格的取值打出来，日志会一路「全绿」而病在别处。
                 #if DEBUG
                 let _ = {
+                    let gate = pip.shouldRenderProbe()
                     if let p = avPlayer {
                         let cur = p.currentItem
                         let ps = cur?.presentationSize ?? .zero
                         let st = cur?.status.rawValue ?? -1
-                        oneSkinLog("PICCHK ok avPlayer=yes item=\(cur != nil) status=\(st) ps=\(Int(ps.width))x\(Int(ps.height)) win=\(Int(winW))x\(Int(winH)) winX=\(Int(winX)) winY=\(Int(winY))")
+                        oneSkinLog("PICCHK ok avPlayer=yes item=\(cur != nil) status=\(st) ps=\(Int(ps.width))x\(Int(ps.height)) win=\(Int(winW))x\(Int(winH)) winX=\(Int(winX)) winY=\(Int(winY)) gate=\(gate) layer=\(UInt(bitPattern: ObjectIdentifier(pip).hashValue) % 100000)")
                     } else {
-                        // ★★ 2026-11-13：`avPlayer == nil` 时**必须**打出「为什么 nil」的三档，
-                        // 否则只看到 `sess=nil` 无从判断是哪一档断了。
-                        // 三档（`VideoDetailView.oneSkinStageSession`）：
-                        //   ① playerSession ② lastGoodSession ③ store.currentSession(for: watchChannel)
-                        // 探针只能读，不改行为。
-                        oneSkinLog("PICCHK avPlayer=NIL 走海报 win=\(Int(winW))x\(Int(winH)) sess=\(session == nil ? "nil" : "ok") stage=\(stageDiag)")
+                        // ★★ 2026-11-13 两路探针合并（本行同时携带两类判据）：
+                        //   · `stage=...` 三档诊断：avPlayer 为 nil 时是哪一档断了
+                        //     （① playerSession ② lastGoodSession ③ store.currentSession(for:)）
+                        //   · `gate=...` 画中画出帧闸判决：`shouldRender` 是否把画面摘掉
+                        // 二者正交：`stage` 管「有没有会话」，`gate` 管「有会话时闸放不放行」。
+                        // 纯读，零行为变更。
+                        oneSkinLog("PICCHK avPlayer=NIL 走海报 win=\(Int(winW))x\(Int(winH)) sess=\(session == nil ? "nil" : "ok") stage=\(stageDiag) gate=\(gate)")
                     }
                 }()
                 #endif
