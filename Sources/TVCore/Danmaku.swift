@@ -243,6 +243,40 @@ public struct DanmakuLayout {
     /// How long a placement stays on screen.
     public func duration(_ placement: Placement) -> Double { placement.speed > 0 ? (width + placement.width) / placement.speed : fixedDuration }
 
+    /// 把一批**已经在屏上**的 placement 播种进三张碰撞表，让新布局知道这些行已经被占着。
+    ///
+    /// 用途：拨弹幕速度档位时不能清屏（那会闪一下），于是保留 `active`；但 `active` 只决定
+    /// 「画什么」，**不参与位置分配** —— 位置分配只查 `scrolling`/`top`/`bottom`。
+    /// 三张表若留空，`place()` 看到每一行都是 nil，新弹幕就会全部挤进 lane 0，
+    /// 和屏上正在飘的旧弹幕**叠在同一行**（复核 N1）。
+    ///
+    /// 传入的 `placements` 来自旧布局：lane 号沿用（行数与行高不变时才有意义，调用方保证），
+    /// `speed`/`width` 也沿用 —— 旧弹幕本来就在按旧速度飘，`Placement.speed` 是建它时的快照，
+    /// 刷新它反而会让屏上的位置跳变。
+    ///
+    /// 越界的 lane 直接丢弃：不播种只是少了碰撞信息（退化成「可能重叠」），
+    /// 而强行塞进不存在的行会让 `place()` 的索引假设失效。
+    public mutating func adopt(_ placements: [Placement]) {
+        for p in placements {
+            switch p.comment.position {
+            case .scroll:
+                guard p.lane >= 0, p.lane < scrolling.count else { continue }
+                // 同一行有多条时留**最新**的那条：`place()` 只读 `scrolling[lane]` 一个槽，
+                // 而「最新」的那条尾端最靠右，正是它决定下一颗能不能进。
+                if let cur = scrolling[p.lane], cur.start > p.start { continue }
+                scrolling[p.lane] = p
+            case .top:
+                guard p.lane >= 0, p.lane < top.count else { continue }
+                if let cur = top[p.lane], cur.start > p.start { continue }
+                top[p.lane] = p
+            case .bottom:
+                guard p.lane >= 0, p.lane < bottom.count else { continue }
+                if let cur = bottom[p.lane], cur.start > p.start { continue }
+                bottom[p.lane] = p
+            }
+        }
+    }
+
     public mutating func place(_ comment: Danmaku, width textWidth: Double, at time: Double) -> Placement? {
         switch comment.position {
         case .scroll:
