@@ -173,6 +173,18 @@ struct BiliPortraitPage: View {
                     // 于是盖住返回/播放/全屏这些按钮。`isUserInteractionEnabled = false`
                     // 管的是 UIView 自己，这里管的是 SwiftUI 那一层的命中测试。
                     .allowsHitTesting(false)
+                // 弹幕层：Bili 皮肤原来**没有**（`DanmakuOverlay(` 在 Bili 四文件 = 0），
+                // 而「弹幕」面板的 6 个偏好（开关/区域/字号/透明度/速度/屏蔽词）全都可拨。
+                // 数据源现成：三页共用同一个 `PlaybackSession`，`session.danmaku` /
+                // `danmakuOpacity` / `danmakuRevision` 与 One、原版读的是同一份。
+                // 叠在画面之上、控件（下面的 VStack）之下。
+                if danmakuOn, !session.danmaku.isEmpty {
+                    DanmakuOverlay(player: session.player,
+                                   comments: session.danmaku,
+                                   opacity: session.danmakuOpacity,
+                                   revision: session.danmakuRevision)
+                        .allowsHitTesting(false)
+                }
             }
             VStack(spacing: 0) {
                 // ⚠️ 顶栏右侧**必须留 84pt** —— 这是 iPhone Duo 竖屏的前置摄像头避让区。

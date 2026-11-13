@@ -82,6 +82,14 @@ struct BiliFullScreenPage: View {
                                  colorFilters: BiliColorFilter.current.caFilters(),
                                  pip: pip)
                     .allowsHitTesting(false)
+                // 弹幕层（Bili 皮肤原来没有）。共用 session 的 danmaku。
+                if danmakuOn, !session.danmaku.isEmpty {
+                    DanmakuOverlay(player: session.player,
+                                   comments: session.danmaku,
+                                   opacity: session.danmakuOpacity,
+                                   revision: session.danmakuRevision)
+                        .allowsHitTesting(false)
+                }
             }
             // 四个角色区**各自挂一层 overlay**（不在 chrome 内部再嵌套）。
             // rea 实证 `BBPlayerFullScreen{Top,Bottom,Left,Right}Widget` 是四个独立 Widget，

@@ -3177,6 +3177,7 @@ struct VideoDetailView: View {
                 summary: detail?.name ?? "",
                 isFavorite: store.favorites.contains(videoFavorite()),
                 pip: biliPip,
+                danmakuOn: danmakuOnForSkin,
                 onBack: { leavePlayer() },
                 onCast: {},
                 onMore: { biliPanel = .actionMenu },
