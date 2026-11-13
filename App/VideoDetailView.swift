@@ -2439,6 +2439,32 @@ struct VideoDetailView: View {
         return store.currentSession(for: channel)
     }
 
+    /// `oneSkinStageSession` 三档的**只读**诊断串，喂给 `OneSkinStage.stageDiag`。
+    ///
+    /// ⛔ 只读：这里绝不能调 `playbackSession(for:)`（会新建并顶掉正在播的会话）。
+    /// 字段含义（真机上 `PICCHK avPlayer=NIL ... stage=...` 一行即可定性）：
+    ///   ps=1/0   `playerSession` 有没有值
+    ///   lgs=1/0  `lastGoodSession` 有没有值
+    ///   wc=1/0   `watchChannel` 有没有值
+    ///   st=1/0   `store.currentSession(for: watchChannel)` 有没有值
+    ///   pl=1/0   `store.playing` 有没有值
+    ///   ac=1/0   `store.activeSessionChannel` 有没有值
+    ///   eq=1/0   `activeSessionChannel == watchChannel`（**全字段比较**）
+    ///   item=1/0 `store.activeSession` 的 player 有没有 currentItem
+    private var oneSkinStageDiag: String {
+        // ⛔ 只用 Store 的**公开**接口：`activeSession` / `activeSessionChannel`
+        //    是 `private`（Store.swift:546），这里读不到也不该读。
+        //    `currentSession(for:)` 已经内含「activeSession 存在且频道全字段相等」，
+        //    所以 `st` 自己就是 eq 的结论。
+        func b(_ v: Bool) -> Int { v ? 1 : 0 }
+        let wc = watchChannel
+        let st = wc.flatMap { store.currentSession(for: $0) }
+        return "ps=\(b(playerSession != nil)) lgs=\(b(lastGoodSession != nil))"
+            + " wc=\(b(wc != nil)) st=\(b(st != nil))"
+            + " pl=\(b(store.playing != nil))"
+            + " item=\(b(st?.player.currentItem != nil))"
+    }
+
     /// 哔哩哔哩版式：半屏卡片 + 详情 + 选集抽屉；全屏时齿轮从右侧划出设置面板。
     ///
     /// 与 One 分支的区别只有版式和控件位置 —— 会话、换集、字幕、弹幕全部走同一套引擎，
@@ -3409,6 +3435,7 @@ struct VideoDetailView: View {
             ),
             // 探针由 OneSkinStage 内部读 aspectRatio 打，见 ASPECTDBG。
             shape: oneSkinShape,
+            stageDiag: oneSkinStageDiag,
             // 遮挡（四边）：唯一消费端是几何层（`box` 扣边），见 16.1。
             // 位置必须紧跟 `shape`（声明次序），否则 memberwise init 参数错位。
             occlusion: occlusionInsets,

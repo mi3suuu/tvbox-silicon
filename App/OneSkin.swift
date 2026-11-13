@@ -1003,6 +1003,15 @@ struct OneSkinStage: View {
     /// 三态之一，由调用方按上游 `splitsWatchPage` / `portraitExpanded` 算好传进来。
     var shape: OneSkinShape = .column
 
+    /// 会话三档诊断串（仅 DEBUG 探针用，空串表示调用方没提供）。
+    ///
+    /// ⛔ 存在的理由：`avPlayer` 为 nil 时，日志只写 `sess=nil`，
+    /// 无法区分是 `VideoDetailView.oneSkinStageSession` 的哪一档断了：
+    ///   ① `playerSession` ② `lastGoodSession` ③ `store.currentSession(for:)`
+    /// 而这三档对应**完全不同的修法**（页面持引用 / 缓存兜底 / store 键失配）。
+    /// 2026-11-13 真机实测 `avPlayer=NIL` 占 16/27 帧，只能靠这个字段定性。
+    var stageDiag: String = ""
+
     /// 系统报的遮挡（挖孔 / 摄像头 / 系统胶囊），四边内缩。
     ///
     /// ★ 16.1：遮挡**只允许有一个消费端**。这里选几何层 ——
@@ -1220,7 +1229,10 @@ struct OneSkinStage: View {
     /// 调用方改了 `shape`，这里的 `stage` **不重算**（与 fullScreenNow 同一个坑）：
     /// 布局停在旧形态上，窗口与控件按旧方向排，用户看到「旋转后 UI/控件漂移，
     /// 重启 App 才恢复」。用 onChange 把它镜像进 @State，再由本地值驱动布局。
-    @State private var shapeNow: OneSkinShape = .column
+    // ⛔ 已删除 `shapeNow` 镜像 @State（2026-11-13 红果案根治）。
+    // 它只被 `onChange(of: shape)` 写入、被 ROOT 日志的 `mirror` 判据读取，
+    // 但 `shape()` / `effectiveShape` 早已直接返回入参 `shape`，不再读它。
+    // 它是「同帧形态滞后一帧」的来源（日志 `mirror=LAG(shapeNow=…)`），删掉即根治。
     /// 冻结的布局盒。
     ///
     /// ⛔ 三次回归的教训，记全别再反复：
@@ -1673,11 +1685,8 @@ struct OneSkinStage: View {
             let now = Date().timeIntervalSince1970
             let dt = ROOTRecomputeProbe.last > 0 ? Int((now - ROOTRecomputeProbe.last) * 1000) : -1
             ROOTRecomputeProbe.last = now
-            // ★ 决定性探针：把「入参 shape」与「镜像 shapeNow」并列打印。
-            //   effectiveShape 现在直接返回入参 shape，但 ROOT 行打的是 shapeNow（@State 镜像）。
-            //   两者不一致 ⇒ 镜像滞后（onChange 晚一帧），正是 body 反复重算的原因之一。
-            let mirror = (shapeNow == shape) ? "same" : "LAG(shapeNow=\(shapeNow.logName))"
-            oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) shape=\(shape.logName) mirror=\(mirror) folded=\(foldedNow) portrait=\(portraitNow)")
+            // ★ 决定性探针：直接打印入参 shape（镜像 @State 已删）。
+            oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) shape=\(shape.logName) folded=\(foldedNow) portrait=\(portraitNow)")
         }()
         #endif
         // ★ 整页底色必须**单独一层、不跟着内容内缩**。
@@ -1790,6 +1799,8 @@ struct OneSkinStage: View {
                 // 灰带内**不可能**因为亚点尺寸差翻转 —— 断了「差 1pt 就换版式」的环。
                 let w = max(geo.size.width, 1)
                 let h = max(geo.size.height, 1)
+                // 决定性地打印「本帧走了哪个分支」，钉死 geo 震荡时判错的路径。
+                let _ = oneSkinLog("SHAPEPICK geo=\(Int(w))x\(Int(h)) page=\(shape.logName) qaCol=\(UserDefaults.standard.bool(forKey: "qaOneSkinColumn")) qaLand=\(UserDefaults.standard.bool(forKey: "qaOneSkinLandscape")) qaShape=\(UserDefaults.standard.string(forKey: "qaOneShape") ?? "-")")
                 if w > h * 1.15 { return .split }            // 明确横：双栏
                 if h > w * 1.15 {                            // 明确竖
                     return w >= 500 ? .fullBleed : .column   // 内屏宽版 / 外屏单列
@@ -1880,21 +1891,27 @@ struct OneSkinStage: View {
             // 与内部的 669 打架，`origin` 更糟。基线本来就没有 `.frame`，
             // 唯一的错是 `useAvail` 用了物理屏而不是容器做上限。
             let bucketed = stageIsLandscape ? liveAvail : OneSkin.stableBucket(liveAvail, step: 8)
-            let useAvail = CGSize(width: min(bucketed.width, geo.size.width),
-                                  height: min(bucketed.height, geo.size.height))
-
-            // ★ 真实槽位（2026-11-13）：内容按**整屏**排（One 的绝对值都标定在 669 上），
-            // 但系统分给这一层的只有「屏高 − 底部安全区」。
+            // ★★ 根治（2026-11-13 第三轮）：`useAvail.height` 必须 = **槽位高**，
+            //    不再用整屏高 669。真机铁证（fig-oneskin4.log 同一进程 origin 乱跳）：
+            //      HSPLIT-C origin=0,0 / 0,673 / 0,266 / 0,491 / -475,-334
+            //    同一份代码、同一进程，双栏 HStack 的落点每帧都在变 —— 因为内容高 669
+            //    恒大于父级实际给的空间（屏高 669 − 底部安全区 34 = 635），SwiftUI 每帧
+            //    重新做溢出协商：父级 0×0 时居中 → -475,-334；父级让出上方时顺排 →
+            //    0,673。落在屏幕外的那几帧，用户就只看到背景海报。
+            //
+            // 修法：`useAvail.height` 直接扣掉底部安全区 = 槽位高。stage 内部用 635 排版，
+            //   内容高 = 上报高 = 槽位高，三者一致，溢出协商从根上不存在。
             //
             // ⛔ 不能用 `avail.height` 当槽位 —— 它来自 `liveGeometry.box`，
             //    而 driver 的 `safeInsets` 读的是 `windows.first`（Duo 上拿到
             //    一个没有安全区的系统窗口，bottom 恒 0），所以 `box` 也恒等于整屏。
-            //    用它当槽位等于「槽位 = 内容」，掩盖了真实差异。
             //    这里直接用本视图量到的 `measuredSafeArea`（真机 = 34）。
             let slotH = fullScreenNow
-                ? useAvail.height
-                : max(useAvail.height - max(measuredSafeArea.bottom, 0), 1)
-            let _ = oneSkinLog("SLOT content=\(Int(useAvail.width))x\(Int(useAvail.height)) slot=\(Int(min(useAvail.width, avail.width)))x\(Int(min(useAvail.height, slotH))) safeB=\(Int(measuredSafeArea.bottom))")
+                ? min(bucketed.height, geo.size.height)
+                : max(min(bucketed.height, geo.size.height) - max(measuredSafeArea.bottom, 0), 1)
+            let useAvail = CGSize(width: min(bucketed.width, geo.size.width),
+                                  height: slotH)
+            let _ = oneSkinLog("SLOT content=\(Int(min(bucketed.width, geo.size.width)))x\(Int(min(bucketed.height, geo.size.height))) slot=\(Int(min(useAvail.width, avail.width)))x\(Int(slotH)) safeB=\(Int(measuredSafeArea.bottom))")
             let _ = oneSkinLog("GEOSRC liveAvail=\(Int(liveAvail.width))x\(Int(liveAvail.height)) useAvail=\(Int(useAvail.width))x\(Int(useAvail.height)) geoShape=\(geoShape.logName)")
             // ⛔ `ZStack` 必须**自己撑到 geo.size**，否则当它对 SwiftUI 报出
             // 「我不需要空间」（子视图全是绝对定位/忽略父级）时，父级会把本层
@@ -1930,8 +1947,11 @@ struct OneSkinStage: View {
                 // 才生效 ⇒ 每次转屏多一轮渲染，且偶尔「状态没变化」
                 // （本帧 stage 仍读旧值）。现在直接把 `geoShape` 作为参数传入，
                 // 同一次求值内生效，零延迟。
+                // ratioBase 必须保持**整屏高**（geo.size.height，真机 = 669），
+                // 不随 useAvail 的槽位高（635）缩水。One 的绝对 y 坐标（窗口 y、
+                // 控件条 y、胶囊 y）都按整屏 669 标定；只有 `box`（内容容器）用槽位高。
                 stage(useAvail,
-                      ratioBase: CGSize(width: useAvail.width, height: useAvail.height),
+                      ratioBase: CGSize(width: useAvail.width, height: geo.size.height),
                       fitMode: fitMode,
                       liveShape: geoShape)
                     // ⛔⛔ 这里上报的必须是**槽位尺寸**，不是**内容尺寸**（2026-11-13）。
@@ -2035,7 +2055,7 @@ struct OneSkinStage: View {
             // （顶部是否铺满、控件是否被顶下去）。
             let qaFS = UserDefaults.standard.bool(forKey: "qaOneSkinFullScreen")
             fullScreenNow = debugBlockFullScreen ? false : (qaFS ? true : isFullScreen)
-            shapeNow = shape
+            // ⛔ 已删除 `shapeNow = shape`（镜像 @State 已删，见声明处）。
             // ★ 必须传 **effectiveShape**（含 QA 强制形态），不能传父视图的 `shape`。
             //
             // 实测（模拟器外屏 + -qaOneSkinLandscape YES）：driver 认为 .column
@@ -2146,13 +2166,7 @@ struct OneSkinStage: View {
         }
         .onChange(of: shape()) { _, new in
             // 旋转/折叠后调用方改了 shape 参数。
-            //
-            // ⛔ 这里只更新 `shapeNow` 镜像，**不参与 `effectiveShape` 的判定** ——
-            //    后者已改为直接读 `shape`，见 `effectiveShape` 里的说明。
-            //
-            // 形态是离散枚举，几何一步到位、不做插值；视觉上的平滑由叶子控件
-            // 自己的过渡承担（不给整页挂隐式动画，理由见 body 上的注释）。
-            shapeNow = new
+            // 形态是离散枚举，几何一步到位、不做插值；视觉平滑由叶子控件承担。
             oneSkinLog("SHAPE -> \(new.logName)")
             // ★ 通知几何驱动：形态跨档了才重算（B 站 `appliedRightInset` 模式）。
             // 同样必须用 effectiveShape 而不是 new —— 与 onAppear 保持同一来源。
@@ -3105,7 +3119,12 @@ struct OneSkinStage: View {
                         let st = cur?.status.rawValue ?? -1
                         oneSkinLog("PICCHK ok avPlayer=yes item=\(cur != nil) status=\(st) ps=\(Int(ps.width))x\(Int(ps.height)) win=\(Int(winW))x\(Int(winH)) winX=\(Int(winX)) winY=\(Int(winY))")
                     } else {
-                        oneSkinLog("PICCHK avPlayer=NIL 走海报 win=\(Int(winW))x\(Int(winH)) sess=\(session == nil ? "nil" : "ok")")
+                        // ★★ 2026-11-13：`avPlayer == nil` 时**必须**打出「为什么 nil」的三档，
+                        // 否则只看到 `sess=nil` 无从判断是哪一档断了。
+                        // 三档（`VideoDetailView.oneSkinStageSession`）：
+                        //   ① playerSession ② lastGoodSession ③ store.currentSession(for: watchChannel)
+                        // 探针只能读，不改行为。
+                        oneSkinLog("PICCHK avPlayer=NIL 走海报 win=\(Int(winW))x\(Int(winH)) sess=\(session == nil ? "nil" : "ok") stage=\(stageDiag)")
                     }
                 }()
                 #endif
