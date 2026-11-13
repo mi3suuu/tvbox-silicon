@@ -45,14 +45,22 @@ if [ -x "$K" ]; then
   LATCH_NONCE="z${LATCH_NONCE:-fallback}"
   M1_OUT="$(ONESKIN_SELFTEST_NONCE="$LATCH_NONCE" "$K" --selftest 2>&1)"
   M1_RC=$?
-  if [ "$M1_RC" -ne 0 ]; then
-    LATCH_FAIL="M1：selfest 自检失败（脚本抓不到已知违规）"
+
+  # 区分两件事，不能混为一谈（实测踩过误拦）：
+  #   · 脚本**不支持**自检（旧版本，把 --selftest 当普通参数忽略）→ 无自检能力
+  #   · 脚本支持自检但**自检失败**（坏了 / 被裁剪 / 假脚本）→ 门失效
+  # 前者在未合并本分支的树里必然出现（那些树的脚本还是旧版），
+  # 若一并判红就会阻断 20 棵树的正常提交 —— 那是误拦，不是发现问题。
+  if ! printf '%s' "$M1_OUT" | grep -q 'SELFTEST:'; then
+    LATCH_NO_SELFTEST=1
+  elif [ "$M1_RC" -ne 0 ]; then
+    LATCH_FAIL="M1：selftest 自检失败（脚本抓不到已知违规）"
   elif ! printf '%s' "$M1_OUT" | grep -q "SELFTEST: OK nonce=$LATCH_NONCE"; then
     LATCH_FAIL="M1：selftest 未回显本次 nonce（结论不可信 —— 可能不是真脚本在回答）"
   fi
 
   # ── M2：门闩亲手造坏输入，看它红不红 ──
-  if [ -z "$LATCH_FAIL" ]; then
+  if [ -z "$LATCH_FAIL" ] && [ -z "${LATCH_NO_SELFTEST:-}" ]; then
     M2_TMP="$(mktemp -d)"
     mkdir -p "$M2_TMP/App" "$M2_TMP/Scripts" "$M2_TMP/Sources/TVCore"
     cp "$K" "$M2_TMP/Scripts/audit-oneskin-keys.sh"
@@ -83,6 +91,17 @@ if [ -x "$K" ]; then
       LATCH_FAIL="M2：判红了但没指出门闩放入的违规（$M2_MARK）—— 可能因别的原因变红"
     fi
     rm -rf "$M2_TMP"
+  fi
+
+  if [ -n "${LATCH_NO_SELFTEST:-}" ]; then
+    TOUCHED_L=$(git diff --cached --name-only \
+      | grep -E '^(App/OneSkin|App/BiliMetrics|App/RootView|Sources/TVCore/OneSkinShared)\.swift$' || true)
+    if [ -n "$TOUCHED_L" ]; then
+      echo "⚠️  本树的键名脚本是旧版（不支持 --selftest），该门**无自检能力**"
+      echo "    本次提交涉及：$TOUCHED_L"
+      echo "    合并 fix/tvos-platform-guards 后本树自动获得 M1+M2 自检。"
+      echo "    ⇒ 本次提交**未验证**该门是否真有判别力（仍会跑常规检查，见上方输出）。"
+    fi
   fi
 
   if [ -n "$LATCH_FAIL" ]; then
