@@ -3511,6 +3511,17 @@ struct VideoDetailView: View {
             playerSession?.setSpeed(Float(value))
         }
         .onAppear {
+            #if DEBUG
+            // ★ 时序探针：`-qaLogSkinSeed 1` 时打印「onAppear 那一刻 playerSession 是否已就绪」。
+            //
+            // 为什么需要它：B1 的整个论证建立在「onAppear 时 playerSession 为 nil」这一步上，
+            // 而这一步此前**只是时序推演，没有任何运行时读数**（复核 t7 与我本人都是推的）。
+            // 有了这行，模拟器上跑一次 `-qaLogSkinSeed 1 -qaOneSkin -qaSection home -qaPage detail:...`
+            // 就能把「推演」变成「读数」——不必等真机。
+            // 判据：日志出现 `SEED onAppear session=nil` ⇒ 旧写法必失效；`session=有` ⇒ 需要重新审。
+            NSLog("SEED onAppear session=%@ speed=%.2f",
+                  playerSession == nil ? "nil" : "ready", oneSkinSpeed)
+            #endif
             if oneSkinSpeed != 1 { playerSession?.setSpeed(Float(oneSkinSpeed)) }
         }
         // ⛔ 只有 `onAppear` 是不够的 —— 这条我自己在本文件别处写过理由，却漏了这里。
