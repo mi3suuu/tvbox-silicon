@@ -819,6 +819,18 @@ struct VideoTaskCard: View {
     var ownScale: CGFloat = 1
     /// 这张卡捏合时回报新的 scale（由坞写回 `perCardScale[task.id]`）。
     var onScaleChange: ((CGFloat) -> Void)? = nil
+    /// 这一张在坞里的**位置**与**总数**（`applyMuting` 用的是同一对值）。
+    ///
+    /// ⛔ 这两个数必须与 `VideoTasks.applyMuting()` 传给
+    /// `DockAudioPolicy.output(isActive:taskIndex:taskCount:override:)` 的**完全一致**。
+    /// 曾经这里写死 `taskIndex: 0, taskCount: 1` —— 于是卡片按「坞里只有我一路」算音量，
+    /// 而实际出声按真实路数算：
+    ///   · `.mixed` 下活跃那路实际是 `1/n`，卡片却显示满格；
+    ///   · `.dimmed` / `.focused` 的活跃判断也按「唯一那张」算，图标随之失真。
+    /// 用户看到的就是「这一张图标是静音，得按 + 才出声」——
+    /// **图标说的和听到的不是一回事**，因为两处口径分叉。
+    var taskIndex: Int = 0
+    var taskCount: Int = 1
 
     private var scaledWidth: CGFloat { width * ownScale }
     private var height: CGFloat { scaledWidth / task.aspectRatio }
@@ -854,7 +866,8 @@ struct VideoTaskCard: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel(Text(task.isPaused ? "Play" : "Pause"))
 
-                        DockVolumeButton(task: task, isActive: isActive)
+                        DockVolumeButton(task: task, isActive: isActive,
+                                         taskIndex: taskIndex, taskCount: taskCount)
                     }
                     .padding(6)
                 }
@@ -960,13 +973,18 @@ private struct DockVolumeButton: View {
     let task: VideoTask
     /// 它是不是当前选中的那一张（全局 `.focused` 下只有这张出声）。
     let isActive: Bool
+    /// 这一张在坞里的位置与总数 —— **必须与 `applyMuting()` 用同一对值**，
+    /// 否则图标/滑杆与实际听到的声音分叉（见 `VideoTaskCard.taskIndex` 的注释）。
+    var taskIndex: Int = 0
+    var taskCount: Int = 1
 
     /// 这一张现在**实际**的音量（0…1），用于图标分档与滑杆初值。
     ///
     /// 优先级与 `DockAudioPolicy.output` 一致：卡片设定 → 全局档位。
     private var effectiveVolume: Float {
         DockAudioPolicy.current
-            .output(isActive: isActive, taskIndex: 0, taskCount: 1, override: task.audioOverride)
+            .output(isActive: isActive, taskIndex: taskIndex, taskCount: taskCount,
+                    override: task.audioOverride)
             .volume
     }
 
@@ -974,7 +992,8 @@ private struct DockVolumeButton: View {
     /// 图标要按用户听到的结果画，不能只信其中一个字段。
     private var isSilent: Bool {
         let output = DockAudioPolicy.current
-            .output(isActive: isActive, taskIndex: 0, taskCount: 1, override: task.audioOverride)
+            .output(isActive: isActive, taskIndex: taskIndex, taskCount: taskCount,
+                    override: task.audioOverride)
         return output.isMuted || output.volume <= 0.001
     }
 
@@ -1146,7 +1165,9 @@ struct VideoTaskDock: View {
                                       isActive: task.id == store.videoTasks.activeTaskID, pip: pip,
                                       coveredByForeground: coveredByForeground,
                                       ownScale: perCardScale[task.id] ?? 1,
-                                      onScaleChange: { perCardScale[task.id] = $0 })
+                                      onScaleChange: { perCardScale[task.id] = $0 },
+                                      taskIndex: index,
+                                      taskCount: store.videoTasks.tasks.count)
                             .offset(perCardOffset[task.id] ?? slot)
                             .gesture(
                                 // 只挪这一张。`translation` 是相对**起手点**的累计量，
