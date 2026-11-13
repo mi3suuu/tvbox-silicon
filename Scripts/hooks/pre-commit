@@ -1,0 +1,65 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════
+# 本仓库统一的 pre-commit 闸门（**入库版本，A 方案**）
+#
+# 为什么入库：这道门原本只装在 `<common-dir>/hooks/pre-commit`，即「只存在某台机器」。
+# 合并后任何人 clone / 新建 worktree 都不会有它，**而且不会有任何告警** ——
+# 缺脚本是「可见的缺」，缺钩子是「不可见的无」。这正是本项目反复出事的形态：
+# 闸门只活在一个人的环境里，下次没人知道它曾经存在，且第三方评审看不见。
+#
+# 安装/生效：
+#   core.hooksPath = Scripts/hooks        （相对路径，按各树自己的 toplevel 解析）
+#   ⇔ 仓库内任何 worktree 都自动生效，无需逐个安装。
+#   ⚠️ 未设置该配置的克隆**不会**跑本钩子，见 README/交付说明。
+#
+# ⚠️ git 行为实测（2026-11-13，git 2.54.0）：
+#   当 core.hooksPath 指向的目录**不存在**时，git **不回落** <common-dir>/hooks，
+#   而是直接认为「无钩子」并**完全静默**。因此从未检出过本目录的树会同时失去
+#   本钩子与旧的 common 钩子 —— 切换 core.hooksPath 前必须先确认目标目录存在。
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+[ "${AIGATE_SKIP:-0}" = "1" ] && { echo "⚠ AIGATE_SKIP=1 跳过全部闸门（留痕）"; exit 0; }
+
+# ── ① 断言强度闸门（通用，来自 ~/.dsh/discipline）─────────────────────────────
+# 本机未装该工具时**不静默跳过**，而是出声说明本道门未生效。
+G="$HOME/.dsh/discipline/lint-agent-diff.sh"
+if [ -x "$G" ]; then
+  "$G" --repo "$ROOT" --base HEAD || {
+    echo "════ 提交被拦：测试断言被削弱或改成恒真 ════"
+    echo "删断言/自比对 = 把某类缺陷从检测器里永久删除。"
+    echo "正确做法：期望值来自被测产物，断言仍指向真实值。"
+    exit 1; }
+else
+  echo "⚠️  $G 不存在 ⇒ 本次提交**未校验**断言强度（E1/E2/E3）。"
+fi
+
+# ── ② One 皮肤键名闸门 ────────────────────────────────────────────────────────
+# 「一套状态两套键」是本项目已出三例的缺陷族。两道：
+#   ① oneSkin* 字面量越出单一真源；② 键名字面量被改（= 用户已存偏好静默丢失）。
+#
+# 本钩子已入库，但 `audit-oneskin-keys.sh` 是随分支 fix/tvos-platform-guards 提交的，
+# 尚未合并的树里没有它。缺失时**必须出声**，且只在本次提交确实触及 One 相关文件时
+# 才吵 —— 每棵树每次提交都刷告警会进盲区，噪音式告警与静默跳过效果等价、只是更贵。
+K="$ROOT/Scripts/audit-oneskin-keys.sh"
+if [ -x "$K" ]; then
+  "$K" || {
+    echo "════ 提交被拦：One 皮肤键名越界或被改 ════"
+    echo "键名是落盘契约：改字符串 = 所有用户已存的皮肤偏好静默回落默认值。"
+    echo "① 越界：把字面量改成引用 TVCore.OneSkinKeys；"
+    echo "② 改键：确认是有意的偏好迁移，同时更新脚本里的 PINNED 并说明迁移。"
+    exit 1; }
+else
+  TOUCHED=$(git diff --cached --name-only \
+    | grep -E '^(App/OneSkin|App/BiliMetrics|App/RootView|Sources/TVCore/OneSkinShared)\.swift$' || true)
+  if [ -n "$TOUCHED" ]; then
+    echo "⚠️  本树没有 One 皮肤键名闸门（Scripts/audit-oneskin-keys.sh 不存在）"
+    echo "    本次提交涉及：$TOUCHED"
+    echo "    该门禁随分支 fix/tvos-platform-guards 提交；本树 ${ROOT} 未包含它。"
+    echo "    ⇒ 本次提交**未校验**：oneSkin* 字面量唯一性 / 键名落盘契约。"
+    echo "    需要这道门：合入 fix/tvos-platform-guards，或手工比对 TVCore.OneSkinKeys。"
+    echo "    （不阻断提交：这是覆盖范围披露，不是违规。）"
+  fi
+fi
