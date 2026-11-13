@@ -2665,7 +2665,7 @@ struct VideoDetailView: View {
                                              set: { store.autoPlayNext = $0 }))
                 BiliPSToggleChip(text: L10n.text("Loop playback"),
                                  on: Binding(get: { playerSession?.looping ?? false },
-                                             set: { playerSession?.looping = $0 }))
+                                             set: { setSkinLooping($0) }))
             }
         }
     }
@@ -2677,8 +2677,28 @@ struct VideoDetailView: View {
     }
 
     private func applyPlayMode(_ mode: BiliPlayMode) {
-        playerSession?.looping = mode.loopsCurrent
+        setSkinLooping(mode.loopsCurrent)
         store.autoPlayNext = mode.autoAdvances
+    }
+
+    /// 循环开关的**唯一写入口**：同时写会话与 `OneSkin.loopKey` 偏好。
+    ///
+    /// ⛔ 为什么必须双写（复核 t7 的 H1）：
+    ///   两种皮肤对这个偏好的写入口径原本不一致 ——
+    ///   · One 的 chip（`OneSkin.swift:3570`）：`loop.toggle()` 写偏好 **+** `session?.looping`
+    ///   · Bili 的 6 个入口：**只写会话**，从不写偏好
+    ///   ⇒ Bili 里开循环 → 切回 One ⇒ `seedLoopPreference()` 用偏好的 old 值（false）
+    ///     覆盖会话的 true —— **用户在 Bili 里开的循环被 One 吃掉了**。
+    ///   `OneSkin.loopKey` 是全局共享的（两个皮肤同一个键），所以两个入口必须同口径。
+    ///
+    /// 另一个原因：`seedLoopPreference()` 只负责「启动对齐」，它读的正是这个偏好 ——
+    /// 偏好若从不被 Bili 写入，重启后 One 仍会按旧值把它盖掉。
+    ///
+    /// 单向性：这里写的是「用户明确选择的循环状态」，所以偏好与会话**同时**设成同一个值，
+    /// 不存在「谁覆盖谁」的问题 —— 它们本来就是同一个语义的两个载体。
+    func setSkinLooping(_ on: Bool) {
+        playerSession?.looping = on
+        UserDefaults.standard.set(on, forKey: OneSkin.loopKey)
     }
 
     /// 把自定义菜单项映射成一行（点击后切到对应面板段）。
@@ -2782,7 +2802,7 @@ struct VideoDetailView: View {
                             ),
                             loopPlayback: Binding(
                                 get: { playerSession?.looping ?? false },
-                                set: { playerSession?.looping = $0 }
+                                set: { setSkinLooping($0) }
                             )
                         )
                         // 实测垂直范围：上沿在归一化 y≈0.400（678 × 0.40 ≈ 271pt），铺到屏幕底。
@@ -2841,7 +2861,8 @@ struct VideoDetailView: View {
                                                       advances: store.autoPlayNext)
                                 },
                                 set: { mode in
-                                    playerSession?.looping = mode.loopsCurrent
+                                    // 走统一入口（会话 + 偏好双写），理由见 `setSkinLooping` 的注释。
+                                    setSkinLooping(mode.loopsCurrent)
                                     store.autoPlayNext = mode.autoAdvances
                                 }
                             ),
@@ -2901,7 +2922,7 @@ struct VideoDetailView: View {
                             ),
                             loopPlayback: Binding(
                                 get: { playerSession?.looping ?? false },
-                                set: { playerSession?.looping = $0 }
+                                set: { setSkinLooping($0) }
                             ),
                             backgroundAudio: Binding(
                                 get: { BiliPlayerExtras.shared.backgroundAudio },
@@ -3005,7 +3026,8 @@ struct VideoDetailView: View {
                                                       advances: store.autoPlayNext)
                                 },
                                 set: { mode in
-                                    playerSession?.looping = mode.loopsCurrent
+                                    // 走统一入口（会话 + 偏好双写），理由见 `setSkinLooping` 的注释。
+                                    setSkinLooping(mode.loopsCurrent)
                                     store.autoPlayNext = mode.autoAdvances
                                 }
                             ),
@@ -3490,6 +3512,22 @@ struct VideoDetailView: View {
         }
         .onAppear {
             if oneSkinSpeed != 1 { playerSession?.setSpeed(Float(oneSkinSpeed)) }
+        }
+        // ⛔ 只有 `onAppear` 是不够的 —— 这条我自己在本文件别处写过理由，却漏了这里。
+        //
+        // `playerSession` 的唯一赋值源是 `onStageSession`（在 `watchStage:3845`，
+        // 属于 `watchStage` 视图），而上面那个 `onAppear` 在 `oneSkinBody` 内 ——
+        // **两者不在同一视图层级，onAppear 必然先跑**，那一刻 `playerSession` 还是 nil，
+        // `?.` 把整句静默丢弃。且 `OneSkinStage` 调用处无 `.id()`，identity 不变，
+        // onAppear 不会因会话就绪而重跑。
+        // 后果（用户可感知）：One 里设 1.5× 退出重进 → chip 显示 1.5×，实际按 1.0× 播。
+        //
+        // 判时序要看**视图层级**，不看行号先后（`:3491 < :3845` 只是佐证）。
+        // 与 `armSleepTimer()` 双挂（onAppear + onChange(watchChannel)）同一修法；
+        // 也与 loop 的 `seedLoopPreference()` 同一形态 —— 修一个宿主时必须扫同文件的同构写法。
+        .onChange(of: playerSession != nil) { _, ready in
+            guard ready, oneSkinSpeed != 1 else { return }
+            playerSession?.setSpeed(Float(oneSkinSpeed))
         }
         // [mi3s] 方向锁 / 转屏 / 折展收全屏 / 换集清会话，全部**不在这里写**：
         // 已统一到 `watchPageLifecycle()`，由 `body` 在 `watchBody` 外层挂一次。
