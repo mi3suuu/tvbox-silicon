@@ -128,7 +128,11 @@ final class DanmakuEngine: @unchecked Sendable {
             // A new size, area or text size, or a seek (any jump the clock would not make by itself), starts over at `time`.
             if layout == nil || size != self.size || area != self.area || textScale != self.textScale
                 || time < lastTime - 0.3 || time > lastTime + 2 {
-                restart(at: time, size: size, area: area, textScale: textScale)
+                // 只有「布局被主动作废」这一种（尺寸/区域/字号都没变）才保留屏上的弹幕；
+                // 其余（换尺寸、换区域、换字号、进度跳变）旧位置已失效，必须清空重排。
+                let layoutOnly = layout == nil
+                    && size == self.size && area == self.area && textScale == self.textScale
+                restart(at: time, size: size, area: area, textScale: textScale, keepOnScreen: layoutOnly)
             }
             lastTime = time
             var budget = Self.perFrame
@@ -174,7 +178,15 @@ final class DanmakuEngine: @unchecked Sendable {
         return image
     }
 
-    private func restart(at time: Double, size: CGSize, area: DanmakuArea, textScale: Double) {
+    /// `keepOnScreen`：换布局时**保留正在飘的那批**。
+    ///
+    /// 拨速度档位只改 `scrollDuration`，画面尺寸/区域/字号都没变 ——
+    /// 这时若照常 `active = []`，屏上的弹幕会先全部消失、再从此刻重新排，
+    /// 用户看到的是「一拨速度，弹幕闪一下」。而 `Active` 里存的是 `DanmakuLayout.Placement`
+    /// （含 `start` 与 `speed`），换布局后按新 `speed` 继续算 x 即可，不需要重建。
+    /// 尺寸/区域/字号变化、以及进度跳变，仍然走原来的清空重建（那些情况下旧位置确实失效）。
+    private func restart(at time: Double, size: CGSize, area: DanmakuArea, textScale: Double,
+                         keepOnScreen: Bool = false) {
         self.size = size; self.area = area; self.textScale = textScale
         // About 43pt on a 1080p TV, 22pt in a small Mac window. From the shorter side: an upright iPhone's full-screen
         // player is tall and narrow, and its height made the text twice the size it is when the phone is turned.
@@ -185,7 +197,7 @@ final class DanmakuEngine: @unchecked Sendable {
         layout = DanmakuLayout(width: size.width, height: size.height * 0.96,
                                laneHeight: fontSize * 1.35, scrollArea: area.share,
                                scrollDuration: BiliDanmakuSpeed.current.scrollDuration)
-        active = []
+        if !keepOnScreen { active = [] }
         var low = 0, high = comments.count
         while low < high { let mid = (low + high) / 2; if comments[mid].time < time { low = mid + 1 } else { high = mid } }
         next = low
