@@ -126,9 +126,23 @@ final class DanmakuEngine: @unchecked Sendable {
             : comments.filter { !BiliDanmakuFilter.isBlocked($0.text) }
 
         lock.withLock {
-            // Live comments only grow at the end: keep the layout and what is already on screen.
-            if !self.comments.isEmpty, visible.count > self.comments.count,
-               visible.first == self.comments.first {
+            // ⛔ 快路径（实时弹幕只往后追加时，保住 layout 与 `next`，不重排）必须**只对真追加**生效。
+            //
+            // 原条件只有「条数变多 + 首条相同」。它当年只可能被「实时弹幕增长」走到，
+            // 所以够用。但 `blockWordsRaw` 接进 `.task(id:)` 之后，**「移除屏蔽词」第一次能走到这里**
+            // —— 而这恰好也是「条数变多 + 首条通常不变」⇒ 命中快路径 ⇒ `next` 仍指向
+            // 旧（已过滤）数组的索引，而 `comments` 已是新的更长数组 ⇒ **索引错位、弹幕重放**。
+            // 复核 t5 的 O1 指出：屏蔽「哈哈」这类已消费的早期高频短词再移除，会重放约 9 条。
+            //
+            // 收紧条件：`visible` 必须**以旧 `comments` 为前缀**（即旧数组的每一条都原样在
+            // 新数组的同一位置）。只有真追加才满足；移除屏蔽词会让旧数组的中间冒出条目，
+            // 前缀关系立刻破裂，于是落到下面「重排」路径。
+            //
+            // 逐条比较而不是比 count/首元素：屏蔽词命中数组中间时，首元素与长度都可能不变
+            // 或看起来像追加，只有前缀比较能可靠区分「追加」与「插回」。
+            let isAppend = !self.comments.isEmpty && visible.count > self.comments.count
+                && visible.starts(with: self.comments)
+            if isAppend {
                 self.comments = visible; return
             }
             // ⛔ 这里必须把 `preserveOnRestart` 一起复位成 false。
