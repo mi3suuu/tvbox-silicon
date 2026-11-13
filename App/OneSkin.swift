@@ -997,6 +997,23 @@ struct OneSkinStage: View {
         session.looping = loop
     }
 
+    /// 播种时机为什么不会覆盖用户刚点的 chip（自查，非推测）：
+    ///
+    /// 用户点 chip 时走的是 `loop.toggle(); session?.looping = loop` —— 两者**同步翻转**，
+    /// 点完 `session.looping == loop`，所以之后再调 `seedLoopPreference()` 会命中
+    /// 第一行的 `guard ... else { return }`，什么都不做。**幂等性靠「两者相等即返回」成立**，
+    /// 不是靠调用时机。
+    ///
+    /// 唯一会让两者不等的窗口是「AppStorage 被外部改了、session 没跟上」
+    /// （例如设置页/另一个入口改了 `oneSkinLoop`），那时播种正是我们要的行为。
+    ///
+    /// ⚠️ 已知边界（不改，记录）：`onChange(of: session != nil)` 用 Bool 比较，
+    /// 而 `oneSkinStageSession` 换集时**保持不变**（`playbackSession(for:)` 复用同一会话，
+    /// 见 `VideoDetailView:3806-3809` 的注释）⇒ 这个 onChange 实际只在「首次就绪」时触发一次。
+    /// 对本缺陷足够（要的就是首播对齐），但如果将来有「换集后需要重新对齐偏好」的需求，
+    /// 这个判据不会生效 —— 届时必须改成 `onChange(of: watchChannel)` 那种按频道比的形式。
+    /// 我已在另一处踩过同样的坑（`onChange(of: playerSession == nil)` 因换集不变而 false→false 不触发）。
+
     /// 已播秒数与总时长。One 的进度条两端是「已播 / 剩余」，
     /// 没有真值就画不出正确的进度，所以由调用方从 `PlaybackSession` 传入。
     // ⛔ `position` / `duration` 已从本视图移除。
