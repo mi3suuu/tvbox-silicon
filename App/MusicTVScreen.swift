@@ -87,8 +87,15 @@ private struct MusicNativePlayer: UIViewControllerRepresentable {
         // 重复 / 随机：tvOS 上原来和 iOS 一样**没有任何入口**。
         //
         // `MusicPlaybackSession` 早就有 `cycleRepeat()`（三态 off/all/one，落盘到 "musicRepeat"）
-        // 与 `toggleShuffle()`，消费端也是真的：`canAdvance` 判 `repeatMode == .all`、
-        // `advance()` 里有 `.one` 的单曲循环、`toggleShuffle` 会真的重排队列。
+        // 与 `toggleShuffle()`，消费端也是真的：
+        //   · `repeatMode == .one` 的真实消费点是 `songEnded()`（MusicPlaybackSession:507）——
+        //     `if repeatMode == .one || repeatMode == .all && queue?.tracks.count == 1 { seek(0); play() }`；
+        //   · `canAdvance`（:197）判 `repeatMode == .all`；
+        //   · `toggleShuffle()` 会真的重排队列（保存 `unshuffled` 原序以便还原）。
+        //
+        // ⛔ 这里原来写「`advance()` 里有 `.one` 的单曲循环」是**错的**（复核 Q3 指出，我已核）：
+        //    `advance()` 是纯队列推进，不看 repeatMode；单曲循环全部发生在 `songEnded()`。
+        //    引用位置写错会误导后来者去 `advance()` 里找消费点，什么也找不到。
         // 但调用点只有 `MusicMacPlayer`（整文件 `#if os(macOS)`）⇒ tvOS 用户切不了。
         //
         // 这里用 `transportBarCustomMenuItems` 而不是自绘按钮：Apple TV 的焦点引擎由
@@ -96,9 +103,13 @@ private struct MusicNativePlayer: UIViewControllerRepresentable {
         // 往里面加条目不需要碰焦点/遥控器手势，也不会挤占画面上的安全区。
         //
         // ⚠️ 这两项**不受上面 `queue.tracks.count > 1` 的门控**：
-        //    「随机」在一首歌的队列上是无意义的，但「循环单曲」恰恰是单曲队列最常用的场景
-        //    （`repeatMode == .one` 在 `advance()` 里就是「这首放完再放这首」）。
-        //    放进那个 `if` 里会让最有用的那种用法消失。
+        //    「随机」在一首歌的队列上是无意义的，但「循环单曲」恰恰是单曲队列最常用的场景。
+        //    依据是 `songEnded()`（:507）那条判据：
+        //    `repeatMode == .one || repeatMode == .all && queue?.tracks.count == 1`
+        //    —— 这里 `tracks.count == 1` 被**显式当作 `.all` 也该重播的情形**写进了代码，
+        //    也就是说「单曲队列」正是设计时考虑过的场景。放进 `tracks.count > 1` 的 `if` 里
+        //    会让最有用的那种用法消失。
+        //    （原注释写「在 `advance()` 里」，位置错，已订正。）
         items.append(UIAction(title: L10n.text("Shuffle"),
                               image: UIImage(systemName: music.shuffled ? "shuffle.circle.fill" : "shuffle"),
                               state: music.shuffled ? .on : .off) { _ in music.toggleShuffle() })
