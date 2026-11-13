@@ -125,17 +125,24 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         layer.videoGravity = .resizeAspect
         layer.isHidden = true
         layer.backgroundColor = nil
-        // Only build the pipeline when the viewer actually switched an enhancement on. With both switches
-        // off there is nothing to process, and the idle layer/pipeline is a use-after-free hazard across a
-        // Duo fold/unfold (SIGSEGV / SIGILL on scene teardown).
-        guard VideoEnhancement.enabled else { return }
-        #if !targetEnvironment(simulator)
-        if #available(macOS 26, iOS 26, tvOS 26, *) {
-            engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in
-                Task { @MainActor [weak self] in self?.apply(status, summary: summary, note: note, format: format) }
-            }
-        }
-        #endif
+        // ⛔ 这里**不再** `guard VideoEnhancement.enabled else { return }`。
+        //
+        // 原来那样写有三个连锁后果（用户可感知）：
+        //   ① 增强关着时 `return` 在 `engine` 创建**之前**（原 :131 vs :134），
+        //      连下面的 `itemObservation` 和 250ms 刷新定时器都一起没建；
+        //   ② 于是播放中把开关打开 → `refresh()` 首行 `guard let engine` 直接返回，
+        //      **永远不会生效**；用户看到的是「开了没反应」；
+        //   ③ 全仓零处 `onChange(of: upscalesVideo|smoothsVideo)`，没有任何重建入口。
+        //   ⇒ 唯一出路是退出重进（那时才会以 enabled=true 重建）。
+        //
+        // 但原来那个 guard 不是没理由的，注释写明：空闲的 layer/pipeline 在 Duo
+        // 折叠/展开时是 use-after-free 隐患（SIGSEGV / SIGILL on scene teardown）。
+        //
+        // 折中：**监听照建，pipeline 惰性建**。
+        //   · `itemObservation` 与刷新定时器无条件建立（它们本身不持有 GPU 资源）；
+        //   · `engine` 保持 nil 直到 `refresh()` 发现「开关真的开着且设备支持」才创建
+        //     （见 `makeEngineIfNeeded()`）——那个时刻与「关着就建」的场景不同，
+        //     是用户明确打开之后才付出代价，也就绕开了折叠期空闲 pipeline 的隐患。
         itemObservation = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
@@ -164,7 +171,25 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         Task { @MainActor [weak self] in self?.refresh() }
     }
 
+    /// 按需创建增强管线。
+    ///
+    /// 只有「开关真的开着 + 设备支持」才建，且只在第一次需要时建一次。
+    /// 这样 `init` 不必因为开关关着就整个提前返回（那会让运行期开启永远无效），
+    /// 又不会在没有增强需求时长期持有一条空闲管线（Duo 折叠期的 use-after-free 隐患）。
+    private func makeEngineIfNeeded() {
+        guard engine == nil, VideoEnhancement.enabled else { return }
+        #if !targetEnvironment(simulator)
+        if #available(macOS 26, iOS 26, tvOS 26, *) {
+            engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in
+                Task { @MainActor [weak self] in self?.apply(status, summary: summary, note: note, format: format) }
+            }
+        }
+        #endif
+    }
+
     private func refresh() {
+        // 开关可能是在播放中途打开的（设置页 / 播放器内开关），所以每次刷新都先补建管线。
+        makeEngineIfNeeded()
         guard let engine, let player else { return }
         let defaults = UserDefaults.standard
         var next = VideoEnhancementOptions(upscale: VideoEnhancement.canUpscale && defaults.bool(forKey: VideoEnhancement.upscaleKey),
