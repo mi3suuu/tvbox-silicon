@@ -177,7 +177,24 @@ private protocol EnhancementEngine: AnyObject, Sendable {
     /// 这样 `init` 不必因为开关关着就整个提前返回（那会让运行期开启永远无效），
     /// 又不会在没有增强需求时长期持有一条空闲管线（Duo 折叠期的 use-after-free 隐患）。
     private func makeEngineIfNeeded() {
-        guard engine == nil, VideoEnhancement.enabled else { return }
+        // ⛔ 先处理「开关被关掉」：**必须把 engine 释放回 nil**。
+        //
+        // 原来只做了「从没开过就不建」，漏了另一半 —— `engine` 一旦创建就**永不释放**
+        // （无 `engine = nil`、`VideoEnhancer` 也无 deinit），所以「开过一次再关掉」
+        // 会永久持有一条空闲 pipeline 跨 Duo 折叠/展开，
+        // 正是 `init` 原注释要避免的 use-after-free 场景。
+        // 复核（fix-reviewer ③）指出这一点，成立。
+        if !VideoEnhancement.enabled {
+            if engine != nil {
+                engine = nil
+                layer.flush()
+                output = nil
+                item = nil
+                Diagnostics.shared.record(.info, "enhance", "pipeline released (enhancement off)")
+            }
+            return
+        }
+        guard engine == nil else { return }
         #if !targetEnvironment(simulator)
         if #available(macOS 26, iOS 26, tvOS 26, *) {
             engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in

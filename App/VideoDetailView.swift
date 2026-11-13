@@ -3610,7 +3610,7 @@ struct VideoDetailView: View {
                 // ⛔ 也不能在 arm 时就把值固定下来（第一版错法，见 `d29fb84`）。
                 //
                 // 折中：`onAppear` 时 `playerSession` 常常还是 nil，所以**不能只挂一次** ——
-                // 下面的 `.onChange(of: playerSession)` 会在会话真正就绪后再挂一次，
+                // 下面的 `.onChange(of: watchChannel)` 会在频道就绪/换集后再挂一次，
                 // 保证最终挂上的是有值的那个。
                 armSleepTimer()
                 // ⛔ 这里**不再动坞**。
@@ -3666,9 +3666,17 @@ struct VideoDetailView: View {
                 }
                 #endif
             }
-            // `playerSession` 是 `onStageSession` / `opened:` 回调之后才就绪的，
-            // `onAppear` 那一刻通常是 nil。会话一就绪就重挂一次，保证定时关闭挂到真有值的那个。
-            .onChange(of: playerSession == nil) { _, _ in armSleepTimer() }
+            // ⛔ 这里必须监听 `watchChannel`，**不能**监听 `playerSession == nil`。
+            //
+            // `playerSession` 在**换集时保持不变**（`:2350-2352` 注释自己写明），
+            // 所以 `playerSession == nil` 这个 Bool 换集时是 `false → false`，**不触发**。
+            // 那样闭包会一直绑着**换集前**的 `channelNow`，到点 `isPlaying(旧频道)` 为假
+            // ⇒ 静默 return，连日志都没有。症状与原 P0 一样，只是触发条件从
+            // 「从未挂载」变成「换过集」。（fix-reviewer ④ 指出，成立。）
+            //
+            // `watchChannel` 由 `store.playing` 派生，换集会变，且 `Channel` 是 `Hashable`
+            // （`Models.swift:322`），可以直接作为 `onChange` 的观测值。
+            .onChange(of: watchChannel) { _, _ in armSleepTimer() }
             .onChange(of: watchScopes) { old, new in
                 store.watchPageScopes.subtract(old.subtracting(new)); store.watchPageScopes.formUnion(new)
             }
