@@ -118,6 +118,23 @@ struct VideoDetailView: View {
     @State private var coverBack = false
     /// The page's player, whose wait the cover tells about.
     @State private var playerSession: PlaybackSession?
+    /// 最近一次「确定在播」的会话快照。
+    ///
+    /// ⛔ 为什么需要它：`Store.playing` 的 `didSet` 在 `playing == nil` 时会把
+    /// `activeSession` / `activeSessionChannel` **一起清空**：
+    ///     if playing == nil { activeSession = nil; activeSessionChannel = nil }
+    /// 而 `playing` 在一次 body 求值、一次坞交接、一次转屏里都可能瞬时变成 nil。
+    /// 于是 `oneSkinStageSession` 在那些帧返回 nil → `avPlayer` 为 nil →
+    /// 画面层走 `else` 画海报。
+    //
+    /// 真机实证（8.11.6，同一进程内相邻两帧）：
+    ///     PICCHK avPlayer=NIL 走海报 win=523x294      ← 这一帧 session 丢了
+    ///     PICCHK ok avPlayer=yes item=true ps=1080x1920 win=371x659  ← 下一帧又回来了
+    /// 用户看到的就是「一会儿有画面一会儿只有海报」，放大了就是「只出海报」。
+    ///
+    /// 会话对象一旦建立就一直活着（`PlaybackSession` 由 `@State`/`@Observable` 持有），
+    /// 所以这里缓存它不会延长任何生命周期，只是避免「store 清槽 → 本页失明」。
+    @State private var lastGoodSession: PlaybackSession?
     /// The source's config center, open in the app (`ConfigCenterView`).
     @State private var showsConfigCenter = false
     #endif
@@ -2205,7 +2222,23 @@ struct VideoDetailView: View {
 
     /// 哔哩哔哩皮肤是否生效。QA 用 `-qaBiliSkin`。
     private var biliActive: Bool {
-        UserDefaults.standard.bool(forKey: "qaBiliSkin") || playSkin == .bilibili
+        // 探针：皮肤判据的每个输入都打出来。
+        // 用户报「设置里选 One，界面仍是哔哩哔哩，杀进程重进也一样」——
+        // 只有三个可能：①`playSkin` 没写成 one ②`oneSkinEnabled` 被置 false
+        // ③`qaBiliSkin` 残留 true。一次打清，不再分层猜。
+        // ⛔ 只认「本次启动」标记，不认持久域里的 `qaBiliSkin`。
+        //
+        // 真机 plist 直读实证：`playSkin=one`、`oneSkinEnabled=true`、
+        // 但 `qaBiliSkin=true` —— 用户明明选了 One，界面永远是哔哩哔哩。
+        // `qaBiliSkin` 是旧版本会写回持久域的 QA 开关，一旦写成 true 就自锁，
+        // 设置里改什么都不生效（`guard !biliActive else { return false }` 先把它挡掉）。
+        // 现在 QA 参数只在启动那一次写入易失标记，正常启动会被清掉。
+        let qa = UserDefaults.standard.bool(forKey: "qaBiliSkinActiveThisLaunch")
+        let r = qa || playSkin == .bilibili
+        #if DEBUG
+        oneSkinLog("SKINCHK raw=\(playSkinRaw) skin=\(playSkin) qaBili=\(qa) oneEnabled=\(oneSkinEnabled) bili=\(r)")
+        #endif
+        return r
     }
 
     /// 选集页要给菜单栏让出的空间。
@@ -2350,8 +2383,35 @@ struct VideoDetailView: View {
     /// PlaybackView 实际持有的会话，换集时保持不变，正好长期一致。
     /// `??` 右侧延迟求值：只有首次 `onAppear` 之前才回退到 store（此时两者本就
     /// 是同一个对象）；换集后 `playerSession` 已有值，不会再新建空会话。
+    /// 现读 `presentationSize` 得到片源比例；无 item / 未就绪时 nil（调用方回退）。
+    private var oneSkinLiveAspect: CGFloat? {
+        guard let sz = oneSkinStageSession?.player.currentItem?.presentationSize,
+              sz.width > 0, sz.height > 0 else { return nil }
+        let r = sz.width / sz.height
+        return (r.isFinite && r > 0.2 && r < 6) ? r : nil
+    }
+
     private var oneSkinStageSession: PlaybackSession? {
-        playerSession ?? watchChannel.map { store.playbackSession(for: $0) }
+        // ⛔ 这里**只能读，不能建**。
+        //
+        // 原来写的是 `store.playbackSession(for:)` —— 那个函数在频道不匹配时
+        // 会新建一个空会话并顶替 `activeSession`。而本属性是**计算属性**，
+        // 每次 `body` 求值都会执行一次，于是：
+        //   · 真正在播的会话被顶掉、变成孤儿（它还挂着 item，但没人读它）；
+        //   · 新会话 `currentItem == nil` → 画面层无 item → 只显示海报。
+        // 真机日志（8.11.5，用户报「部分视频只出海报」）：
+        //   VIDSRC in=1.7778 ps=0x0 st=-1 dur=-1 ext=- host=- noItem   ← 坏源
+        //   VIDSRC in=0.5625 ps=1080x1920 st=1 dur=114 ext=mp4 n=1     ← 好源
+        // 「部分」的成因：`Channel.id` 只含 group|name|url，而
+        // `activeSessionChannel == channel` 比的是**全字段**。换集/换线路/
+        // 从坞回来时两者不等 → 每帧新建空会话 → 该源永远 noItem。
+        // ① 优先用本页持有的强引用（`onStageSession` 交回来的那一个）。
+        if let playerSession { return playerSession }
+        // ② 其次用 `lastGoodSession` —— 见下方说明。
+        if let lastGoodSession { return lastGoodSession }
+        // ③ 最后才去 store 查（首次进入、`onStageSession` 还没回传时）。
+        guard let channel = watchChannel else { return nil }
+        return store.currentSession(for: channel)
     }
 
     /// 哔哩哔哩版式：半屏卡片 + 详情 + 选集抽屉；全屏时齿轮从右侧划出设置面板。
@@ -2400,9 +2460,26 @@ struct VideoDetailView: View {
     @MainActor
     private func syncAspectFromPresentationSize() async {
         for _ in 0..<40 {
-            if let size = playerSession?.player.currentItem?.presentationSize,
+            // ⛔ 必须读 `oneSkinStageSession`，不能只读 `playerSession`。
+            //
+            // `playerSession` 只有 `PlaybackView` 的 `onStageSession` 闭包会给它赋值；
+            // One 皮肤走 `stageOnly: true`，那条闭包路径不一定跑 —— 实测真机日志：
+            //   `ASPECTSYNC TIMEOUT 未拿到 presentationSize，仍用 1.7778`
+            // 于是一整场都按 16:9 排版，竖屏源（0.5625）的窗口高度算错，
+            // 详情列被挤出屏幕（用户报「竖屏源只看到海报」）。
+            //
+            // 而 `oneSkinStageSession` 正是 `OneSkinStage` 实际拿去渲染的那个会话
+            // （`playerSession ?? store.playbackSession(for:)`），比例必须问它。
+            let probeSession = playerSession ?? oneSkinStageSession
+            if let size = probeSession?.player.currentItem?.presentationSize,
                size.width > 0, size.height > 0 {
                 let ratio = size.width / size.height
+                #if DEBUG
+                // 探针：用户报「竖屏源仍按 16:9 排版」。这条能分清是
+                // ① 拿不到 presentationSize（回退 16:9），还是
+                // ② 拿到了但被范围闸门挡掉。
+                oneSkinLog("ASPECTSYNC size=\(Int(size.width))x\(Int(size.height)) ratio=\(String(format: "%.4f", ratio)) old=\(String(format: "%.4f", playerAspectRatio))")
+                #endif
                 if ratio.isFinite, ratio > 0.2, ratio < 6,
                    abs(ratio - playerAspectRatio) > 0.01 {
                     playerAspectRatio = ratio
@@ -2412,6 +2489,9 @@ struct VideoDetailView: View {
             try? await Task.sleep(nanoseconds: 150_000_000)
             if Task.isCancelled { return }
         }
+        #if DEBUG
+        oneSkinLog("ASPECTSYNC TIMEOUT 未拿到 presentationSize，仍用 \(String(format: "%.4f", playerAspectRatio))")
+        #endif
     }
 
     /// 全屏态四钮共用的弹窗（以「画质」框为基准款式）。
@@ -3291,7 +3371,18 @@ struct VideoDetailView: View {
             current: currentEpisode,
             playing: playingOnThisPage,
             busy: busy,
-            aspectRatio: BiliAspectMode.effectiveAspect(sourceRatio: playerAspectRatio),
+            // ★ 直接从 `session` 现算片源比例，不读 `@State playerAspectRatio`。
+            //
+            // 真机日志（竖屏源 presentationSize 1080×1920）：
+            //   `pictureColumn aspect=1.7777` 出现 **613 次**，`aspect=0.5625` 只 235 次
+            // —— 同一个源，窗口在 523×294 ⇄ 371×659 之间反复跳。
+            // 原因是 `playerAspectRatio` 由异步 `.task` 写入，写完后要下一轮
+            // body 求值才可见；期间任何重排都拿旧值（16:9）排版。
+            // `presentationSize` 是同步可读的事实（项目铁律：画面比例唯一真源）。
+            aspectRatio: BiliAspectMode.effectiveAspect(
+                sourceRatio: oneSkinLiveAspect ?? playerAspectRatio
+            ),
+            // 探针由 OneSkinStage 内部读 aspectRatio 打，见 ASPECTDBG。
             shape: oneSkinShape,
             // 遮挡（四边）：唯一消费端是几何层（`box` 扣边），见 16.1。
             // 位置必须紧跟 `shape`（声明次序），否则 memberwise init 参数错位。
@@ -3758,7 +3849,11 @@ struct VideoDetailView: View {
                              stageOnly: stageOnly,
                              // 把 PlaybackView 实际持有的会话交回本页：选集页
                              // 画面层据此长期绑定同一个 AVPlayer（换集只换 item）。
-                             onStageSession: { session in playerSession = session })
+                             onStageSession: { session in
+                                 playerSession = session
+                                 // 记下「确定在播」的那一个，供 store 清槽后继续取用。
+                                 lastGoodSession = session
+                             })
             }
             if covered { watchCover.transition(.opacity) }
         }

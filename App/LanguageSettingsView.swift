@@ -9,6 +9,12 @@ import TVCore
 /// 根视图读到计数器就整棵重算 —— 不需要重启。
 struct LanguageSettingsView: View {
     @Environment(Store.self) private var store
+    /// 响应式真源：`isSelected` 原来直接读 `UserDefaults`，而 `UserDefaults`
+    /// **不参与 SwiftUI 状态管理** —— 点完只有 `store.languageRevision` 自增，
+    /// 若本视图没被那条 revision 驱动，勾选态就不动、也没有任何回馈。
+    /// 用户报的「语言设置没有勾选态和刷新」就是这个。
+    /// `@AppStorage` 让写入立刻触发本视图重绘，勾选态一定跟手。
+    @AppStorage(L10n.languageKey) private var storedLanguage: String = ""
 
     /// `nil` 代表「跟随系统」，排在最前。
     private var choices: [String?] {
@@ -43,7 +49,8 @@ struct LanguageSettingsView: View {
     }
 
     private func isSelected(_ code: String?) -> Bool {
-        let stored = UserDefaults.standard.string(forKey: L10n.languageKey)
+        // 读 `@AppStorage` 而不是 `UserDefaults.standard`：前者变化会重绘。
+        let stored: String? = storedLanguage.isEmpty ? nil : storedLanguage
         if let code { return stored == code }
         return stored == nil || !L10n.supportedLanguages.contains(stored ?? "")
     }

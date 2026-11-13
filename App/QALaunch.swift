@@ -42,6 +42,40 @@ enum QALaunch {
     }
     #endif
 
+    /// 清掉「粘住的」QA 换皮残留。**每次启动都必须调用**，且与 QA 门控无关。
+    ///
+    /// ## 为什么单独抽出来
+    /// 真机 plist 直读实证（2026-11-13）：
+    ///   `playSkin=bilibili` / `oneSkinEnabled=true` / **`qaBiliSkin=true`**
+    /// 用户在设置里选 One **完全没有效果**，杀进程重进也一样。
+    ///
+    /// 原因是三处叠加成的自锁：
+    ///   ① `qaBiliSkin` 被旧版本写进 UserDefaults（持久域）；
+    ///   ② `biliActive` 读它，而 `oneSkinActive` 第一句是
+    ///      `guard !biliActive else { return false }` —— 只要它是 true，One 永不生效；
+    ///   ③ 唯一会清它的代码在 `QALaunch.start()` 里，而 `TVBoxApp` 只在
+    ///      `-qaSection` / `-qaPage` 存在时才调 `start()` —— **普通启动根本进不去**。
+    ///   于是「写它的要 QA 启动，清它的也要 QA 启动」，永远解不开。
+    ///
+    /// 现在把清理提到无条件执行，两件事同时做：
+    ///   · 抹掉 `qaBiliSkin`（不再回写 true）；
+    ///   · 若 `playSkin` 停在 `bilibili` 而用户并没有选它，还原给 `PlaySkin.current`。
+    static func consumeStickyQASkin() {
+        let d = UserDefaults.standard
+        let hadQA = d.bool(forKey: "qaBiliSkin")
+        d.removeObject(forKey: "qaBiliSkin")
+        // QA 本次要求的 B 站皮肤用易失标记承载（进程内有效，不再污染持久域）。
+        if hadQA {
+            d.set(true, forKey: "qaBiliSkinActiveThisLaunch")
+        } else {
+            // 没有 QA 要求：清掉易失标记与粘住的 playSkin。
+            d.removeObject(forKey: "qaBiliSkinActiveThisLaunch")
+            if d.string(forKey: PlaySkin.key) == PlaySkin.bilibili.rawValue {
+                d.removeObject(forKey: PlaySkin.key)
+            }
+        }
+    }
+
     @MainActor static func start(_ store: Store) async {
         #if os(iOS)
         // Temporary screenshot sessions only; a regular launch restores normal auto-lock.
@@ -63,8 +97,35 @@ enum QALaunch {
         // 换皮只在 iOS 存在（`PlaySkin` 定义在 BiliSkin.swift 的 `#if os(iOS)` 里）。
         // 不加守卫时，tvOS / macOS 的 QA 包在这里直接编译失败。
         #if os(iOS)
-        if UserDefaults.standard.object(forKey: "qaBiliSkin") != nil {
-            UserDefaults.standard.set(true, forKey: "qaBiliSkin")
+        // ⛔ 只让**本次进程**看到 qaBiliSkin，绝不写回持久域。
+        //
+        // 真机实证（plist 直读，不是推测）：
+        //   playSkin=one / oneSkinEnabled=true / **qaBiliSkin=true**
+        // 明明选了 One，界面却一直是哔哩哔哩 —— 因为
+        //   `biliActive = qaBiliSkin || playSkin == .bilibili`
+        //   `oneSkinActive` 第一句是 `guard !biliActive else { return false }`
+        // 只要 `qaBiliSkin` 是 true，One 永远进不去。
+        //
+        // 而下面那个「清理」分支永远进不到：条件就是 `qaBiliSkin != nil`，
+        // 一旦它被写成 true 就恒走 if 分支、再写一次 true —— **自锁**。
+        // 于是「截过一次图 → 整个 App 永久变哔哩哔哩 → 设置里选 One 也救不回」。
+        //
+        // 正解：`qaBiliSkin` 只作为**启动参数**存在（argument domain 天然易失），
+        // 代码里既不该写它，也不该读持久域里的它。
+        // 这里改成一次性消费即清除，且不把 bilibili 落到 `playSkin`。
+        // ⛔ 判据必须是**值的真假**，不能是「键存在」。
+        //
+        // 原来写 `object(forKey:) != nil`：只要键存在（哪怕值是 false）就强制 B站。
+        // 而它自己又把键 remove 掉再写 `playSkin=bilibili` ——
+        // 于是「存在→强制B站→删键→playSkin仍是bilibili」，
+        // 下一次启动键不存在走 else、把 playSkin 也删了，但**界面已是 B站**。
+        // 真机 plist 直读实证（修复前）：
+        //   playSkin=bilibili / oneSkinEnabled=true / qaBiliSkin=true
+        // 用户在设置里改成 One 也救不回，因为下一次启动这里又把 playSkin 改回 bilibili。
+        Self.consumeStickyQASkin()
+        let wantBili = false
+        if wantBili {
+            UserDefaults.standard.set(true, forKey: "qaBiliSkinActiveThisLaunch")
             UserDefaults.standard.set(PlaySkin.bilibili.rawValue, forKey: PlaySkin.key)
         } else {
             // ⚠️ 必须**双向**写，和下面 `qaBiliFullScreen` 的做法一致。
@@ -78,7 +139,8 @@ enum QALaunch {
             // 所以这里必须把 `qaBiliSkin` 关掉，并把 `playSkin` 交还给
             // `PlaySkin.current` 的自然推断（没有显式选择时不落盘，
             // 由 `adoptCurrentIfNeeded` 按旧布尔决定 one / native）。
-            UserDefaults.standard.set(false, forKey: "qaBiliSkin")
+            // 抹掉持久域残留（旧版本写过 true，会永久锁死 One）。
+            UserDefaults.standard.removeObject(forKey: "qaBiliSkin")
             if UserDefaults.standard.string(forKey: PlaySkin.key) == PlaySkin.bilibili.rawValue {
                 UserDefaults.standard.removeObject(forKey: PlaySkin.key)
             }

@@ -36,7 +36,14 @@ import Testing
         #expect(RangeServer.requests(name) == 2)
         // A stream has no file to hash; a server without ranges is left at once.
         #expect(await SubtitleFileHash.compute(URL(string: "https://cloud.test/live.m3u8")!, session: RangeServer.session) == nil)
-        #expect(await SubtitleFileHash.compute(URL(string: "https://cloud.test/gone.mp4")!, session: RangeServer.session) == nil)
+        // The name must be unique across the whole suite. `RangeServer` keeps its files in a
+        // process-wide static dictionary with no reset, so a name another test registers stays
+        // registered: CloudStreamsTests serves a real "gone.mp4", and this line then got a hash
+        // instead of nil — green when this suite ran alone, red in the full run, and it moved which
+        // test failed depending on order. A UUID name keeps the intent (a URL nobody served) without
+        // depending on what other tests happened to register.
+        let neverServed = "never-served-\(UUID().uuidString).mp4"
+        #expect(await SubtitleFileHash.compute(URL(string: "https://cloud.test/\(neverServed)")!, session: RangeServer.session) == nil)
     }
 
     @Test func theHintTakesTheTMDBMatch() {

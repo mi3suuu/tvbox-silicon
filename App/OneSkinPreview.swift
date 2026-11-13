@@ -2,6 +2,32 @@
 import SwiftUI
 import TVCore
 
+/// QA 用片源比例：`-qaOneAspect 0.5625` 可让四形态验收跑**竖源**。
+///
+/// ⛔ 存在的理由：此前两处 `OneSkinStage(...)` 把 `aspectRatio` 写死成 16:9，
+/// 于是 `-qaPage one-preview -qaOneShape split|column|fullBleed|halfFold`
+/// 四条验收通道**永远只跑横源**。任何「只在竖源暴露」的几何缺陷
+/// （如 2026-11-13 的「竖源横持只剩海报」）在模拟器验收里 100% 通过 ——
+/// 这不是测试不足，是**测试结构上不可达**。
+/// 支持三档：1.7778（横）/ 0.5625（竖）/ 1.3333（4:3）；缺省 16:9。
+enum OneSkinPreviewAspect {
+    /// ⛔ 必须**读字符串再自己转**，不能用 `double(forKey:)`。
+    ///
+    /// 实测（真机 iPhone Duo / 8.13.0）：`-qaOneAspect 0.5625` 传进来后
+    /// `UserDefaults.standard.double(forKey:)` 返回 0 —— argument domain 的
+    /// NSNumber 在这里类型不匹配（与同文件另一处 `-qaOneSkinPortrait` 踩的坑同源，
+    /// 那边注释写着「`bool(forKey:)` 读 Number 会失败，必须判键存在」）。
+    /// `string(forKey:)` 对 argument domain 稳定，转 Double 才可靠。
+    static var current: CGFloat {
+        if let s = UserDefaults.standard.string(forKey: "qaOneAspect"),
+           let v = Double(s), v > 0.05 {
+            return CGFloat(v)
+        }
+        return 16.0 / 9.0
+    }
+}
+
+
 /// One 播放页的 SwiftUI Preview 载体。
 ///
 /// 目的：改布局常量时不必「构建 → 装机 → 进播放页」走一遍（约 8 分钟），
@@ -43,7 +69,7 @@ struct OneSkinPreviewHost: View {
                 current: video.episodes.first,
                 playing: false,
                 busy: false,
-                aspectRatio: 16.0 / 9.0,
+                aspectRatio: OneSkinPreviewAspect.current,
                 shape: OneSkinPreviewShape.from(qaShape),
                 channel: nil,
                 avPlayer: nil,
@@ -108,7 +134,7 @@ struct OneSkinQAHost: View {
                 current: video.episodes.first,
                 playing: false,
                 busy: false,
-                aspectRatio: 16.0 / 9.0,
+                aspectRatio: OneSkinPreviewAspect.current,
                 shape: OneSkinPreviewShape.from(shapeKey),
                 channel: nil,
                 avPlayer: nil,

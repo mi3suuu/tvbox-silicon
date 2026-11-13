@@ -291,8 +291,19 @@ final class RangeQueue: @unchecked Sendable {
 /// One reports DownloadSnapshot(speed:activeConnections:) beside the byte counts; the number is what makes
 /// an accelerator legible - it is how you tell 8 sockets from 1.
 final class SpeedMeter: @unchecked Sendable {
+    /// Time source. Production reads the wall clock; a test injects a clock it controls, because a
+    /// duration-based assertion on the real clock is a flaky test: under a full parallel suite the
+    /// 250 ms window stretches and the computed rate falls below the threshold, failing on a busy
+    /// machine and passing on an idle one. Injecting the clock pins the arithmetic instead of the
+    /// timing.
+    private let now: @Sendable () -> Date
     private let lock = NSLock()
-    private var last = Date()
+    private var last: Date
+
+    init(now: @escaping @Sendable () -> Date = { Date() }) {
+        self.now = now
+        self.last = now()
+    }
     private var lastBytes: Int64 = 0
     private var smoothed: Double = 0
     private var lanes = 0
@@ -320,10 +331,10 @@ final class SpeedMeter: @unchecked Sendable {
     /// Called about once a second by the download ticker.
     func sample(_ bytes: Int64) {
         lock.withLock {
-            let now = Date(), elapsed = now.timeIntervalSince(last)
+            let current = now(), elapsed = current.timeIntervalSince(last)
             guard primed else {
                 // Baseline only: a resumed file's first count is bytes already on disk, not bytes arrived.
-                primed = true; last = now; lastBytes = bytes
+                primed = true; last = current; lastBytes = bytes
                 return
             }
             guard elapsed > 0.2 else { return }
@@ -331,7 +342,7 @@ final class SpeedMeter: @unchecked Sendable {
             // The same 0.6/0.4 blend the queue already uses for its rows: steady enough to read,
             // quick enough to show a stall.
             smoothed = smoothed == 0 ? rate : smoothed * 0.6 + rate * 0.4
-            last = now; lastBytes = bytes
+            last = current; lastBytes = bytes
         }
     }
 

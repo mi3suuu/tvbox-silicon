@@ -181,7 +181,37 @@ final class OneSkinFixedPlayerView: UIView {
                                    width: max(fixedSize.width, 1),
                                    height: max(fixedSize.height, 1))
         #if DEBUG
-        let line = "fixedLayer view=\(Int(bounds.width))x\(Int(bounds.height)) fixed=\(Int(fixedSize.width))x\(Int(fixedSize.height)) layer=\(Int(playerLayer.frame.width))x\(Int(playerLayer.frame.height)) videoRect=\(Int(playerLayer.videoRect.width))x\(Int(playerLayer.videoRect.height)) gravity=\(playerLayer.videoGravity.rawValue)"
+        // 探针必须区分「没绑 player」「绑了但没画面」「有画面但被裁」。
+        // 只看 videoRect 会把三种情况混成一个 0x0。
+        let hasPlayer = playerLayer.player != nil
+        let hidden = isHidden || playerLayer.isHidden
+        let alpha = Int(playerLayer.opacity * 100)
+        let superL = superview != nil
+        // 屏幕绝对位置：判断「画了但不在屏幕内」。0 帧或越界会表现为「只有海报」。
+        // ⛔ 必须同时打出 window 尺寸，否则「y=714 是否越界」无法判定。
+        // Duo 内屏物理 951×669 不随方向交换，但 window bounds 可能是竖持 669×951，
+        // 只看 y 值会把「在屏内」误判成「出屏」。
+        let wb = window?.bounds.size ?? .zero
+        let winRect = convert(bounds, to: nil)
+        let wr = convert(bounds, to: window)
+        let inWindow = (wr.minY >= -2 && wr.maxY <= wb.height + 2
+                        && wr.minX >= -2 && wr.maxX <= wb.width + 2)
+        _ = inWindow
+        // 父链：定位「布局 frame 与预期不符」的来源。
+        // 竖屏源 inW=0 (y=714) 但上层 pictureColumn 报 at=(0,0)，差 714 必须找到在哪一层产生的。
+        // ⛔ 用 convert(.., to: window) 而不是 to: nil。
+        // to: nil 会带上每一层的 transform/仿射，横屏源正常显示时也报 y=818 > 屏高 669，
+        // 说明那个值不是屏幕坐标，不能判越界。window 坐标才是真屏幕位置。
+        var chain = ""
+        var cur: UIView? = superview
+        var depth = 0
+        while let v = cur, depth < 8 {
+            let r = v.convert(v.bounds, to: window)
+            chain += " [d\(depth) x\(Int(r.minX)) y\(Int(r.minY)) w\(Int(r.width)) h\(Int(r.height)) bo\(Int(v.bounds.origin.x)),\(Int(v.bounds.origin.y)) cls\(type(of: v))]"
+            cur = v.superview
+            depth += 1
+        }
+        let line = "fixedLayer chain=\(chain) wb=\(Int(wb.width))x\(Int(wb.height)) inW=\(inWindow ? 1 : 0) winW=\(Int(wr.minX)),\(Int(wr.minY)),\(Int(wr.width))x\(Int(wr.height)) view=\(Int(bounds.width))x\(Int(bounds.height)) fixed=\(Int(fixedSize.width))x\(Int(fixedSize.height)) layer=\(Int(playerLayer.frame.width))x\(Int(playerLayer.frame.height)) videoRect=\(Int(playerLayer.videoRect.width))x\(Int(playerLayer.videoRect.height)) pl=\(hasPlayer ? 1 : 0) win=\(inWindow ? 1 : 0) hid=\(hidden ? 1 : 0) op=\(alpha) sup=\(superL ? 1 : 0) gravity=\(playerLayer.videoGravity.rawValue)"
         if line != lastLogged { lastLogged = line; oneSkinLog(line) }
         #endif
     }

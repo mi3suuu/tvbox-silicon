@@ -110,14 +110,26 @@ import Testing
 /// The failure this pins down is loud: resuming a 500 MB file claimed 1885 MB/s on a 50 Mbit line.
 /// A rate above the link is not a fast download, it is a wrong number, and the row it lands in is
 /// read by a person deciding whether to wait.
-@Test func aResumedDownloadDoesNotClaimTheBytesItAlreadyHad() async throws {
-    let meter = SpeedMeter()
+@Test func aResumedDownloadDoesNotClaimTheBytesItAlreadyHad() throws {
+    // The clock is injected instead of slept on. This test slept 250 ms and asserted a rate between
+    // 2 and 8 MB/s; that window is only 0.2–0.5 s wide (SpeedMeter ignores elapsed <= 0.2 s), so a
+    // loaded machine stretched it past 0.5 s and the rate read low. It failed on a busy box and
+    // passed on an idle one — a flaky guard, not a defect in the meter. Driving the clock pins the
+    // arithmetic exactly; both assertions and both thresholds are unchanged.
+    final class TestClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var t = Date(timeIntervalSince1970: 1_000_000)
+        func advance(_ s: TimeInterval) { lock.withLock { t = t.addingTimeInterval(s) } }
+        var now: Date { lock.withLock { t } }
+    }
+    let clock = TestClock()
+    let meter = SpeedMeter(now: { clock.now })
     let already: Int64 = 500 << 20
     // First reading: bytes on disk, not bytes that arrived.
     meter.sample(already)
     #expect(meter.speed == 0)
-    try await Task.sleep(for: .milliseconds(250))
-    // One more megabyte in a quarter second is about 4 MB/s, not 500.
+    // Exactly a quarter second later, exactly one more megabyte: 4 MB/s on paper, not 500.
+    clock.advance(0.25)
     meter.sample(already + (1 << 20))
     #expect(meter.speed > Double(2 << 20))
     #expect(meter.speed < Double(8 << 20))
@@ -191,6 +203,17 @@ import Testing
 }
 
 /// Stopping mid-file and starting again must not fetch again what is already on disk.
+///
+/// ⚠️ Timing-fragile. The test needs "cancel while some chunks are on disk but not all" — a *state*,
+/// which a real download reaches naturally but the mock server does not linger in: RangeServer answers
+/// localhost ranges in single-digit milliseconds, so a 6 MiB file can finish before any poll notices.
+/// It therefore waits on the request count (1 probe + 6 ranges = 7) rather than a wall-clock sleep;
+/// waiting for 6 leaves one chunk for the resume, which is what `delta < 4` allows.
+/// Measured on a loaded machine (2026-11-13, 1296 tests in parallel): this file's timing assertions
+/// fail intermittently along with several other deadline/budget tests — CPU contention, not a code
+/// defect. On an idle machine it passes. If it ever goes stably red, the fix is to expose an
+/// injectable progress hook on `Transfer` (or split into pure `TransferPlan.merge` + `RangeQueue`
+/// unit tests) — do NOT widen the thresholds, that only moves the failure to a slower machine.
 @Test func aStoppedDownloadResumesWithoutRefetching() async throws {
     let size = 6 << 20
     let name = "resume-(UUID().uuidString).mp4"
@@ -212,7 +235,17 @@ import Testing
     while !FileManager.default.fileExists(atPath: folder.appending(path: "plan.json").path) {
         try await Task.sleep(for: .milliseconds(20))
     }
-    try await Task.sleep(for: .milliseconds(150))
+    // The first run must leave at most two of the six 1 MiB chunks for the resume, because the
+    // assertion below allows it three requests (one probe + two chunks). A fixed 150 ms wait cannot
+    // promise that — on a loaded machine fewer chunks land and the resume needs four or more
+    // (measured: HEAD as-is fails 4 of 5 parallel runs). Wait on the request count instead, which is
+    // the same quantity the assertion counts: 1 probe + 5 chunks = 6 requests leaves one chunk.
+    // Waiting for fewer (e.g. 4) leaves three or four chunks and still fails.
+    var waited = 0
+    while RangeServer.requests(name) < 6, waited < 5_000 {
+        try await Task.sleep(for: .milliseconds(2))
+        waited += 2
+    }
     first.cancel()
     _ = try? await first.value
     let before = RangeServer.requests(name)

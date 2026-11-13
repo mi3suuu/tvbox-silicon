@@ -548,6 +548,19 @@ import TVCore
     /// has finished, so a fold/unfold during that load would otherwise build a fresh session and restart
     /// the episode. Matching on the channel keeps the in-flight session.
     @ObservationIgnored private var activeSessionChannel: Channel?
+    /// 只读：取当前正在用的会话，**绝不新建**。
+    ///
+    /// ⛔ 给 `View.body` / 计算属性用。`playbackSession(for:)` 在频道不匹配时会
+    /// **新建并顶替** `activeSession`，那是命令（写）不是查询（读）。
+    /// 在 body 里调它会：每次重新求值都造一个空 `PlaybackSession`，
+    /// 把真正在播的那个孤立掉 —— 新会话 `currentItem == nil`，
+    /// 画面层拿不到 item，只能显示海报。
+    /// 真机日志实证：`VIDSRC ... st=-1 dur=-1 ext=- host=- noItem`。
+    func currentSession(for channel: Channel) -> PlaybackSession? {
+        guard let session = activeSession, activeSessionChannel == channel else { return nil }
+        return session
+    }
+
     func playbackSession(for channel: Channel) -> PlaybackSession {
         if let session = activeSession, activeSessionChannel == channel { return session }
         let session = PlaybackSession()

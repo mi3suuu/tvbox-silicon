@@ -27,6 +27,57 @@ import MediaPlayer
 // 滑块比「在画面上上下滑」精确得多，也不干扰上半屏的观看。
 
 /// 半折时下半屏的控制台。
+/// 半折控制台的配色。
+///
+/// ⛔ 为什么要做成一族参数：本视图**挂在 One 皮肤**（`OneSkin.swift` 的半折分支），
+/// 而 One 是**深色**版式（右栏文字区实测 RGB 约 52,50,50）。此前本文件把每一处颜色
+/// 都写成 `BiliPalette.light*`（哔哩哔哩**亮色**板），真机实测后果是：
+///
+///   `-qaSection home -qaPage one-preview -qaOneShape halfFold` 的截图里
+///   上半屏（画面）纯黑 RGB(2.7,2.7,2.7)，
+///   下半屏（控制台）近白 RGB(248.7,249.4,250.0)，近白像素占 95.1%，
+///   上下分界 y=334.7pt（50.02%）—— 一块深色页面里贴了一张白纸。
+///
+/// 配色是**皮肤的**属性，不该由「这个控件最早为谁写」决定。所以做成注入值，
+/// One 传深色、哔哩哔哩若将来要用就传 `.biliLight`。
+struct HalfFoldConsolePalette {
+    /// 下半屏底色。
+    var page: Color
+    /// 主文字（标题、播放键）。
+    var primary: Color
+    /// 次文字（亮度/音量图标）。
+    var secondary: Color
+    /// 三级文字（时间码、百分比）。
+    var tertiary: Color
+    /// 轨道 / 封面占位等中性填充。
+    var fill: Color
+    /// 强调色（进度条、滑块）。
+    var accent: Color
+
+    /// One 皮肤：深色。底与右栏同族（深灰，不是纯黑，避免与上半屏画面黑连成一片）。
+    ///
+    /// 数值取 One 右栏实测的文字区背景 (52,50,50) 稍压暗一档，
+    /// 让「控制台」与「详情列」在视觉上可分但同属深色体系。
+    static let oneDark = HalfFoldConsolePalette(
+        page: Color(biliHex: 0x2A2929),
+        primary: Color(biliHex: 0xF2F1F1),
+        secondary: Color(biliHex: 0xB8B6B6),
+        tertiary: Color(biliHex: 0x8C8A8A),
+        fill: Color(biliHex: 0x454343),
+        accent: Color(biliHex: 0xFF6699)
+    )
+
+    /// 哔哩哔哩亮色板（原行为，保留给该皮肤将来接入时用）。
+    static let biliLight = HalfFoldConsolePalette(
+        page: BiliPalette.lightPage,
+        primary: BiliPalette.lightPrimary,
+        secondary: BiliPalette.lightSecondary,
+        tertiary: BiliPalette.lightTertiary,
+        fill: BiliPalette.lightFill,
+        accent: BiliPalette.accent
+    )
+}
+
 struct HalfFoldConsoleView: View {
     /// 播放会话（进度、时长、播放/暂停）。
     var session: PlaybackSession?
@@ -37,6 +88,8 @@ struct HalfFoldConsoleView: View {
     var title: String
     /// 下半屏可用的高度（由 `FoldSplitLayout` 的 lower rect 给）。
     var height: CGFloat
+    /// 配色。默认深色 —— 当前唯一调用方是 One 皮肤。
+    var palette: HalfFoldConsolePalette = .oneDark
     /// 点画面/进度条跳转（0…1）。
     var onSeek: (Double) -> Void = { _ in }
 
@@ -62,7 +115,7 @@ struct HalfFoldConsoleView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(BiliPalette.lightPage)
+        .background(palette.page)
         // 隐藏的系统音量视图：`SystemSlider` 靠它拿到 UISlider 才能写音量。
         // 1×1 且不吃触摸 —— 只是宿主，不参与布局。
         .background {
@@ -95,14 +148,14 @@ struct HalfFoldConsoleView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(BiliPalette.lightPrimary)
+                    .foregroundStyle(palette.primary)
                     .lineLimit(1)
                 // 时间放在封面右边而不是另起一行：下半屏高度有限，
                 // 每省一行就多给滑块一点触控余量。
                 Text("\(BiliClock.text(position))/\(BiliClock.text(duration))")
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
-                    .foregroundStyle(BiliPalette.lightTertiary)
+                    .foregroundStyle(palette.tertiary)
             }
             Spacer(minLength: 0)
         }
@@ -121,7 +174,7 @@ struct HalfFoldConsoleView: View {
                     .resizable()
                     .scaledToFill()
             } else {
-                BiliPalette.lightFill
+                palette.fill
             }
         }
         .frame(width: side * 16 / 9, height: side)
@@ -164,16 +217,16 @@ struct HalfFoldConsoleView: View {
         HStack(spacing: 10) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(BiliPalette.lightSecondary)
+                .foregroundStyle(palette.secondary)
                 .frame(width: 18)
             Slider(value: value, in: 0...1) { editing in
                 if editing { onEditing() }
             }
-            .tint(BiliPalette.accent)
+            .tint(palette.accent)
             Text("\(Int((value.wrappedValue * 100).rounded()))%")
                 .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
-                .foregroundStyle(BiliPalette.lightTertiary)
+                .foregroundStyle(palette.tertiary)
                 .frame(width: 34, alignment: .trailing)
         }
         .frame(height: 30)
@@ -185,10 +238,10 @@ struct HalfFoldConsoleView: View {
         VStack(spacing: 4) {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(BiliPalette.lightFill).frame(height: 4)
-                    Capsule().fill(BiliPalette.accent)
+                    Capsule().fill(palette.fill).frame(height: 4)
+                    Capsule().fill(palette.accent)
                         .frame(width: geo.size.width * fraction, height: 4)
-                    Circle().fill(BiliPalette.accent)
+                    Circle().fill(palette.accent)
                         .frame(width: 9, height: 9)
                         .offset(x: geo.size.width * fraction - 4.5)
                 }
@@ -237,7 +290,7 @@ struct HalfFoldConsoleView: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size, weight: .medium))
-                .foregroundStyle(BiliPalette.lightPrimary)
+                .foregroundStyle(palette.primary)
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }

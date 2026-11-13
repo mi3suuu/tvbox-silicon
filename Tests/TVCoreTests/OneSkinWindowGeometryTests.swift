@@ -124,41 +124,65 @@ private func fitsWithin(_ window: OneSkinWindowGeometry, _ container: CGSize) ->
     }
 }
 
-/// 窗口尺寸**与片源比例无关**（锁定约定）：构造器不接受任何 aspect 参数，
-/// 这条断言用「同尺寸两次构造必须完全相等」表达。
+/// 窗口尺寸**与片源比例无关**（锁定约定，2026-11-13 焊死）。
+///
+/// ⛔ 这条测试原来的写法是「同一构造调两次、比较两个必然相等的结果」——恒真断言，
+/// 无论实现是否依赖片源都通过。回归正是从这里漏出去的。
+///
+/// 现在分两层钉住：
+///   ① **类型层**：构造器不收任何 aspect 参数（写了就编不过）；
+///   ② **行为层**：窗口只由列宽决定 —— 同宽不同高的容器必须得到同样的 winW/winH。
+///
+/// ② 之所以不是恒真：曾经有实现用 `innerW / playerAspect` 算高，
+/// 那样「同宽不同高」仍相等，但形状会跟着片源跑；所以再加一条显式版式断言。
 @Test func theWindowGeometryIsIndependentOfSourceAspect() {
-    let size = CGSize(width: 430, height: 700)
-    let a = geometry(size, landscape: false)
-    let b = geometry(size, landscape: false)
-    #expect(a.winW == b.winW && a.winH == b.winH && a.winX == b.winX && a.winY == b.winY)
+    // 同宽、不同高：窗口尺寸必须一模一样（高度只由宽度推导）。
+    // ⛔ 只取「够高、不触发底部控件条夹取」的两档：容器极矮时窗口会被
+    //    `controlBarRoom` 压扁，那是尺寸保护，不是片源影响。
+    let widths: [CGFloat] = [466, 522, 669]
+    for w in widths {
+        for landscape in [true, false] {
+            let a = geometry(CGSize(width: w, height: 700), landscape: landscape)
+            let b = geometry(CGSize(width: w, height: 951), landscape: landscape)
+            #expect(a.winW == b.winW && a.winH == b.winH,
+                    "列宽 \(w) landscape=\(landscape) 时窗口尺寸随容器高变化：\(a.winW)x\(a.winH) vs \(b.winW)x\(b.winH)")
+        }
+    }
+
+    // 横屏：画框形状恒等于版式常量 1.819（片源 9:16 也必须是它）。
+    for w in [522.0, 951.0] as [CGFloat] {
+        let g = geometry(CGSize(width: w, height: 669), landscape: true)
+        #expect(abs(g.winW - w) < 1.01, "横屏画框应吃满列宽，实得 \(g.winW)（列 \(w)）")
+        #expect(abs(g.winH - (w / OneSkinWindowGeometry.Metrics.windowAspect).rounded()) < 1.01,
+                "横屏画框高度应为 列宽 ÷ 1.819，实得 \(g.winH)（列 \(w)）")
+    }
 }
 
-/// 竖屏窗口的**下沿落在播放器控制条上沿**（用户明确要求，2026-11-11）。
+/// 竖屏窗口的高度**只由列宽决定**（外屏 1.819 / 内屏 2.146），与容器高无关。
 ///
-/// ⛔ 这里原来断言的是「窗口保持版式比例 1.819」，2026-11-12 已作废：
+/// ⛔ 这条测试原来断言「窗口底必须够到控制条 y=353」（2026-11-11 的用户要求）。
+/// 2026-11-13 作废，原因不是要求变了，而是那个实现选了**错的表达方式**：
+/// 它用「控制条位置」反推窗高，于是同一块屏在不同容器高下算出不同窗高
+///（466 宽：289 / 266；669 宽：323 / 439），窗口高度跟着转屏动画一起胀缩。
 ///
-/// 用户的原话是「视频满宽、下移到避开摄像头、**长度到控制条上方**」
-/// （`RULES.md` §七，标注为「覆盖真机」）。按那条要求，竖屏窗口的**高度**
-/// 由「顶边到控制条上沿」决定，比例只是副产品 —— 外屏 466×678 实测
-/// 控制条 y=353、顶边 y≈43，于是 winH≈310，比例约 1.5，本来就不是 1.819。
-///
-/// 1.819 是 One 的**横屏**版式比例（1015×558 px）。把它套到竖屏，
-/// 在 430×932 这种高屏上算出的窗口只有 236pt 高，会**把画面压得很扁**、
-/// 底部空出一大片 —— 那正好是用户要求「长度到控制条上方」想避免的。
-///
-/// 所以现在守的是真正的要求：**窗口下沿不低于控制条上沿**（在小屏绝对坐标下），
-/// 并且**不越出容器**（后者由 `thePortraitWindowNeverExceedsItsContainer` 覆盖）。
-@Test func thePortraitWindowReachesDownToTheControlBar() {
-    // 外屏竖持（真机基准 466×678）：控制条在 y=353，窗口底必须够到它，
-    // 否则画面下方留出一条空白，而用户的诉求正是「长度到控制条上方」。
-    let outer = geometry(CGSize(width: 466, height: 678), landscape: false)
-    #expect(abs(outer.winY + outer.winH - 353) < 1.0,
-            "窗口底应落在控制条上沿 y=353，实际 \(outer.winY + outer.winH)")
-
-    // 更宽的容器（内屏/Duo 展开）按容器高度比例取控制条位置，同样要够到。
+/// 「到控制条上方」现在由**画面列高度**表达（`pictureHeightOf` = 顶边 + 窗高 + 呼吸位），
+/// 胶囊条贴画面列下沿 —— 窗高本身必须恒等于 `列宽 ÷ 版式比例`。
+@Test func thePortraitWindowKeepsTheFixedFrameHeight() {
+    // 外屏竖持 466×678：窗高 = 466 ÷ 1.819 ≈ 256，与容器高无关。
+    for h in [678.0, 951.0] as [CGFloat] {
+        let g = geometry(CGSize(width: 466, height: h), landscape: false)
+        #expect(abs(g.winH - (466 / OneSkinWindowGeometry.Metrics.windowAspect).rounded()) < 1.01,
+                "外屏窗高应为 466÷1.819≈256，实际 \(g.winH)（容器高 \(h)）")
+    }
+    // 内屏竖持 669：走专属 2.146。
     let inner = geometry(CGSize(width: 669, height: 951), landscape: false)
-    #expect(inner.winY + inner.winH >= 951 * 0.553 - 1.0,
-            "内屏窗口应够到比例化的控制条位置")
+    #expect(abs(inner.winH - (669 / OneSkinWindowGeometry.Metrics.portraitWindowAspectLarge).rounded()) < 1.01,
+            "内屏窗高应为 669÷2.146≈312，实际 \(inner.winH)")
+    // 无论多高，窗口都不许压到底部控件条。
+    for h in [300.0, 500.0, 678.0, 951.0] as [CGFloat] {
+        let g = geometry(CGSize(width: 466, height: h), landscape: false)
+        #expect(g.winY + g.winH <= h * 0.94 + 0.51, "窗口压到控件条 @ h=\(h)")
+    }
 }
 
 // MARK: - 竖屏顶边留白必须按**屏幕高**算
@@ -237,63 +261,55 @@ private func fitsWithin(_ window: OneSkinWindowGeometry, _ container: CGSize) ->
     #expect(a.winW == upright.width && b.winW == sideways.width)
 }
 
-// MARK: - 全出血形态：画面高度与胶囊条必须同源（BUG-K）
+// MARK: - 全出血形态：画面列高度只由列宽决定（BUG-K / 2026-11-13 收敛）
 
-/// 画面列高度按片源比例算，胶囊条底距必须用**同一个**高度。
+/// 画面列高度 = 列宽 ÷ 16:9 版式常量，**与片源无关**。
 ///
-/// 修复前胶囊条按固定的 `0.56 × 整高` 反推，而画面早已改成按片源比例：
-/// 669×951 放 16:9 片源时画面只有 376.3pt，胶囊条却按 532.6pt 算，
-/// 下沿低了 145pt，扎进详情区。竖片恰好撞上限所以看不出问题 —— 这就是它长期漏检的原因。
-private func bleedingPictureHeight(_ size: CGSize, aspect: CGFloat,
-                                   lower: CGFloat, upper: CGFloat) -> CGFloat {
-    let a = (aspect.isFinite && aspect > 0.2 && aspect < 6) ? aspect : 16.0 / 9.0
-    return min(max(size.width / a, size.height * lower), size.height * upper)
+/// 历史：这里曾有第三份公式拷贝（`size.width / aspect` 夹 `size.height*0.56`），
+/// 于是「单测绿、App 里另一份实现是红」——测试测的不是产品代码。
+/// 现在 App 只调 `OneSkinWindowGeometry.fullBleedPictureColumnHeight`，测的也是它。
+@Test func theFullBleedColumnHeightComesFromTheLayoutConstantOnly() {
+    for w in [466.0, 669.0, 951.0] as [CGFloat] {
+        let h = OneSkinWindowGeometry.fullBleedPictureColumnHeight(columnWidth: w)
+        #expect(abs(h - (w / OneSkinWindowGeometry.fullBleedColumnAspect).rounded()) < 1.01,
+                "画面列高应为 列宽 ÷ \(OneSkinWindowGeometry.fullBleedColumnAspect)，实得 \(h)（列 \(w)）")
+    }
+    // 669 宽的实测值（参考截图量测 376.3）。
+    #expect(abs(OneSkinWindowGeometry.fullBleedPictureColumnHeight(columnWidth: 669) - 376) < 1.01)
 }
 
-/// 胶囊条底距必须随片源比例变化 —— 这正是「同源」的可观测判据。
+/// 极小列宽也不许塌成 0（否则 capsule/详情列按 0 排）。
+@Test func theFullBleedColumnHeightHasAFloor() {
+    for w in [1.0, 20.0, 100.0] as [CGFloat] {
+        #expect(OneSkinWindowGeometry.fullBleedPictureColumnHeight(columnWidth: w)
+                >= OneSkinWindowGeometry.Metrics.minPictureHeight)
+    }
+}
+
+// MARK: - 竖屏源在展开横持双栏下的窗口尺寸（用户报「只有海报」的回归锁）
+
+/// 展开横持 951×669 时播放器列宽 522 —— 窗口必须吃满列宽、形状固定。
 ///
-/// 修复前它对所有片源返回同一个常数；修复后四种片源给出四个不同值。
-@Test func theControlBarFollowsThePictureHeightNotAFixedRatio() {
-    let box = CGSize(width: 669, height: 951)
-    let aspects: [CGFloat] = [16.0 / 9, 4.0 / 3, 9.0 / 16, 2.35]
-    let bottoms = aspects.map { aspect -> CGFloat in
-        let picH = bleedingPictureHeight(box, aspect: aspect, lower: 0.28, upper: 0.56)
-        return box.height - (picH * 0.928 - 13 - 8)
-    }
-    #expect(Set(bottoms.map { Int($0.rounded()) }).count == aspects.count,
-            "四种片源应给出四个不同底距，实际：\(bottoms)")
-}
-
-/// 16:9 的具体数值：修复前 477.8，修复后 622.8，差 145pt。
-@Test func theWideAspectCaseMatchesTheHandComputedValue() {
-    let box = CGSize(width: 669, height: 951)
-    let picH = bleedingPictureHeight(box, aspect: 16.0 / 9, lower: 0.28, upper: 0.56)
-    #expect(abs(picH - 376.3) < 0.5, "16:9 画面列高度应为 376.3，实际 \(picH)")
-    let bottom = box.height - (picH * 0.928 - 13 - 8)
-    #expect(abs(bottom - 622.8) < 0.5, "胶囊条底距应为 622.8，实际 \(bottom)")
-    // 旧公式在同一输入下给 477.8 —— 两者必须不同，否则修复无效。
-    let oldBottom = box.height - (box.height * 0.56 * 0.928 - 13 - 8)
-    #expect(abs(oldBottom - bottom) > 100, "新旧公式必须拉开距离（旧 \(oldBottom)）")
-}
-
-/// 竖片撞上限：新旧公式在这一档**本来就应该相同**，不能当成回归。
-@Test func aPortraitSourceSitsAtTheUpperBoundEitherWay() {
-    let box = CGSize(width: 669, height: 951)
-    let picH = bleedingPictureHeight(box, aspect: 9.0 / 16, lower: 0.28, upper: 0.56)
-    #expect(abs(picH - box.height * 0.56) < 0.5, "竖片应被上限压住")
-}
-
-/// 画面列高度永远不越出整高，胶囊条底距永远为正。
-@Test func theBleedingHeightStaysInsideAndTheBarStaysOnScreen() {
-    let aspects: [CGFloat] = [0.3, 4.0 / 3, 16.0 / 9, 2.35]
-    let boxes = [CGSize(width: 669, height: 951), CGSize(width: 466, height: 678),
-                 CGSize(width: 951, height: 669)]
-    for box in boxes {
-        for aspect in aspects {
-            let picH = bleedingPictureHeight(box, aspect: aspect, lower: 0.28, upper: 0.56)
-            #expect(picH > 0 && picH <= box.height + 0.01, "画面列越界：\(picH) / \(box)")
-            let bottom = box.height - (picH * 0.928 - 13 - 8)
-            #expect(bottom >= 8, "胶囊条底距为负：\(bottom)")
-        }
-    }
+/// ⛔⛔ 2026-11-13 结论翻转：这两条测试此前断言的是「窗口跟随片源比例」
+///（竖源 ≈371×659、宽度 <450、高度 >600），**那是被推翻的设计**。
+///
+/// 作者当时把病因判反了：真正让用户看到「只有海报」的**正是 371×659 这个形状**
+///（winW 只占列宽 71%、winH 占列高 98.5%、winY 被夹到 0）。左列于是变成
+/// 「窄高条 + 29% 压暗海报底」，与「只剩海报」的现象完全吻合。
+///
+/// 现在这条测试连片源参数都传不进来（构造器不收），只能钉「画框」本身；
+/// 「片源不许影响画框」由构造器的类型签名 + `theWindowGeometryIsIndependentOfSourceAspect` 保证。
+@Test func theDualColumnKeepsTheFixedWindowShape() {
+    let g = OneSkinWindowGeometry(size: CGSize(width: 522, height: 669),
+                                  landscape: true,
+                                  fullScreen: false)
+    // 窗口形状 = 版式常量 1.819。
+    #expect(abs(g.winW / g.winH - OneSkinWindowGeometry.Metrics.windowAspect) < 0.02,
+            "窗口比例应为固定版式 1.819，实得 \(g.winW)x\(g.winH)=\(g.winW / g.winH)")
+    // 宽度吃满列宽：绝不允许再出现「71% 窄条」。
+    #expect(abs(g.winW - 522) < 2, "窗口必须吃满列宽，实得 \(g.winW)")
+    // 高度必须留在列高一半附近，绝不能撑满整列（那是「压暗海报底」的来源）。
+    #expect(g.winH < 350, "窗口高不得接近列高（列 669），实得 \(g.winH)")
+    // 垂直居中，不得顶到屏幕最上沿。
+    #expect(g.winY > 100, "winY 不得为 0（顶到屏幕顶），实得 \(g.winY)")
 }

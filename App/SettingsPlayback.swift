@@ -26,6 +26,37 @@ struct PlaybackSettingsView: View {
     @AppStorage(OneWatchPage.Backdrop.blurRadiusKey)
     private var backdropBlur = OneWatchPage.Backdrop.defaultBlurRadius
 
+    /// 三态开关的**响应式**真源。
+    ///
+    /// ⛔ 不能只用 `PlaySkin.current`（纯计算属性读 UserDefaults）当 `Picker` 的 selection：
+    /// 它不参与 SwiftUI 的状态管理，`applySkin` 写完 `UserDefaults` 后**视图不会重算**，
+    /// 于是「点了没勾选态 / 没有回馈 / 选了 One 界面不变、再选回来也不变」。
+    /// 用户报的正是这三条。
+    /// `@AppStorage` 让写入触发重绘；`PlaySkin.current` 仍保留作首次迁移的兜底。
+    // ⛔ 默认值**不能**是空串（与 `VideoDetailView.playSkinRaw` 同一铁律）。
+    //
+    // `@AppStorage` 在键缺失时会把默认值**写回** UserDefaults。若默认写 `""`：
+    //   属性初始化 → 写入空串 → `activeSkin` 回退到 `.current`
+    //   → Picker 立刻把回退值落盘 → 用户之前选的 One 被覆盖成 native/bilibili。
+    // 真机现象正是「选 One 不生效、杀进程重进还是哔哩哔哩」。
+    // 默认值取迁移结果即无覆盖窗口。
+    @AppStorage(PlaySkin.key) private var skinRaw: String = PlaySkin.current.rawValue
+    /// 声音分配档位的响应式真源。`DockAudioPolicy.current` 同属计算属性，
+    /// 直接当 selection 会「选了不刷新、没有勾选态」（与皮肤选择同一个坑）。
+    /// 同 `skinRaw`：默认值不能是空串，否则键缺失时会把空串写回去覆盖用户选择。
+    @AppStorage(DockAudioPolicy.key) private var dockAudioRaw: String = DockAudioPolicy.current.rawValue
+
+    /// 本视图当前生效的皮肤（含「从未存过 → 按旧布尔迁移」）。
+    private var activeSkin: PlaySkin {
+        if let s = PlaySkin(rawValue: skinRaw), !skinRaw.isEmpty { return s }
+        return PlaySkin.current
+    }
+
+    /// 当前声音档位（空串 → 回退到 `current` 的默认）。
+    private var activeDockAudio: DockAudioPolicy {
+        DockAudioPolicy(rawValue: dockAudioRaw) ?? DockAudioPolicy.current
+    }
+
     /// 写三态开关，并把旧的那一个布尔同步过去。
     ///
     /// 为什么要同步：`VideoDetailView.oneSkinActive` 仍然读 `oneSkinEnabled`
@@ -52,8 +83,11 @@ struct PlaybackSettingsView: View {
             SettingsGroup(title: "观看页外观",
                           footer: "三选一。原版是上游原样；One 是黑底、控制条压在画面上、选集横排；哔哩哔哩是半屏卡片、选集抽屉、全屏右侧设置面板。功能不变，只换外观。") {
                 Picker(selection: Binding(
-                    get: { PlaySkin.current },
-                    set: { applySkin($0) }
+                    get: { activeSkin },
+                    set: { newSkin in
+                        skinRaw = newSkin.rawValue   // 先写 @AppStorage → 触发重绘
+                        applySkin(newSkin)           // 再同步旧布尔键
+                    }
                 )) {
                     ForEach(PlaySkin.allCases) { skin in
                         Label(skin.title, systemImage: skin.symbol).tag(skin)
@@ -63,7 +97,7 @@ struct PlaybackSettingsView: View {
                 }
                 .pickerStyle(.inline)
                 ForEach(PlaySkin.allCases) { skin in
-                    if PlaySkin.current == skin {
+                    if activeSkin == skin {
                         Text(skin.detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -72,7 +106,7 @@ struct PlaybackSettingsView: View {
             }
             // One 观看页背景模糊半径。
             // 只在选 One 皮肤时有意义，所以条件显示；但值始终保留（切回 One 时不丢）。
-            if PlaySkin.current == .one {
+            if activeSkin == .one {
                 SettingsGroup(title: "背景模糊",
                               footer: "One 观看页的背景虚化强度。实测 One 用的是 gaussianBlur 滤镜；"
                                     + "默认 40 是按两边截图边缘能量反推出来的（One 3.41 / 我们半径 40 时 3.49）。"
@@ -166,8 +200,8 @@ struct PlaybackSettingsView: View {
             SettingsGroup(title: "多任务同时播放的声音",
                           footer: "坞里同时挂着多个迷你播放器时，声音怎么分配。这一档是**全局默认**；某一张卡片上单独设过声音的，以卡片上的为准（卡片左上角的喇叭键）。") {
                 Picker(selection: Binding(
-                    get: { DockAudioPolicy.current },
-                    set: { UserDefaults.standard.set($0.rawValue, forKey: DockAudioPolicy.key) }
+                    get: { activeDockAudio },
+                    set: { dockAudioRaw = $0.rawValue }
                 )) {
                     Text("全部静音（画面照常播）").tag(DockAudioPolicy.silent)
                     Text("只有当前播放的出声").tag(DockAudioPolicy.focused)

@@ -8,7 +8,7 @@
 - branch: fusion/restructure-A
 - owner: 质量门禁队（lead）
 - self: true
-- last_seen: 2026-11-13 11:04:48
+- last_seen: 2026-11-13 11:28:58
 - claimed:
   - UITests/DuoAcceptanceUITests.swift
   - UITests/ControlWalkUITests.swift
@@ -66,3 +66,26 @@
 | 时间 | 从 | 到 | 内容 |
 |---|---|---|---|
 | 2026-11-13 02:28 | — | — | 按 A8 建立；路 B 数据来自 mtime 实测，待对方本人认领 |
+
+## 路 C · tvOS 平台可编译性清理（Chief 派活）
+
+- branch: `fix/tvos-platform-guards`（worktree: `tvbox-wt-tvos-guards`）
+- owner: lead（受 Chief 委派）
+- last_seen: 2026-11-13 12:55
+- claimed:
+  - App/CustomProxySettings.swift
+  - App/FoldRegion.swift
+  - App/MobilePlayer.swift
+  - App/OneSkin.swift
+  - App/OneSkinBackdrop.swift
+  - App/OneSkinGeometryDriver.swift
+  - App/OneSkinWindowGeometry.swift
+  - App/PlayerControls.swift
+  - App/QALaunch.swift
+  - App/SettingsTV.swift
+  - App/SiteView.swift
+  - App/SitesView.swift
+  - App/VideoDetailView.swift
+  - App/WatchPageChrome.swift
+- 状态: **已提交 `1f8807c`，BUILD SUCCEEDED**（`5db8179` 中两条已按 Chief 复核意见撤回重做）
+- 交付: `交付/tvOS可编译性清理-最终-20261113.md`（分层清单 `…-分层清单-20261113.md` 保留为过程记录）

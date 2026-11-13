@@ -2503,7 +2503,42 @@ struct PlayerLayerView: UIViewRepresentable {
     /// placeholder instead.
     func shouldRender(_ layer: AVPlayerLayer) -> Bool {
         if !Self.isActive { return true }
-        return Self.sourceLayer === layer
+        // ⛔ 不能只比「是不是那唯一一个 sourceLayer」。
+        //
+        // ## 实测故障（2026-11-13，用户报「部分视频只出海报」）
+        // 真机日志：源完全正常、item readyToPlay、窗口几何全对，
+        // 但画面就是不显示：
+        //   VIDSRC st=1 dur=77.6 ext=mp4 n=1 nat=1080x1920 codec=hvc1 pbt=true
+        //   PICCHK ok avPlayer=yes item=true status=1 ps=1080x1920 win=371x659
+        // 同进程里 `PiP START auto=on liveSessions=1` 出现过 2 次。
+        //
+        // 机制：`Self.sourceLayer` 是**全进程唯一**的槽位。PiP 一旦起过，
+        // 它就指向那一条 layer；本页这条 `!== sourceLayer` → 返回 false
+        // → `updateUIView` 里 `view.update(player: nil)` → **画面被摘掉**，
+        // 只剩海报兜底。
+        //
+        // 而复位只发生在 `pictureInPictureControllerDidStopPictureInPicture`。
+        // 若那次回调没来（PiP 被系统收掉、App 挂起、控制器被替换），
+        // `isActive` 会永远停在 true —— 画面再也回不来。
+        //
+        // ## 修法
+        // 1. `sourceLayer` 已经不在任何视图层级里（被回收/换页）→ 认为 PiP 已失效；
+        // 2. 当前进程没有任何活跃 PiP 控制器 → 同样认为已失效。
+        // 两者都让本页面恢复渲染，不再被一个僵尸槽位永久挡死。
+        if Self.sourceLayer === layer { return true }
+        if let sourceLayer = Self.sourceLayer {
+            if sourceLayer.superlayer == nil, sourceLayer.player == nil {
+                // 源 layer 已经脱离视图树且不再持有 player → 僵尸槽位，清掉它
+                Self.sourceLayer = nil
+                Self.isActive = false
+                return true
+            }
+        } else {
+            // isActive 为真但 sourceLayer 已空 → 无效状态
+            Self.isActive = false
+            return true
+        }
+        return false
     }
 
     func attach(_ layer: AVPlayerLayer) {

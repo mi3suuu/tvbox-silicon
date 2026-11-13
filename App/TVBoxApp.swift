@@ -62,6 +62,10 @@ import TVCore
                 .task { Diagnostics.shared.record(.info, "app", "Application scene opened") }
                 .task { await ErrorReports.shared.start() }
                 .task {
+                    // ★ 无条件清理 QA 换皮残留 —— 必须放在 QA 门控**之前**。
+                    // 写它的要 QA 启动、清它的也要 QA 启动时，就永远解不开；
+                    // 真机实证过「选 One 无效、杀进程重进还是哔哩哔哩」。
+                    QALaunch.consumeStickyQASkin()
                     #if DEBUG
                     if QALaunch.section != nil || QALaunch.page != nil { await QALaunch.start(store); return }
                     #endif

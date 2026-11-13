@@ -569,8 +569,11 @@ private enum OneSkinLogSink {
     /// 单文件硬上限 4MB：超过就整体轮转（删旧、留最后 2MB）。
     /// 之前无上限，实测一次环路就能写到 8.4MB —— 既是取日志的障碍，
     /// 也反过来成了「是否成环」的量化指标：正常使用几小时才几百 KB。
-    static let maxBytes = 4 * 1024 * 1024
-    static let keepBytes = 2 * 1024 * 1024
+    // ⛔ 实测：`devicectl device copy from` 在 >3MB 时会中途断流
+    //（`peer closed the file service data channel after 3000000 of 3228272 bytes`），
+    // 日志取不出来等于没有探针。降到 1MB 轮转，单次拉取必定成功。
+    static let maxBytes = 1024 * 1024
+    static let keepBytes = 512 * 1024
 
     static func log(_ s: String) {
         // 同时走 os_log，真机可用 `devicectl device console` 实时抓。
@@ -1266,6 +1269,12 @@ struct OneSkinStage: View {
     /// 只把 `landscapeNow` 改了，而 `effectiveShape` 仍返回旧的 `shape` ——
     /// 于是出现「横着排（land=true）但走单列分支（shape=column）」的矛盾。
     /// 现在所有分支与日志都走这一个方法，override 一处生效、全局一致。
+    /// 本帧真正用于排版的形态（由 body 的 `geoShape` 写入，`stage` 同帧读取）。
+    ///
+    /// 存在的理由：`shape()` 原来读成员参数 `shape`，而 `stage` 的分支用局部
+    /// `liveShape`。两者在「`screen` 已翻向、`geo` 还没跟上」的帧会不一致
+    /// （实测 split vs fullBleed），导致画面按 fullBleed 排、用户等不到双栏。
+    /// 现在统一到这一个值，**同一帧内只有一个形态**。
     private func shape(_ override: OneSkinShape? = nil) -> OneSkinShape {
         if let override { return override }
         // ★ QA 强制必须覆盖**全部五态**（之前只认 portrait/landscape，
@@ -1687,24 +1696,29 @@ struct OneSkinStage: View {
                 if UserDefaults.standard.string(forKey: "qaOneShape") != nil { return shape }
                 // ② 半折由折缝决定，不按宽高比推翻
                 if shape == .halfFold { return .halfFold }
-                // ②′ **转屏预判**：`screen.bounds` 在 UIKit 转屏动画**开始时**就变了，
-                //    而 `geo.size` 要等动画结束（实测 520~840ms）才更新。
-                //    用 screen 的宽高比先判一步，转屏当帧就切版式，视觉上立刻响应。
-                //    `screen` 只在**方向真的变了**时才与 geo 不一致，所以不会误判：
-                //    两者一致时走下面的 geo 判断，结果相同。
-                // 读 `screenIsLandscapeNow` 让 body 在转屏时重算（见其声明处说明）。
+                // ⛔⛔ **已删除「screen 预判」分支（2026-11-13，第二次推翻）。**
+                //
+                // 原逻辑：`screen.bounds` 在转屏动画开始时先变、`geo.size` 要等动画结束
+                // 才变，于是「两者方向不一致 ⇒ 以 screen 为准」，想让转屏当帧就切版式。
+                //
+                // 在 Duo 上这个前提是**错的**，而且后果是灾难性的：
+                // 真机日志（2026-11-13 12:2x，内屏横持、用户手上就是横的）
+                //   `GEOSRC geo=951x669 screen=669x951`   ← 容器横、screen 报竖
+                //   → 预判把形态翻成 `.fullBleed`（竖排版式）
+                //   → `stage size=944x664` 但 `pictureColumn shape=fullBleed`
+                //     （竖版的 664×944 版面塞进 951×669 的横容器）
+                //   → 内容比槽位高，整页被 SwiftUI 挤出屏幕，只剩海报底色
+                // 也就是说：**在 Duo 上 screen 与 geo 长期不一致，不是过渡帧。**
+                // `fixedScreenSize()` 读 keyWindow.bounds，折叠屏横持时它可能报
+                // 竖持尺寸（物理屏不随方向交换），这条信号根本不能当方向真源。
+                //
+                // 形态只信 **`geo.size`**：它就是要渲染的那个容器的真实尺寸，
+                // 按它排出来的版式一定装得下。代价是转屏晚一帧换版式 ——
+                // 一帧的延迟用户看不见，排错版式却是整页消失。
+                //
+                // ⛔ 不要再用 `screenIsLandscapeNow` 参与判定；它只用于
+                //    `.onChange(of: fixedScreenSize())` 触发一次重算。
                 let _ = screenIsLandscapeNow
-                let scr = OneSkin.fixedScreenSize()
-                if scr.width > 1, scr.height > 1 {
-                    let screenLandscape = scr.width > scr.height
-                    let geoLandscape = geo.size.width > geo.size.height
-                    if screenLandscape != geoLandscape {
-                        // screen 已翻向、geo 还没跟上 ⇒ 以 screen 为准（转屏进行中）
-                        return screenLandscape
-                            ? .split
-                            : (max(scr.width, scr.height) >= 500 ? .fullBleed : .column)
-                    }
-                }
                 // ③ 真实运行：按 One 的原始判据 —— **`w > h` 一次比较**。
                 //
                 // 依据（RULES.md §一，勿再推翻）：
@@ -1715,10 +1729,92 @@ struct OneSkinStage: View {
                 // 下方「竖持再分 fullBleed / column」是**我方对 Duo 的扩展**
                 //   （One 没有「外屏 vs 内屏竖持」的区分，它靠 __division 判折缝）。
                 //   这里按短边分档，因为外屏 466 与内屏 669 的竖持版式确实不同。
+                // ★★★ 2026-11-13（红果案）：`w > h` 一次比较改成**带滞回的轴**。
+                //
+                // 为什么不是「一次比较」：
+                //   `geo.size` 是**本视图拿到的提议尺寸**。只要它有一帧被内容反推
+                //   （父级给 nil 提议 / 分支切换 / 推场动画），`w > h` 就会把整页
+                //   翻成竖版；竖版内容又是 669×951，于是**下一帧量到的还是竖**——
+                //   两个自洽状态，落进哪个就锁死在哪个。这正是「竖持正常、横持
+                //   出不来双栏」的形状（11-11 的证据图 2/3 逐像素相同就是它）。
+                //   源相关只是**触发概率**不同：红果 item 恒 noItem、`st=-1`，
+                //   页面长期停在不稳定重排态，更容易掉进竖版那个吸引子。
+                //
+                // 现在：明确横（宽 > 高 15%）与明确竖（高 > 宽 15%）各走各的，
+                // 中间 15% 的灰带才交给页面级离散判据（`shape`，来自 size class /
+                // 折痕 / 铰链，与 One 的 `LargeCanvas` 同源）。
+                // 灰带内**不可能**因为亚点尺寸差翻转 —— 断了「差 1pt 就换版式」的环。
                 let w = max(geo.size.width, 1)
                 let h = max(geo.size.height, 1)
-                if w > h { return .split }                   // 横：双栏
-                return w >= 500 ? .fullBleed : .column       // 竖：内屏宽版 / 外屏单列
+                if w > h * 1.15 { return .split }            // 明确横：双栏
+                if h > w * 1.15 {                            // 明确竖
+                    return w >= 500 ? .fullBleed : .column   // 内屏宽版 / 外屏单列
+                }
+                // 近似方形：容器自己判不出方向，用页面级离散形态裁决，
+                // 不让 ±1pt 决定整页版式。
+                return shape == .split ? .split : (w >= 500 ? .fullBleed : .column)
+            }()
+            let _ = oneSkinLog("BUILDMARK v20261113-1410-axis-hysteresis")
+            // ★★★ 轴判决单行摘要（红果案的决定性证据）。
+            //
+            // 一行同时给出：容器尺寸、页面级形态、本帧实际形态、全屏/折叠、
+            // 以及**片源侧是否存在数据**（session / detail / 集数）。
+            // 排查「只有海报」时先看这一行：
+            //   · `shape=fullBleed` + `geo=951x669` → 轴判错（本帧就是 bug）
+            //   · `axis=split` + `geo=951x669` 却仍只有海报 → 位置/裁剪问题
+            //   · `fs=true` 或 `folded=true` → 走的是「只画画面」分支，与源无关
+            //   · `geo` 本身就是竖的 → 容器被页面方向锁按住了，不在几何层
+            let _ = oneSkinLog("AXIS geo=\(Int(geo.size.width))x\(Int(geo.size.height)) "
+                + "page=\(shape.logName) axis=\(geoShape.logName) fs=\(fullScreenNow) "
+                + "folded=\(foldedNow) sess=\(session == nil ? "nil" : "ok") "
+                + "detail=\(detail == nil ? "nil" : "ok") eps=\(episodes.count)")
+            // 探针：进到 stage 的 aspectRatio 到底是多少，以及 session 侧的现值。
+            // 之前只统计 `pictureColumn aspect=` 出现次数，分不清是
+            // 「传进来就是 16:9」还是「传进来对、算窗口时丢了」。
+            let _ = {
+                let ps = session?.player.currentItem?.presentationSize ?? .zero
+                let inA = String(format: "%.4f", aspectRatio)
+                oneSkinLog("ASPECTDBG in=\(inA) ps=\(Int(ps.width))x\(Int(ps.height)) avP=\(avPlayer != nil)")
+            }()
+            // ★★★ 视频源特征探针（VIDSRC）—— 用户指出的盲区。
+            //
+            // 用户原话：「部分视频是正常的 部分是视频只出海报」「视屏来源和视频尺寸
+            // 你抓特征了吗」。此前所有探针只记录**几何/容器/avPlayer 是否存在**，
+            // 从未记录视频源本身（URL 类型 / 编码 / 轨道 / 是否 HLS / 有无视频轨）。
+            // 既然症状是「部分」，差异必然在源上。
+            let _ = {
+                let item = session?.player.currentItem
+                let ps = item?.presentationSize ?? .zero
+                let inA = String(format: "%.4f", aspectRatio)
+                let st = item?.status.rawValue ?? -1
+                let dur = item.map { CMTimeGetSeconds($0.duration) } ?? -1
+                let pbt = item?.isPlaybackLikelyToKeepUp ?? false
+                let err = item?.error.map { "\(($0 as NSError).code)" } ?? "nil"
+                var vtrack = "noItem"
+                var ct = -1
+                if let item {
+                    let vts = item.asset.tracks(withMediaType: .video)
+                    if let t = vts.first {
+                        let n = t.naturalSize
+                        var code = "?"
+                        if let fd = t.formatDescriptions.first {
+                            let sub = CMFormatDescriptionGetMediaSubType(fd as! CMFormatDescription)
+                            let b: [UInt8] = [UInt8((sub >> 24) & 0xFF), UInt8((sub >> 16) & 0xFF),
+                                              UInt8((sub >> 8) & 0xFF), UInt8(sub & 0xFF)]
+                            code = String(bytes: b, encoding: .ascii) ?? "?"
+                        }
+                        vtrack = "n=\(vts.count) nat=\(Int(n.width))x\(Int(n.height)) fps=\(String(format: "%.0f", t.nominalFrameRate)) codec=\(code)"
+                    } else {
+                        vtrack = "n=0无视频轨"
+                    }
+                    ct = item.asset.duration.isValid ? Int(CMTimeGetSeconds(item.asset.duration)) : -1
+                }
+                var ext = "-", host = "-"
+                if let u = (item?.asset as? AVURLAsset)?.url {
+                    ext = u.pathExtension.lowercased()
+                    host = String(u.host?.suffix(24) ?? "-")
+                }
+                oneSkinLog("VIDSRC in=\(inA) ps=\(Int(ps.width))x\(Int(ps.height)) st=\(st) err=\(err) dur=\(String(format: "%.1f", dur)) assetDur=\(ct) pbt=\(pbt) ext=\(ext) host=\(host) \(vtrack)")
             }()
             let _ = oneSkinLog("GEOSRC geo=\(Int(geo.size.width))x\(Int(geo.size.height)) screen=\(Int(screen.width))x\(Int(screen.height))")
             let _ = oneSkinLog("SWITCH geo=\(Int(geo.size.width))x\(Int(geo.size.height)) shape=\(geoShape.logName) t=\(String(format: "%.0f", _t0*1000))")
@@ -1727,9 +1823,62 @@ struct OneSkinStage: View {
                 screen: OneSkin.fixedScreenSize(),
                 fullScreen: fullScreenNow
             )
-            let useAvail = stageIsLandscape ? liveAvail : OneSkin.stableBucket(liveAvail, step: 8)
+            // ★ 再与**容器实尺寸** `geo.size` 取最小值（只夹小，不放大）。
+            //
+            // 真机日志：容器 `proxy=951x635`（= 屏幕 669 减底部安全区 34），
+            // 而 `box=951x669` —— 内容比容器高 34pt。
+            // 后果：SwiftUI 对超出容器的内容做**居中溢出**，`HSPLIT-A` 的
+            // `origin` 变成 `-475,-334`（= -951/2, -669/2），整块双栏跑到屏幕外，
+            // 用户只看到背景海报（竖屏源尤其明显，因为它的窗口高 659 最接近容器高）。
+            //
+            // ⛔ 只在**这里**夹，不要额外给 `stage(...)` 加 `.frame(...)`。
+            // 之前我加过 `.frame`，反而让内容显式声明成容器大小、
+            // 与内部的 669 打架，`origin` 更糟。基线本来就没有 `.frame`，
+            // 唯一的错是 `useAvail` 用了物理屏而不是容器做上限。
+            let bucketed = stageIsLandscape ? liveAvail : OneSkin.stableBucket(liveAvail, step: 8)
+            let useAvail = CGSize(width: min(bucketed.width, geo.size.width),
+                                  height: min(bucketed.height, geo.size.height))
+
+            // ★ 真实槽位（2026-11-13）：内容按**整屏**排（One 的绝对值都标定在 669 上），
+            // 但系统分给这一层的只有「屏高 − 底部安全区」。
+            //
+            // ⛔ 不能用 `avail.height` 当槽位 —— 它来自 `liveGeometry.box`，
+            //    而 driver 的 `safeInsets` 读的是 `windows.first`（Duo 上拿到
+            //    一个没有安全区的系统窗口，bottom 恒 0），所以 `box` 也恒等于整屏。
+            //    用它当槽位等于「槽位 = 内容」，掩盖了真实差异。
+            //    这里直接用本视图量到的 `measuredSafeArea`（真机 = 34）。
+            let slotH = fullScreenNow
+                ? useAvail.height
+                : max(useAvail.height - max(measuredSafeArea.bottom, 0), 1)
+            let _ = oneSkinLog("SLOT content=\(Int(useAvail.width))x\(Int(useAvail.height)) slot=\(Int(min(useAvail.width, avail.width)))x\(Int(min(useAvail.height, slotH))) safeB=\(Int(measuredSafeArea.bottom))")
             let _ = oneSkinLog("GEOSRC liveAvail=\(Int(liveAvail.width))x\(Int(liveAvail.height)) useAvail=\(Int(useAvail.width))x\(Int(useAvail.height)) geoShape=\(geoShape.logName)")
+            // ⛔ `ZStack` 必须**自己撑到 geo.size**，否则当它对 SwiftUI 报出
+            // 「我不需要空间」（子视图全是绝对定位/忽略父级）时，父级会把本层
+            // 压成 0×0，然后把一个 951×669 的内容**居中溢出**到屏幕外。
+            //
+            // 数学实证（真机 HSPLIT-A，2026-11-13）：
+            //   hstack=951x669  origin=-475,-334
+            //   -475 = -(951/2)，-334 = -(669/2)
+            // —— 精确等于「尺寸 ×½ 取负」，即**父容器 0×0 + 居中**的标准特征。
+            // 用户看到的就是「双栏整块跑到屏幕外，只剩背景海报」。
+            // 竖持之所以正常：它走 fullScreen/edgeToEdge，内容本身铺满背景色，
+            // 视觉上掩盖了同样的溢出。
+            //
+            // 修法：用 `Color.clear.frame(槽位)` 提供确定尺寸的底座
+            // （`Color` 是贪婪视图，会给 ZStack 一个真实的内在尺寸），
+            // 再在 `.frame(..., alignment: .topLeading)` 上把锚点钉在左上角。
+            //
+            // ⛔⛔ 底座必须撑到**槽位**（635），不是 `geo.size`（669）。
+            //    ZStack 的尺寸 = 所有子视图尺寸的**最大值**，
+            //    底座只要还是 669，整层就仍是 669，下面 stage 那个
+            //    `.frame(..., height: slotH)` 等于白改 —— 溢出协商照旧。
+            //    这条是 2026-11-13 第二轮漏掉的：只改了子视图上报值，
+            //    忘了底座会把它重新顶回去。
             ZStack(alignment: .topLeading) {
+                // 这一层只负责「把容器撑到槽位」，本身透明不可见。
+                Color.clear
+                    .frame(width: min(geo.size.width, avail.width),
+                           height: min(geo.size.height, slotH))
                 OneSkinPalette.pageBase.ignoresSafeArea()
                 // ⛔ 不再经 `@State` 中转。
                 //
@@ -1739,8 +1888,30 @@ struct OneSkinStage: View {
                 // 同一次求值内生效，零延迟。
                 stage(useAvail,
                       ratioBase: CGSize(width: useAvail.width, height: useAvail.height),
-                      fitMode: fitMode, playerAspect: aspectRatio,
+                      fitMode: fitMode,
                       liveShape: geoShape)
+                    // ⛔⛔ 这里上报的必须是**槽位尺寸**，不是**内容尺寸**（2026-11-13）。
+                    //
+                    // 版式数学跑在 `useAvail` 上（One 的绝对值都按整屏 669 标定），
+                    // 而 `.ignoresSafeArea()` 让 `geo.size` 拿到的是**整屏** 669，
+                    // 真正的槽位只有 635（少一条 34pt 的底部安全区，真机日志
+                    // `GEO ... safe=0,34` / `ROOT use=951x635`）。
+                    //
+                    // 原来这里写 `.frame(height: useAvail.height)` = 669，
+                    // 等于对 SwiftUI 宣称「我需要 669」——而父级只有 635。
+                    // 于是每一帧都在做**溢出协商**，实测两种落位都出现过：
+                    //   `HSPLIT origin=-475,-334`（= -951/2, -669/2，父级被压成 0 后居中）
+                    //   `HSPLIT origin=0,714`     （整块顺排到槽位下方）
+                    // 两种都在屏幕外 ⇒ 用户只看到 `OneSkinBackdropLayer` 那张海报底色。
+                    //
+                    // 现在：**画 669，报 635**。`.frame` 上报的是它自己的尺寸，
+                    // 与子视图多大无关；多出来的 34pt 由子视图向下溢出（正是
+                    // ignoresSafeArea 想要的效果，那块是 Home 指示条区域）。
+                    // 结果：版式的每一个绝对坐标一个字都不用改，但父级不再
+                    // 拿到一个比它自己还大的子视图，溢出协商从根上不存在。
+                    .frame(width: min(useAvail.width, avail.width),
+                           height: min(useAvail.height, slotH),
+                           alignment: .topLeading)
             }
         }
         .ignoresSafeArea()
@@ -2021,7 +2192,6 @@ struct OneSkinStage: View {
     @ViewBuilder private func stage(_ size: CGSize,
                                     ratioBase: CGSize,
                                     fitMode: OneSkinFitMode,
-                                    playerAspect: CGFloat,
                                     liveShape: OneSkinShape) -> some View {
         // 关键修正：调用方传的 shape 复用了我方二开的 Duo 判据
         // （duoExpanded/sideways/portraitExpanded），在 Fig-clone 虚拟机上
@@ -2164,9 +2334,19 @@ struct OneSkinStage: View {
             // ★ P1-4 的常驻哨兵：盒高绝不能超过容器高（容器 = 物理屏 − 底部安全区）。
             //   写在日志里而不是 `assert`：真机上宁可多打一行，也别在一个
             //   「只是差 1pt」的形态上把 QA 跑崩。
-            let containerH = Int(ratioBase.height - (fullScreenNow ? 0 : max(measuredSafeArea.bottom, 0)))
-            if Int(box.height) > containerH + 1 {
-                let _ = oneSkinLog("⚠️BOX>CONTAINER box=\(Int(box.height)) container=\(containerH) shape=\(liveShape.logName) fs=\(fullScreenNow)")
+            // ★ 2026-11-13：这条告警原来的判据是「box 高 > 容器高」，而容器高
+            //   用 `ratioBase − safeArea.bottom` 算 —— 两处扣减口径不同，于是
+            //   每一帧都成立、每帧刷一行，真正的异常反而被噪声淹没
+            //   （`box` 按 One 的整屏口径**故意**不扣底部，见 `OneSkinGeometry.box`）。
+            //
+            // 现在它只盯一件事：**槽位是否还有效**。内容超出槽位是设计使然，
+            // 由 stage 外层的 `.frame` 上报槽位尺寸吸收（见 body 里 SLOT 那一段）。
+            let slotH = fullScreenNow
+                ? ratioBase.height
+                : max(ratioBase.height - max(measuredSafeArea.bottom, 0), 1)
+            let containerH = Int(slotH)
+            if containerH < 1 {
+                let _ = oneSkinLog("⚠️SLOT-INVALID slot=\(containerH) box=\(Int(box.height)) shape=\(liveShape.logName) fs=\(fullScreenNow)")
             }
         }
         #endif
@@ -2210,9 +2390,11 @@ struct OneSkinStage: View {
                 // 只留窗口内控件（顶部图标 / 播放组 / 进度条）。
                 // 画面本身仍按片源比例用 aspectRatio 适配，不做拉伸 ——
                 // One 的全屏也是 letterbox 而不是裁切。
-                pictureColumn(box, landscape: landscapeNow, fullScreen: true, fitMode: fitMode, playerAspect: aspectRatio)
+                pictureColumn(box, landscape: landscapeNow, fullScreen: true, fitMode: fitMode,
+                              shapeOverride: liveShape)
             } else if folded {
-                pictureColumn(box, landscape: landscapeNow, fitMode: fitMode, playerAspect: aspectRatio)
+                pictureColumn(box, landscape: landscapeNow, fitMode: fitMode,
+                              shapeOverride: liveShape)
             } else if liveShape == .halfFold {
                 // ★ 半折（书本 / 帐篷）：折痕在**中部**，上下各半屏。
                 //
@@ -2243,12 +2425,13 @@ struct OneSkinStage: View {
                 VStack(alignment: .center, spacing: 0) {
                     pictureColumn(CGSize(width: box.width, height: topH),
                                   landscape: stageIsLandscape, edgeToEdge: true, ratioBase: ratio,
-                                  fitMode: fitMode, playerAspect: aspectRatio)
+                                  fitMode: fitMode, shapeOverride: liveShape)
                         .frame(width: box.width, height: topH)
                     HalfFoldConsoleView(session: session,
                                         cover: posterImage,
                                         title: current?.name ?? video.name,
                                         height: bottomH,
+                                        palette: .oneDark,
                                         onSeek: onSeekTo)
                         .frame(width: box.width, height: bottomH)
                 }
@@ -2264,19 +2447,20 @@ struct OneSkinStage: View {
                 // 画面列高度按**片源比例**优先，不再固定 0.56·H。
                 // 竖片按宽算会很高，仍由 0.56 上限压住 —— 既不留无谓黑边，
                 // 也不会让竖片把详情区挤没。
-                let picH = bleedingPictureHeight(box, aspect: aspectRatio, lower: 0.28, upper: 0.56)
+                let picH = bleedingPictureHeight(box)
                 let detailH = max(box.height - picH, 1)
                 VStack(alignment: .center, spacing: 0) {
                     pictureColumn(CGSize(width: box.width, height: picH),
                                   landscape: false, edgeToEdge: true, ratioBase: ratio,
-                                  fitMode: fitMode, playerAspect: aspectRatio)
+                                  fitMode: fitMode, shapeOverride: liveShape)
                         .frame(width: box.width, height: picH)
                     // ★ 2026-11-12：详情列也要跟着整体下移，且**保持既有间隔**。
                     //   原来 96/78 是「画面列下沿 → 标题」的固定距离；
                     //   现在加同一个 `portraitExtraDrop`，画面层与详情层一起下移，
                     //   两者之间的间距不变（96/78 那一段原样保留）。
                     detailColumn(CGSize(width: box.width, height: detailH), landscape: false,
-                                 topInset: (session != nil ? 96 : 78) + OneSkin.portraitExtraDrop)
+                                 topInset: (session != nil ? 96 : 78) + OneSkin.portraitExtraDrop,
+                                 shapeOverride: liveShape)
                         .frame(width: box.width, height: detailH)
                 }
             } else if landscapeNow {
@@ -2340,9 +2524,11 @@ struct OneSkinStage: View {
                 let colR: CGFloat = base * OneSkinWindowGeometry.Metrics.columnLeft    // 0.4501 详情列
                 let colL: CGFloat = base - colR                                        // 播放器列 = 剩余（含缝）
                 HStack(alignment: .top, spacing: 0) {
-                    pictureColumn(CGSize(width: colL, height: box.height), landscape: true, ratioBase: ratio, fitMode: fitMode, playerAspect: aspectRatio)
+                    pictureColumn(CGSize(width: colL, height: box.height), landscape: true, ratioBase: ratio,
+                                  fitMode: fitMode, shapeOverride: liveShape)
                         .frame(width: colL, height: box.height)
-                    detailColumn(CGSize(width: colR, height: box.height), landscape: true, ratioBase: ratio)
+                    detailColumn(CGSize(width: colR, height: box.height), landscape: true, ratioBase: ratio,
+                                 shapeOverride: liveShape)
                         .frame(width: colR, height: box.height)
                 }
                 .background(
@@ -2371,7 +2557,8 @@ struct OneSkinStage: View {
                     // 用户报的「竖屏没法全屏」就是这个。传 picH 后 winY/bottomBar
                     // 全部收敛在画面区内，几何自洽。
                     pictureColumn(CGSize(width: box.width, height: picH),
-                                  landscape: false, ratioBase: ratio, fitMode: fitMode, playerAspect: aspectRatio)
+                                  landscape: false, ratioBase: ratio, fitMode: fitMode,
+                                  shapeOverride: liveShape)
                         .frame(width: box.width, height: picH, alignment: .top)
                     detailColumn(CGSize(width: box.width, height: max(box.height - picH, 1)),
                                  landscape: false, ratioBase: ratio,
@@ -2379,7 +2566,8 @@ struct OneSkinStage: View {
                                  // 未播放态那条带子已经不画了（见 overlay 的判据），
                                  // 再让 78 只是把标题白白推低 —— 参考里画面下沿到标题
                                  // 只有 ~20pt 的呼吸位（669×951 实测 469→522，外屏 272→348）。
-                                 topInset: session != nil ? 96 : 20)
+                                 topInset: session != nil ? 96 : 20,
+                                 shapeOverride: liveShape)
                         .frame(width: box.width, height: max(box.height - picH, 1))
                 }
             }
@@ -2454,7 +2642,7 @@ struct OneSkinStage: View {
                         // 全屏键，落在列高 0.928 处）。画面多高、胶囊条就贴多高 ——
                         // 两者共用 `bleedingPictureHeight`，不再一个按片源比例、
                         // 一个按固定 0.56。
-                        let picH = bleedingPictureHeight(box, aspect: aspectRatio, lower: 0.28, upper: 0.56)
+                        let picH = bleedingPictureHeight(box)
                         return max(box.height - (picH * 0.928 - barHitHalf - 8), 8)
                     }
                     if landscapeNow { return box.height * (1 - 0.868) }
@@ -2559,44 +2747,15 @@ struct OneSkinStage: View {
     /// 而胶囊条若仍按固定的 `0.56·H` 反推，16:9 片源在 669×951 上就差 **145pt**
     /// （画面列实际 376.3，胶囊条却按 532.6 算，下沿低 145pt 扎进详情区）。
     /// 竖片恰好撞上限所以看不出来 —— 这就是它长期漏检的原因。
-    private func bleedingPictureHeight(_ size: CGSize,
-                                       aspect: CGFloat,
-                                       lower: CGFloat,
-                                       upper: CGFloat) -> CGFloat {
-        // ⛔ 两条硬约束，缺一就出事：
-        //   ① 结果**不得依赖 `size.height`** —— 那会让列高与容器高互为因果成环
-        //      （实测：列高 213→378 爬升 → 容器被撑高 → 再来一轮，每秒 291 次）
-        //   ② 结果**不得无限大** —— 片源越窄画面越高，竖片 9:16 时
-        //      `width/aspect` = 669/0.5625 = 1189pt，把整页撑爆、详情栏压成 1pt
+    private func bleedingPictureHeight(_ size: CGSize) -> CGFloat {
+        // 实现在 Core（`OneSkinWindowGeometry.fullBleedPictureColumnHeight`），
+        // 因为这里曾有**两份**公式：stage 里一份、胶囊条底距一份，
+        // 而单测里还留了第三份「旧版拷贝」——三份各算各的，谁都可能只改一处。
         //
-        // 上一版 `min(max(f, f*lower/upper), max(size.height*upper, f))` 是**代数恒等式**
-        // （`lower/upper=0.5<1` 且 `hiCap≥f`），返回恒等于 `width/aspect`，
-        // `upper` 完全失效 —— 子代理用 20 万组随机反例证实 0 例外。
-        // 后果实测：16:9 恰好 ≈50% 所以看不出来，但 4:3 溢出 50pt、
-        // 1:1 溢出 288pt、竖片溢出 1028pt。
-        //
-        // 正解：上限挂在**宽度**上（宽度不随内容变，不成环），
-        // 取「版式窗口按 windowAspect 铺满时的高度 × upper」。
-        // `windowAspect = 1.819` 是 One 版式的窗口比例常量，
-        // 内屏竖持 669 宽 → 标称窗口高 368 → 上限 368×0.56 ≈ 206…
-        // 但这样会把 16:9 的 376 压到 206（上一版就这么错的）。
-        //
-        // ⇒ 上限必须与 `fittedH` 同尺度：用**宽度对应的最长合理画面高**。
-        //   One 的版式规定画面列最多占整页 `upper` 比例，而整页高度按
-        //   「宽度 / 版式宽高比」估。为避免再次压小正常片源，
-        //   取 `max(该值, fittedH)` 作为**下限**，再让 upper 只压那些
-        //   `fittedH` 明显超出窗口的窄片。
-        let rawAspect = (aspect.isFinite && aspect > 0.2 && aspect < 6) ? aspect : 16.0 / 9.0
-        let fittedH = size.width / rawAspect
-        // 版式窗口高：纯由宽度推出，与容器无关。
-        let nominalWindowH = size.width / OneSkinWindowGeometry.Metrics.windowAspect
-        // 画面列允许的最大高度：窗口高 × upper，但**不低于** 16:9 的画面高，
-        // 否则正常宽片会被压小（上两版都踩了这个坑）。
-        let naturalH = size.width / (16.0 / 9.0)
-        let cap = max(nominalWindowH * upper, naturalH)
-        // 下限：窗口高 × lower，同样不低于 0。
-        let floorH = max(nominalWindowH * lower, 1)
-        return min(max(fittedH, floorH), cap)
+        // 现在只有一份，且**只吃列宽**：
+        //   · 不读 `size.height`（容器高 = 画面列 + 详情列，读它就是环）；
+        //   · 不读片源比例（画框恒定，片源只决定框内 letterbox）。
+        OneSkinWindowGeometry.fullBleedPictureColumnHeight(columnWidth: size.width)
     }
 
     private func pictureHeightOf(_ size: CGSize, landscape: Bool) -> CGFloat {
@@ -2622,7 +2781,9 @@ struct OneSkinStage: View {
     /// 双列态因为窗口只占左列一小块、多数控件落在窗口外，问题才不明显。
     private func pictureControls(colW: CGFloat, colH: CGFloat, landscape: Bool, fullScreen: Bool,
                                  edgeToEdge: Bool = false,
-                                 portraitTopInset: CGFloat? = nil) -> some View {
+                                 portraitTopInset: CGFloat? = nil,
+                                 /// 本帧真实形态，与画面层同源（见 `pictureColumn` 的同名参数）。
+                                 shapeOverride: OneSkinShape? = nil) -> some View {
         // 控件层与画面共用**同一个几何来源**（OneSkinWindowGeometry）。
         // 以前这里和 pictureColumn 各算一份，只改一处就立刻错位。
         // edgeToEdge（展开宽屏）也必须同步带上，否则控件仍按内缩窗口定位。
@@ -2666,8 +2827,8 @@ struct OneSkinStage: View {
                 //    外层不重算而没触发，`shapeNow` 会**永久**停在初值 `.column`。
                 //    现在两处都读 `effectiveShape`：一个来源（含 QA 强制覆盖），
                 //    与 `stage` 排版的形态也完全同源。
-                skinShape: shape(),
-                layout: PlayerControlsLayout.current(forSkinShape: shape(), width: colW),
+                skinShape: shape(shapeOverride),
+                layout: PlayerControlsLayout.current(forSkinShape: shape(shapeOverride), width: colW),
                 openEpisodes: onEpisodes,
                 miniPlayer: onMiniPlayer,
                 toggleFullScreen: onFullScreen,
@@ -2721,7 +2882,15 @@ struct OneSkinStage: View {
                                edgeToEdge: Bool = false,
                                ratioBase: CGSize = .zero,
                                fitMode: OneSkinFitMode = .fit,
-                               playerAspect: CGFloat = 0) -> some View {
+                               /// 本帧**真正在排版的形态**（`stage` 的 `liveShape`）。
+                               ///
+                               /// ⛔ 不传的话内部 `shape()` 会回落到父视图那个 `shape` 参数，
+                               /// 于是同一帧里出现两套形态 —— 真机日志实证：
+                               ///   `stage size=944x664 shape=split`
+                               ///   `pictureColumn shape=fullBleed`   ← 同一帧
+                               /// 画面列按竖版算窗口、`stage` 按横版分栏，两列宽度对不上，
+                               /// 内容溢出容器（页面上只剩海报）。
+                               shapeOverride: OneSkinShape? = nil) -> some View {
         #if DEBUG
         // ⛔ 这个探针**必须传 portraitTopInset**，否则竖持时 `winY` 会算成
         //    `colH × 0.091`（≈31），而真实 `geo` 用的是
@@ -2732,7 +2901,7 @@ struct OneSkinStage: View {
             edgeToEdgeOnly: edgeToEdge,
                                        portraitTopInset: landscape ? nil : OneSkinStage.portraitTopInset(
                                            ratioBase: ratioBase, colSize: colSize))
-        oneSkinLog("pictureColumn shape=\(shape().logName) col=\(Int(colSize.width))x\(Int(colSize.height)) fs=\(fullScreen) edge=\(edgeToEdge) fit=\(fitMode.rawValue) aspect=\(playerAspect) win=\(Int(_g.winW))x\(Int(_g.winH)) at=(\(Int(_g.winX)),\(Int(_g.winY))) bottomY=\(Int(_g.winY + _g.winH))")
+        oneSkinLog("pictureColumn shape=\(shape(shapeOverride).logName) col=\(Int(colSize.width))x\(Int(colSize.height)) fs=\(fullScreen) edge=\(edgeToEdge) fit=\(fitMode.rawValue) win=\(Int(_g.winW))x\(Int(_g.winH)) at=(\(Int(_g.winX)),\(Int(_g.winY))) bottomY=\(Int(_g.winY + _g.winH))")
         #endif
         // ===== 播放器窗口几何（2026-11-07 双方向逐像素实测，One 1.7.0）=====
         //
@@ -2793,7 +2962,9 @@ struct OneSkinStage: View {
             // 顶边留白的基准必须是**物理屏高**，不是 colH（见 init 注释）：
             // 外屏 678×0.091=61.7 ✓  内屏 951×0.091=86.5 ✓
             portraitTopInset: landscape ? nil : OneSkinStage.portraitTopInset(
-                ratioBase: ratioBase, colSize: colSize)
+                ratioBase: ratioBase, colSize: colSize),
+            // ⛔ **不要**再传任何片源参数。窗口是固定版式的画框，
+            //    片源只决定框内怎么 letterbox（见 Core 构造器头部）。
         )
         let winX = geo.winX, winY = geo.winY
         let winW = geo.winW, winH = geo.winH
@@ -2806,6 +2977,17 @@ struct OneSkinStage: View {
         return ZStack(alignment: .topLeading) {
             Color.clear
                 .frame(width: colW, height: colH)
+                // 探针：本列自身在全局坐标系的原点。用于判定「窗口偏移」还是
+                // 「整个列被推下去」——固定层报 scr=0,714 但 winY=0，必须区分这两者。
+                .background(
+                    GeometryReader { g in
+                        let f = g.frame(in: .global)
+                        let d = "COLORIGIN col=\(Int(colW))x\(Int(colH)) gx=\(Int(f.minX)) gy=\(Int(f.minY)) land=\(landscape)"
+                        Color.clear
+                            .onAppear { let _ = oneSkinLog(d) }
+                            .onChange(of: f.minY) { _, _ in let _ = oneSkinLog(d) }
+                    }
+                )
 
             // 播放器窗口。
             // `zIndex(-1)` 是必须的：OneSkinPlayerLayer 是 UIViewRepresentable，
@@ -2862,6 +3044,27 @@ struct OneSkinStage: View {
                     )
                     .frame(width: winW, height: winH)
                 }
+
+                // ★ 一次性探针：把「画面层的三条前提」绑在一行打出来。
+                //
+                // 用户报「竖屏源只有背景海报」。日志已证几何正确
+                // （win=371x659、detailColumn 428x669 都在），所以问题只可能在：
+                //   ① `avPlayer` 为 nil → 走 else 画海报；
+                //   ② layer 建了但 `playerLayer.player` 没绑上 → videoRect 0×0；
+                //   ③ 宿主 bounds 把 layer 裁掉了。
+                // 这三条一次打清，不再逐层猜。
+                #if DEBUG
+                let _ = {
+                    if let p = avPlayer {
+                        let cur = p.currentItem
+                        let ps = cur?.presentationSize ?? .zero
+                        let st = cur?.status.rawValue ?? -1
+                        oneSkinLog("PICCHK ok avPlayer=yes item=\(cur != nil) status=\(st) ps=\(Int(ps.width))x\(Int(ps.height)) win=\(Int(winW))x\(Int(winH)) winX=\(Int(winX)) winY=\(Int(winY))")
+                    } else {
+                        oneSkinLog("PICCHK avPlayer=NIL 走海报 win=\(Int(winW))x\(Int(winH)) sess=\(session == nil ? "nil" : "ok")")
+                    }
+                }()
+                #endif
 
                 if let avPlayer {
                     OneSkinFixedPicture(
@@ -2940,7 +3143,8 @@ struct OneSkinStage: View {
                             fullScreen: fullScreen, edgeToEdge: edgeToEdge,
                             // 与画面层同源：同一份 portraitTopInset（B-D1）。
                             portraitTopInset: landscape ? nil : OneSkinStage.portraitTopInset(
-                                ratioBase: ratioBase, colSize: colSize))
+                                ratioBase: ratioBase, colSize: colSize),
+                            shapeOverride: shapeOverride)
         }
         // 「用外部播放器打开」——真机是**右侧弹出的自定义面板**，不是系统弹窗。
         //

@@ -147,6 +147,26 @@ public struct OneSkinWindowGeometry {
         max(10, width * 0.0147)
     }
 
+    /// 「全出血」形态里画面列（画框）的版式比例。
+    ///
+    /// One 内屏竖持实测：669 宽 → 画面列 376.3 高 = 1.7778。
+    ///
+    /// ⛔ 这是**画框的比例**，不是片源比例。两者的区别正是 2026-11-13 那次回归：
+    /// 拿片源比例算画框，竖源就把画面列拉成 1189pt（整页被撑爆、详情栏压成 1pt），
+    /// 宽银幕又把画面列压到 285pt（详情列白多 90pt、画面反而更小）。
+    /// 片源只决定框内怎么 letterbox，框恒定。
+    public static let fullBleedColumnAspect: CGFloat = 16.0 / 9.0
+
+    /// 「全出血」形态里画面列的高度 —— **唯一来源**（App 只准调这里）。
+    ///
+    /// ⛔ 结果不得依赖容器高度：容器高由「画面列 + 详情列」拼出来，
+    /// 拿它当输入就是环（实测列高 213→378 爬升，每秒 291 次重排）。
+    /// 所以只读列宽 —— 宽度由屏幕/分栏决定，不随内容变。
+    public static func fullBleedPictureColumnHeight(columnWidth: CGFloat) -> CGFloat {
+        let w = max(columnWidth, 1)
+        return max((w / fullBleedColumnAspect).rounded(), Metrics.minPictureHeight)
+    }
+
     /// - Parameters:
     ///   - size: 这一列的尺寸
     ///   - landscape: 由容器决定，**不要**用 `colW > colH` 反推
@@ -173,6 +193,21 @@ public struct OneSkinWindowGeometry {
                 /// （竖持 58pt 空白，菜单/控件被往下顶）—— 就是这个参数要修的回归。
                 edgeToEdgeOnly: Bool = false,
                 portraitTopInset: CGFloat? = nil) {
+        // ⛔⛔ 构造器**不接受任何片源参数**，这是刻意的。
+        //
+        // 2026-11-13：窗口尺寸第一次被接到片源比例上（`winH = innerW / playerAspect`），
+        // 竖屏源（9:16）直接把 523×294 的窗口算成 371×659 ——
+        // 左列变成「一根 71% 宽的窄高条 + 29% 压暗海报底」，winY 被夹到 0 顶穿屏幕。
+        // 用户看到的就是「横持只剩海报、双栏设计没了」。
+        //
+        // 更阴的是它**看起来是对的**：横源 16:9 算出来 523/1.7778 = 294.2，
+        // 与固定版式 523/1.819 = 287.5 只差 6.7pt（2.4%），肉眼不可辨。
+        // 缺陷只在竖源上暴露，而当时的 QA 入口写死 16:9，四条验收通道结构上跑不到。
+        //
+        // 所以这条缝必须**在类型层面焊死**：谁想按片源改窗口，只能改这个构造器，
+        // 而它一个 aspect 参数都不收。片源只决定窗口**内部**怎么 letterbox
+        //（`OneSkinFixedPicture` 的 `.resizeAspect`），绝不决定窗口本身。
+        // 回归护栏见 `OneSkinWindowGeometryTests`（含竖源/宽银幕/4:3 逐字段对照）。
         let colW = size.width
         let colH = size.height
         self.colW = colW
@@ -254,13 +289,15 @@ public struct OneSkinWindowGeometry {
                 //   winW = innerW（= 整列宽 523）
                 //   winH = 高度按左半栏的宽高比，填到可用高
                 //
-                // 高度：占满栏目后按片源 16:9 算，再夹到可用高。
-                let playerW = innerW
-                let fittedH = max(
-                    min(playerW / Metrics.playerAspect, usableH),
-                    min(Metrics.minPictureHeight, colH)
-                )
-                self.winW = Self.px(innerW)
+                // 高度：占满栏目后按**版式比例**算，再夹到可用高。
+                // 窗口 = **固定版式的画框**：宽度吃满列宽，高度 = 宽 ÷ 1.819。
+                //
+                // 片源只决定框内怎么 letterbox（`OneSkinFixedPicture` 的 `.resizeAspect`），
+                // 绝不决定框本身 —— 理由见构造器头部那段（2026-11-13 竖源回归）。
+                let fixedH = min(innerW / Metrics.windowAspect, usableH)
+                let fittedW = innerW
+                let fittedH = max(fixedH, min(Metrics.minPictureHeight, colH))
+                self.winW = Self.px(fittedW)
                 self.winH = Self.px(fittedH)
                 self.winX = 0
                 // 居中后再夹进容器：`usableH*centre - fittedH/2` 在
@@ -315,26 +352,26 @@ public struct OneSkinWindowGeometry {
                 // 顶边：避开摄像头（真机实测 43pt @466 宽）
                 let top = max(portraitTopInset ?? (colH * Metrics.portraitTop), 0)
 
-                // 高度拉到「播放器控制条」上沿。
-                // 外屏竖持实测控制条 y=353 → 高 = 353 - 43 = 310。
-                // 内屏竖持（更宽的屏）按容器高比例放大到同一相对位置。
-                let isSmallScreen = colW < 500
-                let controlBarTop: CGFloat = isSmallScreen
-                    ? 353
-                    : (colH * 0.553)
-                let wanted = max(controlBarTop - top, min(Metrics.minPictureHeight, colH))
-                // ⛔ 上限必须**让出底部控件条**，不能用 `colH - top`（那是「撑到底」）。
+                // 高度 = 列宽 ÷ 竖屏版式比例（内屏 2.146 / 外屏 1.819）。
                 //
-                // 用 `colH - top` 时：容器比窗口需要的还矮（如 colH=300）时，
-                // 窗口会被拉到贴满整个高度，底边正好压在控件条上 ——
-                // 实测 h=300 → winY=27, winH=273, 底=300.0 > 允许 282.51，
-                // 越界 17.5pt。控件条被画面盖住，用户点不到「倍速」那排键。
+                // ⛔ 这里原来是「拉到播放器控制条上沿」：
+                //       colW < 500 → 控制条硬编码 y=353（外屏真机实测）
+                //       否则        → colH × 0.553
+                //    两个分支**都不是**由列宽决定的，于是同一块屏会算出不同的窗高：
+                //       466 宽：colH=700 → 289，colH=951 → 266
+                //       669 宽：colH=700 → 323，colH=951 → 439
+                //    后者尤其糟：窗口高度跟着**容器高度**线性变（0.553 倍），
+                //    而容器高度在转屏/折叠动画里是连续变化的 —— 窗口会跟着一起胀缩。
+                //    这条也是「画框必须是常量、只能由列宽决定」的同一条铁律，
+                //    只是漏在竖屏这一支。2026-11-13 与横屏一起收掉。
                 //
-                // 留 6% 是版式约定（`thePortraitWindowLeavesRoomForTheControlBar`
-                // 守的就是这条）。正常手机高（500/700/951）本来就不触顶，改动无感；
-                // 只在容器异常矮时才生效 —— 那正是它要保护的情形。
+                // 控制条那 353 的诉求（「长度到控制条上方」）此后由**画面列高度**表达：
+                // `pictureHeightOf` 就是 `顶边 + 窗高 + 底部呼吸位`，
+                // 胶囊条贴画面列下沿，不再反过来用控制条位置定窗高。
+                let wantedH = innerW / Metrics.portraitAspect(forColumnWidth: colW)
+                // 容器异常矮（转屏中间帧）时才压扁，绝不让窗口越过底部控件条。
                 let limit = max(colH * (1 - Metrics.controlBarRoom) - top, 1)
-                self.winH = Self.px(min(wanted, limit))
+                self.winH = Self.px(min(wantedH, limit))
                 self.winX = 0
                 self.winY = Self.px(min(top, max(colH - self.winH, 0)))
             }
