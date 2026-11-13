@@ -158,10 +158,29 @@ final class OneSkinFixedPlayerView: UIView {
     override var intrinsicContentSize: CGSize { fixedSize }
     override func sizeThatFits(_ size: CGSize) -> CGSize { fixedSize }
 
+    /// 实例唯一编号：用于判定「屏幕上到底有几个 OneSkinFixedPlayerView」。
+    ///
+    /// ⛔ 存在的唯一理由：`fixedLayer` 探针只在内容变化时打印（`line != lastLogged`），
+    /// 而 SwiftUI 在切集/改窗口/转屏时会新建宿主 UIView。多个实例各自打印一行时，
+    /// 日志里看到的是**若干个不同实例交替出现**，极易被当成「同一个实例状态在变」。
+    /// 实测 8.14.0：`videoRect=161x287`（证明拿到过正确视频尺寸）与
+    /// `videoRect=0x0 / itemReady=0` 交替出现 —— 必须靠实例号才能分清是谁在报。
+    let instanceID: Int = OneSkinFixedPlayerView.nextInstanceID()
+
+    /// 单线程静态计数（只用于 DEBUG 日志编号；`layoutSubviews` 与 init 都在主线程）。
+    private static var instanceCounter = 0
+    static func nextInstanceID() -> Int {
+        instanceCounter += 1
+        return instanceCounter
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
         layer.addSublayer(playerLayer)
+        #if DEBUG
+        oneSkinLog("fixedView INSTANCE #\(instanceID) created")
+        #endif
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -224,7 +243,17 @@ final class OneSkinFixedPlayerView: UIView {
             cur = v.superview
             depth += 1
         }
-        let line = "fixedLayer chain=\(chain) wb=\(Int(wb.width))x\(Int(wb.height)) inW=\(inWindow ? 1 : 0) winW=\(Int(wr.minX)),\(Int(wr.minY)),\(Int(wr.width))x\(Int(wr.height)) view=\(Int(bounds.width))x\(Int(bounds.height)) fixed=\(Int(fixedSize.width))x\(Int(fixedSize.height)) layer=\(Int(playerLayer.frame.width))x\(Int(playerLayer.frame.height)) videoRect=\(Int(playerLayer.videoRect.width))x\(Int(playerLayer.videoRect.height)) pl=\(hasPlayer ? 1 : 0) win=\(inWindow ? 1 : 0) hid=\(hidden ? 1 : 0) op=\(alpha) sup=\(superL ? 1 : 0) gravity=\(playerLayer.videoGravity.rawValue)"
+        // 双 player 身份比对：PICCHK 读 avPlayer，本节读 playerLayer.player。
+        // 若 `same=0`，则「item=true/status=1」与「itemReady=0」的矛盾即被解释：
+        // **画层绑的不是那个在播的 player**。
+        let layerPlayer = playerLayer.player
+        let lpID = layerPlayer.map { String(UInt(bitPattern: ObjectIdentifier($0).hashValue) % 100000) } ?? "nil"
+        let itemExists = (layerPlayer?.currentItem != nil)
+        let itemStatus = layerPlayer?.currentItem?.status.rawValue ?? -9
+        let rateV = layerPlayer?.rate ?? -1
+        let ctV = layerPlayer?.currentTime().seconds ?? -1
+
+        let line = "fixedLayer inst=#\(instanceID) chain=\(chain) wb=\(Int(wb.width))x\(Int(wb.height)) inW=\(inWindow ? 1 : 0) winW=\(Int(wr.minX)),\(Int(wr.minY)),\(Int(wr.width))x\(Int(wr.height)) view=\(Int(bounds.width))x\(Int(bounds.height)) fixed=\(Int(fixedSize.width))x\(Int(fixedSize.height)) layer=\(Int(playerLayer.frame.width))x\(Int(playerLayer.frame.height)) videoRect=\(Int(playerLayer.videoRect.width))x\(Int(playerLayer.videoRect.height)) pl=\(hasPlayer ? 1 : 0) win=\(inWindow ? 1 : 0) hid=\(hidden ? 1 : 0) op=\(alpha) sup=\(superL ? 1 : 0) gravity=\(playerLayer.videoGravity.rawValue) ready=\(playerLayer.isReadyForDisplay ? 1 : 0) itemReady=\(itemStatus == 1 ? 1 : 0) lp=\(lpID) itemHas=\(itemExists ? 1 : 0) ist=\(itemStatus) rate=\(String(format: "%.2f", rateV)) ct=\(String(format: "%.1f", ctV))"
         if line != lastLogged { lastLogged = line; oneSkinLog(line) }
         #endif
     }
