@@ -340,6 +340,23 @@ import TVCore
     /// 起哪一集：看过就接上次那集，没看过就第一集 —— 与详情页「继续播放」同一取舍，
     /// 免得同一部剧两个入口从不同集开始。
     func start(video: Video, client: CatalogClient, store: Store) async {
+        // ⛔ 列表页的海报只有 id / 名字 / 封面，`episodes` 一定是空数组 ——
+        //    `vod_play_url` 只在 `ac=detail` 的响应里。原来直接拿它选集：
+        //    `startingEpisode` 找不到任何一集 → 弹一句「没有可播放的剧集」→
+        //    **迷你播放器永远起不来**。用户看到的就是「长按海报点小窗没反应」，
+        //    而同一部剧点进详情页再播放是正常的（那条路会先取详情）。
+        //    这里补上同一步：空选集就先向源要详情（走 MediaCache，点进过详情页时
+        //    通常一次网络都不用发）。
+        var video = video
+        if video.episodes.isEmpty {
+            guard let detail = try? await client.detail(video.id, cached: true),
+                  !detail.episodes.isEmpty else {
+                store.notice = L10n.text("This title has no episodes to play.")
+                return
+            }
+            // 详情常常没有封面（`vod_pic` 只在列表里给），保留海报页那张。
+            video = detail.keepingPoster(video.poster, headers: video.posterHeaders)
+        }
         guard let episode = startingEpisode(video, client: client, store: store) else {
             store.notice = L10n.text("This title has no episodes to play.")
             return
@@ -847,7 +864,14 @@ struct VideoTaskCard: View {
     var taskIndex: Int = 0
     var taskCount: Int = 1
 
-    private var scaledWidth: CGFloat { width * ownScale }
+    /// 捏合的**瞬时**倍率：只影响画面，松手时才算进 `ownScale`。
+    ///
+    /// ⛔ 原来直接把 `MagnificationGesture.value` 写回 `ownScale`。那个 value 是
+    /// 「相对**本次起手**的倍率」，不是绝对缩放 —— 已经捏到 1.6 的卡再捏一下，
+    /// 它又从 1 起算，`ownScale` 立刻跳回 1.0，每捏一次都「弹回原大小」。
+    @GestureState private var pinch: CGFloat = 1
+
+    private var scaledWidth: CGFloat { width * ownScale * pinch }
     private var height: CGFloat { scaledWidth / task.aspectRatio }
 
     var body: some View {
@@ -910,7 +934,13 @@ struct VideoTaskCard: View {
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
-            .frame(width: width, alignment: .leading)
+            // ⛔ 必须是 `scaledWidth`，不是 `width`。
+            //
+            // 原来这里写死基础宽度：视频画面按 `scaledWidth` 缩放，标题行却始终满宽。
+            // 缩小（捏到 0.6）时画面比标题行窄 → 右侧露出一条 `regularMaterial`
+            // 的浅色底，用户看到的就是「迷你小窗缩放后右边一条白边」；
+            // 放大时反过来，标题行右侧塌下去一块。两者现在同一个宽度源。
+            .frame(width: scaledWidth, alignment: .leading)
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
@@ -941,10 +971,15 @@ struct VideoTaskCard: View {
         // 手势必须挂在**卡片**上而不是坞上：挂在坞上时一次捏合会改所有卡，
         // 而 `MagnificationGesture` 的倍率是相对起手值的，多卡共用一个会互相打架。
         .simultaneousGesture(
-            MagnificationGesture().onChanged { value in
-                guard let onScaleChange else { return }
-                onScaleChange(min(max(value, 0.6), 2.2))
-            }
+            MagnificationGesture()
+                // 画面跟手：手势进行中就实时缩放（`scaledWidth` 里乘了 `pinch`）。
+                .updating($pinch) { value, state, _ in state = value }
+                // 松手才写回：提交的是「起手值 × 本次倍率」。
+                // 直接提交 `value` 等于把之前的缩放丢掉（见 `pinch` 的注释）。
+                .onEnded { value in
+                    guard let onScaleChange else { return }
+                    onScaleChange(min(max(ownScale * value, 0.6), 2.2))
+                }
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(task.title))

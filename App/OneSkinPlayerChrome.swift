@@ -659,7 +659,7 @@ struct OneSkinChrome: View {
             // 设置页也列得出、也能拖进「更多」—— 但顶栏这一颗永远在，
             // 于是「拖进更多」等于白拖（还多一份），「隐藏」更是不可能。
             //
-            // 现在：用户把它排进顶栏 → 由 `surfacedControls` 按槽位画，这里不再兜底；
+            // 现在：用户把它排进顶栏 → 由 `topSlotRow` 按槽位画，这里不再兜底；
             // 排进「更多」→ 只在更多里出现；两处都没有（老配置没这一项）→ 才画这颗兜底，
             // 免得升级上来的用户失去转屏入口。
             // ⛔ 不能再带 `!fullScreen`。
@@ -673,34 +673,38 @@ struct OneSkinChrome: View {
             }
             // ⛔ 这里**不能**再套一层 `if !fullScreen`。
             //
-            // `surfacedControls` 自己就是 `fullScreen ? layout.fullSurfaced : layout.watchSurfaced`。
+            // `topSlotRow` 自己就是 `fullScreen ? layout.fullSurfaced : layout.watchSurfaced`。
             // 原来外面又包一层 `if !fullScreen`，于是全屏时这段整个不画 ——
             // `fullSurfaced` 分支**永远不可达**，设置页那张「Shown in Full Screen」
             // 勾选表对 One 皮肤是纯粹的谎：勾什么都看不到。
             //
-            // 现在交给 `surfacedControls` 自己分流：全屏取 `fullSurfaced`（默认是空数组，
-            // 所以默认行为一个字节没变），选集页取 `watchSurfaced`。
-            // 用户真去勾了全屏那几项，才会在全屏顶栏看到它们。
-            ForEach(surfacedControls, id: \.self) { control in
-                controlButton(control)
+            // 按**槽位**画：空槽保留一个热区宽度，控件才会落在用户排的那一格上。
+            ForEach(Array(topSlotRow.enumerated()), id: \.offset) { _, control in
+                if let control {
+                    controlButton(control)
+                } else {
+                    Color.clear.frame(width: m.hit, height: m.hit)
+                }
             }
 
             Spacer(minLength: 0)
 
-            // 锁定是**唯一**保留的结构位，而且必须留。
+            // 锁定：**兜底**结构位。
             //
-            // 理由不是懒惰：锁定后 `morePanel` / 顶栏控件全都不画（见 body 里的 `locked` 分支），
-            // 所以它自己的入口**不可能**放在「更多」或可隐藏的槽位里 ——
-            // 放进去了就是「锁上之后再也解不开，只能退出页面」。
-            // 它也不在 `barControls` 里，设置页不会让用户勾选它，
-            // 所以不存在「设置里说能改、实际改不了」的矛盾。
-            iconButton(locked ? "lock.fill" : "lock.open",
-                       label: L10n.text(locked ? "Unlock Controls" : "Lock Controls")) {
-                // 锁定同样要先收面板：`morePanel` 在 `locked` 时不画，但 `showsMore` 还留着 true，
-                // 一解锁面板就自己弹出来。
-                if showsMore { closeMore() }
-                locked.toggle()
-                if locked { PlayerOrientation.lock() } else { PlayerOrientation.unlock() }
+            // 锁定后 `morePanel` / 顶栏控件全都不画（见 body 里的 `locked` 分支），
+            // 所以它必须有一个「锁上之后仍然画得出来」的入口。
+            // 老版本里它是无条件画在这里的 —— 那意味着用户永远动不了它。
+            // 现在：用户把 `.lock` 排进顶栏并勾上可见，就按他的槽位画（`topSlotRow`
+            // 不再过滤它），这里**不再重复补一颗**；哪都没排才补这颗兜底。
+            if !topSlotRow.contains(.lock) {
+                iconButton(locked ? "lock.fill" : "lock.open",
+                           label: L10n.text(locked ? "Unlock Controls" : "Lock Controls")) {
+                    // 锁定同样要先收面板：`morePanel` 在 `locked` 时不画，但 `showsMore` 还留着 true，
+                    // 一解锁面板就自己弹出来。
+                    if showsMore { closeMore() }
+                    locked.toggle()
+                    if locked { PlayerOrientation.lock() } else { PlayerOrientation.unlock() }
+                }
             }
             // ⛔ 全屏态收掉「更多」菜单：它弹出的选集 / 画质 / 音轨 / 字幕 / 倍速 /
             // 外播 / 视频信息都是选集页的选项，全屏里点出来会叠在画面上，
@@ -754,26 +758,30 @@ struct OneSkinChrome: View {
         return max(0, Int(spare / m.hit))
     }
 
-    /// 控制栏里**直接显示**的控件。
+    /// 顶栏的**槽位行**（含空槽），不是「过滤后的控件清单」。
     ///
-    /// 现在由两个独立集合决定（设置页可改）：
+    /// ⛔ 这里返回 `[PlayerControl?]` 而不是 `[PlayerControl]` 是关键：
+    /// 原来用 `layout.top`（`compactMap` 之后）再 `ForEach`，**空槽被压掉了** ——
+    /// 用户把「画质」放在第 7 格、第 1–6 格空着，播放器里它紧贴着左边第一颗出现。
+    /// 设置页的预览按格画（有空格），播放器里却左移，用户看到的就是
+    /// 「槽位调了没用 / 对不上」。现在空格照样占一个热区的宽度。
+    ///
+    /// 可见性仍由两个集合决定（设置页可改）：
     /// · 选集页 → `layout.watchSurfaced`
     /// · 全屏态 → `layout.fullSurfaced`
-    /// 同一个控件可以同时出现在两边，互不冲突。列表顺序仍按 `layout.top` 的槽位顺序，
-    /// 这样用户在设置里调过位置后，两种状态里的相对次序保持一致。
-    private var surfacedControls: [PlayerControl] {
+    /// 但**不再**把 `.lock` 滤掉：用户把它排进顶栏就按他的位置画
+    /// （没排才补结构位那颗，见 `topBar`）。
+    private var topSlotRow: [PlayerControl?] {
         let allowed = Set(fullScreen ? layout.fullSurfaced : layout.watchSurfaced)
-        return Array(layout.top
-            // ⛔ 这里不再按 `.fullScreen / .rotate / .lock` 过滤。
-            //
-            // 原来这三项被滤掉，同时又各自有一颗硬编码的结构键 —— 于是用户把它们
-            // 摆到顶栏之后，得到的是「滤掉的那一颗没出现，硬编码的那一颗还在原地」，
-            // 也就是「拖了没反应、位置也改不了」。现在谁被排进顶栏就画谁，
-            // 唯一的结构位只剩锁定（理由见 `topBar` 里那颗锁定键的注释）。
-            .filter { $0 != .lock }
-            .filter { allowed.contains($0) }
-            .filter(available)
-            .prefix(topSurfaceCapacity))
+        // 容量的单位是**格**：绝对定位后，一个控件落在第 9 格就实占 9 格宽度。
+        let slots = Array(layout.topSlots.prefix(topSurfaceCapacity))
+        // 末尾的空格不占位：只在「最后一个有内容的格子」之前保留空位，
+        // 否则窄窗口里会被一串无意义的空格把控件挤出可视区。
+        let end = (slots.lastIndex { $0 != nil } ?? -1) + 1
+        return slots.prefix(end).map { slot in
+            guard let control = slot, allowed.contains(control), available(control) else { return nil }
+            return control
+        }
     }
 
     /// 转屏这一项是否已经由用户摆在别处（顶栏槽位或「更多」里）。
@@ -787,30 +795,53 @@ struct OneSkinChrome: View {
         layout.top.contains(.rotate) || layout.more.contains(.rotate) || layout.bottom.contains(.rotate)
     }
 
-    /// 底栏传输区控件 —— **按 `layout.bottomSlots` 渲染**（用户在设置页 Bottom Row 里排的那十格）。
+    /// 底栏**槽位行**（含空槽）—— 与顶栏同一套「绝对定位」口径。
     ///
-    /// ⛔ 这里曾经是硬编码的「时间码 + 进度条 + 剩余时间 + 全屏键」，**完全不读
-    /// `layout.bottomSlots`**。后果：设置页明确提供「Bottom Row」十格拖拽区
-    /// （`PlayerControlsSettingsView:160`，footer 也写着 "Drag a button onto any slot
-    /// in the top **or bottom** row"），用户把「上一集/下一集/后退十秒」拖到底栏后，
-    /// One 皮肤里一个都不出现 —— 拖了等于没拖。只有原版皮肤（`MobilePlayer`）
-    /// 真的读 `bottomSlots`，两套皮肤行为分叉。
+    /// ⛔ 这里曾经是 `layout.bottom`（`compactMap` 之后的清单），空槽被压掉：
+    /// 用户把「播放暂停」排到第 9 格，它照样紧贴着左边第一颗 → 「槽位调了没用」。
     ///
-    /// 现在：底栏左侧是用户排的传输控件（含空槽占位），进度条仍在中间，
-    /// 时间码/剩余时间留在右侧 —— 保留 One 的版式，只把「哪些按钮、什么顺序」交还给用户。
-    ///
-    /// ⛔ 这里**不再排除** `.fullScreen` / `.lock` / `.rotate`。
-    ///
-    /// 原来这三项被无条件滤掉，而底栏右端又硬编码画了一颗全屏键 ——
-    /// 结果就是「全屏键永远在右下角，用户在设置里怎么排都动不了它」，
-    /// 正是用户说的「控件没有实现完整、不能自定义」。现在：用户把全屏键摆进
-    /// Bottom Row 就按他的位置画；没摆才用那颗硬编码的兜底（永远有全屏入口）。
-    private var transportControls: [PlayerControl] {
+    /// ⛔ 也曾经完全不读 `bottomSlots`（硬编码「时间码 + 进度条 + 剩余时间 + 全屏键」），
+    /// 用户在设置页拖下来的控件一个都不出现。那一条已修，这里保持读槽位。
+    private var bottomSlotRow: [PlayerControl?] {
         _ = layoutRaw
-        // `.lock` 例外：顶栏那颗锁定键是**结构位**（锁上后其它控件与「更多」全都不画，
-        // 它自己的入口必须常在，否则锁了再也解不开）。它不进 `barControls`，用户本不该
-        // 能排它；但老配置串里可能有，这里兜一道，避免底栏多出一颗只上锁不解锁的锁。
-        return layout.bottom.filter { $0 != .lock }.filter(available)
+        let slots = layout.bottomSlots
+        let end = (slots.lastIndex { $0 != nil } ?? -1) + 1
+        return slots.prefix(end).map { slot in
+            // `.lock` 例外：它锁上之后其它控件全不画，入口必须常在 ——
+            // 底栏这颗只上锁不解锁（底栏在锁定态也不画），所以不让它进来。
+            guard let control = slot, control != .lock, available(control) else { return nil }
+            return control
+        }
+    }
+
+    /// 落在画面中央那一组的控件种类。
+    ///
+    /// One 的画面中间是「上一集 / 后退 10 / 播放 / 前进 10 / 下一集」，
+    /// 底栏贴着进度条。这两处原来各自独立：中心是**硬编码**一组，
+    /// 底栏又按 `bottomSlots` 画同一批 —— 屏幕上两颗播放键，
+    /// 用户把播放键拖到别处，中间那颗也不动，也就是「视频播放器的控件调不了」。
+    ///
+    /// 现在统一：**传输类走中心的槽位行，其余（全屏 / 画质 / 转屏…）走底栏边缘**。
+    /// 两处都保持用户排的槽位顺序与空格，任何一个控件都有明确的家。
+    private static let centerControlSet: Set<PlayerControl> =
+        [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode]
+
+    private var centerSlotRow: [PlayerControl?] {
+        bottomSlotRow.map { $0.flatMap { Self.centerControlSet.contains($0) ? $0 : nil } }
+    }
+
+    /// 底栏边缘那一行（全屏 / 画质 / 转屏…）。这里**压缩空槽**：
+    /// 它是贴着进度条的一条边，前面留一串空格只会把时间码往里挤，
+    /// 位置语义由中心那一行承担。
+    private var edgeControls: [PlayerControl] {
+        bottomSlotRow.compactMap { $0 }.filter { !Self.centerControlSet.contains($0) }
+    }
+
+    /// 中央槽位行里每一格分到的宽度。控件多、窗口窄时按比例收，
+    /// 免得一排小圆点挤出画面（`winW` 只有两百多的坞状小窗时确实会发生）。
+    private var centerSlotWidth: CGFloat {
+        let count = max(1, centerSlotRow.count)
+        return min(m.playHit, max(m.stepHit, (winW - 2 * m.edge) / CGFloat(count)))
     }
 
     /// 当前上下文是否用得上这个控件（与 `MobilePlayerView.available` 同一套判断）。
@@ -853,30 +884,66 @@ struct OneSkinChrome: View {
     // MARK: - 中央播放组
 
     private var centerTransport: some View {
-        HStack(spacing: m.playGlyph * 0.72) {
-            if let previous = step(back: true) {
-                smallCircle("backward.end.fill") { previous.go() }
-                    .disabled(previous.busy)
+        let slots = centerSlotRow
+        let slotW = centerSlotWidth
+        let needsFallbackPlay = !slots.contains(.playPause) && !topSlotRow.contains(.playPause)
+        return HStack(spacing: 0) {
+            ForEach(Array(slots.enumerated()), id: \.offset) { _, control in
+                Group {
+                    if let control {
+                        centerSlot(control)
+                    } else {
+                        // 空格照占一格 —— 否则「排在第 7 格」会被左移成第 1 颗。
+                        Color.clear
+                    }
+                }
+                .frame(width: slotW, height: m.playHit)
             }
-            smallCircle("gobackward.10") { seek(by: -10) }
-            bigCircle(playing ? "pause.fill" : "play.fill") { session?.togglePlayback() }
-            smallCircle("goforward.10") { seek(by: 10) }
-            if let next = step(back: false) {
-                smallCircle("forward.end.fill") { next.go() }
-                    .disabled(next.busy)
+            // 播放键兜底：顶栏与底栏槽位都没排它时，中间这一颗是唯一入口。
+            if needsFallbackPlay {
+                bigCircle(playing ? "pause.fill" : "play.fill") { session?.togglePlayback() }
+                    .frame(width: slotW, height: m.playHit)
             }
         }
         .frame(width: winW, height: m.playHit)
         .position(x: winW / 2, y: winH * 0.496)
     }
 
+    /// 中央一格里画什么。
+    ///
+    /// 传输类保持 One 的「中号小圆 / 大号播放键」两档；用户把别的控件
+    /// （画质、字幕…）排进底栏槽位时，走与顶栏同一套 `controlButton`，
+    /// 不会出现「排进去是一颗点不动的空白」。
+    @ViewBuilder private func centerSlot(_ control: PlayerControl) -> some View {
+        switch control {
+        case .playPause:
+            bigCircle(playing ? "pause.fill" : "play.fill") { session?.togglePlayback() }
+        case .backTen:
+            smallCircle("gobackward.10") { seek(by: -10) }
+        case .forwardTen:
+            smallCircle("goforward.10") { seek(by: 10) }
+        case .previousEpisode:
+            if let previous = step(back: true) {
+                smallCircle("backward.end.fill") { previous.go() }
+                    .disabled(previous.busy)
+            }
+        case .nextEpisode:
+            if let next = step(back: false) {
+                smallCircle("forward.end.fill") { next.go() }
+                    .disabled(next.busy)
+            }
+        default:
+            controlButton(control)
+        }
+    }
+
     // MARK: - 底部进度条
 
     private var bottomBar: some View {
         HStack(spacing: 0) {
-            // 左侧：用户在设置页「Bottom Row」里排的传输控件（上一集 / 播放暂停 / 下一集 …）。
-            // 空槽不留间距 —— One 的底栏本来就贴边，留空会把它挤窄。
-            ForEach(Array(transportControls.enumerated()), id: \.offset) { _, control in
+            // 左侧：底栏槽位里**非传输类**的控件（全屏 / 画质 / 转屏 …）。
+            // 传输类（播放 / ±10 / 上下集）在画面中央那一行，见 `centerSlotRow`。
+            ForEach(edgeControls, id: \.self) { control in
                 transportControl(control)
             }
             // 时间码：按文字实际宽度占位，不吃 10.8% 窗口宽。
@@ -900,10 +967,12 @@ struct OneSkinChrome: View {
             // 这里以前单独传 `winW * 0.040` 和小一号的字，是同一排里唯一
             // 「框更窄、字形更小」的图标。现在与顶栏同一套：同一颗图标、同一个热区。
             //
-            // ★ 只有在用户**没把全屏键排进 Bottom Row** 时才画这颗兜底键。
-            //   排进去了就由 `transportControls` 按他的槽位画，这里再画一颗
+            // ★ 只有在用户**哪里都没排**全屏键时才画这颗兜底键。
+            //   排进去了就由槽位那一行按他的位置画，这里再画一颗
             //   就是「同一个功能两个按钮、还删不掉其中一颗」。
-            if !transportControls.contains(.fullScreen) {
+            if !edgeControls.contains(.fullScreen),
+               !topSlotRow.contains(.fullScreen),
+               !centerSlotRow.contains(.fullScreen) {
                 iconButton(kit.isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                            label: kit.isFullScreen ? L10n.text("Exit Full Screen") : L10n.text("Full Screen")) {
                     kit.toggleFullScreen()
@@ -1114,7 +1183,7 @@ struct OneSkinChrome: View {
 
     /// 「更多」里的**单条**控件。所有条目集中在这里，一处定义、一处改。
     ///
-    /// 以前同样的功能在四个 `Section` 里各写一遍，和顶栏的 `surfacedControls`
+    /// 以前同样的功能在四个 `Section` 里各写一遍，和顶栏的槽位行
     /// 又是另一套 —— 同一个「倍速」有三处实现。现在只留这一份。
     /// 每个分支都自带「没有这个能力就不画」的守卫（直播没有倍速、单轨没有音轨菜单…），
     /// 因此空守卫不会留下死条目。

@@ -151,26 +151,22 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
          .adBlock, .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]
     }
 
-    /// 能摆进顶栏的那些控件 —— 设置页的两个「直接显示」勾选表就是它。
+    /// 能摆进控制栏的那些控件 —— 设置页的两张「直接显示」勾选表就是它。
     ///
-    /// 转屏与锁定是顶栏的**结构位**（一直在，不归布局管），transport 那几个属于底栏，
-    /// 因此不在这张表里：把它们勾上不会有任何可见变化，那就是在骗人。
-    static var barControls: [PlayerControl] {
-        // ⛔ 这张表必须是 `standardBottom` 的**不相交**补集，否则「能勾但不生效」会复发。
-        //
-        // `surfaced` 两个集合只约束**顶栏**，这个设计成立的前提是「底栏控件根本进不了勾选表」。
-        // 而排除是**隐式**的（靠 `isRoundButton` 返回 false），没有任何东西阻止有人日后
-        // 把某个底栏控件的 `isRoundButton` 改成 true —— 那时它会出现在勾选表里，
-        // 用户勾上/取消却没有任何可见变化，正是本次修的 #7b 同型复发。
-        // 复核 t8 判 O3：当时没有测试锁这条不变量。这里用 Debug 断言把它变成运行期事实。
-        let controls = allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }
-        assert(
-            Set(controls).isDisjoint(with: Set(Self.standardBottom)),
-            "barControls 与 standardBottom 出现交集 ⇒ 底栏控件进了勾选表，"
-            + "勾上/取消将无可见变化（「能勾但不生效」）。检查 isRoundButton 的 switch。"
-        )
-        return controls
-    }
+    /// ⛔ 这里曾经是 `allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }`，
+    /// 于是**播放暂停 / ±10 秒 / 上一集 / 下一集 / 全屏 / 转屏 / 锁定**七项根本
+    /// 不出现在勾选表里。用户的原话是「选集播放、全屏播放、视频播放器的任意控件
+    /// 都需要可以调节任意槽位」—— 缺的首先就是这张表：他连勾都没法勾。
+    ///
+    /// 现在列出**全部**控件。这不只是把表列长，前提是三处渲染都已经吃得住它们：
+    ///   · One 皮肤 `OneSkinPlayerChrome.controlButton` 覆盖全部分支；
+    ///   · 原版 `MobilePlayer.topControlButton` / `transportButton` 也覆盖全部；
+    ///   · 勾上时 `surfaceInTopRow` 会把它摆进顶栏第一个空槽（并自动从底栏摘走），
+    ///     所以「勾了就有位置、有位置就能看见」——「能勾但不生效」不再成立。
+    ///
+    /// 仍然不在这张表里的是**不属于 `PlayerControl` 的结构键**：全屏态的返回、
+    /// 「更多」菜单。它们不是可配置项，也就不存在「设置里勾了却没有」的矛盾。
+    static var barControls: [PlayerControl] { allCases }
 
     /// 这个名字在**本机**真的能画出来吗。
     ///

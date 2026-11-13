@@ -10,8 +10,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: '6.0'
-    MARKETING_VERSION: '1.14.2'
-    CURRENT_PROJECT_VERSION: '1142'
+    MARKETING_VERSION: '1.14.3'
+    CURRENT_PROJECT_VERSION: '1143'
     GENERATE_INFOPLIST_FILE: YES
     INFOPLIST_KEY_CFBundleDisplayName: 顾及One
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
