@@ -14,30 +14,83 @@ cd "$ROOT" || exit 1
 
 [ "${AIGATE_SKIP:-0}" = "1" ] && { echo "⚠ AIGATE_SKIP=1 跳过全部闸门（留痕）"; exit 0; }
 
-# ── ⓿ 门闩：证明两道门**真的能跑、真的能抓** ─────────────────────────────────
+# ── ⓿ 门闩：由**门闩自己**造坏输入，验证这道门有没有判别力 ────────────────────
 #
-# ⚠️ 这里不能 grep 自己文件里的字符串。本项目已因此出过第三层同源缺陷：
-#   首版门闩检查「自己体内有没有 'audit-oneskin-keys.sh' 这个 marker」，
-#   而那个 marker 就写在它自己上方的声明行里 ⇒ **恒真**。
-#   实测：把 One 门的实体整段删掉、只留 marker 声明行，门闩仍判「功能完整」，
-#   提交照常落地。**校验的对象与依据是同一份东西。**
+# 本项目这条线上被打穿四层，逐层记录（每一层都是「判据看不见自己瞎在哪」）：
+#   1  静默跳过        —— 脚本不存在时什么也不发生
+#   2  静默禁门        —— core.hooksPath 指向缺失目录时 common hooks 静默失效
+#   3  恒真自校验      —— grep 自己文件里的 marker 字符串（那串就写在它自己上方）
+#   4  信任被测方自述  —— 假脚本 `--selftest` 打印 "SELFTEST: OK" 就能过
 #
-# 所以改为**实际调用一次**：让每道门自己证明「我在且我能抓」。
-#   · One 键名门：`audit-oneskin-keys.sh --selftest` —— 它在临时 fixture 里
-#     造一个带随机 nonce 的已知违规，要求自己抓到。抓不到即 exit 1。
-#   · 断言强度门：见下方 ①，工具缺失时出声说明未校验（不静默）。
+# 第 3 层之后我改用「调用 --selftest」，但那是**被测方提供的入口**：
+# 假脚本预置一句 "SELFTEST: OK; exit 0" 即可骗过。实测确被打穿（COMMIT_EXIT=0）。
 #
-# 脚本不存在（分支未合并的树）时无法自检 —— 那是「尚未合并」不是「装错了」，
-# 不阻断，但由 ② 段的覆盖披露出声。
+# 所以门闩必须同时做两件事，缺一不可：
+#
+#   M1 结论不可伪造：给 selftest 传一个**本次现生成**的 nonce，要求它回显在 OK 行。
+#      假脚本不知道这个值 ⇒ 造不出合法 OK。直接手工跑时脚本自生成，不影响可用性。
+#
+#   M2 不信自述，自己造坏输入：门闩在临时副本里**亲手塞一个已知违规**，
+#      然后调用被测脚本，要求它必须变红。被测方无法预置答案——它不知道门闩
+#      会在哪里放什么。这才是「判别力」判据，而不是「你说你行」。
+#
+# M2 还兼作 M1 的兜底：即使 --selftest 被伪造，M2 走的是**正常检查路径**
+# 而不是被测方可以特判的自检入口。
 K="$ROOT/Scripts/audit-oneskin-keys.sh"
 if [ -x "$K" ]; then
-  SELFTEST_OUT="$("$K" --selftest 2>&1)"
-  SELFTEST_RC=$?
-  if [ "$SELFTEST_RC" -ne 0 ]; then
+  LATCH_FAIL=""
+
+  # ── M1：结论不可伪造 ──
+  LATCH_NONCE="n$(printf '%s%s' "$$" "$RANDOM" | tr -d '0-9' | cut -c1-10)"
+  LATCH_NONCE="z${LATCH_NONCE:-fallback}"
+  M1_OUT="$(ONESKIN_SELFTEST_NONCE="$LATCH_NONCE" "$K" --selftest 2>&1)"
+  M1_RC=$?
+  if [ "$M1_RC" -ne 0 ]; then
+    LATCH_FAIL="M1：selfest 自检失败（脚本抓不到已知违规）"
+  elif ! printf '%s' "$M1_OUT" | grep -q "SELFTEST: OK nonce=$LATCH_NONCE"; then
+    LATCH_FAIL="M1：selftest 未回显本次 nonce（结论不可信 —— 可能不是真脚本在回答）"
+  fi
+
+  # ── M2：门闩亲手造坏输入，看它红不红 ──
+  if [ -z "$LATCH_FAIL" ]; then
+    M2_TMP="$(mktemp -d)"
+    mkdir -p "$M2_TMP/App" "$M2_TMP/Scripts" "$M2_TMP/Sources/TVCore"
+    cp "$K" "$M2_TMP/Scripts/audit-oneskin-keys.sh"
+    chmod +x "$M2_TMP/Scripts/audit-oneskin-keys.sh"
+    # 键名对齐 PINNED，让②通过，专测①
+    {
+      echo 'public enum OneSkinKeys {'
+      printf '    public static let enabledKey = "oneSkinEnabled"\n'
+      printf '    public static let fitModeKey = "oneSkinFitMode"\n'
+      printf '    public static let speedKey = "oneSkinSpeed"\n'
+      printf '    public static let loopKey = "oneSkinLoop"\n'
+      printf '    public static let fillKey = "oneSkinFill"\n'
+      printf '    public static let autoFullScreenKey = "oneSkinAutoFullScreen"\n'
+      printf '    public static let twoColumnKey = "oneSkinTwoColumn"\n'
+      echo '}'
+    } > "$M2_TMP/Sources/TVCore/OneSkinShared.swift"
+    printf 'public enum OneWatchPageModel {}\n' > "$M2_TMP/Sources/TVCore/OneWatchPageModel.swift"
+    # ← 门闩亲手放的违规（纯字母，避免撞检查正则的字符类）
+    M2_MARK="leak$(printf '%s' "$RANDOM" | tr '0-9' 'qrstuvwx')"
+    printf 'enum M2Probe { static let leaked = "oneSkin%s" }\n' "$M2_MARK" > "$M2_TMP/App/M2Probe.swift"
+
+    M2_OUT="$(cd "$M2_TMP" && ./Scripts/audit-oneskin-keys.sh 2>&1)"
+    M2_RC=$?
+    # 要求：必须非 0，且输出里点到门闩刚放进去的那个标记
+    if [ "$M2_RC" -eq 0 ]; then
+      LATCH_FAIL="M2：喂已知违规仍判通过（这道门没有判别力）"
+    elif ! printf '%s' "$M2_OUT" | grep -q "$M2_MARK"; then
+      LATCH_FAIL="M2：判红了但没指出门闩放入的违规（$M2_MARK）—— 可能因别的原因变红"
+    fi
+    rm -rf "$M2_TMP"
+  fi
+
+  if [ -n "$LATCH_FAIL" ]; then
     echo "════ 提交被拦：One 键名门自检失败（这道门已失效）════"
-    echo "$SELFTEST_OUT"
-    echo "  ⇒ 脚本存在但抓不到已知违规：逻辑被改坏 / 被裁剪 / 依赖漂移。"
-    echo "  修复后重试：./Scripts/audit-oneskin-keys.sh --selftest"
+    echo "  $LATCH_FAIL"
+    [ -n "${M1_OUT:-}" ] && printf '%s\n' "$M1_OUT" | sed 's/^/    M1| /'
+    [ -n "${M2_OUT:-}" ] && printf '%s\n' "$M2_OUT" | sed 's/^/    M2| /' | head -12
+    echo "  ⇒ 修复后重试：./Scripts/audit-oneskin-keys.sh --selftest"
     exit 1
   fi
 fi

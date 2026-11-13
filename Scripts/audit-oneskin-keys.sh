@@ -75,6 +75,10 @@ check_pinned() {
 #   抓不到 = 脚本已死 / 被裁剪 / 逻辑坏掉，门闩据此变红。
 #   fixture 里写入随机 nonce，要求输出中出现该串 —— 这样「通过」不可能来自
 #   缓存、巧合或历史输出。
+# M1：selftest 的**成功**行必须携带本次运行的不可伪造证据。
+#   非阻塞参数：调用方（pre-commit 门闩）通过环境变量传入 nonce。
+#   做法与 FAIL 分支对称：FAIL 分支已要求「输出里必须出现本次 nonce」，
+#   成功分支同样要求。伪造者不知道本次 nonce ⇒ 造不出合法的 OK 行。
 selftest() {
   local tmp rc=0
   tmp="$(mktemp -d)" || { echo "SELFTEST: FAIL (mktemp)"; return 1; }
@@ -83,7 +87,14 @@ selftest() {
 
   # ⚠️ nonce 必须**纯字母**：检查正则 "oneSkin[A-Za-z]*" 不含数字，带数字的
   #    nonce 会让 fixture 自身不匹配该正则，导致自检假红。实测踩过。
-  local nonce="st$(printf '%s' "$$" | tr -d '0-9')$(printf '%s' "$RANDOM" | tr '0-9' 'abcdefghij')"
+  #
+  # M1：优先采用调用方传入的 nonce（$ONESKIN_SELFTEST_NONCE）。
+  #   门闩自己生成 nonce 并校验 OK 行回显它 ⇒ 被测方无法预置答案。
+  #   直接手工运行时退回自生成，保持脚本可独立使用。
+  local nonce="${ONESKIN_SELFTEST_NONCE:-}"
+  if [ -z "$nonce" ]; then
+    nonce="st$(printf '%s' "$$" | tr -d '0-9')$(printf '%s' "$RANDOM" | tr '0-9' 'abcdefghij')"
+  fi
   mkdir -p "$tmp/App" "$tmp/Scripts" "$tmp/Sources/TVCore"
   local self; self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   cp "$self" "$tmp/Scripts/audit-oneskin-keys.sh"
@@ -113,7 +124,7 @@ selftest() {
     rc=1
   fi
 
-  [ "$rc" -eq 0 ] && echo "SELFTEST: OK"
+  [ "$rc" -eq 0 ] && echo "SELFTEST: OK nonce=$nonce"
   return "$rc"
 }
 
