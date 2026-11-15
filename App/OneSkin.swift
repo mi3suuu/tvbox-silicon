@@ -2651,17 +2651,21 @@ struct OneSkinStage: View {
             // 于是 `box.width ≡ ratioBase.width` ⇒ `dx` 恒为 0，而期望却是 47，
             // 每帧误报 ⚠MIXED。真机 20/20 条 GEOM 全是这个形态。
             //
-            // 修法：`expectDX` 由 `ratioBase.width - availableScreenSize().width` **算出**，
-            // 而不是写死常量。这样：
-            //   · 让位规则若改成扣右带（:316 改了），这里自动跟着变，不需要同步两处；
-            //   · 当前规则下差值为 0 ⇒ 期望 0；
-            //   · 关键——检测器**没有变成恒真**：期望值来自另一条独立代码路径
-            //     （`UIApplication.screen.bounds` + `safeAreaInsets`），
-            //     一旦 `box` 被某个子视图错误地缩窄（拿 ratio 当容器），
-            //     `dx` 仍会与这个期望值分叉并立刻报 ⚠MIXED。
-            // ⚠ 严禁改成 `let expectDX = 0` 这种字面量：那等于把检测器删掉（B6）。
-            let expectWidth = OneSkin.availableScreenSize(landscape: landscapeNow).width
-            let expectDX = Int((ratioBase.width - expectWidth).rounded())
+            // 修法：`expectDX = 0`。
+            //
+            // ⚠ expectDX = 0 是【跨函数契约哨兵】，不是几何自检：
+            //    断言 |ratioBase.width - box.width| <= 8。两者同源于调用处 useAvail.width（:2101/:2606），
+            //    故恒成立——它的价值是「哪天 :2102 不再传 useAvail.width 就会立刻报」。
+            // ⛔ 严禁改成 `ratioBase.width - availableScreenSize(...)`：跨坐标系，竖持容器渲染成 split 时会算 -212。
+            //
+            // 三版历程（四轮返工，别再走回头路）：
+            //   v1 `2f16835` expectDX = 0                       ✅ 正确
+            //   v2 `7d2aeaa` ratioBase.width - availableScreenSize(...)  ❌ 跨坐标系，真机 -212
+            //   v3 本提交  回到 expectDX = 0                     ✅
+            // 真机失败证据（2026-11-15 iPhone Duo 内屏横持）：
+            //   GEOM[split] box=466x644 ratio=466x678 dX=0(expect -212) → ⚠MIXED
+            // 根因：ratioBase.width 是**容器宽**(466)，availableScreenSize 横持返回**屏幕长边**(678)。
+            let expectDX = 0
             // ★ dY 的期望值不再是 0：非全屏时 `box` 会扣掉底部安全区（P1-4 修正），
             //   全屏时四边全忽略、扣 0。自检必须跟着这个口径走，
             //   否则每一帧都会报 ⚠MIXED，真出问题时反而看不见。
