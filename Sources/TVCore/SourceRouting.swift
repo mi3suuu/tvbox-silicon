@@ -101,26 +101,36 @@ public enum SourceRoute: String, Codable, CaseIterable, Sendable {
     }
 }
 
-/// Rewrites a source's `api` between its own address and the relay address, so a viewer can flip a
-/// whole subscription (or one source) between direct and proxied without editing the subscription.
+/// Rewrites a source's `api` between its own address and the address the app relays it through.
+///
+/// ## 中转这件事现在是映匣自己的
+///
+/// 以前这里写死了一台公共服务器的中转（`149.104.28.149:8100`）：`.proxy` 会把源地址改写成
+/// `/cms/<token>/<host>/<path>`，请求和签名都捏在那台机器手里 —— 它一关，所有「中转」源一起
+/// 变黑；它也看不到这台手机的任何东西，却必须信任它。
+///
+/// 现在中转 = **本机回环中继**（`LocalProxyServer`）+ **观众自己配的出口代理**（`CustomProxyStore`）：
+///   · 源地址改写成 `http://127.0.0.1:<port>/p/<proxyID>/<scheme>/<host>/<port><path>`；
+///   · 字节由 App 自己搬运，出去的那条腿走你选的那台代理（HTTP / HTTPS / SOCKS5）；
+///   · 没配代理就是 `/d/…`，等于直连 —— 那样中转没有意义，所以 `.auto` 不会替你翻到中转。
+///
+/// ⚠️ 一句必须说清的话：**回环中继不能让一个被墙的源变得能访问**。它改变的是「从哪条腿出去」
+/// 和「请求长什么样」，不改「这台手机能不能连上那台机器」。149 之所以能救活那些源，是因为它
+/// 是一台境外服务器；本机做不到这件事。要救，只有观众自己给一个出口。
 public enum SourceRelay {
-    /// The public relay that fronts a source's HTTP API and its media.
-    public static let host = "149.104.28.149"
-    public static let port = 8100
-    /// The token that gates the relay.
-    public static let token = "rex8f3a2c1d"
+    /// 旧公共中继的地址，**只用于解包**：历史订阅里带过来的中转地址要能还原成真实地址。
+    /// 新的中转地址不再由它产生，也不会再出现在任何随包数据里。
+    private static let legacyHost = "149.104.28.149"
+    private static let legacyPort = 8100
 
-    /// The relay prefix used for the CMS (list/detail/search) API.
-    public static var cmsPrefix: String { "http://\(host):\(port)/cms/\(token)/" }
-
-    /// Whether an address already points at our relay.
+    /// Whether an address is one of the old public relay's (and therefore needs unwrapping).
     public static func isRelayed(_ api: String) -> Bool {
-        api.contains("\(host):\(port)/cms/") || api.contains("\(host):\(port)/cmsr/")
+        api.contains("\(legacyHost):\(legacyPort)/cms/") || api.contains("\(legacyHost):\(legacyPort)/cmsr/")
     }
 
-    /// The source's own (direct) address, stripping our relay prefix when present.
+    /// The source's own (direct) address, stripping the old relay prefix when present.
     public static func directAddress(_ api: String) -> String {
-        let needle = "\(host):\(port)/"
+        let needle = "\(legacyHost):\(legacyPort)/"
         guard let range = api.range(of: needle) else { return api }
         let after = api[range.upperBound...]
         // /cms/<token>/<host>/<path> or /cmsr/<token>/<host>/<path>
@@ -133,28 +143,26 @@ public enum SourceRelay {
         return "\(scheme)://" + parts.dropFirst(2).joined(separator: "/")
     }
 
-    /// The relay address for a source's own address. Non-HTTP apis (JAR/csp classes, local files)
-    /// are returned unchanged: only native CMS endpoints are relayed.
-    public static func relayedAddress(_ api: String) -> String {
-        guard let url = URL(string: api), let sourceHost = url.host(),
-              url.scheme == "http" || url.scheme == "https" else { return api }
-        guard !isRelayed(api) else { return api }
-        // Encode the whole direct address behind the relay so nothing is lost:
-        // http — /cms/<token>/<host[:port]>/<path[?query]>; https — /cmsr/<token>/…
-        let route = url.scheme == "https" ? "cmsr" : "cms"
-        var target = sourceHost
-        if let sourcePort = url.port { target += ":\(sourcePort)" }
-        var path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
-        if let query = url.query { path += "?\(query)" }
-        return "http://\(host):\(port)/\(route)/\(token)/\(target)/\(path)"
+    /// The loopback address that relays a source's own address, through `proxyID` when one is given.
+    ///
+    /// Returns the address unchanged when the loopback server is not up or the api is not HTTP
+    /// (a JAR class, `assets://`, a local file): those are not URLs the relay can carry.
+    public static func relayedAddress(_ api: String, base: URL?, proxyID: String?) -> String {
+        let direct = directAddress(api)
+        guard let base, let url = URL(string: direct), let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return direct }
+        let loopback = proxyID.map { LocalProxyServer.proxyURL(base: base, url: url, proxyID: $0) }
+            ?? LocalProxyServer.directURL(base: base, url: url)
+        return loopback.absoluteString
     }
 
     /// Applies a route to a source's api string.
-    public static func apply(_ route: SourceRoute, to api: String, directOK: Bool = true) -> String {
+    public static func apply(_ route: SourceRoute, to api: String, base: URL? = nil, proxyID: String? = nil) -> String {
         switch route {
         case .direct: return directAddress(api)
-        case .proxy: return relayedAddress(api)
-        case .auto: return api
+        // 中转必须有出口才有意义：没有代理就不包装，免得绕一圈回环还是从同一条腿出去。
+        case .proxy: return proxyID == nil ? directAddress(api) : relayedAddress(api, base: base, proxyID: proxyID)
+        case .auto: return directAddress(api)
         }
     }
 }
@@ -162,9 +170,9 @@ public enum SourceRelay {
 extension Site {
     /// A copy whose `api` is rewritten to the given route. Only native (type 1/4) CMS endpoints can be
     /// relayed; a JAR/csp class or built-in source is returned unchanged.
-    public func routed(_ route: SourceRoute) -> Site {
+    public func routed(_ route: SourceRoute, relayBase: URL? = nil, proxyID: String? = nil) -> Site {
         guard native, !api.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return self }
-        let next = SourceRelay.apply(route, to: api)
+        let next = SourceRelay.apply(route, to: api, base: relayBase, proxyID: proxyID)
         guard next != api else { return self }
         var raw = self.raw
         raw["api"] = .string(next)

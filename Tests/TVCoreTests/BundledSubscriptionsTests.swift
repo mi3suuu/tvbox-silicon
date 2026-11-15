@@ -38,7 +38,8 @@ import Testing
 @Test func bundledRoutePackKeepsItsGroups() throws {
     let addresses = BundledSubscriptions.addresses
     #expect(addresses.first == BundledSubscriptions.kanjuAddress)
-    #expect(addresses.count > 20)
+    // 22 组并成 7 组：影视 可播/待测、成人 可播、直播、4K·网盘、工具·插件、失效（默认关闭）。
+    #expect(addresses.count == 8)
 
     let direct = try #require(BundledSubscriptions.document(for: "builtin://yingxia-route-00"))
     #expect(direct.origin.absoluteString == "builtin://yingxia-route-00")
@@ -46,17 +47,31 @@ import Testing
     // Verdicts travel with the sources, so the source list can still show why a line is routed.
     #expect(direct.sites.contains { $0.raw["_probe"] != nil })
 
-    let proxyEntry = try #require(BundledSubscriptions.entry(for: "builtin://yingxia-route-02"))
-    #expect(proxyEntry.routing == .proxy)
-    #expect(proxyEntry.name.contains("中转"))
+    let playable = try #require(BundledSubscriptions.entry(for: "builtin://yingxia-route-00"))
+    #expect(playable.routing == .direct)
+    #expect(playable.name.contains("可播"))
 
-    // The dead group ships switched off.
-    let dead = try #require(BundledSubscriptions.entry(for: "builtin://yingxia-route-11"))
+    // The dead bucket ships switched off.
+    let dead = try #require(BundledSubscriptions.entry(for: "builtin://yingxia-route-06"))
     #expect(dead.enabled == false)
+}
 
-    let total = addresses.compactMap { BundledSubscriptions.document(for: $0) }
-        .reduce(0) { $0 + $1.sites.count + $1.lives.count }
-    #expect(total > 900)
+/// 中转只在映匣里：包里不能再有任何一台外部中继的地址。
+///
+/// 这条是回归闸门 —— 上一版有 31 个源把 `149.104.28.149:8100/cms/<token>/…` 写死在 `api` 里，
+/// 那台机器一关（或换了 token），所有「中转」源一起变黑，而映匣自己一点办法都没有。
+/// 新的中转是 `LocalProxyServer` 回环 + 观众自己的出口代理，随包数据里一个外部中继地址都不该有。
+@Test func routePackCarriesNoExternalRelay() throws {
+    for address in BundledSubscriptions.addresses {
+        guard let document = BundledSubscriptions.document(for: address) else { continue }
+        for site in document.sites {
+            #expect(!site.api.contains("149.104.28.149"), "\(site.key) 还指着外部中继")
+            #expect(!String(describing: site.raw).contains("149.104.28.149"), "\(site.key) 的附加信息里还留着外部中继")
+        }
+        for live in document.lives {
+            #expect(!live.url.absoluteString.contains("149.104.28.149"), "\(live.name) 还指着外部中继")
+        }
+    }
 }
 
 /// The pack that ships to users says `builtin://kanju`, so importing it lands on the same entry the

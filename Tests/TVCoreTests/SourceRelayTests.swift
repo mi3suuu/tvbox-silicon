@@ -2,41 +2,57 @@ import Foundation
 import Testing
 @testable import TVCore
 
-/// 源中继（SourceRelay）：直连地址与中继地址之间的对称编解码。
-/// P1-2 之前 relay 丢端口/query/https，反向还原靠 hasPrefix("https") 猜而恒错；这里锁定 scheme/host/port/path/query 全保留。
+/// 源中转（SourceRelay）：旧公共中继只负责**解包**，新的中转地址是映匣自己的回环中继。
+///
+/// 这一套钉两件事：
+///   ① 历史订阅里带过来的 `149.104.28.149:8100/cms[r]/<token>/<host>/<path>` 能还原成真实地址
+///      （scheme / host / port / path / query 全保留），升级后自动落到直连；
+///   ② 新的中转**不再产生任何外部服务器地址** —— 只有 `127.0.0.1` 的回环，
+///      配了出口代理走 `/p/<proxyID>/…`，没配就走 `/d/…`。
 @Suite struct SourceRelayTests {
 
-    @Test func relayAndDirectRoundTripAnHTTPSAddressWithPortAndQuery() {
+    @Test func legacyRelayIsUnwrappedWithPortAndQueryIntact() {
         let direct = "https://api.example.com:8443/api.php?id=1&v=2"
-        let relayed = SourceRelay.relayedAddress(direct)
-        #expect(relayed.contains("cmsr"))                        // https → cmsr
-        #expect(relayed.contains("api.example.com:8443"))        // 端口保留
-        #expect(relayed.contains("id=1"))                        // query 保留
-        #expect(SourceRelay.directAddress(relayed) == direct)
+        let legacy = "http://149.104.28.149:8100/cmsr/rex8f3a2c1d/api.example.com:8443/api.php?id=1&v=2"
+        #expect(SourceRelay.isRelayed(legacy))
+        #expect(SourceRelay.directAddress(legacy) == direct)
     }
 
-    @Test func relayAndDirectRoundTripPlainHTTP() {
-        let direct = "http://api.example.com/api"
-        let relayed = SourceRelay.relayedAddress(direct)
-        #expect(relayed.contains("/cms/"))
-        #expect(SourceRelay.directAddress(relayed) == direct)
+    @Test func legacyRelayUnwrapsPlainHTTP() {
+        let legacy = "http://149.104.28.149:8100/cms/rex8f3a2c1d/91md.me/api.php/provide/vod"
+        #expect(SourceRelay.directAddress(legacy) == "http://91md.me/api.php/provide/vod")
     }
 
-    @Test func anAlreadyRelayedAddressIsLeftAlone() {
-        let direct = "https://api.example.com/api"
-        let relayed = SourceRelay.relayedAddress(direct)
-        #expect(SourceRelay.relayedAddress(relayed) == relayed)
-        #expect(SourceRelay.isRelayed(relayed))
+    @Test func aRelayedAddressIsNeverProducedForAnOrdinarySource() {
+        let direct = "https://api.example.com/api.php?id=1"
+        let relayed = SourceRelay.relayedAddress(direct, base: URL(string: "http://127.0.0.1:9999/"), proxyID: "p1")
+        #expect(relayed.hasPrefix("http://127.0.0.1:9999/p/p1/https/api.example.com/443/"))
+        #expect(!relayed.contains("149.104.28.149"))
+        // 回环编码是自洽的：端口、路径、query 都能原样解回来。
+        let target = try? #require(LocalProxyServer.parse(URL(string: relayed)!.path + "?" + (URL(string: relayed)!.query ?? "")))
+        #expect(target?.host == "api.example.com")
+        #expect(target?.port == 443)
+        #expect(target?.proxyID == "p1")
+        #expect(target?.path.hasSuffix("/api.php?id=1") == true)
+    }
+
+    @Test func noProxyMeansNoHop() {
+        // 没有出口代理时中转没有意义：地址保持原样，不为绕一圈回环多付一次转发。
+        #expect(SourceRelay.apply(.proxy, to: "https://api.example.com/api",
+                                  base: URL(string: "http://127.0.0.1:9999/"), proxyID: nil) == "https://api.example.com/api")
+        // 中继没起来（base 为 nil）时同理：退直连，不产生一个打不开的地址。
+        #expect(SourceRelay.apply(.proxy, to: "https://api.example.com/api", base: nil, proxyID: "p1") == "https://api.example.com/api")
     }
 
     @Test func nonHTTPApisAreReturnedUnchanged() {
-        // JAR/csp 类、本地文件不是原生 CMS 端点，不中继。
-        #expect(SourceRelay.relayedAddress("csp_Spider") == "csp_Spider")
-        #expect(SourceRelay.relayedAddress("file:///tmp/a.json") == "file:///tmp/a.json")
-        #expect(SourceRelay.relayedAddress("jar://com.x.Spider") == "jar://com.x.Spider")
+        // JAR/csp 类、本地文件不是原生 CMS 端点，不中转。
+        let base = URL(string: "http://127.0.0.1:9999/")
+        #expect(SourceRelay.relayedAddress("csp_Spider", base: base, proxyID: "p1") == "csp_Spider")
+        #expect(SourceRelay.relayedAddress("file:///tmp/a.json", base: base, proxyID: "p1") == "file:///tmp/a.json")
+        #expect(SourceRelay.relayedAddress("jar://com.x.Spider", base: base, proxyID: "p1") == "jar://com.x.Spider")
     }
 
-    @Test func directAddressLeavesANonRelayedAddressAlone() {
+    @Test func directAddressLeavesAnOrdinaryAddressAlone() {
         #expect(SourceRelay.directAddress("https://api.example.com/api") == "https://api.example.com/api")
     }
 }

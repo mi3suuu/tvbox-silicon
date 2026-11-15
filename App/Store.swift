@@ -1135,6 +1135,7 @@ import TVCore
     func seedAggregatedSubscriptions() async {
         guard !Distribution.isAppStore else { return }
         dropDeveloperHostedFeeds()
+        dropRetiredBundledFeeds()
         let pending = Self.aggregatedSubscriptionAddresses.filter { address in
             !dismissedAggregateAddresses.contains(address) && !subscriptions.contains { $0.address == address }
         }
@@ -1166,6 +1167,27 @@ import TVCore
         for entry in legacy {
             subscriptions.removeAll { $0.address == entry.address && $0.environmentID == entry.environmentID }
             // 别的环境可能还在用同一个地址，那时缓存不能删。
+            guard !subscriptions.contains(where: { $0.address == entry.address }) else { continue }
+            documents[entry.address] = nil
+            subscriptionErrors[entry.address] = nil
+            if persistsChanges {
+                try? FileManager.default.removeItem(at: Self.file(for: entry))
+                ImportedFiles.remove(entry.address)
+            }
+        }
+        saveSubscriptionList()
+    }
+    /// 内置包重打包之后，旧组号在这一版里已经不存在了（22 组并成 7 组，组号也重排过）。
+    ///
+    /// 留着那些条目只会永远报「导入失败」，而它们的源已经被并进新组 —— 所以按「看起来是内置
+    /// 地址、但这一版包里没有」来删。不写进 `dismissedAggregateAddresses`：那不是观众的选择，
+    /// 将来包里如果又出现同一个地址，它该照常装回来。
+    private func dropRetiredBundledFeeds() {
+        let live = Set(BundledSubscriptions.addresses)
+        let retired = subscriptions.filter { BundledSubscriptions.isBundled($0.address) && !live.contains($0.address) }
+        guard !retired.isEmpty else { return }
+        for entry in retired {
+            subscriptions.removeAll { $0.address == entry.address && $0.environmentID == entry.environmentID }
             guard !subscriptions.contains(where: { $0.address == entry.address }) else { continue }
             documents[entry.address] = nil
             subscriptionErrors[entry.address] = nil
@@ -1790,6 +1812,8 @@ import TVCore
     /// and switched back once the direct line recovers.
     private func applySourceRouting(_ config: Subscription) {
         let byAddress = Dictionary(environmentSubscriptions.map { ($0.address, $0) }, uniquingKeysWith: { $1 })
+        // 中转地址是回环的，要端口：中继没起来时只能退直连（下一次合并会补上）。
+        let relayBase = LocalProxyServer.shared.baseSync
         let sites = config.sites.map { site -> Site in
             let origin = site.origin(or: config.origin)
             let sub: SubscriptionEntry? = {
@@ -1798,20 +1822,22 @@ import TVCore
             }()
             let explicit = sourceRouting.route(site, origin: origin)
             let effective = explicit ?? (sub?.routing ?? .auto)
+            // 这台源在设置里指定了哪台出口代理。中转只在这时候才有意义：
+            // 回环中继换的是「从哪条腿出去」，不是「这台手机能不能连上」。
+            let proxyID = CustomProxyStore.shared.route(origin: origin, sourceKey: site.sourceKey).proxyID
             switch effective {
             case .direct:
                 return site.routed(.direct)
             case .proxy:
-                return site.routed(.proxy)
+                return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
             case .auto:
                 // Follow connectivity only for native sources whose address can be relayed.
                 guard site.native, !site.api.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return site }
-                let relayed = SourceRelay.isRelayed(site.api)
-                let failing = SourceHealth.shared.failedRepeatedly(site, origin: origin)
-                if failing && !relayed {
-                    return site.routed(.proxy)
-                } else if !failing && relayed {
-                    return site.routed(.direct)
+                // 旧公共中继的地址一律解包：那台服务器不在映匣里，留着就是一条随时会断的腿。
+                if SourceRelay.isRelayed(site.api) { return site.routed(.direct) }
+                // 只有配了出口代理才值得翻：没配的时候「中转」只是绕一圈回环，还是同一条腿出去。
+                if SourceHealth.shared.failedRepeatedly(site, origin: origin), proxyID != nil {
+                    return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
                 }
                 return site
             }
