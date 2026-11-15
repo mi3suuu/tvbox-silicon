@@ -85,6 +85,11 @@ struct SitesView: View {
     @State private var selecting = false
     /// The last batch result, said where the buttons are rather than in a sheet.
     @State private var batchNote: String?
+    /// 已经点过「展开其余」的分组。组里 168 个源不该一次全画出来 —— 先给一屏，
+    /// 想全看的人自己点开；搜索与选择模式下不看这个（那两种时刻要的是「全都在」）。
+    @State private var expandedGroups: Set<String> = []
+    /// 每组先画多少张卡。手机上两列，12 张 = 六行，刚好一屏多一点。
+    private var previewLimit: Int { 12 }
     /// 正在改名的分组（幂等：非 nil 就弹那个改名框）。
     @State private var renamingGroup: SourceGroup?
     /// 正在改名的订阅地址。
@@ -165,13 +170,17 @@ struct SitesView: View {
                             // 头仍然在，仍然可以点开。
                             Section {
                                 if !collapsed.contains(group.id) {
+                                    let preview = previewSites(group)
                                     LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
-                                        ForEach(group.sites) { site in
+                                        ForEach(preview.sites) { site in
                                             siteRow(site, group: group, config: config, sites: sites)
                                         }
                                     }
                                     // Unfolds from under its header; folding only fades, as the groups below slide up.
                                     .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -16)), removal: .opacity))
+                                    if preview.hidden > 0 || expandedGroups.contains(group.id) {
+                                        moreSourcesButton(group, hidden: preview.hidden)
+                                    }
                                 }
                             } header: {
                                 groupHeader(group)
@@ -479,6 +488,42 @@ struct SitesView: View {
             header.contextMenu { measureGroupButton(group) }
         }
         #endif
+    }
+
+    /// 这一组现在该画哪些源。
+    ///
+    /// 一个组 168 个源一次全画出来，读者只会滚过去，不会看 —— 先给 `previewLimit` 张，
+    /// 剩下的收在一颗按钮后面。三种情况不预览：搜索中（要找的东西可能在后面）、
+    /// 选择中（整组勾选要靠满屏）、已经点过展开。
+    private func previewSites(_ group: SourceGroup) -> (sites: [Site], hidden: Int) {
+        let showAll = !query.isEmpty || selecting || expandedGroups.contains(group.id)
+        guard !showAll, group.sites.count > previewLimit else { return (group.sites, 0) }
+        return (Array(group.sites.prefix(previewLimit)), group.sites.count - previewLimit)
+    }
+
+    /// 「展开其余 156 个」/「收起」。展开是这一页的一次性操作，不写盘 ——
+    /// 下次进来又回到一屏，否则一次展开会让之后每次进页面都铺一屏。
+    @ViewBuilder
+    private func moreSourcesButton(_ group: SourceGroup, hidden: Int) -> some View {
+        Button {
+            withAnimation(.snappy(duration: 0.28)) {
+                if hidden > 0 { expandedGroups.insert(group.id) } else { expandedGroups.remove(group.id) }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: hidden > 0 ? "chevron.down" : "chevron.up")
+                    .font(.caption2.weight(.bold))
+                Text(hidden > 0
+                     ? L10n.text("Show the rest (%lld)", hidden)
+                     : L10n.text("Fold the extra back"))
+                    .font(.caption.weight(.semibold))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.white.opacity(0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .accessibilityIdentifier("sources.more." + group.id)
     }
 
     /// 长按分组头 → 「测速这一组」。

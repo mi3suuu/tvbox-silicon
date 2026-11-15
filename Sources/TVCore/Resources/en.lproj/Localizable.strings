@@ -2641,3 +2641,5 @@
 "These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again.";
 "Lock Controls — top right" = "Lock Controls — top right";
 "Stop Measuring" = "Stop Measuring";
+"Show the rest (%lld)" = "Show the rest (%lld)";
+"Fold the extra back" = "Fold the extra back";
