@@ -422,6 +422,14 @@ enum QALaunch {
             // 也没有 OneSkin 皮肤可预览，故此处不做等价实现，只给出可见的说明。
             Text("one-preview is an iPhone-only QA page")
             #endif
+        // 播放器控件布局页：不需要订阅、不连网络，用来直接截图核对预览
+        // （`-qaPage player-controls`）。
+        } else if page == "player-controls" {
+            #if os(iOS)
+            PlayerControlsSettingsView()
+            #else
+            Text("player-controls is an iPhone-only QA page")
+            #endif
         // Pages that need no subscription, so an App Store build (`-qaAppStore 1`) can show them before one is added.
         } else if section == self.section, store.subscription == nil, page == "cloud-accounts" {
             CloudDriveView()
@@ -550,7 +558,7 @@ enum QALaunch {
 
     static func overrides(_ section: AppSection) -> Bool {
         guard section == self.section, let page else { return false }
-        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add", "one-preview"].contains(page.split(separator: ":").first.map(String.init) ?? "")
+        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add", "one-preview", "player-controls"].contains(page.split(separator: ":").first.map(String.init) ?? "")
     }
 }
 

@@ -2,375 +2,737 @@ import SwiftUI
 import TVCore
 
 #if os(iOS)
-/// Settings → Playback → Player Controls: drop the player's buttons onto the ten slots of the top
-/// bar or the ten slots of the bottom row, or into the More menu — and set their left-to-right
-/// place. A live preview at the top mirrors the player's chrome as you drag. One layout serves
-/// every player shape (folded outer screen, unfolded upright, unfolded sideways).
+// MARK: - 播放器控件布局（设置 › 播放 › 播放器控件）
+//
+// ## 这一页为什么重写
+//
+// 旧版是三份独立配置（外屏 / 展开竖持 / 展开横持），顶部先选形态再一份一份地排，
+// 外加两张各 27 行的「直接显示」开关表。实际后果：
+//   ① 用户在外屏那份里排好，播放器正在横持 ⇒ 读的是另一份 ⇒「改了完全没反应」；
+//   ② 同一件事要为三个形态各做一遍 ⇒「很乱」；
+//   ③ 开关表和槽位是两个与条件，只满足一个就什么也不出现 ⇒「设置了不生效」。
+//
+// 现在的规则只有三条：
+//   1. **一份排布**，三种形态共用。屏幕放不下的自动收进「更多」，宽屏时自动回来。
+//   2. **两个列表、拖拽排序**：上面一行是画面顶部的控件，下面一行是进度条那一条。
+//      进度条、时间码、剩余时间本身就是这一行里的普通条目 —— 与按钮一样可挪、可删。
+//   3. **下面添加**：没放上去的控件按「更多」面板的真实分组列在下方，点 ＋ 加回去。
 struct PlayerControlsSettingsView: View {
-    /// 三形态各自独立配置（见 `PlayerControlsLayout.Shape`）。
-    ///
-    /// 此前只有一个 `playerControlsOrder` 键，所有形态共用一套槽位。
-    /// 外屏顶栏只放得下 2–3 个按钮，横持能放 6 个 —— 共用一套必然有个形态是错的：
-    /// 在外屏删掉的按钮，横持时也没了；为横持加的按钮，外屏会挤成一条。
-    /// 现在每个形态一份，设置页顶部切换。
-    @State private var editing: PlayerControlsLayout.Shape = .folded
-    @AppStorage(PlayerControlsLayout.Shape.folded.storageKey)
-    private var foldedRaw = PlayerControlsLayout.standard.stored
-    @AppStorage(PlayerControlsLayout.Shape.unfolded.storageKey)
-    private var unfoldedRaw = PlayerControlsLayout.standard.stored
-    @AppStorage(PlayerControlsLayout.Shape.sideways.storageKey)
-    private var sidewaysRaw = PlayerControlsLayout.standard.stored
+    @AppStorage(PlayerControlsLayout.storageKey)
+    private var stored = PlayerControlsLayout.standard.stored
 
-    /// 当前正在编辑的那一份的可写代理。
-    ///
-    /// `@AppStorage` 不能动态选键，所以这里按形态分三支手工转发；
-    /// 三支都写同一个 `String`，读回也是同一个 `String`。
-    private var stored: Binding<String> {
-        switch editing {
-        case .folded:   return $foldedRaw
-        case .unfolded: return $unfoldedRaw
-        case .sideways: return $sidewaysRaw
+    /// 顶栏顺序。
+    @State private var topOrder: [PlayerControl] = PlayerControlsLayout.current.top
+    /// 底栏（进度那一行）顺序。
+    @State private var bottomOrder: [PlayerControl] = PlayerControlsLayout.current.bottom
+    /// 只看预览用的形态选择器 —— 不影响配置。
+    @State private var previewShape: PlayerControlsLayout.Shape = Self.initialPreviewShape
+
+    /// 预览默认看横持（配置最满的那个形态）。
+    /// `-qaPreviewShape unfolded` 可预选，供无输入设备的截图 QA 用。
+    private static var initialPreviewShape: PlayerControlsLayout.Shape {
+        #if DEBUG
+        if let raw = UserDefaults.standard.string(forKey: "qaPreviewShape"),
+           let shape = PlayerControlsLayout.Shape(rawValue: raw) {
+            return shape
         }
+        #endif
+        return .sideways
     }
+
+    private var layout: PlayerControlsLayout { PlayerControlsLayout(stored: stored) }
 
     var body: some View {
         SettingsPage(title: L10n.text("Player Controls"), symbol: "slider.horizontal.3") {
-            // ⛔ 这张排布表只对**原版**与 **One** 两套皮肤生效。
-            //
-            // 哔哩哔哩皮肤的底栏/顶栏是照 B 站二进制实测出的**绝对定位**复刻的
-            // （`BiliFullScreenPage.bottomBar` / `BiliPortraitPage` 里全是硬编码偏移，
-            //  `grep "PlayerControlsLayout\|PlayerControl\." App/Bili*.swift` 零命中），
-            // 它读的是自己那套 `BiliMenuConfig`（`biliMenuOrder` / `biliMenuHidden`），
-            // 与本页的十格槽位互不相通。
-            //
-            // 所以这里必须**明说**。不说的话，用户在哔哩哔哩皮肤下把这里拖了个遍、
-            // 播放器纹丝不动，只会得出「设置坏了」—— 而事实是「这一套不适用」。
-            // 把它写出来，是「没有实现清晰」这条需求里最便宜也最实在的一半。
             if PlaySkin.current == .bilibili {
                 SettingsGroup(footer: L10n.text("This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel.")) {
                     FormLabel(symbol: "info.circle.fill", tint: .orange,
                               title: L10n.text("Not used by the Bilibili skin"))
                 }
             }
-            // 形态切换。三形态各自独立，切过去看到的槽位就是那个形态实际用的。
-            SettingsGroup(footer: L10n.text("Each shape keeps its own layout. A button you remove on the folded outer screen stays on the unfolded one.")) {
-                Picker(selection: $editing) {
-                    ForEach(PlayerControlsLayout.Shape.allCases, id: \.self) { shape in
-                        Text(shape.title).tag(shape)
+
+
+            // ── 预览（按真实形态 1:1 画，再整体缩放）──
+            SettingsGroup(footer: L10n.text("Drawn at the real size of each screen, so what you see is what the player draws. Switching the shape only changes the preview — there is one layout for all three.")) {
+                PlayerControlsPreviewCard(layout: layout, shape: $previewShape)
+                    .listRowInsets(EdgeInsets())
+            }
+
+            // ── 顶栏 ──
+            orderSection(
+                title: L10n.text("Top Bar"),
+                symbol: "arrow.up",
+                controls: topOrder,
+                footer: L10n.text("Drag to reorder. A screen too narrow for all of them moves the rest into More instead of dropping them."),
+                zone: .topBar,
+                apply: applyTopOrder
+            )
+
+            // ── 底栏（进度那一行）──
+            orderSection(
+                title: L10n.text("Progress Row"),
+                symbol: "arrow.down",
+                controls: bottomOrder,
+                footer: L10n.text("Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there."),
+                zone: .progressRow,
+                apply: applyBottomOrder
+            )
+
+            // ── 加回来：按「更多」面板的真实分组 ──
+            ForEach(PlayerControl.capabilityGroups) { group in
+                let available = group.controls.filter { !topOrder.contains($0) && !bottomOrder.contains($0) }
+                if !available.isEmpty {
+                    SettingsGroup(title: group.title) {
+                        ForEach(available) { control in
+                            addRow(control)
+                        }
                     }
-                } label: {
-                    FormLabel(symbol: "rectangle.split.2x1", tint: .teal,
-                              title: L10n.text("Shape"))
                 }
-                .pickerStyle(.inline)
             }
-            SettingsGroup {
-                // ⛔ `.id(editing)` 不能省：`PlayerControlsPreview` 与 `PlayerControlsEditor`
-                // 内部都用 `@State` 缓存了一份从 `stored` 解析出来的 layout，
-                // 而 `@State` **只在视图身份变化时重init一次**。切形态时 `stored` 换了键，
-                // 但视图身份没变 → 编辑器里还是上一个形态的 layout。
-                // 后果不是「显示不对」而是**写串**：在 folded 排好 → 切到 sideways →
-                // 拖任意一颗 → 整份 folded 槽位被写进 sideways 的键，两个形态互相污染。
-                PlayerControlsPreview(layout: PlayerControlsLayout(stored: stored.wrappedValue))
-                    .id(editing)
+
+            // ── 固定不动的两处（说明，不是可调项）──
+            //
+            // 这两颗如果也做成可移除，用户就会把自己锁死：
+            //   · 「更多」是放不下的控件的唯一去处，收掉它那些控件就再也点不到；
+            //   · 「退出全屏」是全屏态唯一的出口（全屏里「更多」整个收掉了）。
+            // 所以它们不在上两张表里，而是作为**结构位**常在；写在这里是为了
+            // 回答「播放器上还有哪些东西没出现在设置页」——不能靠猜。
+            SettingsGroup(title: L10n.text("Fixed Keys"),
+                          footer: L10n.text("These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again.")) {
+                FormLabel(symbol: "ellipsis", tint: .gray,
+                          title: L10n.text("More (…) — top right"))
+                FormLabel(symbol: "chevron.left", tint: .gray,
+                          title: L10n.text("Exit Full Screen — top left, full screen only"))
+                FormLabel(symbol: "lock.open", tint: .gray,
+                          title: L10n.text("Lock Controls — top right"))
             }
-            SettingsGroup(footer: L10n.text("Drag a button onto any slot in the top or bottom row, or into More. Empty slots stay empty.")) {
-                PlayerControlsEditor(stored: stored)
-                    .id(editing)
-            }
-            // 该形态已有自己的配置时，给一个「恢复默认」。
-            // 判据是「这个键真的被写过」，不是「和 standard 相等」——
-            // 用户手动排成和默认一样也算自定义过，不该被当成没改。
-            if PlayerControlsLayout.hasOwnConfiguration(for: editing) {
+
+            if PlayerControlsLayout.hasOwnConfiguration {
                 SettingsGroup {
                     Button(role: .destructive) {
-                        PlayerControlsLayout.reset(editing)
-                        stored.wrappedValue = PlayerControlsLayout.standard.stored
+                        PlayerControlsLayout.reset()
+                        let fresh = PlayerControlsLayout.standard
+                        stored = fresh.stored
+                        topOrder = fresh.top
+                        bottomOrder = fresh.bottom
                     } label: {
-                        Label(L10n.text("Reset This Shape to Default"), systemImage: "arrow.counterclockwise")
+                        Label(L10n.text("Reset to Default"), systemImage: "arrow.counterclockwise")
                     }
                 }
             }
         }
     }
-}
 
-/// A miniature of the player's chrome, redrawn live as the layout changes: the top bar's round
-/// buttons on their ten slots, the bottom transport row on its ten slots, and a "⋯" button when
-/// anything is in More.
-private struct PlayerControlsPreview: View {
-    let layout: PlayerControlsLayout
+    // MARK: 行
 
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                LinearGradient(colors: [Color(white: 0.12), Color(white: 0.05)], startPoint: .top, endPoint: .bottom)
-                VStack {
-                    LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom).frame(height: 46)
-                    Spacer()
-                    LinearGradient(colors: [.clear, .black.opacity(0.5)], startPoint: .top, endPoint: .bottom).frame(height: 46)
-                }
-                VStack(spacing: 0) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.backward")
-                        Text(L10n.text("Now Playing")).font(.caption).lineLimit(1)
-                        Spacer()
-                        ForEach(Array(layout.topSlots.enumerated()), id: \.offset) { _, control in
-                            previewSlot(control)
-                        }
-                        if !layout.more.isEmpty { Image(systemName: "ellipsis.circle") }
-                    }
-                    .padding(.horizontal, 12).padding(.top, 10)
-                    Spacer()
-                    HStack(spacing: 6) {
-                        ForEach(Array(layout.bottomSlots.enumerated()), id: \.offset) { _, control in
-                            previewSlot(control)
-                        }
-                        Spacer()
-                        Image(systemName: "clock").foregroundStyle(.white.opacity(0.6))
-                    }
-                    .padding(.horizontal, 12).padding(.bottom, 10)
-                }
-            }
-            .frame(height: 180)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .foregroundStyle(.white)
-        }
-        .listRowInsets(EdgeInsets())
-    }
-
-    @ViewBuilder private func previewSlot(_ control: PlayerControl?) -> some View {
-        // 只在「选集页直接显示」里勾过的才画：预览要和播放器一致，否则勾选框一动、上面的
-        // 小播放器照旧画满一排，勾选看起来就没生效。
-        if let control, layout.watchSurfaced.contains(control) {
-            Image(systemName: control.symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 22, height: 22)
-                .background(control.tint.opacity(0.55), in: Circle())
-                .foregroundStyle(.white)
-        } else {
-            // An empty slot is invisible in the preview, exactly as it is in the player.
-            Color.clear.frame(width: 22, height: 22)
-        }
-    }
-}
-
-/// The slot editor: two rows of ten drop targets (top and bottom) plus a More tray. Every control
-/// — wherever it currently sits — is draggable, and every slot is a drop target, so a control moves
-/// to a specific X position by being dropped on the slot there.
-private struct PlayerControlsEditor: View {
-    @Binding var stored: String
-    @State private var layout: PlayerControlsLayout
-    @State private var selected: PlayerControl?
-
-    init(stored: Binding<String>) {
-        _stored = stored
-        _layout = State(initialValue: PlayerControlsLayout(stored: stored.wrappedValue))
-    }
-
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: PlayerControlsLayout.slotCount)
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Tap a control to pick it up, then tap an empty slot to drop it there — or just drag it.
-            if let selected {
-                HStack(spacing: 8) {
-                    Image(systemName: "hand.point.up.left.fill").foregroundStyle(.secondary)
-                    Text(L10n.text("Tap a slot to place %@", selected.title)).font(.footnote).foregroundStyle(.secondary)
-                    Spacer()
-                    Button(L10n.text("Cancel")) { self.selected = nil }.font(.footnote)
-                }
-            }
-            rowSection(title: L10n.text("Top Row"), slots: layout.topSlots, zone: .top)
-            rowSection(title: L10n.text("Bottom Row"), slots: layout.bottomSlots, zone: .bottom)
-            moreSection
-            surfacingSections
-        }
-        .padding(.vertical, 8)
-    }
-
-    /// 两个**独立**的勾选列表：哪些控件在「选集页」控制栏直接出现、哪些在「全屏」直接出现。
+    /// 一个可拖拽排序的列表段。
     ///
-    /// 同一个控件可以两边都勾 —— 用户明确要求「这两个可以都显示，不冲突」。
-    /// 没勾的控件仍在「更多」菜单里，不丢功能。
-    ///
-    /// 列表里放的是 `PlayerControl.barControls`（所有能进顶栏的控件），而不是
-    /// `layout.top`（当前顶栏里的那几个）：后者只有在用户先把控件拖到顶栏之后才会列出来，
-    /// 于是「新加的按钮」永远没有勾选项 —— 用户看到的是一张缺项的表。勾上时由
-    /// `surfaceInTopRow` 顺手补一个顶栏空位，所以「勾了就能看见」。
-    private var surfacingSections: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(L10n.text("Ticking a control puts it in the first free slot of the top row. A bar too narrow to hold them all leaves the last ones out — drag those earlier, or untick a few."))
-                .font(.caption).foregroundStyle(.tertiary)
-            surfacingSection(
-                title: L10n.text("Shown While Watching"),
-                symbol: "rectangle.on.rectangle",
-                hint: L10n.text("Buttons that sit in the control bar on the episode page."),
-                controls: PlayerControl.barControls,
-                isOn: { isShownInBar($0, whileWatching: true) },
-                toggle: { control, on in setSurfaced(control, on: on, whileWatching: true) }
-            )
-            surfacingSection(
-                title: L10n.text("Shown in Full Screen"),
-                symbol: "arrow.up.left.and.arrow.down.right",
-                hint: L10n.text("Buttons that sit in the control bar in full-screen playback."),
-                controls: PlayerControl.barControls,
-                isOn: { isShownInBar($0, whileWatching: false) },
-                toggle: { control, on in setSurfaced(control, on: on, whileWatching: false) }
-            )
-        }
-    }
-
-    /// 勾选框读的是「现在真的会画出来吗」，而不是「集合里有没有它」。
-    ///
-    /// 一个控件要出现在控制栏里，必须**同时在顶栏槽位里、又在可见集合里**。只看集合的话，
-    /// 一条不在顶栏的旧记录会显示成「已勾选」而屏幕上没有那颗按钮 —— 勾选框就成了谎话。
-    private func isShownInBar(_ control: PlayerControl, whileWatching: Bool) -> Bool {
-        let set = whileWatching ? layout.watchSurfaced : layout.fullSurfaced
-        return set.contains(control) && layout.top.contains(control)
-    }
-
-    /// 勾选／取消一个控件在某种状态下的可见性。
-    /// 勾上时同时把它补进顶栏（见 `surfaceInTopRow`）：勾选集合只决定「可见」，
-    /// 位置由槽位决定，两者缺一按钮就不出现 —— 「勾了没反应」的根因就在这里。
-    private func setSurfaced(_ control: PlayerControl, on: Bool, whileWatching: Bool) {
-        var set = whileWatching ? layout.watchSurfaced : layout.fullSurfaced
-        if on {
-            if !set.contains(control) { set.append(control) }
-            layout.surfaceInTopRow(control)
-        } else {
-            set.removeAll { $0 == control }
-        }
-        if whileWatching { layout.watchSurfaced = set } else { layout.fullSurfaced = set }
-        stored = layout.stored
-    }
-
-    private func surfacingSection(title: String, symbol: String, hint: String,
-                                  controls: [PlayerControl],
-                                  isOn: @escaping (PlayerControl) -> Bool,
-                                  toggle: @escaping (PlayerControl, Bool) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(title, systemImage: symbol)
-                .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).textCase(nil)
-            Text(hint).font(.caption).foregroundStyle(.tertiary)
-            ForEach(controls, id: \.self) { control in
-                Toggle(isOn: Binding(get: { isOn(control) },
-                                     set: { toggle(control, $0) })) {
-                    Label(L10n.text(control.title), systemImage: control.symbol)
-                        .font(.footnote)
-                }
-                .toggleStyle(.switch)
+    /// 用**整行拖拽 + 行尾删除键**，不用 `EditMode`：
+    /// `Form` 里把 `.environment(\.editMode, .constant(.active))` 挂在 Section 上
+    /// 并不会让行进入编辑态（把手与删除键都不出现），用户看到的就是「说能拖，实际拖不动」。
+    /// 整行 `.draggable` + 落到某一行 `.dropDestination` 在 Form 里是可靠的，
+    /// 也不需要额外的「编辑」开关。
+    @ViewBuilder
+    private func orderSection(title: String, symbol: String,
+                              controls: [PlayerControl],
+                              footer: String,
+                              zone: PlayerControl.Placement,
+                              apply: @escaping ([PlayerControl]) -> Void) -> some View {
+        SettingsGroup(title: title, footer: footer) {
+            if controls.isEmpty {
+                Text(L10n.text("Nothing here yet — add one below."))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            ForEach(controls) { control in
+                orderRow(control, in: controls, zone: zone, apply: apply)
             }
         }
     }
 
-    private func rowSection(title: String, slots: [PlayerControl?], zone: PlayerControlsLayout.Zone) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(title, systemImage: zone == .top ? "arrow.up" : "arrow.down")
-                .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).textCase(nil)
-            LazyVGrid(columns: columns, spacing: 4) {
-                ForEach(Array(slots.enumerated()), id: \.offset) { index, control in
-                    slotCell(control, zone: zone, index: index)
+    private func orderRow(_ control: PlayerControl, in list: [PlayerControl],
+                          zone: PlayerControl.Placement,
+                          apply: @escaping ([PlayerControl]) -> Void) -> some View {
+        HStack(spacing: 12) {
+            ControlChip(control: control)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(control.title).font(.subheadline)
+                if let note = control.availabilityNote {
+                    Text(note).font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-        }
-    }
-
-    @ViewBuilder private func slotCell(_ control: PlayerControl?, zone: PlayerControlsLayout.Zone, index: Int) -> some View {
-        Group {
-            if let control {
-                controlChip(control)
-            } else {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.secondary.opacity(0.06))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(selected != nil ? Color.accentColor : Color.secondary.opacity(0.35),
-                                          style: StrokeStyle(lineWidth: selected != nil ? 1.5 : 1, dash: [4, 3]))
-                    }
-                    .frame(height: 40)
+            Spacer(minLength: 8)
+            Image(systemName: "line.3.horizontal")
+                .font(.footnote).foregroundStyle(.tertiary)
+            Button {
+                var updated = list
+                updated.removeAll { $0 == control }
+                apply(updated)
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.red.opacity(0.85))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(L10n.text("Move %@ to More", control.title))
         }
+        .padding(.vertical, 3)
         .contentShape(Rectangle())
-        .onTapGesture {
-            if control == nil { dropSelected(into: zone, slot: index) }
-        }
+        .draggable(zone.rawValue + Self.dragSeparator + control.rawValue)
         .dropDestination(for: String.self) { items, _ in
-            guard let raw = items.first, let dropped = PlayerControl(rawValue: raw) else { return false }
-            layout.place(dropped, in: zone, slot: index)
-            selected = nil
-            persist()
+            guard let payload = items.first,
+                  // 拖拽串带**来源区**：顶栏 ↔ 进度行之间不允许互拖。
+                  // 以前不分来源，把「播放键」拖进顶栏会先加进去再被播放器挪回底栏，
+                  // 表现为「松手后它自己跳回去了」。
+                  let dropped = Self.control(from: payload),
+                  dropped != control,
+                  dropped.placements.contains(zone) else { return false }
+            var updated = list.filter { $0 != dropped }
+            let target = updated.firstIndex(of: control) ?? updated.count
+            updated.insert(dropped, at: target)
+            apply(updated)
             return true
         }
     }
 
-    private var moreSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(L10n.text("In More"), systemImage: "ellipsis.circle")
-                .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).textCase(nil)
-            Group {
-                if layout.more.isEmpty {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.secondary.opacity(0.06))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .strokeBorder(selected != nil ? Color.accentColor : Color.secondary.opacity(0.35),
-                                              style: StrokeStyle(lineWidth: selected != nil ? 1.5 : 1, dash: [4, 3]))
-                        }
-                        .frame(height: 40)
-                        .overlay(Text(L10n.text("Drop here to hide")).font(.caption).foregroundStyle(.secondary))
-                } else {
-                    LazyVGrid(columns: columns, spacing: 4) {
-                        ForEach(layout.more) { control in
-                            controlChip(control)
-                        }
-                    }
+    /// 拖拽串里「区」与「控件」之间的分隔符。控件 rawValue 只有字母，用 `|` 不会撞。
+    static let dragSeparator = "|"
+
+    static func control(from payload: String) -> PlayerControl? {
+        guard let bar = payload.firstIndex(of: Character(dragSeparator)) else { return nil }
+        return PlayerControl(rawValue: String(payload[payload.index(after: bar)...]))
+    }
+
+    /// 「加回来」的一行：菜单里每一项都是它**真正画得出来**的落点。
+    private func addRow(_ control: PlayerControl) -> some View {
+        HStack(spacing: 12) {
+            ControlChip(control: control)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(control.title).font(.subheadline)
+                if let note = control.availabilityNote {
+                    Text(note).font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture { dropSelected(into: .more, slot: 0) }
-            .dropDestination(for: String.self) { items, _ in
-                guard let raw = items.first, let dropped = PlayerControl(rawValue: raw) else { return false }
-                layout.place(dropped, in: .more, slot: 0)
-                selected = nil
-                persist()
-                return true
+            Spacer(minLength: 8)
+            Menu {
+                ForEach(control.placements, id: \.self) { placement in
+                    Button {
+                        var updated = PlayerControlsLayout(stored: stored)
+                        updated.add(control, to: placement)
+                        topOrder = updated.top
+                        bottomOrder = updated.bottom
+                        stored = updated.stored
+                    } label: {
+                        Label(placement.title, systemImage: placement.symbol)
+                    }
+                }
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .accessibilityLabel(L10n.text("Add %@", control.title))
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    // MARK: 写盘
+
+    private func applyTopOrder(_ order: [PlayerControl]) {
+        var updated = PlayerControlsLayout(stored: stored)
+        updated.setTopOrder(order)
+        topOrder = updated.top
+        bottomOrder = updated.bottom
+        stored = updated.stored
+    }
+
+    private func applyBottomOrder(_ order: [PlayerControl]) {
+        var updated = PlayerControlsLayout(stored: stored)
+        updated.setBottomOrder(order)
+        topOrder = updated.top
+        bottomOrder = updated.bottom
+        stored = updated.stored
+    }
+}
+
+// MARK: - 预览卡
+
+private struct PlayerControlsPreviewCard: View {
+    let layout: PlayerControlsLayout
+    @Binding var shape: PlayerControlsLayout.Shape
+
+    /// 预览画面的高度上限（见调用处的注释）。
+    static let previewMaxHeight: CGFloat = 360
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker(selection: $shape) {
+                ForEach(PlayerControlsLayout.Shape.allCases, id: \.self) { shape in
+                    Text(shape.title).tag(shape)
+                }
+            } label: {
+                Text(L10n.text("Preview"))
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 12)
+
+            // 高度封顶 360：竖持形态按真实比例铺满宽度要 727pt（466:678），
+            // 整张卡比一屏还高，一进来就得先滚过它才碰得到任何一项可调的东西。
+            // 封顶后竖持会缩成一块居中的窄屏 —— 版式仍然 1:1，只是整体更小。
+            PlayerShapePreview(shape: shape, layout: layout)
+                .frame(maxHeight: PlayerControlsPreviewCard.previewMaxHeight)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 12)
+
+            fitSummary
+                .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 14)
+        }
+    }
+
+    private var fit: PlayerControlsFit { PlayerControlsFit(layout: layout, shape: shape) }
+
+    /// 一行说清「这块屏装得下几颗、几颗进了更多」。
+    private var fitSummary: some View {
+        let fit = self.fit
+        return HStack(spacing: 12) {
+            stat(L10n.text("Top"), value: fit.top.count)
+            stat(L10n.text("Middle"), value: fit.center.count)
+            stat(L10n.text("Bottom"), value: fit.edge.count)
+            stat(L10n.text("More"), value: fit.moreCount)
+            Spacer(minLength: 0)
+            if !fit.overflow.isEmpty {
+                Label(L10n.text("%lld moved to More", fit.overflow.count),
+                      systemImage: "arrow.down.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.orange)
             }
         }
     }
 
-    /// Puts the picked-up control into a slot (or More), clearing the selection.
-    private func dropSelected(into zone: PlayerControlsLayout.Zone, slot: Int) {
-        guard let picked = selected else { return }
-        layout.place(picked, in: zone, slot: slot)
-        selected = nil
-        persist()
+    private func stat(_ title: String, value: Int) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(value)").font(.system(.subheadline, design: .rounded).weight(.semibold))
+                .foregroundStyle(value == 0 ? Color.secondary : Color.primary)
+            Text(title).font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+}
+
+// MARK: - 「装得下几颗」的真实计算
+
+/// 与 `OneSkinPlayerChrome` 同一套容量规则，供预览与小结共用。
+struct PlayerControlsFit {
+    let top: [PlayerControl]
+    let center: [PlayerControl]
+    let edge: [PlayerControl]
+    let overflow: [PlayerControl]
+    let moreCount: Int
+
+    init(layout: PlayerControlsLayout, shape: PlayerControlsLayout.Shape) {
+        let window = PlayerShapeGeometry.windowSize(for: shape)
+        let m = PreviewMetrics(size: window)
+
+        // 顶栏按**格子**数容量（与播放器同一口径：`OneSkinChrome.topSurfaceCapacity`）。
+        //
+        // 两处差异是刻意的，都往「更保守」的方向偏，不会让预览比播放器画得多：
+        //   · 播放器用 `barLeading + barTrailing`（含安全区），预览这里只能取 `m.edge`
+        //     —— 设置页里量不到播放器那一帧的安全区；
+        //   · `structural` 取 4 = 选集页（旋转 / 合拢 / 更多 / 锁定），
+        //     全屏态是 2 —— 全屏不在预览范围内。
+        let topCapacity = max(0, Int((window.width - m.edge * 2 - CGFloat(4) * m.hit) / m.hit))
+        top = Array(layout.topSlots.prefix(topCapacity)).compactMap { $0 }
+
+        let centerAll = layout.bottom.filter { PlayerControl.centerControls.contains($0) }
+        let edgeAll = layout.bottom.filter { !PlayerControl.centerControls.contains($0) }
+
+        let centerCapacity = max(1, Int((window.width - 2 * m.edge) / max(m.stepHit, 1)))
+        let reserve = m.caption * 15 + m.hit + 120
+        let edgeCapacity = max(1, Int(max(0, window.width - 2 * m.edge - reserve) / max(m.hit, 1)))
+
+        center = Array(centerAll.prefix(centerCapacity))
+
+        var fixed = 0
+        var shown: [PlayerControl] = []
+        for control in edgeAll {
+            if control == .progressBar { shown.append(control); continue }
+            if control == .fullScreen { shown.append(control); fixed += 1; continue }
+            guard fixed < edgeCapacity else { continue }
+            fixed += 1
+            shown.append(control)
+        }
+        edge = shown
+
+        let topOver = Array(layout.topSlots.dropFirst(topCapacity)).compactMap { $0 }
+        let bottomOver = Array(centerAll.dropFirst(centerCapacity)) + edgeAll.filter { !shown.contains($0) }
+        overflow = topOver + bottomOver
+
+        var seen = Set<PlayerControl>()
+        // 固定键（锁定）不在「更多」里，别把它算进这个数字。
+        moreCount = (layout.more + overflow)
+            .filter { !PlayerControl.fixedKeys.contains($0) }
+            .filter { seen.insert($0).inserted }
+            .count
+    }
+}
+
+/// 预览用的比例尺 —— 与 `ChromeMetrics` 同一组公式。
+struct PreviewMetrics {
+    let size: CGSize
+    var scale: CGFloat { min(max(size.height / 300, 0.82), 1.4) }
+    var glyph: CGFloat { (13 * scale).rounded() }
+    var hit: CGFloat { min(52, max(44, (glyph * 1.8).rounded())) }
+    var barHeight: CGFloat { max(hit, (glyph * 2.2).rounded()) }
+    var edge: CGFloat { max(4, size.width * 0.012) }
+    var playGlyph: CGFloat { (glyph * 1.75).rounded() }
+    var stepGlyph: CGFloat { (glyph * 1.2).rounded() }
+    var playHit: CGFloat { (playGlyph * 1.7).rounded() }
+    var stepHit: CGFloat { (stepGlyph * 1.9).rounded() }
+    var caption: CGFloat { (glyph * 0.9).rounded() }
+}
+
+/// 三种形态的屏幕尺寸与画面窗口落位。
+///
+/// ⛔ **不在这里重算几何**：窗口矩形直接由播放器那个 `OneSkinWindowGeometry`
+/// 产出 —— 预览与播放器从此是同一段算术，不可能再漂移。
+///
+/// 之前这里是手抄的一版，抄错了三处，预览就把用户带偏了：
+///   · 把 `Metrics.columnLeft`(0.4501) 当成了**画面列**宽 —— 它其实是**详情列**；
+///     真正的画面列是 `base − base×columnLeft`（横持 951 → 523，不是 428）；
+///   · 还往窗口里减了 `insetLandscape` 的左右边距 —— 而 Core 里明写
+///     「`inset` 只作旧版式记录，**不参与任何窗口几何计算**」，画面列是满宽的；
+///   · 竖持顶边用了 `colH × 0.091`，而正确值是 `屏高 × 0.091 + portraitExtraDrop`
+///     （Core 的 init 注释里专门为这条留了 `portraitTopInset` 参数）。
+enum PlayerShapeGeometry {
+    private static var M: OneSkinWindowGeometry.Metrics.Type { OneSkinWindowGeometry.Metrics.self }
+
+    static func screenSize(for shape: PlayerControlsLayout.Shape) -> CGSize { shape.screenSize }
+
+    static func windowSize(for shape: PlayerControlsLayout.Shape) -> CGSize {
+        windowRect(for: shape).size
     }
 
-    private func controlChip(_ control: PlayerControl) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: control.symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-            Text(control.title)
-                .font(.caption).lineLimit(1).minimumScaleFactor(0.6)
-                .foregroundStyle(.white.opacity(0.9))
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 40)
-        .background(LinearGradient(colors: [control.tint.blend(with: .white, by: 0.12), control.tint.blend(with: .black, by: 0.2)],
-                                   startPoint: .top, endPoint: .bottom),
-                    in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(selected == control ? Color.white : .clear, lineWidth: 2)
-        }
-        .onTapGesture { selected = selected == control ? nil : control }
-        .draggable(control.rawValue)
+    /// 竖持窗口顶边 —— 与 `OneSkinStage.portraitTopInset` 同一公式
+    ///（外屏窄列 0.0634、内屏宽列 0.091，都要再加 `portraitExtraDrop`）。
+    static func portraitTopInset(for shape: PlayerControlsLayout.Shape) -> CGFloat {
+        let screen = shape.screenSize
+        let ratio: CGFloat = screen.width < 500 ? 0.0634 : 0.091
+        return (screen.height * ratio + OneSkin.portraitExtraDrop).rounded()
     }
 
-    private func persist() {
-        withAnimation(.smooth) { stored = layout.stored }
+    /// `pictureColumn` 实际收到的那个 size（画面列，**不是**整屏）。
+    ///
+    /// 横持：`colL = base − base×columnLeft`，高度整列；
+    /// 竖持：宽满屏，高 = `顶边 + 窗高 + 底部呼吸位`（夹在屏高 72% 内），
+    /// 与 `OneSkin.pictureHeightOf` 同一式子 —— 详情列从它下沿开始。
+    static func pictureColumnSize(for shape: PlayerControlsLayout.Shape) -> CGSize {
+        let screen = shape.screenSize
+        switch shape {
+        case .sideways:
+            let detail = (screen.width * M.columnLeft).rounded()
+            return CGSize(width: screen.width - detail, height: screen.height)
+        case .folded, .unfolded:
+            let winH = screen.width / M.portraitAspect(forColumnWidth: screen.width)
+            let pictureH = min(screen.height * 0.091 + winH + screen.height * 0.04,
+                               screen.height * 0.72)
+            return CGSize(width: screen.width, height: pictureH.rounded())
+        }
+    }
+
+    static func windowRect(for shape: PlayerControlsLayout.Shape) -> CGRect {
+        let landscape = shape == .sideways
+        let g = OneSkinWindowGeometry(size: pictureColumnSize(for: shape),
+                                      landscape: landscape,
+                                      fullScreen: false,
+                                      portraitTopInset: landscape ? nil : portraitTopInset(for: shape))
+        return CGRect(x: g.winX, y: g.winY, width: g.winW, height: g.winH)
+    }
+
+    /// 横持右列（详情）。预览里画一块暗色骨架，表明这是双列版式。
+    static func rightColumn(for shape: PlayerControlsLayout.Shape) -> CGRect? {
+        guard shape == .sideways else { return nil }
+        let screen = shape.screenSize
+        let width = (screen.width * M.columnLeft).rounded()
+        return CGRect(x: screen.width - width, y: 0, width: width, height: screen.height)
+    }
+}
+
+// MARK: - 真实形态预览
+
+/// 按**设备真实点数**画一张播放器，再整体缩放到可用宽度。
+private struct PlayerShapePreview: View {
+    let shape: PlayerControlsLayout.Shape
+    let layout: PlayerControlsLayout
+
+    var body: some View {
+        let screen = shape.screenSize
+        let window = PlayerShapeGeometry.windowRect(for: shape)
+        GeometryReader { proxy in
+            let scale = proxy.size.width / screen.width
+            ZStack(alignment: .topLeading) {
+                screenBackground(screen)
+                if let right = PlayerShapeGeometry.rightColumn(for: shape) {
+                    detailColumn(right)
+                }
+                PlayerWindowPreview(size: window.size, layout: layout)
+                    .frame(width: window.width, height: window.height)
+                    .offset(x: window.minX, y: window.minY)
+                if shape != .sideways {
+                    portraitDetail(after: PlayerShapeGeometry.pictureColumnSize(for: shape).height,
+                                   screen: screen)
+                }
+            }
+            .frame(width: screen.width, height: screen.height)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
+            }
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(width: proxy.size.width, height: screen.height * scale, alignment: .topLeading)
+        }
+        .aspectRatio(screen.width / screen.height, contentMode: .fit)
+    }
+
+    private func screenBackground(_ screen: CGSize) -> some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.12, green: 0.09, blue: 0.08),
+                                    Color(red: 0.05, green: 0.04, blue: 0.045)],
+                           startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: [.white.opacity(0.06), .clear],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
+        .frame(width: screen.width, height: screen.height)
+    }
+
+    /// 竖持形态：**画面列之下**那半屏的详情骨架（标题 / 按钮 / 选集）。
+    ///
+    /// 起点是画面列的下沿（`pictureHeightOf` 算出的高度），不是窗口下沿 ——
+    /// 两者之间还隔着 4% 屏高的呼吸位。用窗口下沿会让详情整体上移、贴住画面。
+    private func portraitDetail(after top: CGFloat, screen: CGSize) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.20))
+                .frame(width: screen.width * 0.42, height: 13)
+            RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.10))
+                .frame(width: screen.width * 0.30, height: 8)
+            HStack(spacing: 8) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Capsule().fill(.white.opacity(0.12)).frame(width: 62, height: 22)
+                }
+            }
+            .padding(.top, 2)
+            HStack(spacing: 8) {
+                ForEach(0..<4, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 4).fill(.white.opacity(0.08))
+                        .frame(width: 56, height: 78)
+                }
+            }
+            .padding(.top, 6)
+            Spacer()
+        }
+        .padding(.top, 18).padding(.horizontal, 16)
+        .frame(width: screen.width, height: max(0, screen.height - top),
+               alignment: .topLeading)
+        .offset(x: 0, y: top)
+    }
+
+    private func detailColumn(_ rect: CGRect) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.22))
+                .frame(width: rect.width * 0.55, height: 14)
+            RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.12))
+                .frame(width: rect.width * 0.80, height: 8)
+            RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.12))
+                .frame(width: rect.width * 0.68, height: 8)
+            Spacer()
+        }
+        .padding(.top, 24).padding(.horizontal, 18)
+        .frame(width: rect.width, height: rect.height, alignment: .topLeading)
+        .background(Color.black.opacity(0.28))
+        .offset(x: rect.minX, y: rect.minY)
+    }
+}
+
+/// 画面窗口里的播放器控件层（顶栏 / 中央 / 底栏），按真实点数绘制。
+private struct PlayerWindowPreview: View {
+    let size: CGSize
+    let layout: PlayerControlsLayout
+
+    private var m: PreviewMetrics { PreviewMetrics(size: size) }
+
+    private var topY: CGFloat { max(size.height * 0.072, m.hit / 2 + m.edge) }
+    private var bottomY: CGFloat { min(size.height * 0.928, size.height - m.hit / 2 - m.edge) }
+
+    private var topCapacity: Int {
+        max(0, Int((size.width - m.edge * 2 - CGFloat(4) * m.hit) / m.hit))
+    }
+
+    private var topSlots: [PlayerControl?] {
+        let slots = Array(layout.topSlots.prefix(topCapacity))
+        let end = (slots.lastIndex { $0 != nil } ?? -1) + 1
+        return slots.prefix(end).map { $0 }
+    }
+
+    private var centerRow: [PlayerControl?] {
+        let all = layout.bottomSlots.map {
+            $0.flatMap { PlayerControl.centerControls.contains($0) ? $0 : nil }
+        }
+        let capacity = max(1, Int((size.width - 2 * m.edge) / max(m.stepHit, 1)))
+        let end = (all.lastIndex { $0 != nil } ?? -1) + 1
+        return Array(all.prefix(end).prefix(capacity))
+    }
+
+    private var bottomRow: [PlayerControl] {
+        let all = layout.bottom.filter { !PlayerControl.centerControls.contains($0) }
+        let reserve = m.caption * 15 + m.hit + 120
+        let capacity = max(1, Int(max(0, size.width - 2 * m.edge - reserve) / max(m.hit, 1)))
+        var fixed = 0
+        var shown: [PlayerControl] = []
+        for control in all {
+            if control == .progressBar { shown.append(control); continue }
+            if control == .fullScreen { shown.append(control); fixed += 1; continue }
+            guard fixed < capacity else { continue }
+            fixed += 1
+            shown.append(control)
+        }
+        return shown
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            LinearGradient(colors: [Color(white: 0.18), Color(white: 0.09)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.black.opacity(0.45), .clear],
+                               startPoint: .top, endPoint: .bottom).frame(height: m.barHeight)
+                Spacer(minLength: 0)
+                LinearGradient(colors: [.clear, .black.opacity(0.45)],
+                               startPoint: .top, endPoint: .bottom).frame(height: m.barHeight)
+            }
+            topBar
+            centerBar
+            bottomBar
+        }
+        .foregroundStyle(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 0) {
+            if !layout.top.contains(.rotate) {
+                glyph("rectangle.landscape.rotate", base: m.glyph)
+            }
+            ForEach(Array(topSlots.enumerated()), id: \.offset) { _, control in
+                if let control {
+                    glyph(control.symbol, base: m.glyph)
+                } else {
+                    Color.clear.frame(width: m.hit, height: m.hit)
+                }
+            }
+            Spacer(minLength: 0)
+            if !layout.top.contains(.lock) {
+                glyph("lock.open", base: m.glyph)
+            }
+            glyph("ellipsis", base: m.glyph)
+        }
+        .padding(.horizontal, m.edge)
+        .frame(width: size.width, height: m.barHeight)
+        .position(x: size.width / 2, y: topY)
+    }
+
+    private var centerBar: some View {
+        let count = max(1, centerRow.count)
+        let slotW = min(m.playHit, max(m.stepHit, (size.width - 2 * m.edge) / CGFloat(count)))
+        return HStack(spacing: 0) {
+            ForEach(Array(centerRow.enumerated()), id: \.offset) { _, control in
+                Group {
+                    if let control {
+                        switch control {
+                        case .playPause:
+                            glyph("play.fill", base: m.playGlyph, weight: .semibold, box: m.playHit)
+                        case .backTen:
+                            glyph("gobackward.10", base: m.stepGlyph, box: m.stepHit)
+                        case .forwardTen:
+                            glyph("goforward.10", base: m.stepGlyph, box: m.stepHit)
+                        case .previousEpisode:
+                            glyph("backward.end.fill", base: m.stepGlyph, box: m.stepHit)
+                        case .nextEpisode:
+                            glyph("forward.end.fill", base: m.stepGlyph, box: m.stepHit)
+                        default:
+                            glyph(control.symbol, base: m.glyph)
+                        }
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: slotW, height: m.playHit)
+            }
+        }
+        .frame(width: size.width, height: m.playHit)
+        .position(x: size.width / 2, y: size.height * 0.496)
+    }
+
+    private var bottomBar: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(bottomRow.enumerated()), id: \.offset) { _, control in
+                if control == .timecode {
+                    Text("0:12").font(.system(size: m.caption)).monospacedDigit()
+                        .padding(.trailing, 8)
+                } else if control == .remaining {
+                    Text("-1:39").font(.system(size: m.caption)).monospacedDigit()
+                } else if control == .progressBar {
+                    seekBar
+                } else {
+                    glyph(control.symbol, base: m.glyph)
+                }
+            }
+            if !bottomRow.contains(.fullScreen), !layout.top.contains(.fullScreen) {
+                glyph("arrow.up.left.and.arrow.down.right", base: m.glyph)
+            }
+        }
+        .padding(.horizontal, m.edge)
+        .frame(width: size.width, height: m.barHeight)
+        .position(x: size.width / 2, y: bottomY)
+    }
+
+    private var seekBar: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(.white.opacity(0.28)).frame(height: max(2, m.glyph * 0.18))
+            GeometryReader { track in
+                Capsule().fill(.white)
+                    .frame(width: track.size.width * 0.34, height: max(2, m.glyph * 0.18))
+                    .frame(maxHeight: .infinity, alignment: .center)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: m.hit, maxHeight: m.hit)
+    }
+
+    private func glyph(_ symbol: String, base: CGFloat,
+                       weight: Font.Weight = .medium, box: CGFloat? = nil) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: base, weight: weight))
+            .frame(width: box ?? m.hit, height: box ?? m.hit)
+    }
+}
+
+// MARK: - 小部件
+
+/// 一颗控件的小圆标：只画图标，不写字。
+private struct ControlChip: View {
+    let control: PlayerControl
+
+    var body: some View {
+        Circle()
+            .fill(LinearGradient(colors: [control.tint.opacity(0.95),
+                                          control.tint.blend(with: .black, by: 0.35)],
+                                 startPoint: .top, endPoint: .bottom))
+            .frame(width: 30, height: 30)
+            .overlay {
+                Image(systemName: control.symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
     }
 }
 #endif

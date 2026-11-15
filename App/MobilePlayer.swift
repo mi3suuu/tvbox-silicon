@@ -1084,6 +1084,8 @@ struct MobilePlayerView: View {
         case .markAd: session.hasTimeline && !session.isLive && clock.duration > 60
         case .adBlock: true
         case .airPlay: true
+        // 进度行三件：原版底栏是固定版式，这三项不进顶栏，判「可用」只为不误报。
+        case .timecode, .progressBar, .remaining: true
         case .episodes: !inline && channel.historyContext != nil
         // 设备支持 ≠ 按钮能用：AVKit 承载画面的那条路上我们没有 controller，
         // 自动浮起又已经关掉，按钮会变成死键 —— 这种情况直接不列出来。
@@ -1193,6 +1195,10 @@ struct MobilePlayerView: View {
     /// The round glass button for one top control drawn in the bar.
     @ViewBuilder private func topControlButton(_ control: PlayerControl) -> some View {
         switch control {
+        // 进度行三件不属于顶栏（原版底栏是固定版式）。画成只读图标，
+        // 避免旧配置留下一个点不动的空位。
+        case .timecode, .progressBar, .remaining:
+            Image(systemName: control.symbol).frame(width: 22, height: 22)
         // ⛔ 原先这里是 `EmptyView()`：用户把这几项排进顶栏，得到的是**空槽**。
         //    现在走与 One 皮肤同一套「这些控件长什么样」的实现（见 `seriesEntry`）。
         case .markAd: markAdButton(size: 44)
@@ -1399,6 +1405,9 @@ struct MobilePlayerView: View {
     /// The menu entry for one top control collapsed into More.
     @ViewBuilder private func topControlMenuEntry(_ control: PlayerControl) -> some View {
         switch control {
+        // 进度行三件不属于「更多」菜单（它们没有菜单形态）。
+        case .timecode, .progressBar, .remaining:
+            EmptyView()
         // 原先这四项是 `EmptyView()` —— 它们被收进枚举、设置页能排，
         // 但「更多」里一个都不渲染。现在走与顶栏同一份内容（`seriesEntry`）。
         case .markAd:
@@ -1653,6 +1662,9 @@ struct MobilePlayerView: View {
     /// A top-row control rendered as a compact transport button (36 pt circle) for the bottom row.
     @ViewBuilder private func compactButton(_ control: PlayerControl) -> some View {
         switch control {
+        // 进度行三件不属于顶栏（原版底栏是固定版式），这里不画。
+        case .timecode, .progressBar, .remaining:
+            EmptyView()
         case .markAd: markAdButton(size: 36)
         case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual:
             menuEntryButton(control, size: 36)

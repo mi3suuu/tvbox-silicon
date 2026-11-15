@@ -53,6 +53,15 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     case nextEpisode = "nextEpisode"
     case fullScreen = "fullScreen"
 
+    // 底栏那一条进度行上的三件「不是按钮」的东西。
+    //
+    // 用户的要求是「进度条也要，播放器的所有内容都要可以自定义」——
+    // 它们此前是 `bottomBar` 里写死的 `Text` 与 `seekTrack`，既不能挪位置、
+    // 也不能删掉。收进同一张表之后，它们和别的控件一样可拖、可隐藏。
+    case timecode = "timecode"
+    case progressBar = "progressBar"
+    case remaining = "remaining"
+
     // 这四项原先只在 `CatalogPlaybackActions`（上游那套菜单）里有，
     // One 页另起一个「更多」菜单时它们没有对应 case —— 于是两套菜单重复且功能不等。
     // 收进枚举后只有一套，用户可以在设置页里决定它们出不出现。
@@ -88,6 +97,9 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .previousEpisode: L10n.text("Previous Episode")
         case .nextEpisode: L10n.text("Next Episode")
         case .fullScreen: L10n.text("Full Screen")
+        case .timecode: L10n.text("Time Elapsed")
+        case .progressBar: L10n.text("Progress Bar")
+        case .remaining: L10n.text("Time Remaining")
         case .autoPlayNext: L10n.text("Auto-play next episode")
         case .moreInSeries: L10n.text("More in This Series")
         case .skipIntroAuto: L10n.text("Automatically skip intro and outro")
@@ -120,6 +132,9 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .previousEpisode: "backward.end.fill"
         case .nextEpisode: "forward.end.fill"
         case .fullScreen: "arrow.up.left.and.arrow.down.right"
+        case .timecode: "timer"
+        case .progressBar: "slider.horizontal.3"
+        case .remaining: "hourglass"
         case .autoPlayNext: "play.circle"
         case .moreInSeries: "rectangle.stack"
         case .skipIntroAuto: "forward.end.alt"
@@ -132,7 +147,8 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     /// only ever renders as its system button in a bar.
     var isRoundButton: Bool {
         switch self {
-        case .backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode, .fullScreen:
+        case .backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode, .fullScreen,
+             .timecode, .progressBar, .remaining:
             false
         default:
             true
@@ -144,14 +160,136 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
     /// everything else in the "⋯" menu. The standard layout drops these into the first slots of each
     /// row, leaving the rest empty.
     static var standardTop: [PlayerControl] { [.airPlay, .episodes] }
-    static var standardBottom: [PlayerControl] { [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode, .fullScreen] }
+    /// 画面中央那一组（传输类）。
+    ///
+    /// 设置页、播放器、预览三处共用这一张表：把控件从顶栏摘下来时，
+    /// 属于这一组的回中央，其余的进「更多」。
+    static let centerControls: Set<PlayerControl> =
+        [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode]
+
+    /// 只能待在进度行那一条上的三项（它们不是按钮，没有顶栏形态）。
+    static let progressRowOnly: Set<PlayerControl> = [.timecode, .progressBar, .remaining]
+
+    // MARK: 三处能力表（设置页与播放器共用）
+
+    /// 一个控件在播放器里**能落在哪几处**。
+    enum Placement: String, CaseIterable {
+        /// 顶栏（画面顶部一行）。
+        case topBar
+        /// 画面正中的传输组。
+        case middle
+        /// 贴着进度条的那一行。
+        case progressRow
+
+        var title: String {
+            switch self {
+            case .topBar:      return L10n.text("Add to Top Bar")
+            case .middle:      return L10n.text("Add to the Middle")
+            case .progressRow: return L10n.text("Add to Progress Row")
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .topBar:      return "arrow.up"
+            case .middle:      return "play.rectangle"
+            case .progressRow: return "arrow.down"
+            }
+        }
+    }
+
+    /// 三处能力**不对称**，而播放器早就按这份规则过滤了
+    ///（`OneSkinChrome.topSlotRow` / `centerSlotRow` / `bottomSlotRow`）。
+    ///
+    /// 设置页此前不知道这份规则，于是菜单里那两个「加到顶部 / 加到进度行」对某些控件是
+    /// **静默无效**的 —— 用户点了、列表里也确实加了，播放器里却什么都不变：
+    ///   · 时间码 / 进度条 / 剩余时间：顶栏没有画法，写进去会被 `setTopOrder` 滤掉；
+    ///   · 播放 / ±10 秒 / 选集键：只画在画面中央，写进顶栏会被挪回底栏；
+    ///   · 锁定键：底栏在锁定态根本不画，放进进度行等于锁上之后再没有解锁入口。
+    ///
+    /// 这张表现在是唯一来源：设置页照它决定菜单给哪几项、拖拽允不允许跨区。
+    var placements: [Placement] {
+        if Self.fixedKeys.contains(self) { return [] }
+        if Self.centerControls.contains(self) { return [.middle] }
+        if Self.progressRowOnly.contains(self) { return [.progressRow] }
+        return [.topBar, .progressRow]
+    }
+
+    /// 播放器上**位置固定、不由布局表摆放**的控件。
+    ///
+    /// 目前只有锁定键。它以前既在顶栏兜底、又在「更多」里有同名菜单项 ——
+    /// 同一个动作两个入口，且设置页把它当普通控件列出来让人拖，拖到「更多」里
+    /// 顶上那颗兜底照样画着（见 `!topSlotRow.contains(.lock)`）。
+    /// 现在统一成**右上角那颗固定键**：`placements` 为空、不进能力分组、
+    /// 「更多」里也不再重复列一项。
+    ///
+    /// 为什么不能交给用户摆：锁定态下顶栏控件与「更多」全都不画，
+    /// 它必须有一个锁上之后仍然画得出来的位置，否则锁死就再也解不开。
+    static let fixedKeys: Set<PlayerControl> = [.lock]
+
+    static var standardBottom: [PlayerControl] {
+        [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode,
+         .timecode, .progressBar, .remaining, .fullScreen]
+    }
     static var standardMore: [PlayerControl] {
         [.quality, .audio, .subtitles, .speed, .pictureSize, .pictureInPicture, .miniPlayer,
-         .lock, .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer, .markAd,
+         .rotate, .danmaku, .videoInfo, .speechSubtitles, .anotherPlayer, .markAd,
          .adBlock, .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]
     }
 
-    /// 能摆进控制栏的那些控件 —— 设置页的两张「直接显示」勾选表就是它。
+    /// 播放器「更多」面板的真实分组 —— **能力清单的唯一来源**。
+    ///
+    /// 设置页此前自己维护一份表，播放器 `OneSkinPlayerChrome.visibleMoreGroups`
+    /// 又维护一份，两边一旦不同步就会出现「设置里能摆、播放器里没有对应分支」
+    /// （本项目反复出现的「能勾但不生效」）。现在两张表合成这一张：
+    ///   · 顺序 = 「更多」面板里的分组顺序；
+    ///   · 成员 = `allCases` 的**完整划分**（不重不漏，`assert` 在 Debug 下守着）。
+    static var capabilityGroups: [CapabilityGroup] {
+        let groups: [CapabilityGroup] = [
+            CapabilityGroup(title: L10n.text("Playback"), symbol: "play.rectangle",
+                            controls: [.episodes, .previousEpisode, .nextEpisode, .rotate,
+                                       .pictureInPicture, .miniPlayer, .anotherPlayer,
+                                       .playPause, .backTen, .forwardTen, .fullScreen]),
+            CapabilityGroup(title: L10n.text("Picture"), symbol: "rectangle.on.rectangle",
+                            controls: [.quality, .pictureSize]),
+            CapabilityGroup(title: L10n.text("Sound"), symbol: "speaker.wave.2",
+                            controls: [.audio, .subtitles, .speed, .danmaku, .speechSubtitles]),
+            CapabilityGroup(title: L10n.text("Series"), symbol: "rectangle.stack",
+                            controls: [.autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]),
+            CapabilityGroup(title: L10n.text("Progress"), symbol: "slider.horizontal.3",
+                            controls: [.timecode, .progressBar, .remaining]),
+            CapabilityGroup(title: L10n.text("Ads"), symbol: "megaphone",
+                            controls: [.markAd, .adBlock]),
+            CapabilityGroup(title: L10n.text("Info"), symbol: "info.circle",
+                            controls: [.videoInfo, .airPlay])
+        ]
+        // 固定键（锁定）不在分组里：它在播放器上位置固定，设置页单独一节说明。
+        assert(Set(groups.flatMap(\.controls)) == Set(allCases).subtracting(fixedKeys),
+               "能力分组必须正好覆盖全部可摆放控件：漏掉的那个在设置页里找不到，多出的那个没有渲染分支。")
+        return groups
+    }
+
+    /// 某项在播放器里「什么时候才真的画得出来」，给设置页做一句人话说明。
+    ///
+    /// 这不是装饰：`available()` 里有些控件依赖内容（单码率没有画质菜单、
+    /// 单音轨没有音轨菜单、直播没有倍速）。用户排好了却看不到，必须知道原因，
+    /// 否则又是一次「设置了不生效」。
+    var availabilityNote: String? {
+        switch self {
+        case .quality: L10n.text("Only when the source offers more than one quality.")
+        case .audio: L10n.text("Only when the source offers more than one audio track.")
+        case .subtitles: L10n.text("Only when the source has subtitles.")
+        case .danmaku: L10n.text("Only when the source has comments.")
+        case .speed: L10n.text("Never in a live stream.")
+        case .episodes, .moreInSeries, .nextEpisode, .previousEpisode:
+            L10n.text("Only when the title has more than one episode.")
+        case .markAd: L10n.text("Only for on-demand video longer than a minute.")
+        case .speechSubtitles: L10n.text("Only when speech recognition works in your language.")
+        default: nil
+        }
+    }
+
+    /// 能摆进控制栏的那些控件 —— 设置页的调色板就是它。
     ///
     /// ⛔ 这里曾经是 `allCases.filter { $0.isRoundButton && $0 != .rotate && $0 != .lock }`，
     /// 于是**播放暂停 / ±10 秒 / 上一集 / 下一集 / 全屏 / 转屏 / 锁定**七项根本
@@ -211,12 +349,26 @@ enum PlayerControl: String, CaseIterable, Codable, Hashable, Identifiable, Senda
         case .previousEpisode: .gray
         case .nextEpisode: .gray
         case .fullScreen: .gray
+        case .timecode: .gray
+        case .progressBar: .gray
+        case .remaining: .gray
         case .autoPlayNext: Brand.teal
         case .moreInSeries: .purple
         case .skipIntroAuto: Brand.amber
         case .skipIntroManual: Brand.amber
         }
     }
+}
+
+/// 一组能力（与播放器「更多」面板的标题一一对应）。
+///
+/// 用 struct 而不是元组：`ForEach` 需要 `KeyPath`，而 Swift 的 KeyPath
+/// 取不到元组成员（`\.title` 在元组上编译不过）。
+struct CapabilityGroup: Identifiable {
+    let title: String
+    let symbol: String
+    let controls: [PlayerControl]
+    var id: String { title }
 }
 
 /// The viewer's player-control layout: which controls occupy which of the ten slots in the top bar,
@@ -235,19 +387,22 @@ struct PlayerControlsLayout: Equatable {
     /// 全屏态控制栏里**直接显示**的控件。
     static let fullSurfacedKey = "playerControlsFullSurfaced"
 
-    // MARK: - 按形态分别存（三形态各自独立的控制栏）
+    // MARK: - 一份布局，三种形态共用
     //
-    // 用户要求：**各自互补，各自有独立的播放控件设置页**。
-    // 折叠外屏、展开竖持、展开横持三种形态的可用空间差一倍，
-    // 一套槽位不可能同时合适：外屏顶栏只放得下 2–3 个，横持能放 6 个。
-    // 共用一套的结果就是「在外屏删掉的按钮，横持时也没了」。
+    // ⛔ 这里曾经按形态分三份存（`playerControlsOrder.folded/.unfolded/.sideways`），
+    // 理由是「外屏顶栏只放得下 2–3 个，横持能放 6 个，一套槽位不可能同时合适」。
     //
-    // 键名规则：`playerControlsOrder.<形态>`。形态用名字而不是序号，
-    // 因为序号会在将来插入新形态时错位。
+    // 那个理由本身没错，但**解法错了**：它把「空间不够」这个运行时问题变成了
+    // 用户的配置负担 —— 设置页顶部先选形态，再一份一份排。实际后果有两个：
+    //   ① 用户在外屏页排了半天，播放器当前在横持，读的是另一份 ⇒「改了完全没反应」；
+    //   ② 三份配置互相独立，改了一份另外两个形态还是老样子 ⇒「每个形态都要设置一次」。
     //
-    // ⛔ 向后兼容：`playerControlsOrder`（无后缀）仍是**默认值来源**。
-    // 用户从旧版升上来时三份都还没有 → 各自回退到旧键；
-    // 一旦某个形态自己保存过，就用自己那份，不再被旧键覆盖。
+    // 正确的解法是工具栏的通用做法：**用户只排一份先后顺序，运行时按实际宽度
+    // 能放几颗放几颗，放不下的自动收进「更多」**（见 `OneSkinPlayerChrome.topOverflow`）。
+    // 空间问题由代码解决，不再让用户替每个形态各排一遍。
+    //
+    // 现在只有 `storageKey` 一个键。`Shape` 仍然保留，但只用于
+    // **预览选形态**与**旧键迁移**，不再参与存储选择。
     enum Shape: String, CaseIterable {
         /// 合起外屏 466×678。
         case folded
@@ -256,8 +411,8 @@ struct PlayerControlsLayout: Equatable {
         /// 展开横持 951×669（以及手机横持）。
         case sideways
 
-        /// 本形态的存储键。`folded` 直接复用旧键，用户的现有配置原样保留。
-        var storageKey: String {
+        /// 旧版每形态各自的键（仅迁移用）。
+        var legacyStorageKey: String {
             switch self {
             case .folded: return PlayerControlsLayout.storageKey
             default: return PlayerControlsLayout.storageKey + "." + rawValue
@@ -271,91 +426,69 @@ struct PlayerControlsLayout: Equatable {
             case .sideways: return L10n.text("Unfolded, sideways")
             }
         }
-    }
 
-    /// 按形态读一份布局。该形态没存过时**回退到旧键**，再没有就用 standard。
-    static func stored(for shape: Shape) -> String {
-        if let own = UserDefaults.standard.string(forKey: shape.storageKey), !own.isEmpty {
-            return own
+        /// 这块屏的真实点数尺寸（预览按它 1:1 画，再整体缩放）。
+        var screenSize: CGSize {
+            switch self {
+            case .folded:   return CGSize(width: 466, height: 678)
+            case .unfolded: return CGSize(width: 669, height: 951)
+            case .sideways: return CGSize(width: 951, height: 669)
+            }
         }
-        // 折叠态直接就是旧键本身（见 `Shape.storageKey`），走到这里说明确实还没写过。
-        return PlayerControlsLayout.standard.stored
     }
 
-    /// 该形态是否已经有自己的配置（设置页据此显示「已自定义 / 跟随默认」）。
-    static func hasOwnConfiguration(for shape: Shape) -> Bool {
-        guard let own = UserDefaults.standard.string(forKey: shape.storageKey) else { return false }
+    /// 当前布局的原始串。没写过就用标准布局。
+    static var rawStored: String {
+        guard let own = UserDefaults.standard.string(forKey: storageKey), !own.isEmpty else {
+            return standard.stored
+        }
+        return own
+    }
+
+    /// 唯一入口：所有形态、所有皮肤都读这一份。
+    static var current: PlayerControlsLayout { PlayerControlsLayout(stored: rawStored) }
+
+    /// 这个键是否被用户改过。
+    static var hasOwnConfiguration: Bool {
+        guard let own = UserDefaults.standard.string(forKey: storageKey) else { return false }
         return !own.isEmpty
     }
 
-    /// 把当前形态的配置清掉，重新回到默认。
-    static func reset(_ shape: Shape) {
-        UserDefaults.standard.removeObject(forKey: shape.storageKey)
+    /// 恢复默认。
+    static func reset() {
+        UserDefaults.standard.removeObject(forKey: storageKey)
     }
 
-    // MARK: - 一次性迁移：接入「直接显示」集合（#7b）
-
-    /// 把「升级前顶栏里看得见的控件」补进两种「直接显示」集合。
+    /// 把旧的「每形态一份」并成一份。
     ///
-    /// **为什么需要**：`MobilePlayer`（原版皮肤）此前完全不读
-    /// `watchSurfaced` / `fullSurfaced`（`grep -c surfaced App/MobilePlayer.swift` = 0），
-    /// 顶栏是纯槽位驱动。接入过滤后，默认 `watchSurfaced = [.airPlay, .episodes]`、
-    /// `defaultFullSurfaced = []`，于是老用户升级后会看到：观看页顶栏从 N 颗变 2 颗、
-    /// **全屏顶栏一颗不剩**。那不是他们改的配置，是升级造成的 —— 必须先补平。
+    /// 判据与取舍：
+    ///  · 共用键（`playerControlsOrder`，老版本里就是「折叠外屏」那份）**已存在** ⇒ 用它。
+    ///    那是老用户实际在用的那份，迁移不能覆盖它。
+    ///  · 共用键不存在、某个形态自己存过 ⇒ 用**第一个存过的**（顺序 folded → unfolded → sideways），
+    ///    至少把用户排过的东西带过来，而不是直接掉回默认。
+    ///  · 都没有 ⇒ 什么都不写，读的时候自然回落到 `standard`。
     ///
-    /// **为什么逐形态**：控制栏配置按三种形态各自分键存储
-    /// （`Shape.folded/unfolded/sideways`），用户可能排过三套不同布局。
-    /// 只迁一份，另外两个形态升级后照样塌。
-    ///
-    /// **为什么幂等**：用户可能从任意旧版本升上来，「版本号变了就迁」不可靠。
-    /// 判据是「两个集合都还是默认 + **顶栏里有任何可见控件**」，并有 marker 键防重复写盘。
-    /// 连续启动两次，第二次不再写。
-    ///
-    /// ⛔ 判据原先是「顶栏里有**超出默认**的控件」，已修正 —— 那条会漏掉整整一类用户：
-    /// 顶栏正好是默认两颗时 extras 为空 ⇒ 不迁移 ⇒ 全屏顶栏照样是空的（`fullSurfaced = []`）。
-    /// 复核 t8 判 O1：注释当时仍写旧判据，与实现不符。这一行已同步。
-    ///
-    /// 判据与负对照见 `Tests/TVCoreTests/PlayerControlSurfacingTests.swift`。
+    /// 幂等：只在一个 marker 没记过时跑一次；旧键保留不删（回滚到旧版本仍可用）。
     @MainActor
-    static func migrateSurfacingIfNeeded() {
+    static func migrateToUnifiedIfNeeded() {
         let defaults = UserDefaults.standard
-        let marker = PlayerControlSurfacingMigration.markerKey
+        let marker = "playerControlsUnified.migrated.v1"
         guard defaults.object(forKey: marker) == nil else { return }
+        defer { defaults.set(true, forKey: marker) }
 
-        let defaultWatch = defaultWatchSurfaced.map(\.rawValue)
-        let defaultFull = defaultFullSurfaced.map(\.rawValue)
-        var wrote = false
-
+        if let own = defaults.string(forKey: storageKey), !own.isEmpty { return }
         for shape in Shape.allCases {
-            // 该形态没存过配置 → 用的就是 standard，顶栏 = standard.top，
-            // 与默认集合必然一致（extras 为空），plan 会返回 changed=false。
-            var layout = PlayerControlsLayout(stored: stored(for: shape))
-            let outcome = PlayerControlSurfacingMigration.plan(
-                topSlots: layout.topSlots.map { $0?.rawValue },
-                watchSurfaced: layout.watchSurfaced.map(\.rawValue),
-                fullSurfaced: layout.fullSurfaced.map(\.rawValue),
-                defaultWatch: defaultWatch,
-                defaultFull: defaultFull,
-                alreadyMigrated: false          // marker 已在循环外统一判过一次
-            )
-            guard outcome.changed else { continue }
-            let watch = outcome.watchSurfaced.compactMap { PlayerControl(rawValue: $0) }
-            let full = outcome.fullSurfaced.compactMap { PlayerControl(rawValue: $0) }
-            layout.watchSurfaced = watch
-            layout.fullSurfaced = full
-            defaults.set(layout.stored, forKey: shape.storageKey)
-            wrote = true
+            let key = shape.legacyStorageKey
+            guard key != storageKey,
+                  let legacy = defaults.string(forKey: key), !legacy.isEmpty else { continue }
+            defaults.set(legacy, forKey: storageKey)
             #if DEBUG
-            print("[PlayerControls] surfacing migrated shape=\(shape.rawValue) watch=\(watch.count) full=\(full.count)")
+            print("[PlayerControls] unified layout seeded from \(shape.rawValue)")
             #endif
+            return
         }
-
-        // 无论有没有写，都记 marker：判据已经跑过，不需要每次启动重跑。
-        defaults.set(true, forKey: marker)
-        #if DEBUG
-        print("[PlayerControls] surfacing migration done wrote=\(wrote)")
-        #endif
     }
+
 
     /// 当前设备的形态（给播放器各读取点用）。
     ///
@@ -444,26 +577,28 @@ struct PlayerControlsLayout: Equatable {
         }
     }
 
-    /// 按页面形态读一份布局（皮肤层首选；见 `shape(for:width:)`）。
+    /// 皮肤层入口。**保留形参、忽略它们** —— 现在三种形态共用一份布局。
+    ///
+    /// 签名不改是为了让 `OneSkin` / `MobilePlayer` 的调用点保持一行，
+    /// 将来若要恢复「按形态微调」，改动点仍在这里。
     @MainActor
     static func current(forSkinShape skinShape: OneSkinShape, width: CGFloat) -> PlayerControlsLayout {
-        PlayerControlsLayout(stored: stored(for: shape(for: skinShape, width: width)))
+        current
     }
     #endif
 
-    /// 按当前形态读一份布局（播放器与皮肤都走这个，不要再自己读裸键）。
+    /// 播放器入口（原版皮肤）。同样忽略尺寸，返回同一份布局。
     ///
-    /// 传入的是**当前可用空间**（不是屏幕尺寸）：Duo 的两块屏、Split View 半边、
-    /// 被 PiP 压短的高度，都应当影响这一份配置的选择。
+    /// 传进来的仍然是**当前可用空间**，将来做「按形态微调」时它是唯一需要的输入。
     @MainActor
     static func current(forSize size: CGSize) -> PlayerControlsLayout {
-        PlayerControlsLayout(stored: stored(for: currentShape(width: size.width, height: size.height)))
+        current
     }
 
-    /// 只有宽度时的便捷入口（旧调用点保留）。高度未知 → 按竖持处理。
+    /// 只有宽度时的便捷入口（旧调用点保留）。
     @MainActor
     static func current(forWidth width: CGFloat) -> PlayerControlsLayout {
-        current(forSize: CGSize(width: width, height: 0))
+        current
     }
 
     /// The number of fixed slots in the top bar and in the bottom bar.
@@ -475,37 +610,119 @@ struct PlayerControlsLayout: Equatable {
     var bottomSlots: [PlayerControl?]
     var more: [PlayerControl]
 
-    /// 选集页控制栏直接显示的控件集合（其余进「更多」菜单）。
+    /// 兼容字段 —— 早期版本用它们决定「工具栏里画不画这颗」。
     ///
-    /// 与 `topSlots` 的区别：槽位决定**顺序与位置**，这两个集合决定
-    /// **在哪种播放状态下真的出现在控制栏里**。一个控件可以同时在两个集合里
-    /// （选集页和全屏都直接显示），互不冲突 —— 这是用户明确要求的形式。
-    var watchSurfaced: [PlayerControl]
-    /// 全屏态控制栏直接显示的控件集合。
-    var fullSurfaced: [PlayerControl]
+    /// ⛔ 现在**槽位本身才是唯一事实**：排进顶栏/底栏就画，排进「更多」就在菜单里。
+    /// 这两个集合恒等于「全部控件」，保留它们只有两个理由：
+    ///   ① 旧存储串还是五段格式，解析器要能读；
+    ///   ② 原版皮肤走 `PlayerControlSurfacing.allowed(...)`，传「全部」= 不过滤。
+    ///
+    /// 历史教训：可见性集合与槽位是**两个与条件**，于是「勾了但没摆进槽位」和
+    /// 「摆进槽位但没勾」都表现为「设置里改了、播放器里没有」。这正是用户说的
+    /// 「甚至没有生效」。一个条件（槽位）就够，多出来的那个只会制造矛盾。
+    private(set) var watchSurfaced: [PlayerControl]
+    private(set) var fullSurfaced: [PlayerControl]
+
+    /// 一维顺序写入顶栏 —— 设置页「拖拽排序」的唯一写入口。
+    ///
+    /// 规则（越简单越好）：
+    ///   · 传入的数组就是顶栏从左到右的顺序；
+    ///   · 从顶栏摘下去的**传输类**回到画面中央（它的老家），其余进「更多」；
+    ///   · 同一个控件不会同时出现在两处。
+    mutating func setTopOrder(_ controls: [PlayerControl]) {
+        // 只接「顶栏画得出来」的：进度行三件没有顶栏形态，传输类只画在画面中央，
+        // 固定键（锁定）压根不参与摆放。以前只滤了第一条，后两种会被写进
+        // `topSlots` 再被播放器忽略 —— 「加了没反应」。
+        let wanted = controls.filter { $0.placements.contains(.topBar) }
+        var bottom = self.bottom.filter { !wanted.contains($0) }
+        var more = self.more.filter { !wanted.contains($0) }
+        for control in self.top where !wanted.contains(control) {
+            if PlayerControl.centerControls.contains(control), !bottom.contains(control) {
+                bottom.append(control)
+            } else if !more.contains(control) {
+                more.append(control)
+            }
+        }
+        topSlots = wanted.map(Optional.some)
+        bottomSlots = bottom.map(Optional.some)
+        self.more = more
+        assertComplete("setTopOrder")
+    }
+
+    /// 一维顺序写入底栏（进度那一行）—— 与 `setTopOrder` 同构。
+    ///
+    /// 底栏里既有传输类（显示在画面中央），也有时间码 / 进度条 / 剩余时间 / 全屏，
+    /// 顺序就是这一行从左到右的顺序。从这一行摘下去的控件进「更多」。
+    mutating func setBottomOrder(_ controls: [PlayerControl]) {
+        // 锁定键没有底栏形态（锁定态底栏不画），写进来也画不出来。
+        let wanted = controls.filter {
+            $0.placements.contains(.progressRow) || $0.placements.contains(.middle)
+        }
+        let top = self.top.filter { !wanted.contains($0) }
+        var more = self.more.filter { !wanted.contains($0) }
+        for control in self.bottom where !wanted.contains(control) {
+            if !more.contains(control) { more.append(control) }
+        }
+        topSlots = top.map(Optional.some)
+        bottomSlots = wanted.map(Optional.some)
+        self.more = more
+        assertComplete("setBottomOrder")
+    }
+
+    /// 把控件放回它**唯一恰当的位置**（设置页「加回来」用）。
+    ///
+    /// 三处能力不对称，所以不做「加到哪一行」的二次选择：菜单里一项就是一个落点。
+    mutating func add(_ control: PlayerControl, to placement: PlayerControl.Placement) {
+        guard control.placements.contains(placement) else { return }
+        switch placement {
+        case .topBar:
+            setTopOrder(top + [control])
+        case .middle, .progressRow:
+            setBottomOrder(bottom + [control])
+        }
+    }
 
     /// The non-empty controls in each row, in slot order.
     var top: [PlayerControl] { topSlots.compactMap { $0 } }
     var bottom: [PlayerControl] { bottomSlots.compactMap { $0 } }
 
-    init(topSlots: [PlayerControl?], bottomSlots: [PlayerControl?], more: [PlayerControl],
-         watchSurfaced: [PlayerControl]? = nil, fullSurfaced: [PlayerControl]? = nil) {
-        self.topSlots = Self.normalized(topSlots)
-        self.bottomSlots = Self.normalized(bottomSlots)
-        self.more = more
-        // 没给就走默认：选集页显示常用那几个，全屏只显示 transport 相关。
-        self.watchSurfaced = watchSurfaced ?? Self.defaultWatchSurfaced
-        self.fullSurfaced = fullSurfaced ?? Self.defaultFullSurfaced
+    init(topSlots: [PlayerControl?], bottomSlots: [PlayerControl?], more: [PlayerControl]) {
+        // 固定键（锁定）不参与摆放：旧串里它可能还躺在顶栏/底栏/更多里，
+        // 进来时一律剔掉 —— 否则设置页会列一个拖不动的行，播放器那边还会多出一颗。
+        self.topSlots = Self.strippingFixedKeys(Self.normalized(topSlots))
+        self.bottomSlots = Self.strippingFixedKeys(Self.normalized(bottomSlots))
+        self.more = more.filter { !PlayerControl.fixedKeys.contains($0) }
+        // 不过滤：工具栏里有什么就画什么（见 `watchSurfaced` 的注释）。
+        self.watchSurfaced = PlayerControl.allCases
+        self.fullSurfaced = PlayerControl.allCases
     }
 
-    /// 选集页默认直接显示：顶栏标配的那两颗（AirPlay、选集）。
+    /// 构造/写入完成后检查「控件都有家」，不合格就在 Debug 里当场炸。
     ///
-    /// 这里曾经写着「画中画、小窗、外播、视频信息、选集」，但那四项并不在顶栏槽位里 ——
-    /// 可见性集合与槽位必须同时成立才会画出来，于是默认值里有四项**永远画不出来**，
-    /// 而设置页却把它们显示成「已勾选」。默认值只列真能出现的，其余由用户勾（勾上即补位）。
-    static let defaultWatchSurfaced: [PlayerControl] = [.airPlay, .episodes]
-    /// 全屏默认只显示 playback 类（其余全屏里没意义，或会盖住画面）。
-    static let defaultFullSurfaced: [PlayerControl] = []
+    /// 刻意不放在指定 init 里：`init(stored:)` 会先按原样解析一遍、再补齐缺失项
+    /// （见那段「Any control a newer build added…」），中间态本来就不完整 ——
+    /// 在中间态断言，等于给「旧串缺了新控件」这种正常情况判死刑。
+    func assertComplete(_ context: String) {
+        assert(isComplete, """
+            布局不完整（\(context)）：每个可摆放控件必须**恰好**待在顶栏 / 底栏 / 更多其中一处。
+            漏掉的那个会在播放器里凭空消失（设置页还列着），重复的那个会画两遍。
+            top=\(top.map(\.rawValue)) bottom=\(bottom.map(\.rawValue)) more=\(more.map(\.rawValue))
+            """)
+    }
+
+    /// 控件是否「都有家」：三处不重不漏地覆盖全部可摆放控件。
+    ///
+    /// 这就是「三形态共用一份控件表、放不下就叠进更多」这条规则的落点：
+    /// 任何没有被摆进某一行的控件，都必须在 `more` 里 —— 不能被丢掉。
+    var isComplete: Bool {
+        let placed = top + bottom + more
+        return Set(placed).count == placed.count
+            && Set(placed) == Set(PlayerControl.allCases).subtracting(PlayerControl.fixedKeys)
+    }
+
+    private static func strippingFixedKeys(_ slots: [PlayerControl?]) -> [PlayerControl?] {
+        slots.map { slot in slot.flatMap { PlayerControl.fixedKeys.contains($0) ? nil : $0 } }
+    }
 
     /// Pads or trims a slot list to exactly `slotCount` entries.
     private static func normalized(_ slots: [PlayerControl?]) -> [PlayerControl?] {
@@ -529,10 +746,10 @@ struct PlayerControlsLayout: Equatable {
         }
         switch parts.count {
         case 5:
+            // 第 4、5 段（两个「直接显示」集合）**读进来但不采用** ——
+            // 槽位即事实。旧串照旧能解析，改成三段的时机不与本次改动绑定。
             self.init(topSlots: parseSlots(parts[0]), bottomSlots: parseSlots(parts[1]),
-                      more: parts[2].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) },
-                      watchSurfaced: parts[3].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) },
-                      fullSurfaced: parts[4].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) })
+                      more: parts[2].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) })
         case 3:
             self.init(topSlots: parseSlots(parts[0]), bottomSlots: parseSlots(parts[1]),
                       more: parts[2].split(separator: ",").compactMap { PlayerControl(rawValue: String($0)) })
@@ -553,15 +770,13 @@ struct PlayerControlsLayout: Equatable {
         // （曾经在这里用不带集合的 init 重建，五段串里刚解析出来的
         //  watchSurfaced / fullSurfaced 被默认值覆盖 —— 设置页勾完、播放器不认、
         //  重启后勾选框还退回默认，也就是「显示/隐藏 不起作用」。）
-        let surfacedWatch = self.watchSurfaced
-        let surfacedFull = self.fullSurfaced
         var top = self.top, bottom = self.bottom, more = self.more
         let placed = Set(top + bottom + more)
         for control in PlayerControl.standardTop where !placed.contains(control) { top.append(control) }
         for control in PlayerControl.standardBottom where !placed.contains(control) { bottom.append(control) }
         for control in PlayerControl.standardMore where !placed.contains(control) { more.append(control) }
-        self.init(topSlots: top.map(Optional.some), bottomSlots: bottom.map(Optional.some), more: more,
-                  watchSurfaced: surfacedWatch, fullSurfaced: surfacedFull)
+        self.init(topSlots: top.map(Optional.some), bottomSlots: bottom.map(Optional.some), more: more)
+        assertComplete("load")
     }
 
     var stored: String {
@@ -575,57 +790,10 @@ struct PlayerControlsLayout: Equatable {
             + "|" + fullSurfaced.map(\.rawValue).joined(separator: ",")
     }
 
-    /// Which zone a control is in, so the player can route its rendering.
-    enum Zone { case top, bottom, more }
-    func zone(of control: PlayerControl) -> Zone {
-        if top.contains(control) { return .top }
-        if bottom.contains(control) { return .bottom }
-        return .more
-    }
-
-    /// Moves a control into a specific slot of a row, removing it from wherever it was.
-    mutating func place(_ control: PlayerControl, in zone: Zone, slot: Int) {
-        remove(control)
-        let index = min(max(slot, 0), Self.slotCount - 1)
-        switch zone {
-        case .top:
-            // ⛔ 目标槽位若已被别人占着，那个控件**不能凭空消失**。
-            //
-            // 原来直接 `topSlots[index] = control` —— 被挤掉的那个控件
-            // 从 topSlots 里被覆盖掉，既不在顶栏、也不在「更多」里，
-            // 于是它**彻底从界面上消失**，用户只剩「我刚才那个按钮呢」。
-            // 现在把被挤掉的那个收进「更多」，功能不丢、位置可再拖回来。
-            if let displaced = topSlots[index], displaced != control, !more.contains(displaced) {
-                more.append(displaced)
-            }
-            topSlots[index] = control
-        case .bottom:
-            if let displaced = bottomSlots[index], displaced != control, !more.contains(displaced) {
-                more.append(displaced)
-            }
-            bottomSlots[index] = control
-        case .more:
-            // 放进「更多」时，若它本来就在 more 里（被 remove 清掉了），加回去即可。
-            more.append(control)
-        }
-    }
-
-    /// Removes a control from every row and More.
-    mutating func remove(_ control: PlayerControl) {
-        topSlots = topSlots.map { $0 == control ? nil : $0 }
-        bottomSlots = bottomSlots.map { $0 == control ? nil : $0 }
-        more.removeAll { $0 == control }
-    }
-
-    /// 勾上「直接显示」时把控件摆进顶栏第一个空位。
-    ///
-    /// 顶栏槽位决定位置、勾选集合决定可见性，两者**必须同时成立**控件才画出来。只勾不摆，
-    /// 就是「设置里勾了、播放器里没有」—— 所以勾选顺手补位，摆在哪里之后再拖。顶栏满了、
-    /// 或它本来就在顶栏，就原地不动（不挤掉别人）。
-    mutating func surfaceInTopRow(_ control: PlayerControl) {
-        guard !top.contains(control), let free = topSlots.firstIndex(where: { $0 == nil }) else { return }
-        remove(control)
-        topSlots[free] = control
-    }
+    // ⛔ 已删除 `Zone` / `zone(of:)` / `place(_:in:slot:)` / `remove(_:)` / `surfaceInTopRow(_:)`：
+    //   整套是**槽位 + 勾选**两维模型的残留（「勾上→顺手补位」「落到第几格」）。
+    //   现在只有一维顺序（`setTopOrder` / `setBottomOrder` / `add(_:to:)`），
+    //   留着它就是**第三套摆放规则** —— 谁再调它，写出来的串与设置页/播放器都不同源，
+    //   正是「设置里排好了、播放器里是空槽」那一类问题的温床。
 }
 #endif

@@ -302,15 +302,11 @@ struct OneSkinChrome: View {
 
     private var session: PlaybackSession? { kit.session }
     private var channel: Channel? { kit.channel }
-    /// 按当前形态读（三形态各自独立的控制栏）。
-    /// `layoutRaw` 只作为刷新信号保留 —— `@AppStorage` 不能动态选键。
+    /// 控制栏排布：**所有形态共用一份**（见 `PlayerControlsLayout`）。
+    /// `layoutRaw` 只作为刷新信号保留 —— `@AppStorage` 需要它才能在本页重算。
     private var layout: PlayerControlsLayout {
         _ = layoutRaw
-        // ⛔ 不能用 `appScreenBounds.width`（BUG-L）：Duo 的 `screen.bounds` 是**物理固定值**，
-        //    内屏恒报 669（`device-facts` / `duo-metrics` 实测），既不随方向交换，
-        //    也不反映 Split View 半边或 PiP 压短后的真实空间。
-        //    而 `winW×winH` 就是这个播放器窗口此刻真正拿到的尺寸 —— 用它选那一份控制栏配置。
-        return PlayerControlsLayout.current(forSkinShape: kit.skinShape, width: winW)
+        return PlayerControlsLayout.current
     }
     private var scaling: PictureScaling { PictureScaling(rawValue: scalingRaw) ?? .source }
 
@@ -772,16 +768,28 @@ struct OneSkinChrome: View {
     /// 但**不再**把 `.lock` 滤掉：用户把它排进顶栏就按他的位置画
     /// （没排才补结构位那颗，见 `topBar`）。
     private var topSlotRow: [PlayerControl?] {
-        let allowed = Set(fullScreen ? layout.fullSurfaced : layout.watchSurfaced)
-        // 容量的单位是**格**：绝对定位后，一个控件落在第 9 格就实占 9 格宽度。
         let slots = Array(layout.topSlots.prefix(topSurfaceCapacity))
         // 末尾的空格不占位：只在「最后一个有内容的格子」之前保留空位，
         // 否则窄窗口里会被一串无意义的空格把控件挤出可视区。
         let end = (slots.lastIndex { $0 != nil } ?? -1) + 1
         return slots.prefix(end).map { slot in
-            guard let control = slot, allowed.contains(control), available(control) else { return nil }
+            guard let control = slot, available(control) else { return nil }
             return control
         }
+    }
+
+    /// 顶栏**放不下**的控件 —— 自动收进「更多」，而不是被静默丢掉。
+    ///
+    /// 这是「一份排布适配三种形态」的关键：外屏顶栏只放得下 3–4 颗，
+    /// 内屏横持能放 7 颗。用户只排一次，超出的部分在窄屏上出现在「更多」里，
+    /// 到了宽屏又自动回到顶栏 —— 不需要为每个形态各排一遍。
+    ///
+    /// ⛔ 以前这里是 `prefix(capacity)` 直接截断，被截掉的控件不报错、不出现、
+    /// 也找不到：用户看到的正是「设置里排好了，播放器里没有」。
+    private var topOverflow: [PlayerControl] {
+        layout.topSlots.dropFirst(topSurfaceCapacity)
+            .compactMap { $0 }
+            .filter(available)
     }
 
     /// 转屏这一项是否已经由用户摆在别处（顶栏槽位或「更多」里）。
@@ -792,7 +800,8 @@ struct OneSkinChrome: View {
     private var controlsRotateElsewhere: Bool {
         // 三处都要看。原来只看 top / more，于是用户把转屏摆到**底栏**时
         // 顶栏那颗兜底仍然画 —— 上下各一颗，顶栏那颗还删不掉。
-        layout.top.contains(.rotate) || layout.more.contains(.rotate) || layout.bottom.contains(.rotate)
+        // `moreList` 含「放不下被收进更多」的那些：它们也能点到。
+        layout.top.contains(.rotate) || layout.bottom.contains(.rotate) || moreList.contains(.rotate)
     }
 
     /// 底栏**槽位行**（含空槽）—— 与顶栏同一套「绝对定位」口径。
@@ -823,18 +832,77 @@ struct OneSkinChrome: View {
     ///
     /// 现在统一：**传输类走中心的槽位行，其余（全屏 / 画质 / 转屏…）走底栏边缘**。
     /// 两处都保持用户排的槽位顺序与空格，任何一个控件都有明确的家。
-    private static let centerControlSet: Set<PlayerControl> =
-        [.backTen, .playPause, .forwardTen, .previousEpisode, .nextEpisode]
+    // 成员资格与设置页共用 `PlayerControl.centerControls`：那边把控件摘出顶栏时
+    // 要按同一张表判断「它是回到中央、还是进更多」。
+    private static var centerControlSet: Set<PlayerControl> { PlayerControl.centerControls }
 
     private var centerSlotRow: [PlayerControl?] {
-        bottomSlotRow.map { $0.flatMap { Self.centerControlSet.contains($0) ? $0 : nil } }
+        let mapped = bottomSlotRow.map {
+            $0.flatMap { Self.centerControlSet.contains($0) ? $0 : nil }
+        }
+        // 末尾的空格**不占位**：`bottomSlotRow` 里还有时间码 / 进度条 / 剩余时间那几格，
+        // 它们映射成 nil 后若留在末尾，中央这一组会被硬生生推偏半个屏。
+        let end = (mapped.lastIndex { $0 != nil } ?? -1) + 1
+        return Array(mapped.prefix(end).prefix(centerCapacity))
     }
 
-    /// 底栏边缘那一行（全屏 / 画质 / 转屏…）。这里**压缩空槽**：
-    /// 它是贴着进度条的一条边，前面留一串空格只会把时间码往里挤，
-    /// 位置语义由中心那一行承担。
-    private var edgeControls: [PlayerControl] {
-        bottomSlotRow.compactMap { $0 }.filter { !Self.centerControlSet.contains($0) }
+    /// 底栏那一行里**真的画出来**的控件（按槽位顺序）。
+    ///
+    /// 进度条是**弹性宽度**（吃掉剩余空间），其余每件占一个热区。固定宽度的
+    /// 件数超过 `edgeCapacity` 时，多出来的收进「更多」—— 它们不会凭空消失。
+    ///
+    /// 时间码 / 剩余时间 / 进度条本身就是这张表里的三项（`PlayerControl.timecode`
+    /// 等），所以「进度条也能挪位置、也能删」不是特例，而是同一套槽位规则。
+    private var bottomItems: [PlayerControl] {
+        var fixedCount = 0
+        var result: [PlayerControl] = []
+        for control in bottomSlotRow.compactMap({ $0 }) where !Self.centerControlSet.contains(control) {
+            if control == .progressBar { result.append(control); continue }
+            // 全屏键是**结构位兜底**：即使排不下也要画（否则全屏就没有出口了）。
+            // 它在这里占一格，但不因超编被丢进「更多」——否则底栏会同时出现
+            // 「更多」里的全屏条目和右端那颗兜底键，等于两个入口。
+            if control == .fullScreen { result.append(control); fixedCount += 1; continue }
+            guard fixedCount < edgeCapacity else { continue }
+            fixedCount += 1
+            result.append(control)
+        }
+        return result
+    }
+
+    /// 中心那一组最多站得下几格。窗口越窄越少，多出来的收进「更多」。
+    private var centerCapacity: Int {
+        let usable = max(0, winW - 2 * m.edge)
+        return max(1, Int(usable / max(m.stepHit, 1)))
+    }
+
+    /// 底栏进度条左侧最多站得下几颗。
+    ///
+    /// 要预留：时间码 + 剩余时间（两段等宽数字）+ 进度条最窄 120pt + 全屏兜底键。
+    /// 扣完还剩几颗就画几颗，剩下的收进「更多」。
+    private var edgeCapacity: Int {
+        let reserve = m.caption * 15 + m.hit + 120
+        let usable = max(0, winW - barLeading - barTrailing - reserve)
+        return max(1, Int(usable / max(m.hit, 1)))
+    }
+
+    /// 底栏放不下、被收进「更多」的控件（中心与边缘两处合并）。
+    private var bottomOverflow: [PlayerControl] {
+        let all = bottomSlotRow.compactMap { $0 }
+        let center = all.filter { Self.centerControlSet.contains($0) }
+        let edge = all.filter { !Self.centerControlSet.contains($0) }
+        let shown = Set(bottomItems)
+        return Array(center.dropFirst(centerCapacity)) + edge.filter { !shown.contains($0) }
+    }
+
+    /// 「更多」面板此刻真正要列出的控件 = 用户放进去的 + 各处放不下自动收进来的。
+    ///
+    /// 顺序保持用户排的先后，重复项去掉（同一个控件不会既在顶栏又在更多）。
+    private var moreList: [PlayerControl] {
+        var seen = Set<PlayerControl>()
+        // 固定键（锁定）不进「更多」：它已经在右上角常驻，再列一条就是同一动作两个入口。
+        return (layout.more + topOverflow + bottomOverflow)
+            .filter { !PlayerControl.fixedKeys.contains($0) }
+            .filter { seen.insert($0).inserted }
     }
 
     /// 中央槽位行里每一格分到的宽度。控件多、窗口窄时按比例收，
@@ -870,6 +938,9 @@ struct OneSkinChrome: View {
         case .speechSubtitles: return speechLanguage != nil
         case .backTen, .forwardTen: return seekable
         case .playPause, .fullScreen: return true
+        // 进度行三件：时间码随时可显示；进度条与剩余时间依赖时间轴（直播没有）。
+        case .timecode: return true
+        case .progressBar, .remaining: return session.hasTimeline
         case .previousEpisode: return step(back: true) != nil
         case .nextEpisode: return step(back: false) != nil
         // 这四项来自上游那套菜单，收进枚举后一并给出可用性判据。
@@ -941,36 +1012,15 @@ struct OneSkinChrome: View {
 
     private var bottomBar: some View {
         HStack(spacing: 0) {
-            // 左侧：底栏槽位里**非传输类**的控件（全屏 / 画质 / 转屏 …）。
+            // 按槽位顺序画：时间码 / 进度条 / 剩余时间 / 全屏 / 画质 / 转屏 …
             // 传输类（播放 / ±10 / 上下集）在画面中央那一行，见 `centerSlotRow`。
-            ForEach(edgeControls, id: \.self) { control in
-                transportControl(control)
+            ForEach(Array(bottomItems.enumerated()), id: \.offset) { _, control in
+                bottomItem(control)
             }
-            // 时间码：按文字实际宽度占位，不吃 10.8% 窗口宽。
-            // 两侧都收紧后，中间的 seekTrack 才能真正撑满剩余空间。
-            Text(clock(position)).monospacedDigit()
-                .fixedSize()
-                .padding(.trailing, 8)
-            // 进度条吃掉中间剩余宽度。以前写死 0.60×winW，两侧再各让 0.108/0.171，
-            // 加起来只有 0.919，差的那 3.8% 没人占 —— 右端全屏键永远比顶栏往里缩一截。
-            seekTrack
-            // 剩余时间：给一个**够用就停**的宽度，不按 winW 比例切。
-            //
-            // 原来写死 `winW * 0.171`（竖屏 444 宽时 = 76pt），
-            // 而 "-1:39" 五个字符在 caption 字号下只要 40pt 左右 ——
-            // 多出来的 36pt 全变成「全屏键前面的一片空白」，
-            // 于是按钮永远落不到窗口右下角。用户报的「没占满整个宽度」
-            // 一半是这个框撑的（另一半是 barTrailing 掺了列宽，已另修）。
-            // 用 fixedSize 让它按真实文字宽度占位，右侧只留一点点间隙。
-            Text(remainText).monospacedDigit()
-                .fixedSize()
-            // 这里以前单独传 `winW * 0.040` 和小一号的字，是同一排里唯一
-            // 「框更窄、字形更小」的图标。现在与顶栏同一套：同一颗图标、同一个热区。
-            //
             // ★ 只有在用户**哪里都没排**全屏键时才画这颗兜底键。
             //   排进去了就由槽位那一行按他的位置画，这里再画一颗
             //   就是「同一个功能两个按钮、还删不掉其中一颗」。
-            if !edgeControls.contains(.fullScreen),
+            if !bottomItems.contains(.fullScreen),
                !topSlotRow.contains(.fullScreen),
                !centerSlotRow.contains(.fullScreen) {
                 iconButton(kit.isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
@@ -988,6 +1038,35 @@ struct OneSkinChrome: View {
         // 同顶栏：小窗时 0.928 会把热区顶出下沿；
         // 窗口贴屏幕底时还要让开 Home 指示条 —— 见 `bottomBarY`。
         .position(x: winW / 2, y: bottomBarY)
+    }
+
+    /// 底栏一格里画什么。时间码 / 进度条 / 剩余时间各有专属形态，
+    /// 其余控件走与顶栏同一套 `transportControl`。
+    @ViewBuilder private func bottomItem(_ control: PlayerControl) -> some View {
+        switch control {
+        case .timecode:
+            Text(clock(position)).monospacedDigit()
+                .fixedSize()
+                .padding(.trailing, 8)
+        case .remaining:
+            Text(remainText).monospacedDigit()
+                .fixedSize()
+        case .progressBar:
+            seekTrack
+        default:
+            transportControl(control)
+        }
+    }
+
+    /// 把进度行的一件放回底栏末尾。
+    ///
+    /// 直接写同一个 `@AppStorage` 键 —— 与设置页是同一份数据，
+    /// 不需要为这一条动作单开一条通道。
+    private func restoreToProgressRow(_ control: PlayerControl) {
+        var updated = layout
+        updated.setBottomOrder(updated.bottom + [control])
+        layoutRaw = updated.stored
+        if showsMore { closeMore() }
     }
 
     private var seekTrack: some View {
@@ -1151,29 +1230,14 @@ struct OneSkinChrome: View {
         withAnimation(.easeOut(duration: 0.16)) { showsMore = false }
     }
 
-    /// 「更多」里按分组切好的可见条目，已按 `layout.more` 的先后排好序。
+    /// 「更多」里按分组切好的可见条目，已按 `moreList` 的先后排好序。
     ///
-    /// 分组的**成员资格**是写死的语义（倍速/字幕归「播放」，画面比例归「画面」…），
-    /// 但**哪些出现、以什么顺序出现**全部来自 `layout.more`。
+    /// 分组的**成员资格**来自 `PlayerControl.capabilityGroups` —— 与设置页调色板
+    /// 同一张表。以前这里另有一份写死的表，两边一旦不同步就会出现
+    /// 「设置里能摆、这里没有对应分支」的死条目。
     private var visibleMoreGroups: [(title: String, controls: [PlayerControl])] {
-        // 语义分组：只决定「这个控件属于哪个标题」，不决定它出不出现。
-        let groups: [(String, [PlayerControl])] = [
-            // ⛔ 这张表的**成员资格**必须覆盖 `moreItem` 里所有**有分支**的 case。
-            // 少了哪一个，那个分支就成了死代码：用户把它拖进「更多」，
-            // 面板里什么都不出现 —— 正是本批要消灭的「拖进去 = 凭空消失」。
-            // 传输四项（播放/暂停、±10 秒、全屏）原先不在表里，`moreItem` 里
-            // 为它们写的分支从来没被走到过。
-            (L10n.text("Playback"), [.episodes, .previousEpisode, .nextEpisode, .rotate, .lock,
-                                     .pictureInPicture, .miniPlayer, .anotherPlayer,
-                                     .playPause, .backTen, .forwardTen, .fullScreen]),
-            (L10n.text("Picture"), [.quality, .pictureSize]),
-            (L10n.text("Sound"), [.audio, .subtitles, .speed, .danmaku, .speechSubtitles]),
-            (L10n.text("Series"), [.autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual]),
-            (L10n.text("Ads"), [.markAd, .adBlock]),
-            (L10n.text("Info"), [.videoInfo, .airPlay])
-        ]
-        // 只有进了 `layout.more` 的才出现；组内顺序跟随 `more` 的数组顺序。
-        let order = layout.more
+        let groups = PlayerControl.capabilityGroups.map { (title: $0.title, controls: $0.controls) }
+        let order = moreList
         return groups.compactMap { title, members in
             let shown = members.filter { order.contains($0) }
                 .sorted { (order.firstIndex(of: $0) ?? 0) < (order.firstIndex(of: $1) ?? 0) }
@@ -1377,6 +1441,13 @@ struct OneSkinChrome: View {
         case .skipIntroManual:
             Button { showsSkip = true } label: {
                 Label(L10n.text("Skip intro / outro"), systemImage: "forward.end")
+            }
+        case .timecode, .progressBar, .remaining:
+            // 它们不是按钮，放进「更多」等于藏起来。给一条明确的回头路，
+            // 而不是让用户只看到「拖进去就没了」。
+            Button { restoreToProgressRow(control) } label: {
+                Label(L10n.text("Show %@ on the Progress Row", control.title),
+                      systemImage: control.symbol)
             }
         case .playPause, .backTen, .forwardTen:
             // 这三个是**传输类**控件，正常情况下由 `bottomBar` 独占渲染。
@@ -2476,6 +2547,10 @@ struct OneSkinChrome: View {
     /// 顶栏里的一颗用户控件。
     @ViewBuilder private func controlButton(_ control: PlayerControl) -> some View {
         switch control {
+        case .timecode, .progressBar, .remaining:
+            // 这三件属于进度行（`bottomItem` 有专属形态）。设置页也不让它们进顶栏，
+            // 万一旧配置里有，这里画成只读图标而不是一颗点不动的空白。
+            chromeIcon(control.symbol).allowsHitTesting(false)
         case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual:
             // ⛔ 此前这四项是 `EmptyView()`，理由写的是「只做菜单条目，顶栏不放它们」。
             //    但它们**在 `barControls` 里**，设置页的「直接显示」表会列出来、
