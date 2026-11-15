@@ -772,12 +772,75 @@ struct PlayerControlsLayout: Equatable {
         //  重启后勾选框还退回默认，也就是「显示/隐藏 不起作用」。）
         var top = self.top, bottom = self.bottom, more = self.more
         let placed = Set(top + bottom + more)
-        for control in PlayerControl.standardTop where !placed.contains(control) { top.append(control) }
-        for control in PlayerControl.standardBottom where !placed.contains(control) { bottom.append(control) }
+        // ⛔ 2026-11-15：补位必须**有界**，溢出进「更多」，绝不能被 `normalized()` 静默截掉。
+        //
+        // 原写法是无界 `append`，而 `init(topSlots:bottomSlots:more:)` 会走
+        // `normalized()` → `Array(slots.prefix(slotCount))`（:747），**只留前 10 个**。
+        // 一旦 `top`/`bottom` 补位后超过 10 项，多出来的就被静默丢弃：
+        //   `isComplete` 立刻 false ⇒ `assertComplete("load")` 在 Debug 下 SIGTRAP。
+        //
+        // 真机实证（iPhone Duo，2026-11-15）：用户已配 bottom 8 项
+        // （backTen/playPause/forwardTen/previousEpisode/nextEpisode/audio/quality/fullScreen），
+        // 补位还需 timecode/progressBar/remaining 三项 ⇒ 8+3=11 > 10
+        // ⇒ `remaining` 被截掉 ⇒ placed 28/29 ⇒ 每次进播放页必崩
+        // （EXC_BREAKPOINT，栈顶 `assertComplete` ← `init(stored:)` ← `current`）。
+        //
+        // 溢出进「更多」而不是丢弃：控件仍可达（「更多」面板里能点到），
+        // 判据强度不变（29 项仍需全部落位），比「放宽 isComplete」安全得多
+        // ——后者会把这类真实缺陷直接藏起来。
+        for control in PlayerControl.standardTop where !placed.contains(control) {
+            if top.count < Self.slotCount { top.append(control) } else { more.append(control) }
+        }
+        for control in PlayerControl.standardBottom where !placed.contains(control) {
+            if bottom.count < Self.slotCount { bottom.append(control) } else { more.append(control) }
+        }
+        // 「更多」本身不限长，补位直接追加。
         for control in PlayerControl.standardMore where !placed.contains(control) { more.append(control) }
         self.init(topSlots: top.map(Optional.some), bottomSlots: bottom.map(Optional.some), more: more)
         assertComplete("load")
+        Self.assertOverflowReachable()
     }
+
+    /// 回归断言：**真机那个崩溃串，修好之后 isComplete 必须为真。**
+    ///
+    /// 锁死 2026-11-15 的崩溃：`normalized()` 只留前 `slotCount` 个
+    /// （`Array(slots.prefix(slotCount))`，:747），补位一旦超长，多出来的被**静默截掉**
+    /// ⇒ `placed` 少一项 ⇒ `isComplete` false ⇒ `assertComplete("load")` 在 Debug 下
+    /// SIGTRAP ⇒ 真机每次进播放页必崩、播放路径完全不可达。
+    ///
+    /// 这里用的就是**设备上原样那条**持久化串（iPhone Duo，`playerControlsOrder`）：
+    /// 底栏已配 8 项（含 audio/quality），补位还需 timecode/progressBar/remaining，
+    /// 8+3=11 > slotCount ⇒ 原实现把 `remaining` 截掉。
+    /// 修法：补位有界，溢出进「更多」——控件仍可达，判据强度不变。
+    #if DEBUG
+    /// ⛔ 重入护栏：这个断言自己要用 `init(stored:)` 造一个 probe，
+    /// 而 `init(stored:)` 又会在末尾调用本函数 —— 不加此标志会无限递归
+    /// （实测：栈上是 `assertOverflowReachable` ↔ `init(stored:)` 交替，直到 SIGSEGV）。
+    nonisolated(unsafe) private static var checkingOverflow = false
+
+    static func assertOverflowReachable() {
+        guard !checkingOverflow else { return }
+        checkingOverflow = true
+        defer { checkingOverflow = false }
+        // 设备实存原文（勿改）：五段 top|bottom|more|watch|full
+        let deviceStored = "airPlay,episodes,miniPlayer,pictureInPicture,speed,markAd,videoInfo,pictureSize,rotate,lock"
+            + "|backTen,playPause,forwardTen,previousEpisode,nextEpisode,-,-,audio,quality,fullScreen"
+            + "|subtitles,danmaku,speechSubtitles,anotherPlayer,adBlock,autoPlayNext,moreInSeries,skipIntroAuto,skipIntroManual"
+            + "|airPlay,episodes,miniPlayer,speed,adBlock,markAd"
+            + "|episodes,pictureInPicture,danmaku,speed,videoInfo,pictureSize,markAd,adBlock"
+        let probe = PlayerControlsLayout(stored: deviceStored)
+        assert(probe.isComplete, """
+            真机持久化串解析后布局不完整 —— 补位溢出被静默截断了：
+            top=\(probe.top.map(\.rawValue)) bottom=\(probe.bottom.map(\.rawValue)) more=\(probe.more.map(\.rawValue))
+            """)
+        // 被截掉的那项必须仍**可达**（进「更多」），不能凭空消失。
+        let progressRow: [PlayerControl] = [.timecode, .progressBar, .remaining]
+        for control in progressRow {
+            assert(probe.top.contains(control) || probe.bottom.contains(control) || probe.more.contains(control),
+                   "进度行控件 \(control.rawValue) 既不在顶栏/底栏也不在「更多」—— 用户会看不到它")
+        }
+    }
+    #endif
 
     var stored: String {
         func slots(_ s: [PlayerControl?]) -> String {
