@@ -72,6 +72,7 @@ import TVCore
                     #if DEBUG
                     if QALaunch.section != nil || QALaunch.page != nil { await QALaunch.start(store); return }
                     #endif
+                    await store.seedAggregatedSubscriptions()
                     await store.restoreSubscription()
                     // After the saved subscriptions load, so the ones another device added load beside them.
                     store.cloudSync?.start()

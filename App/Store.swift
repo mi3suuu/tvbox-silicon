@@ -1110,6 +1110,7 @@ import TVCore
     /// as the app refusing to take no for an answer.
     func seedAggregatedSubscriptions() async {
         guard !Distribution.isAppStore else { return }
+        dropDeveloperHostedFeeds()
         let pending = Self.aggregatedSubscriptionAddresses.filter { address in
             !dismissedAggregateAddresses.contains(address) && !subscriptions.contains { $0.address == address }
         }
@@ -1126,6 +1127,30 @@ import TVCore
         importing = true; importError = nil; notice = nil
         defer { importing = false; endImport() }
         await fetch(entries)
+    }
+    /// 早期离线包把订阅挂在两个永远到不了的地方：开发机的 8081（`/api/rex/yingxia-*.json`），
+    /// 以及占位保留域 `yingxia.invalid`。地址换成 `builtin://` 之后这些都是重复的死条目——
+    /// 升级时清掉，同一批源由内置包重新装回来。只认这两个名字，别人家的 `/api/rex/` 不碰。
+    private func dropDeveloperHostedFeeds() {
+        let legacy = subscriptions.filter { entry in
+            let address = entry.address.lowercased()
+            if address.contains("yingxia.invalid") { return true }
+            guard address.contains("/api/rex/") else { return false }
+            return address.contains("macdemacbook-pro.local") || address.contains("macdemacbookpro.local")
+        }
+        guard !legacy.isEmpty else { return }
+        for entry in legacy {
+            subscriptions.removeAll { $0.address == entry.address && $0.environmentID == entry.environmentID }
+            // 别的环境可能还在用同一个地址，那时缓存不能删。
+            guard !subscriptions.contains(where: { $0.address == entry.address }) else { continue }
+            documents[entry.address] = nil
+            subscriptionErrors[entry.address] = nil
+            if persistsChanges {
+                try? FileManager.default.removeItem(at: Self.file(for: entry))
+                ImportedFiles.remove(entry.address)
+            }
+        }
+        saveSubscriptionList()
     }
     /// Adds the typed address, or refreshes it when it is already in the list. A directory (多仓)
     /// adds every subscription it lists, switched off, for the viewer to choose from.
