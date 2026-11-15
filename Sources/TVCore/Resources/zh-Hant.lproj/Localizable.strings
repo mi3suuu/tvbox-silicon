@@ -2656,3 +2656,15 @@
 "Shelf Blu-ray" = "藍光 · 4K";
 "Shelf Apps" = "應用";
 "Shelf Other" = "其他";
+"Tier Playable" = "能播";
+"Tier Slow" = "偏慢";
+"Tier Untested" = "未測";
+"Tier Dead" = "不通";
+"Shelves" = "書架";
+"Shelves Auto" = "自動（有實測就按連通）";
+"Shelves By Connection" = "按連通狀態";
+"Shelves By Content" = "按內容形態";
+"%lld playable of %lld" = "能播 %1$lld / %2$lld";
+"%lld unreachable of %lld" = "不通 %1$lld / %2$lld";
+"%lld sources · %lld playable" = "%1$lld 個源 · %2$lld 個能播";
+"Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "一次測出 3 個以上能播的源之後，源列表會自動改按連通狀態分組內書架。";

@@ -96,27 +96,114 @@ public enum SourceShelf: String, CaseIterable, Sendable {
         }
         let groups: [SourceShelfGroup] = Self.ordered.compactMap { shelf -> SourceShelfGroup? in
             guard let members = buckets[shelf], !members.isEmpty else { return nil }
-            return SourceShelfGroup(shelf: shelf, sites: members)
+            return SourceShelfGroup(basis: .content(shelf), sites: members)
         }
         // 大的书架在前（先看占多数的那一类），「其他」永远垫底；
         // 同样大就按 `ordered` 的固定次序，免得两次进入页面顺序不一样。
         let rank = Dictionary(uniqueKeysWithValues: Self.ordered.enumerated().map { ($1, $0) })
         return groups.sorted { lhs, rhs in
-            if lhs.shelf == .other { return false }
-            if rhs.shelf == .other { return true }
+            guard let left = lhs.shelf, let right = rhs.shelf else { return lhs.id < rhs.id }
+            if left == .other { return false }
+            if right == .other { return true }
             if lhs.sites.count != rhs.sites.count { return lhs.sites.count > rhs.sites.count }
-            return (rank[lhs.shelf] ?? 0) < (rank[rhs.shelf] ?? 0)
+            return (rank[left] ?? 0) < (rank[right] ?? 0)
+        }
+    }
+
+    /// 按**实测连通状态**分书架。
+    ///
+    /// 测速之后读者的问题从「这是什么站」变成了「哪些还能用」，所以这一层不按名字、按档位：
+    /// 能播 / 慢 / 没测过 / 测了不通。顺序就用 `SourceTier.rank`，`untested` 在 `dead` 前面 ——
+    /// 没试过的还有机会，试过不通的才是真没法用。
+    ///
+    /// 只有一个档位时不分层（一条「能播 46」的书架没有信息量）；少于 `minimum` 也不分。
+    public static func shelves(byConnectivity sites: [Site], minimum: Int = 8,
+                               tier: (Site) -> SourceTier) -> [SourceShelfGroup] {
+        guard sites.count >= minimum else { return [] }
+        var buckets: [SourceTier: [Site]] = [:]
+        for site in sites { buckets[tier(site), default: []].append(site) }
+        guard buckets.count > 1 else { return [] }
+        return SourceTier.allCases
+            .sorted { $0.rank < $1.rank }
+            .compactMap { tier in
+                guard let members = buckets[tier], !members.isEmpty else { return nil }
+                return SourceShelfGroup(basis: .connectivity(tier), sites: members)
+            }
+    }
+
+    /// 按模式选出这一组该用哪种书架。
+    ///
+    /// `.auto` 的判据是「有没有测出能用的」：至少 3 个能播/偏慢，才值得把整组按连通重排 ——
+    /// 只测出一个可播源就重排 168 张卡，是拿一个样本改整页的秩序。按连通分不出两层
+    /// （比如全组都能播）时回落到内容书架，免得只剩一条没有信息量的组头。
+    public static func shelves(for sites: [Site], mode: SourceShelfMode, counts: TierCounts,
+                               tier: (Site) -> SourceTier) -> [SourceShelfGroup] {
+        switch mode {
+        case .content:
+            return shelves(for: sites)
+        case .connectivity:
+            return shelves(byConnectivity: sites, tier: tier)
+        case .auto:
+            guard counts.usable >= 3 else { return shelves(for: sites) }
+            let byTier = shelves(byConnectivity: sites, tier: tier)
+            return byTier.isEmpty ? shelves(for: sites) : byTier
         }
     }
 }
 
-/// 一层书架：哪一类、里面有哪些源。
+/// 组内书架的排列依据。
+public enum SourceShelfMode: String, CaseIterable, Identifiable, Sendable {
+    /// 有实测结论就按连通分，没有就按内容分 —— 默认，也是「自动分好」的那一档。
+    case auto
+    /// 永远按连通（即便还没测过：那就是一整层「没测过」，等于提醒去测）。
+    case connectivity
+    /// 永远按内容形态。
+    case content
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .auto: return L10n.text("Shelves Auto")
+        case .connectivity: return L10n.text("Shelves By Connection")
+        case .content: return L10n.text("Shelves By Content")
+        }
+    }
+}
+
+/// 一层书架：按内容形态分的，或者按实测状态分的。
 ///
 /// 单独一个结构而不是元组，是为了 `ForEach` 能直接用它 —— `id:` 要的是 key path，
 /// 而 Swift 的 key path 指不到元组成员上。
 public struct SourceShelfGroup: Identifiable, Sendable {
-    public let shelf: SourceShelf
+    public enum Basis: Equatable, Sendable {
+        case content(SourceShelf)
+        case connectivity(SourceTier)
+    }
+
+    public let basis: Basis
     public let sites: [Site]
-    public var id: String { shelf.rawValue }
-    public var title: String { shelf.title }
+
+    public init(basis: Basis, sites: [Site]) {
+        self.basis = basis
+        self.sites = sites
+    }
+
+    /// 折叠状态、展开状态都靠它做键：内容书架与状态书架的 id 不会撞（前缀不同）。
+    public var id: String {
+        switch basis {
+        case .content(let shelf): return "content." + shelf.rawValue
+        case .connectivity(let tier): return "tier." + tier.rawValue
+        }
+    }
+
+    public var title: String {
+        switch basis {
+        case .content(let shelf): return shelf.title
+        case .connectivity(let tier): return tier.title
+        }
+    }
+
+    public var shelf: SourceShelf? { if case .content(let shelf) = basis { return shelf }; return nil }
+    public var tier: SourceTier? { if case .connectivity(let tier) = basis { return tier }; return nil }
 }

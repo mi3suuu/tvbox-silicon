@@ -2656,3 +2656,15 @@
 "Shelf Blu-ray" = "ブルーレイ・4K";
 "Shelf Apps" = "アプリ";
 "Shelf Other" = "その他";
+"Tier Playable" = "再生可";
+"Tier Slow" = "低速";
+"Tier Untested" = "未計測";
+"Tier Dead" = "接続不可";
+"Shelves" = "棚";
+"Shelves Auto" = "自動（計測済みなら接続順）";
+"Shelves By Connection" = "接続状態順";
+"Shelves By Content" = "内容順";
+"%lld playable of %lld" = "再生可 %1$lld / %2$lld";
+"%lld unreachable of %lld" = "接続不可 %1$lld / %2$lld";
+"%lld sources · %lld playable" = "%1$lld 件 · 再生可 %2$lld";
+"Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "1 回の計測で再生できる源が 3 件以上になると、ソース一覧は自動で接続状態順の棚に切り替わります。";

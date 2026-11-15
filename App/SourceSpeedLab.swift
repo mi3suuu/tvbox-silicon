@@ -162,6 +162,8 @@ struct SourceSpeedLab: View {
             Text(L10n.text("After the Sweep"))
         } footer: {
             Text(L10n.text("Grouping only moves sources that have a reading, so a group you arranged by hand stays as it is until a source in it is measured. Routing rewrites the address a source API is fetched from; media still comes from the source's own CDN."))
+            // 分书架是自动的，不需要在这里勾任何一项 —— 但读者看不到代码，只看到「测完了列表没变」。
+            Text(L10n.text("Once three or more sources in a group play, the Sources page shelves that group by connection on its own."))
         }
     }
 

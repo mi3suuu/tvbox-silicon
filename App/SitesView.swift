@@ -92,6 +92,10 @@ struct SitesView: View {
     private var previewLimit: Int { 12 }
     /// 组内二级书架里，哪几个被折起来了（键是 `组id|书架`）。
     @State private var collapsedShelves: Set<String> = []
+    /// 书架按什么分：连通 / 内容 / 有实测就按连通。跨分组生效，记住选择。
+    @State private var shelfMode: SourceShelfMode = SourceShelfState().mode
+    /// 读数落盘时 `SourceProbeStore` 只递增 `revision`，不是可观察对象；这一页靠它重画。
+    @State private var probeRevision = 0
     /// 正在改名的分组（幂等：非 nil 就弹那个改名框）。
     @State private var renamingGroup: SourceGroup?
     /// 正在改名的订阅地址。
@@ -236,6 +240,26 @@ struct SitesView: View {
                         .disabled(!query.isEmpty)
                         .accessibilityIdentifier("sources.foldAllMenu")
                         Divider()
+                        // 书架按什么分。放在这里而不是顶上一排胶囊：它是「这一页怎么读」的设置，
+                        // 不是每次都要按的动作；而它一改，整页所有分组一起换依据，得有个说法。
+                        Menu {
+                            ForEach(SourceShelfMode.allCases) { mode in
+                                Button {
+                                    withAnimation(.snappy(duration: 0.28)) { shelfMode = mode }
+                                    SourceShelfState().save(mode)
+                                } label: {
+                                    if shelfMode == mode {
+                                        Label(mode.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(mode.title)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label(L10n.text("Shelves"), systemImage: "rectangle.split.3x1")
+                        }
+                        .accessibilityIdentifier("sources.shelfMode")
+                        Divider()
                         Button {
                             showingSpeedLab = true
                         } label: {
@@ -290,11 +314,17 @@ struct SitesView: View {
                 foldBeforeSearch = nil
             }
         }
+        // 测速一边跑一边落读数：分组头的「可播 x/y」与连通书架都读那张表，
+        // 不在 revision 变化时重画，读者得离开再回来才看得到新结论。
+        .onChange(of: SourceProbeStore.shared.revision) { _, _ in probeRevision += 1 }
     }
 
     @ViewBuilder
     private func groupHeader(_ group: SourceGroup) -> some View {
         let open = !collapsed.contains(group.id)
+        // 这一组现在能用几个。分组头是吸顶的，滚到组中间也看得到这个数 ——
+        // 「还有没有必要往下翻」是读者在这一页最常问的问题。
+        let counts = SourceConnectivity.counts(group.sites, reading: latestReading)
         // 选择模式下的分组头：左边照旧是折叠开关，右边多一个「整组勾上」。
         // 分组是用户已经整理过的批次，所以「这一组全要」比「一个个点」常用得多。
         let header = HStack(spacing: 8) {
@@ -310,6 +340,22 @@ struct SitesView: View {
                 HStack(spacing: 8) {
                     Text(L10n.text(group.title)).font(.headline).lineLimit(1)
                     Text("\(group.sites.count)").font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
+                    // 测过之后才有这个徽标：没读数时它只会是个「0」，比不显示更容易被误读成「全死了」。
+                    if counts.measured > 0 {
+                        let usable = counts.usable > 0
+                        HStack(spacing: 3) {
+                            Image(systemName: usable ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("\(usable ? counts.usable : counts.dead)")
+                                .font(.caption2.weight(.semibold)).monospacedDigit()
+                        }
+                        .foregroundStyle(usable ? Brand.teal : Brand.rose)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background((usable ? Brand.teal : Brand.rose).opacity(0.15), in: Capsule())
+                        .accessibilityLabel(usable
+                                            ? L10n.text("%lld playable of %lld", counts.usable, counts.total)
+                                            : L10n.text("%lld unreachable of %lld", counts.dead, counts.total))
+                    }
                     if selecting, let ticked = tickedCount(in: group), ticked > 0 {
                         Text(L10n.text("%lld picked", ticked))
                             .font(.caption.weight(.semibold)).monospacedDigit()
@@ -482,21 +528,26 @@ struct SitesView: View {
         #endif
     }
 
-    /// 一个分组的内容：源少就直接铺，源多就先按内容形态分一层书架。
+    /// 一个分组的内容：源少就直接铺，源多就先分一层书架。
     ///
-    /// 168 个 4K 源铺成一面墙，读者既看不完也挑不出；分成「磁力 / 网盘 / 蓝光 / 弹幕…」
-    /// 五六个书架之后，每个书架二三十张，配上「先给 12 张」的预览，一屏就看完了。
-    /// 分层只发生在需要的组（≥24 个源、且真的能分出两类以上），小分组一点不变。
+    /// 书架有两种依据：**内容形态**（磁力 / 网盘 / 蓝光…）与**实测连通状态**（能播 / 慢 / 未测 / 不通）。
+    /// 选哪一种由 `shelfMode` 决定，默认 `.auto` —— 一旦这个组里测出了能用的源，读者的问题就从
+    /// 「这是什么站」变成「哪些还能用」，书架该跟着换；一个都测不出来时仍按内容分，因为按连通
+    /// 分只会得到「未测 120 / 不通 20」两层，不如内容形态有用。
+    ///
+    /// 分层只发生在需要它的组：源少于阈值、或者只分得出一层时，`shelves` 返回空，这里就平铺。
     @ViewBuilder
     private func groupBody(_ group: SourceGroup, config: Subscription, sites: [Site]) -> some View {
-        let shelves = SourceShelf.shelves(for: group.sites)
+        let _ = probeRevision
+        let counts = SourceConnectivity.counts(group.sites, reading: latestReading)
+        let shelves = shelves(for: group.sites, counts: counts)
         if shelves.isEmpty {
             sourceGrid(group, members: group.sites, config: config, all: sites, scope: group.id)
         } else {
             VStack(alignment: .leading, spacing: Layout.cardSpacing) {
                 ForEach(shelves) { entry in
-                    let scope = group.id + "|" + entry.shelf.rawValue
-                    shelfHeader(scope: scope, shelf: entry.shelf, count: entry.sites.count)
+                    let scope = group.id + "|" + entry.id
+                    shelfHeader(scope: scope, entry: entry)
                     if !collapsedShelves.contains(scope) {
                         sourceGrid(group, members: entry.sites, config: config, all: sites, scope: scope)
                     }
@@ -505,9 +556,29 @@ struct SitesView: View {
         }
     }
 
+    /// 这一组该按哪种依据分层。
+    ///
+    /// `.auto` 的判据是「有没有测出能用的」：至少 3 个能播/偏慢，才值得把整组按连通重排 ——
+    /// 只测出一个可播源就重排 168 张卡，是拿一个样本改整页的秩序。切到按连通分不出两层
+    /// （比如全组都能播）时也回落到内容书架，免得只剩一条没有信息量的组头。
+    private func shelves(for sites: [Site], counts: TierCounts) -> [SourceShelfGroup] {
+        SourceShelf.shelves(for: sites, mode: shelfMode, counts: counts, tier: connectivityTier)
+    }
+
+    /// 这个源现在的读数（没测过就是 nil）。一页几百张卡，全靠这张 O(1) 的表。
+    private func latestReading(_ site: Site) -> SourceProbeResult? {
+        SourceProbeStore.shared.latest(sourceKey: site.sourceKey)
+    }
+
+    /// 档位：App 里刚测的读数优先，其次包内实测结论，都没有就是「未测」。
+    private func connectivityTier(_ site: Site) -> SourceTier {
+        SourceConnectivity.tier(of: site, reading: latestReading(site))
+    }
+
     /// 二级书架的表头：小一号的标题 + 数量 + 折叠箭头。它比分组头轻，因为它只在分组里出现。
+    /// 按连通分时标题前多一个档位图标（能播 ✓ / 偏慢 🐢 / 未测 ? / 不通 ✕），一眼看出这一层是什么。
     @ViewBuilder
-    private func shelfHeader(scope: String, shelf: SourceShelf, count: Int) -> some View {
+    private func shelfHeader(scope: String, entry: SourceShelfGroup) -> some View {
         let open = !collapsedShelves.contains(scope)
         Button {
             withAnimation(.snappy(duration: 0.25)) {
@@ -519,8 +590,14 @@ struct SitesView: View {
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(open ? 90 : 0))
-                Text(shelf.title).font(.subheadline.weight(.semibold))
-                Text("\(count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                if let tier = entry.tier {
+                    Image(systemName: tier.symbol)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(tierTint(tier))
+                        .accessibilityHidden(true)
+                }
+                Text(entry.title).font(.subheadline.weight(.semibold))
+                Text("\(entry.sites.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 Spacer(minLength: 0)
             }
             .padding(.leading, 4)
@@ -528,6 +605,16 @@ struct SitesView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("sources.shelf." + scope)
+    }
+
+    /// 档位颜色：能播用青、偏慢用琥珀、不通用玫红、未测保持中性色。
+    private func tierTint(_ tier: SourceTier) -> Color {
+        switch tier {
+        case .playable: return Brand.teal
+        case .slow: return Brand.amber
+        case .dead: return Brand.rose
+        case .untested: return .secondary
+        }
     }
 
     /// 一格书架（或不分层的整组）里的卡：先给 `previewLimit` 张，其余收在按钮后面。
@@ -662,10 +749,16 @@ struct SitesView: View {
     private func listControls(groups: [SourceGroup], sources: Int) -> some View {
         let all = allFolded
         let groupCount = groups.count
+        let counts = SourceConnectivity.counts(groups.flatMap(\.sites), reading: latestReading)
         return HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(L10n.text("%lld groups", groupCount)).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(L10n.text("%lld sources", sources)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                // 测过之后第二行换成「多少能播」：这是读者来这一页最想知道的一个数，
+                // 而它比「多少源」更能说明这一页现在有没有用。
+                Text(counts.measured > 0
+                     ? L10n.text("%lld sources · %lld playable", sources, counts.usable)
+                     : L10n.text("%lld sources", sources))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
             // 「一键」是这里的重点：分组一多，逐个点头标是唯一比测速更烦的事。

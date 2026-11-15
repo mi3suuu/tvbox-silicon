@@ -2655,3 +2655,15 @@
 "Shelf Blu-ray" = "Blu-ray & 4K";
 "Shelf Apps" = "Apps";
 "Shelf Other" = "Other";
+"Tier Playable" = "Works";
+"Tier Slow" = "Slow";
+"Tier Untested" = "Untested";
+"Tier Dead" = "Unreachable";
+"Shelves" = "Shelves";
+"Shelves Auto" = "Automatic (by connection once measured)";
+"Shelves By Connection" = "By connection";
+"Shelves By Content" = "By content";
+"%lld playable of %lld" = "%1$lld of %2$lld playable";
+"%lld unreachable of %lld" = "%1$lld of %2$lld unreachable";
+"%lld sources · %lld playable" = "%1$lld sources · %2$lld playable";
+"Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "Once three or more sources in a group play, the Sources page shelves that group by connection on its own.";
