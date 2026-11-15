@@ -50,8 +50,20 @@ class H(http.server.BaseHTTPRequestHandler):
         if rng:
             m=re.match(r"bytes=(\d*)-(\d*)", rng)
             if m:
-                s=int(m.group(1) or 0)
-                e=int(m.group(2)) if m.group(2) else total-1
+                # ⛔ 后缀 Range（`bytes=-500` = 最后 500 字节）必须单独处理。
+                #    旧写法 `int(m.group(1) or 0)` 把空 group 当成 0，于是
+                #    `bytes=-500` 被算成 `0-500`（前 501 字节），而不是
+                #    `total-500 .. total-1`。AVPlayer 发现 Content-Range 与
+                #    自己请求的区间不符 → CoreMediaErrorDomain -12939
+                #    "HTTP response has bad Content-Range"，视频永远 ready=false。
+                #    RFC 7233 §2.1：后缀形式 `bytes=-N` 表示最后 N 字节。
+                g1, g2 = m.group(1), m.group(2)
+                if g1 == "" and g2 != "":
+                    s = max(0, total - int(g2))
+                    e = total - 1
+                else:
+                    s = int(g1 or 0)
+                    e = int(g2) if g2 else total-1
                 e=min(e,total-1)
                 chunk=d[s:e+1]
                 self.send_response(206)

@@ -1130,6 +1130,28 @@ import TVCore
                     self.checkSegmentedPicture(item, channel: channel, url: url, generation: activeGeneration)
                 }
                 if status == .failed {
+                    // [DIAG-12939] 完整 error chain 探针（只读日志，不改变任何行为）。
+                    // 目的：-12939 出现在 AppleCoreMedia 首个网络请求之前，说明它不在 HTTP 层产生。
+                    // 这里把每一层 domain/code/userInfo 全展开，看链里是否还有别的 domain。
+                    var __chain = failure as NSError?
+                    var __depth = 0
+                    while let __cur = __chain, __depth < 8 {
+                        let __keys = __cur.userInfo.keys.sorted().joined(separator: ",")
+                        // ⛔ 必须单独取 NSLocalizedFailureReasonErrorKey：
+                        //    `should be length N is length M` 这句在 reason 里，不在 description 里，
+                        //    而 localizedDescription 只给被截断的前 60 字（'HTTP response has bad Content-Range'）。
+                        let __reason = (__cur.userInfo[NSLocalizedFailureReasonErrorKey] as? String) ?? "-"
+                        Diagnostics.shared.record(.error, "player",
+                            "[DIAG-12939] chain#\(__depth) domain=\(__cur.domain) code=\(__cur.code) desc=\(__cur.localizedDescription) reason=\(__reason) keys=[\(__keys)]")
+                        __chain = __cur.userInfo[NSUnderlyingErrorKey] as? NSError
+                        __depth += 1
+                    }
+                    let __assetDesc: String = {
+                        guard let a = item.asset as? AVURLAsset else { return "asset≠AVURLAsset type=\(type(of: item.asset))" }
+                        let hdrs = a.url.scheme.map { ["http","https"].contains($0) ? "hasHttpScheme" : "nonHttpScheme(\($0))" } ?? "noScheme"
+                        return "assetURL=\(a.url.absoluteString) \(hdrs)"
+                    }()
+                    Diagnostics.shared.record(.error, "player", "[DIAG-12939] item.status=\(status.rawValue) \(__assetDesc) url=\(url.absoluteString)")
                     if self.retryRange(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.retryHDR(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.recoverLoopback(Self.urlErrorCode(failure), channel: channel, url: url, generation: activeGeneration) { return }
