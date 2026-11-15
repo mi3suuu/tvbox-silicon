@@ -111,7 +111,10 @@ public enum BundledSubscriptions {
             "quickSearch": .number(1),
             "filterable": .number(0),
             "group": .string("看剧AI"),
-            "sort": .number(Double(sort))
+            "sort": .number(Double(sort)),
+            // 官方线路是服务端现签、按集扣词元的：每解一条就是一次花销。别在详情页替用户
+            // 把三档都解了 —— 只预热不花钱的线路表，签名留到他点播放那一刻（见 CatalogClient）。
+            "prefetch": .string("lines")
         ]
         if !ext.isEmpty { raw["ext"] = .string(ext) }
         return Site(key: key, name: name, type: 3, api: script, raw: raw)

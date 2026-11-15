@@ -170,10 +170,14 @@ function call(path, options) {
 }
 
 /// 这张身份还剩几集官方额度；读不到（无会话/接口变了）返回 null，不瞎猜。
+///
+/// 十分钟：这个数字只影响「要不要白撞一次解票」和简介里的提示，而多读一次就是多一个
+/// 往返 —— 每次打开详情都读，等于把详情页的等待翻倍。解票成功时本地先减一（见
+/// `resolveOfficial`），所以显示不会因为这个 TTL 变得离谱。
 let remainCache = null, remainAt = 0;
 function remainingEpisodes(refresh) {
     const now = Date.now();
-    if (!refresh && remainCache !== null && now - remainAt < 120000) return remainCache;
+    if (!refresh && remainCache !== null && now - remainAt < 600000) return remainCache;
     const data = call('/v1/users/me/quota', { timeout: 6000 });
     if (!data || data.remaining_tokens == null) return null;
     remainCache = Math.floor(Number(data.remaining_tokens) / 30000);
@@ -274,19 +278,38 @@ const is4K = line => /4k/i.test(String(line.provider_id) + ' ' + String(line.pro
 /// 它的分发规则照抄：官方线按 `preference_weight`（990–1000）降序，`default_priority` 是它自己
 /// 标的"默认线路"。上面再叠两点我们自己的经验：上次解成功的那家优先（同片各集线路常常同源），
 /// 以及"解不出来就换下一条"由调用方逐条走——首页权重最高那条在某些集次会给图片或空地址。
-let goodProvider = '';
+///
+/// ⚠️ 这两条经验必须**硬过**它的权重，不能是加分项。权重都在 990~1000 之间，加个 +2 等于没加：
+/// 实测一集要连撞三条线（bytevod-lv2、official-v 都给图），三次签名就是三个往返，
+/// 用户眼里的「首次播放要等很久」正是这一段。
+let goodProvider = { p: '', 4: '' };
+/// 最近解不出来的厂：失败一次压一档，成功就清零。按片维度不知道，但同一条线连续失败的
+/// 片子往往就是那几部，压下去比每次重撞三次合算。
+const badProvider = {};
 
-function rankScore(line) {
-    return (line.preference_weight || 0)
-        + (line.default_priority ? 1 : 0)
-        + (goodProvider && line.provider_id === goodProvider ? 2 : 0);
+function readGoodProviders() {
+    try {
+        goodProvider.p = String(local.get('kanju', 'good1080') || '');
+        goodProvider['4'] = String(local.get('kanju', 'good4k') || '');
+    } catch (e) {}
+}
+readGoodProviders();
+
+function providerScore(id, weight, want4K) {
+    const good = id === (want4K ? goodProvider['4'] : goodProvider.p);
+    const bad = Math.min(badProvider[id] || 0, 4);
+    return (good && id ? 1e6 : 0) + (weight || 0) - bad * 400;
+}
+
+function rankScore(line, want4K) {
+    return providerScore(line.provider_id, line.preference_weight || 0, want4K) + (line.default_priority ? 1 : 0);
 }
 
 function rankOfficial(lines, want4K) {
     return lines
         .filter(l => isOfficial(l) && (want4K ? is4K(l) : true))
         .slice()
-        .sort((a, b) => rankScore(b) - rankScore(a));
+        .sort((a, b) => rankScore(b, want4K) - rankScore(a, want4K));
 }
 
 function bestOfficial(lines, want4K) {
@@ -295,7 +318,7 @@ function bestOfficial(lines, want4K) {
 
 function bestOrdinary(lines) {
     const pool = lines.filter(l => l.resolve_mode === 'direct' && /^https?:/i.test(String(l.url || '')));
-    return pool.slice().sort((a, b) => rankScore(b) - rankScore(a))[0] || null;
+    return pool.slice().sort((a, b) => rankScore(b, false) - rankScore(a, false))[0] || null;
 }
 
 // 官方线路的 ticket 在 url 里（resolve://<ticket>），个别版本放在 resolve_ticket
@@ -316,15 +339,34 @@ function looksLikeMedia(url) {
     return true;
 }
 
-function resolveOfficial(line) {
+/// 这一次解成了，下一集先试这家（写进 local，重启也记得）。
+function noteGood(line, want4K) {
+    const id = String(line.provider_id || '');
+    if (!id) return;
+    badProvider[id] = 0;
+    const key = want4K ? '4' : 'p';
+    if (goodProvider[key] === id) return;
+    goodProvider[key] = id;
+    try { local.set('kanju', want4K ? 'good4k' : 'good1080', id); } catch (e) {}
+}
+
+/// 这一次没解成（图片地址、空地址、接口报错）：压一档，排在别家后面，别再每次从它开始撞。
+function noteBad(line) {
+    const id = String(line.provider_id || '');
+    if (id) badProvider[id] = (badProvider[id] || 0) + 1;
+}
+
+function resolveOfficial(line, want4K) {
     const ticket = ticketOf(line);
-    if (!ticket) return '';
+    if (!ticket) { noteBad(line); return ''; }
     const answer = call('/v1/playback/resolve-line', { method: 'POST', body: { ticket: ticket }, timeout: 12000 });
     const fresh = answer && answer.line;
-    if (!fresh) return '';
+    if (!fresh) { noteBad(line); return ''; }
     const url = String(fresh.url || '');
-    if (!/^https?:/i.test(url) || !looksLikeMedia(url)) return '';
-    goodProvider = line.provider_id;   // 下一集先试这家
+    if (!/^https?:/i.test(url) || !looksLikeMedia(url)) { noteBad(line); return ''; }
+    noteGood(line, want4K);
+    // 解票扣词元：本地先减一，免得为了显示「还剩几集」再问一次服务端。
+    if (remainCache != null && remainCache > 0) remainCache -= 1;
     return url;
 }
 
@@ -353,33 +395,64 @@ function rememberAddress(key, url) {
     return url;
 }
 
+/// 一集的分集 token → 它的线路表。**同一个 token 只问一次。**
+///
+/// 三条线路组（普通 / 官方1080 / 官方4K）是同一集的三条路，线路表却是同一份：以前每个
+/// 组各取一次 `/v1/playback/resolve/<token>`，三条组一起用就是三个往返、三倍等待。
+/// 表里也没有会过期的签名地址，缓存十分钟是安全的（换集就是换 token，不会读到别人）。
+const lineCache = {};
+const lineOrder = [];
+const LINE_TTL = 600000;
+
+function linesOf(episodeToken) {
+    const hit = lineCache[episodeToken];
+    if (hit && hit.until > Date.now()) return hit.lines;
+    const data = call('/v1/playback/resolve/' + enc(episodeToken), { timeout: 10000 });
+    const lines = (data && data.line_options) || [];
+    if (!lines.length) return [];
+    lineCache[episodeToken] = { lines: lines, until: Date.now() + LINE_TTL };
+    lineOrder.push(episodeToken);
+    // 看一晚上也就几十集：留 40 集，多出来的按先后丢，免得越积越大。
+    while (lineOrder.length > 40) delete lineCache[lineOrder.shift()];
+    return lines;
+}
+
+/// 分集地址是 `<线路组>|<token>`（`detail` 里拼的）。`warm` 与 `play` 都要拆它。
+function tokenOf(id) {
+    const raw = String(id || '');
+    const cut = raw.indexOf('|');
+    return cut > 0 ? raw.slice(cut + 1) : raw;
+}
+
 function playAddress(mode, episodeToken) {
     const key = mode + '|' + episodeToken;
     const hit = cachedAddress(key);
     if (hit) return hit;
 
-    const data = call('/v1/playback/resolve/' + enc(episodeToken), { timeout: 10000 });
-    const lines = (data && data.line_options) || [];
+    const lines = linesOf(episodeToken);
     if (!lines.length) return '';
 
     if (mode === 'o') {
         const normal = bestOrdinary(lines);
         if (normal) return rememberAddress(key, String(normal.url));
         const fallback = bestOfficial(lines, false);
-        const url = fallback ? resolveOfficial(fallback) : '';
+        const url = fallback ? resolveOfficial(fallback, false) : '';
         return url ? rememberAddress(key, url) : '';
     }
     // 一条解不出来就换下一条：权重最高的那条在某些集次会给图片或空地址，不能就此放弃整个官方档。
     const want4K = mode === '4';
-    // 余额读得到且已经见底：别再拿一次必然失败的解票去撞，直接用普通线。
-    if (remainingEpisodes(false) === 0) {
+    // 余额见底（这是上次问到的读数，不再为它多跑一个往返）：别再拿一次必然失败的解票去撞，
+    // 直接用普通线。读不到读数就照常试 —— 一次失败的解票与一次额度查询同样贵。
+    if (remainCache === 0) {
         const spent = bestOrdinary(lines);
         return spent ? rememberAddress(key, String(spent.url)) : '';
     }
     const ranked = rankOfficial(lines, want4K);
     for (const line of ranked) {
-        const url = resolveOfficial(line);
+        const url = resolveOfficial(line, want4K);
         if (url) return rememberAddress(key, url);
+        // 解不出来就记一笔：这条线的名字与它给的票，是下次换线的依据（也方便排查「点开是黑的」）。
+        console.log('kanju: line failed ' + String(line.provider_id || '') + ' ' + String(line.provider_name || ''));
     }
     // 词元不够 / 官方解析全部失败：退回普通线路，别让用户点开就是黑的
     const normal = bestOrdinary(lines);
@@ -490,11 +563,22 @@ export default {
         return { list: [vod] };
     },
 
+    /// 只预热便宜的那一半：这一集的线路表（`/v1/playback/resolve/<token>`，不扣词元）。
+    ///
+    /// 映匣在详情页落地后调它一次（`{"warm": 地址, "flag": 线路}`，见 prelude 的 warm 分支）：
+    /// 用户从「看简介」到「点播放」之间隔着一两秒，这段空档正好用来问线路表，于是点播放时
+    /// 只剩下一次签名请求。真去解签名地址是要扣词元的，那一步不替用户提前花。
+    warm(flag, id) {
+        const token = tokenOf(id);
+        if (token) linesOf(token);
+        return {};
+    },
+
     play(flag, id) {
         const raw = String(id || '');
         const cut = raw.indexOf('|');
         const mode = cut > 0 ? raw.slice(0, cut) : 'o';
-        const token = cut > 0 ? raw.slice(cut + 1) : raw;
+        const token = tokenOf(raw);
         const url = playAddress(mode, token);
         if (!url) return { parse: 1, url: HOST + '/', header: { 'User-Agent': UA } };
         return { parse: 0, url: url, header: { 'User-Agent': UA, 'Referer': HOST + '/' } };

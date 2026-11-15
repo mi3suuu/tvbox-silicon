@@ -545,6 +545,20 @@ public struct CatalogClient: Sendable {
     public func pluginWindow(_ event: PluginEvent) async throws -> PluginScreen {
         PluginScreen(json: try await perform(["spiderUI": event.json]))
     }
+    /// Asks a source to resolve the cheap half of an episode's playback ahead of the tap.
+    ///
+    /// For 看剧AI that is the episode's line list: one request, no allowance spent, and it is what
+    /// `play` needs before it can even name a signed address. Doing it while the viewer reads the
+    /// detail page takes that round-trip off the moment they press play.
+    ///
+    /// Only for sources that declare `prefetch` (`Site.prefetchesLineList`); any other script would
+    /// just spend a script round-trip answering "not implemented". A prefetch that fails is not an
+    /// error: the play request then does the work itself.
+    public func prefetchPlayback(_ episode: Episode) async {
+        guard site.prefetchesLineList else { return }
+        _ = try? await perform(["warm": episode.address, "flag": episode.flag])
+    }
+
     public func playback(_ episode: Episode) async throws -> Channel {
         let plan = try await preparePlayback(episode)
         return try await resolvePlayback(plan, choice: plan.choices[0])

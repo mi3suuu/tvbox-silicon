@@ -331,11 +331,16 @@ async function call(spider, params) {
     lastFailure = undefined;
     let method, args;
     if ('play' in params) { method = 'play'; args = [params.flag || '', params.play, []]; }
+    else if ('warm' in params) { method = 'warm'; args = [params.flag || '', params.warm]; }
     else if ('ids' in params) { method = 'detail'; args = [params.ids]; }
     else if ('wd' in params) { method = 'search'; args = [params.wd, false, params.pg || '1']; }
     else if ('t' in params) { method = 'category'; args = [params.t, params.pg || '1', true, params.filters ? JSON.parse(params.filters) : {}]; }
     else { method = 'home'; args = [true]; }
-    if (typeof spider[method] !== 'function') throw new Error(`The script does not implement ${method}`);
+    // A source with nothing cheap to resolve says so by not implementing `warm`; that is not a failure.
+    if (typeof spider[method] !== 'function') {
+        if (method === 'warm') return { result: '{}' };
+        throw new Error(`The script does not implement ${method}`);
+    }
     let result = await spider[method](...args);
     if (result == null || result === '') {
         if (lastFailure) throw lastFailure;

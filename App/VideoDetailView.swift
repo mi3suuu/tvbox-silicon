@@ -2369,6 +2369,23 @@ struct VideoDetailView: View {
         // `subscription` 是主线程隔离的，先在主线程取好快照，再并发解析。
         let base = client
         let playback = store.subscription.map { client.applying($0) } ?? client
+
+        // ★ 按次收费的源：只预热**免费的那一半**，不替用户把所有线路都签出来。
+        //
+        // 看剧AI 的官方线路是服务端现签、按集扣词元的。它的三档（普通 / 官方1080 / 官方4K）
+        // 在我们这边是三条「线路」，于是上一版进详情页就把三条全解一遍 —— 每打开一部剧，
+        // 官方 1080 与官方 4K 各扣一次额度（约 3 万 + 6 万词元），而用户可能只是想看看简介；
+        // 更糟的是脚本线程是串行的，这三签排在前面，用户紧接着点播放时**就排在它们后面**，
+        // 他看到的等待正是「等我自己点开的那三条线路」。
+        //
+        // 现在只问这一集的分集线路表（不扣额度），签名留到他点播放的那一刻。
+        // 其余线路在菜单里显示「未测」而不是「不通」——没解析过就不该说人家不通；
+        // 他真去点那条线时，`probeLines` 会按需解析，那一次花销是他自己要求的。
+        if base.site.prefetchesLineList {
+            if let episode = playing ?? episodes.first { await base.prefetchPlayback(episode) }
+            return
+        }
+
         // 这一轮的身份：换集 / 换线 / 重进页面会开新一轮，旧轮次的解析到这里就该收手。
         let generation = await MainActor.run { SourceProbeStore.shared.beginProbeGeneration() }
 

@@ -68,3 +68,17 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: url.path))
     #expect(BundledSubscriptions.kanju().sites.count == 3)
 }
+
+/// 看剧AI 的官方线路是服务端现签、按集扣词元的，所以这三条源必须声明「只预热线路表」。
+///
+/// 少了这个标记，详情页会退回老路：把三条线路各解析一遍（官方 1080 与官方 4K 各扣一次额度），
+/// 而脚本线程是串行的，用户点播放就排在这三次签名后面 —— 「首次播放要等很久」正是这么来的。
+@Test func kanjuOnlyPrefetchesTheLineList() throws {
+    let document = try #require(BundledSubscriptions.document(for: BundledSubscriptions.kanjuAddress))
+    for site in document.sites {
+        #expect(site.prefetchesLineList)
+    }
+    // 普通源没有这个声明：预热要过一次脚本运行时，不能顺手给所有源都加上。
+    let plain = try JSONDecoder().decode(Site.self, from: Data(#"{"key":"x","name":"X","type":1,"api":"https://example.com/api.php/provide/vod","raw":{}}"#.utf8))
+    #expect(!plain.prefetchesLineList)
+}

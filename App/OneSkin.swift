@@ -4443,8 +4443,13 @@ struct OneSkinStage: View {
             }
             ForEach(lines, id: \.self) { line in
                 let ms = lineLatencies[line]
+                // 没有样本 ≠ 不通。按次收费的源（看剧AI 的官方线路每解一条扣一次词元）
+                // 只在用户真去点那条线时才解析，没解析过就照实写「未测」，
+                // 不替它宣布死刑 —— 否则面板会把他自己没选过的线路全标成不通。
+                let detail: String? = ms.map { "\($0) ms" }
+                    ?? (probingLines ? nil : (lineSamples[line] == nil ? "未测" : "不通"))
                 lineRow(title: line.isEmpty ? "线路" : line,
-                        detail: ms.map { "\($0) ms" } ?? (probingLines ? nil : "不通"),
+                        detail: detail,
                         isActive: line == activeLine,
                         isFastest: line == fastest && ms != nil,
                         systemImage: "antenna.radiowaves.left.and.right") {

@@ -177,6 +177,15 @@ public struct Site: Identifiable, Codable, Hashable, Sendable {
     public var detectedRuntime: SourceRuntime? = nil
     public var id: String { key }
     public var native: Bool { (type == 1 || type == 4) && !missingAPI }
+    /// A source whose `play` is an expensive request rather than a string join: it signs each
+    /// address on the server, sometimes against a metered account (看剧AI 的官方线路按集扣词元).
+    ///
+    /// Every line of a title is a different request there, so resolving all of them as soon as the
+    /// detail page opens spends the viewer's allowance on lines they never watch — and, because
+    /// the script thread is serial, puts those requests in front of the one they are waiting for.
+    /// Such a source declares `"prefetch": "lines"`: the detail page asks only for the cheap half
+    /// (the episode's line list), and the signed address is fetched at the moment of playing.
+    public var prefetchesLineList: Bool { raw["prefetch"]?.string?.lowercased() == "lines" }
     /// Merged subscriptions sometimes carry entries with an empty api; they cannot run anywhere.
     private var missingAPI: Bool { api.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     public func pluginURL(origin: URL, fallback: URL?) throws -> URL? {

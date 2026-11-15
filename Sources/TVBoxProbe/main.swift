@@ -145,6 +145,12 @@ import TVCore
         let seconds = Date().timeIntervalSince(started)
         return String(format: "%d MB in %.1fs = %.2f MB/s", bytes >> 20, seconds, Double(bytes) / seconds / 1_048_576)
     }
+    /// A subscription named on the command line. A `builtin://` address answers from the app's own
+    /// bundle, exactly as the app imports it, so the shipped pack can be measured without a server.
+    static func cliSubscription(_ address: String) async throws -> Subscription {
+        if let bundled = BundledSubscriptions.document(for: address) { return bundled }
+        return try await HTTPClient().subscription(WebAddress.resolve(address))
+    }
     /// One of Yingxia's own sources, from its subscription (fetched once).
     static func cloudSite(_ matches: @Sendable (Site) -> Bool) async throws -> Site {
         if CloudSources.current == nil { CloudSources.current = try await CloudSources.fetch(http: HTTPClient()) }
@@ -969,7 +975,7 @@ import TVCore
         if args[1] == "--catalog-check", args.count >= 3 {
             // Browses sources the way the app does (CatalogClient, so lite ports with their JAR
             // fallback): home, a category when home has no videos, detail, then playback.
-            let config = try await HTTPClient().subscription(WebAddress.resolve(args[2]))
+            let config = try await cliSubscription(args[2])
             let filters = Array(args.dropFirst(3))
             let sites = config.sites.filter { site in filters.isEmpty || filters.contains { site.name.contains($0) || site.key.contains($0) } }
             var passed = 0
@@ -1004,7 +1010,7 @@ import TVCore
             // the app sends the TMDB matcher (TMDBMatch.Request), from home and the first categories, for
             // Scripts/tmdb-sample.py.
             setvbuf(stdout, nil, _IONBF, 0)
-            let config = try await HTTPClient().subscription(WebAddress.resolve(args[2]))
+            let config = try await cliSubscription(args[2])
             let filters = Array(args.dropFirst(4))
             let sites = config.sites.filter { site in filters.isEmpty || filters.contains { site.name.contains($0) || site.key.contains($0) } }
             struct Sample: Encodable { let source: String; let sourceName: String; let id: String; let request: TMDBMatch.Request }
@@ -1109,7 +1115,7 @@ import TVCore
             // Searches every source of a subscription the way global search does (same lanes and widths) and
             // prints each source's outcome: --search-check <subscription> <keyword>...
             actor Tally { var ok = 0, empty = 0, failed = 0; func add(_ videos: Int?) { if let videos { if videos > 0 { ok += 1 } else { empty += 1 } } else { failed += 1 } } }
-            let config = try await HTTPClient().subscription(WebAddress.resolve(args[2]))
+            let config = try await cliSubscription(args[2])
             for keyword in args.dropFirst(3) {
                 let started = Date(), tally = Tally()
                 await GlobalSearch.search(sites: config.sites, origin: config.origin, jarURL: config.spiderURL, query: keyword) { result in
@@ -1126,7 +1132,7 @@ import TVCore
         if args[1] == "--home-check", args.count >= 3 {
             // Loads each source's home the way the app's source page does and reports what its
             // category bar would show.
-            let config = try await HTTPClient().subscription(WebAddress.resolve(args[2]))
+            let config = try await cliSubscription(args[2])
             let filters = Array(args.dropFirst(3))
             let sites = config.sites.filter { site in filters.isEmpty || filters.contains { site.name.contains($0) || site.key.contains($0) } }
             // One at a time: the plugin runtime turns away interactive calls beyond a short queue.
@@ -1142,10 +1148,56 @@ import TVCore
             for entry in await Diagnostics.shared.snapshot().entries where entry.category == "lite.fallback" { print("     fallback: \(entry.message)") }
             return
         }
+        if args[1] == "--cold-play", args.count >= 3 {
+            // What a viewer actually pays the first time: a cold script runtime, a detail request,
+            // then play — and then the same play again, which shows what the source's caches save.
+            // `--cold-play builtin://kanju` measures the pack that ships inside the app.
+            let config = try await cliSubscription(args[2])
+            let filters = Array(args.dropFirst(3))
+            let sites = config.sites.filter { site in
+                site.preferredRuntime == .javascript && (filters.isEmpty || filters.contains { site.name.contains($0) || site.key.contains($0) })
+            }
+            for site in sites {
+                let client = CatalogClient(site: site, origin: config.origin, jarURL: config.spiderURL)
+                print("\(site.key)  \(site.name)")
+                var began = Date()
+                func stage(_ name: String) {
+                    let ms = Date().timeIntervalSince(began) * 1000
+                    began = Date()
+                    print("   " + name.padding(toLength: 12, withPad: " ", startingAt: 0) + String(format: "%7.0f ms", ms))
+                }
+                do {
+                    let home = try await client.home()
+                    stage("home")
+                    guard let video = home.videos.first else { throw TVError.unsupported("no videos") }
+                    let detail = try await client.detail(video.id)
+                    stage("detail")
+                    guard let episode = detail.episodes.first else { throw TVError.unsupported("no episodes") }
+                    // The detail page warms the line list while the viewer reads; play then only signs.
+                    await client.prefetchPlayback(episode)
+                    stage("warm")
+                    let plan = try await client.preparePlayback(episode)
+                    stage("play")
+                    let channel = try await client.resolvePlayback(plan, choice: plan.choices[0])
+                    stage("resolve")
+                    print("   → \(channel.url.absoluteString)")
+                    let again = try await client.preparePlayback(episode)
+                    stage("play (warm)")
+                    _ = try await client.resolvePlayback(again, choice: again.choices[0])
+                    stage("resolve (warm)")
+                } catch {
+                    print("   FAILED: \(error.localizedDescription.prefix(200))")
+                }
+            }
+            for entry in await Diagnostics.shared.snapshot().entries where entry.category == "script.log" {
+                print("   log: \(entry.message.prefix(200))")
+            }
+            return
+        }
         if args[1] == "--script-check", args.count >= 3 {
             // Runs a subscription's JavaScript sources on the in-process QuickJS runtime (as iOS and
             // tvOS do): home, a category when home has no videos, detail, then playback.
-            let config = try await HTTPClient().subscription(WebAddress.resolve(args[2]))
+            let config = try await cliSubscription(args[2])
             let filters = Array(args.dropFirst(3))
             let sites = config.sites.filter { site in site.preferredRuntime == .javascript && (filters.isEmpty || filters.contains { site.name.contains($0) || site.key.contains($0) }) }
             var passed = 0
@@ -1180,7 +1232,7 @@ import TVCore
         }
         if args[1] == "--subscription-export", args.count == 3 {
             do {
-                let config = try await HTTPClient().subscription(WebAddress.resolve(args[2]))
+                let config = try await cliSubscription(args[2])
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 print(String(decoding: try encoder.encode(config), as: UTF8.self))
             } catch {
