@@ -44,6 +44,16 @@ struct PlayerControlsSettingsView: View {
 
     private var layout: PlayerControlsLayout { PlayerControlsLayout(stored: stored) }
 
+    /// 预览用的布局：**由两段列表的状态数组拼出来**，不读存储。
+    ///
+    /// 拖动过程中每移动一格都让图片重画一次（"所见即所得"），如果每次读存储，
+    /// 等于每帧写一次 UserDefaults；拼一份只读布局既不会落盘，也和列表共用同一份事实。
+    private var liveLayout: PlayerControlsLayout {
+        PlayerControlsLayout(topSlots: topOrder.map { Optional($0) },
+                             bottomSlots: bottomOrder.map { Optional($0) },
+                             more: layout.more)
+    }
+
     var body: some View {
         SettingsPage(title: L10n.text("Player Controls"), symbol: "slider.horizontal.3") {
             if PlaySkin.current == .bilibili {
@@ -54,9 +64,10 @@ struct PlayerControlsSettingsView: View {
             }
 
 
-            // ── 预览（按真实形态 1:1 画，再整体缩放）──
+            // ── 预览（按真实形态 1:1 画，再整体缩放；图里的控件可以直接拖）──
             SettingsGroup(footer: L10n.text("Drawn at the real size of each screen, so what you see is what the player draws. Switching the shape only changes the preview — there is one layout for all three.")) {
-                PlayerControlsPreviewCard(layout: layout, shape: $previewShape)
+                PlayerControlsPreviewCard(layout: liveLayout, shape: $previewShape,
+                                          move: moveInPicture, commit: commitPictureDrag)
                     .listRowInsets(EdgeInsets())
             }
 
@@ -268,6 +279,41 @@ struct PlayerControlsSettingsView: View {
         bottomOrder = updated.bottom
         stored = updated.stored
     }
+
+    // MARK: 在图里直接拖
+
+    /// 预览里把控件拖到新位置：只改状态数组，**不落盘**。
+    ///
+    /// 用「插在谁前面」而不是索引：底栏那一行里既有中央传输组，又有进度条、时间码这些
+    /// 宽度不一的条目，索引在不同行之间对不上；指认邻居就没有这个问题。
+    /// `nil` 表示插到行尾。
+    private func moveInPicture(_ control: PlayerControl, to row: PlayerControl.Placement,
+                              before neighbor: PlayerControl?) {
+        var top = topOrder, bottom = bottomOrder
+        top.removeAll { $0 == control }
+        bottom.removeAll { $0 == control }
+        var list = row == .topBar ? top : bottom
+        if let neighbor, let index = list.firstIndex(of: neighbor) {
+            list.insert(control, at: index)
+        } else {
+            list.append(control)
+        }
+        if row == .topBar { top = list } else { bottom = list }
+        // 手势每帧都会调一次；没算出新顺序就别写状态，免得整页每秒重绘几十遍。
+        guard top != topOrder || bottom != bottomOrder else { return }
+        topOrder = top
+        bottomOrder = bottom
+    }
+
+    /// 手指离开：把状态数组落成一次写入，走的是列表拖动同一条通道（含 `assertComplete`）。
+    private func commitPictureDrag() {
+        var updated = PlayerControlsLayout(stored: stored)
+        updated.setTopOrder(topOrder)
+        updated.setBottomOrder(bottomOrder)
+        topOrder = updated.top
+        bottomOrder = updated.bottom
+        stored = updated.stored
+    }
 }
 
 // MARK: - 预览卡
@@ -275,6 +321,10 @@ struct PlayerControlsSettingsView: View {
 private struct PlayerControlsPreviewCard: View {
     let layout: PlayerControlsLayout
     @Binding var shape: PlayerControlsLayout.Shape
+    /// 在画面上拖动控件：`(控件, 目标行, 插在谁前面)`，`nil` 为行尾。
+    let move: (PlayerControl, PlayerControl.Placement, PlayerControl?) -> Void
+    /// 手指离开时落盘。
+    let commit: () -> Void
 
     /// 预览画面的高度上限（见调用处的注释）。
     static let previewMaxHeight: CGFloat = 360
@@ -295,13 +345,22 @@ private struct PlayerControlsPreviewCard: View {
             // 高度封顶 360：竖持形态按真实比例铺满宽度要 727pt（466:678），
             // 整张卡比一屏还高，一进来就得先滚过它才碰得到任何一项可调的东西。
             // 封顶后竖持会缩成一块居中的窄屏 —— 版式仍然 1:1，只是整体更小。
-            PlayerShapePreview(shape: shape, layout: layout)
+            PlayerShapePreview(shape: shape, layout: layout, move: move, commit: commit)
                 .frame(maxHeight: PlayerControlsPreviewCard.previewMaxHeight)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 12)
 
+            // 这一行是**操作提示**，不是装饰：拖动只认长按 0.25 秒后的手势，
+            // 不写出来没人会去试（而且直接拖会被页面的滚动吃掉，用户会以为坏了）。
+            Label(L10n.text("Press a control in the picture, then drag it — the lists below follow."),
+                  systemImage: "hand.draw")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.top, 10)
+
             fitSummary
-                .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 14)
+                .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 14)
         }
     }
 
@@ -478,6 +537,8 @@ enum PlayerShapeGeometry {
 private struct PlayerShapePreview: View {
     let shape: PlayerControlsLayout.Shape
     let layout: PlayerControlsLayout
+    let move: (PlayerControl, PlayerControl.Placement, PlayerControl?) -> Void
+    let commit: () -> Void
 
     var body: some View {
         let screen = shape.screenSize
@@ -489,7 +550,7 @@ private struct PlayerShapePreview: View {
                 if let right = PlayerShapeGeometry.rightColumn(for: shape) {
                     detailColumn(right)
                 }
-                PlayerWindowPreview(size: window.size, layout: layout)
+                PlayerWindowPreview(size: window.size, layout: layout, move: move, commit: commit)
                     .frame(width: window.width, height: window.height)
                     .offset(x: window.minX, y: window.minY)
                 if shape != .sideways {
@@ -569,9 +630,32 @@ private struct PlayerShapePreview: View {
 }
 
 /// 画面窗口里的播放器控件层（顶栏 / 中央 / 底栏），按真实点数绘制。
+///
+/// ## 图里的控件可以直接拖
+///
+/// 三条**横带**（顶栏 / 中央传输组 / 进度条那一行）各挂一个手势，按住 0.25 秒后进入拖动：
+///   · 横向：落在哪两颗之间就插到那里。判据是"插在谁前面"而不是索引 —— 进度条那一行里
+///     有进度条、时间码这些宽度不一的条目，绝对索引跨行对不上；
+///   · 纵向：拖到另一条带附近就整行搬过去，只对 `placements` 允许的行生效
+///     （「选集」能上下走，「播放」只能在中央那一行里挪）。
+///
+/// 拖动期间只改页面上的状态数组，图片和下面两张表一起重排；手指离开才写一次存储。
+/// 长按是**故意**的：不带长按的直接拖会被设置页的滚动吃掉，那就又成了"看着能拖、拖不动"。
 private struct PlayerWindowPreview: View {
     let size: CGSize
     let layout: PlayerControlsLayout
+    let move: (PlayerControl, PlayerControl.Placement, PlayerControl?) -> Void
+    let commit: () -> Void
+
+    /// 量控件矩形用的坐标系：窗口自己的点，不受外层 `scaleEffect` 影响。
+    static let space = "playerWindow"
+
+    @State private var frames: [PlayerControl: CGRect] = [:]
+    @State private var dragging: PlayerControl?
+    /// 上一次算出来的落点（行 + 邻居）。只有它变了才触发一次触感，避免每帧都震。
+    @State private var lastRow: PlayerControl.Placement?
+    @State private var lastBefore: PlayerControl?
+    @State private var ticks = 0
 
     private var m: PreviewMetrics { PreviewMetrics(size: size) }
 
@@ -627,10 +711,102 @@ private struct PlayerWindowPreview: View {
             topBar
             centerBar
             bottomBar
+            dragBands
         }
+        .coordinateSpace(name: Self.space)
+        .onPreferenceChange(ControlFrameKey.self) { frames = $0 }
         .foregroundStyle(.white)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        // 预览在横持形态只有 0.49 倍，光靠眼睛看不出"刚才有没有换位"；每换一格震一下。
+        .sensoryFeedback(.selection, trigger: ticks)
     }
+
+    // MARK: 三条可拖的横带
+
+    /// 宽度铺满窗口，高度等于那一行本身 —— 抓取**不要求点到图标**，落点由手势里的
+    /// "最近的控件"决定。横持预览只有 0.49 倍，要求精确点到 21pt 的图标不现实。
+    private var dragBands: some View {
+        ZStack(alignment: .topLeading) {
+            band(.topBar, height: m.barHeight, centerY: topY)
+            band(.middle, height: m.playHit, centerY: size.height * 0.496)
+            band(.progressRow, height: m.barHeight, centerY: bottomY)
+        }
+    }
+
+    private func band(_ placement: PlayerControl.Placement,
+                      height: CGFloat, centerY: CGFloat) -> some View {
+        Color.clear
+            .frame(width: size.width, height: max(height, m.hit * 0.78))
+            .contentShape(Rectangle())
+            .gesture(dragGesture(placement))
+            .position(x: size.width / 2, y: centerY)
+    }
+
+    private func dragGesture(_ band: PlayerControl.Placement) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.25, maximumDistance: 12)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space)))
+            .onChanged { value in
+                guard case .second(true, let drag?) = value else { return }
+                if dragging == nil {
+                    guard let picked = nearest(to: drag.startLocation, in: band) else { return }
+                    dragging = picked
+                }
+                guard let dragged = dragging else { return }
+                place(dragged, at: drag.location)
+            }
+            .onEnded { _ in
+                if dragging != nil { commit() }
+                dragging = nil
+                lastRow = nil
+                lastBefore = nil
+            }
+    }
+
+    /// 带里离手指最近的那颗（带上任意位置都能抓起来）。
+    private func nearest(to point: CGPoint, in band: PlayerControl.Placement) -> PlayerControl? {
+        let candidates = row(band).filter { frames[$0] != nil }
+        return candidates.min {
+            abs((frames[$0]?.midX ?? 0) - point.x) < abs((frames[$1]?.midX ?? 0) - point.x)
+        }
+    }
+
+    /// 拖动中：算出目标行与"插在谁前面"，交给页面改状态。
+    private func place(_ dragged: PlayerControl, at point: CGPoint) {
+        let target = targetRow(for: dragged, y: point.y)
+        let before = row(target).first {
+            $0 != dragged && (frames[$0]?.midX ?? .greatestFiniteMagnitude) > point.x
+        }
+        // 落点没变就不动：手势每帧都调这里，重复写状态只会白白重绘。
+        guard target != lastRow || before != lastBefore else { return }
+        lastRow = target
+        lastBefore = before
+        ticks += 1
+        move(dragged, target, before)
+    }
+
+    private func targetRow(for control: PlayerControl, y: CGFloat) -> PlayerControl.Placement {
+        let bands: [(PlayerControl.Placement, CGFloat)] = [(.topBar, topY),
+                                                           (.middle, size.height * 0.496),
+                                                           (.progressRow, bottomY)]
+        let nearestBand = bands.min { abs($0.1 - y) < abs($1.1 - y) }?.0 ?? .progressRow
+        if control.placements.contains(nearestBand) { return nearestBand }
+        // 中央那条带与进度行同属底栏数组：拖到中间的非传输类控件，按进度行处理。
+        if nearestBand == .middle, control.placements.contains(.progressRow) { return .progressRow }
+        if nearestBand == .progressRow, control.placements.contains(.middle) { return .middle }
+        // 哪儿都不许（例如把中央的播放键往上拖）：留在它本来能待的那一行。
+        return control.placements.contains(.topBar) ? .topBar : .middle
+    }
+
+    /// 某条带上**实际画出来的**控件，顺序即左右顺序。
+    private func row(_ placement: PlayerControl.Placement) -> [PlayerControl] {
+        switch placement {
+        case .topBar:      return topSlots.compactMap { $0 }
+        case .middle:      return centerRow.compactMap { $0 }
+        case .progressRow: return bottomRow
+        }
+    }
+
+    // MARK: 三行
 
     private var topBar: some View {
         HStack(spacing: 0) {
@@ -639,7 +815,7 @@ private struct PlayerWindowPreview: View {
             }
             ForEach(Array(topSlots.enumerated()), id: \.offset) { _, control in
                 if let control {
-                    glyph(control.symbol, base: m.glyph)
+                    measured(control, glyph(control.symbol, base: m.glyph))
                 } else {
                     Color.clear.frame(width: m.hit, height: m.hit)
                 }
@@ -662,20 +838,7 @@ private struct PlayerWindowPreview: View {
             ForEach(Array(centerRow.enumerated()), id: \.offset) { _, control in
                 Group {
                     if let control {
-                        switch control {
-                        case .playPause:
-                            glyph("play.fill", base: m.playGlyph, weight: .semibold, box: m.playHit)
-                        case .backTen:
-                            glyph("gobackward.10", base: m.stepGlyph, box: m.stepHit)
-                        case .forwardTen:
-                            glyph("goforward.10", base: m.stepGlyph, box: m.stepHit)
-                        case .previousEpisode:
-                            glyph("backward.end.fill", base: m.stepGlyph, box: m.stepHit)
-                        case .nextEpisode:
-                            glyph("forward.end.fill", base: m.stepGlyph, box: m.stepHit)
-                        default:
-                            glyph(control.symbol, base: m.glyph)
-                        }
+                        measured(control, centerItem(control))
                     } else {
                         Color.clear
                     }
@@ -690,16 +853,7 @@ private struct PlayerWindowPreview: View {
     private var bottomBar: some View {
         HStack(spacing: 0) {
             ForEach(Array(bottomRow.enumerated()), id: \.offset) { _, control in
-                if control == .timecode {
-                    Text("0:12").font(.system(size: m.caption)).monospacedDigit()
-                        .padding(.trailing, 8)
-                } else if control == .remaining {
-                    Text("-1:39").font(.system(size: m.caption)).monospacedDigit()
-                } else if control == .progressBar {
-                    seekBar
-                } else {
-                    glyph(control.symbol, base: m.glyph)
-                }
+                measured(control, bottomItem(control))
             }
             if !bottomRow.contains(.fullScreen), !layout.top.contains(.fullScreen) {
                 glyph("arrow.up.left.and.arrow.down.right", base: m.glyph)
@@ -708,6 +862,59 @@ private struct PlayerWindowPreview: View {
         .padding(.horizontal, m.edge)
         .frame(width: size.width, height: m.barHeight)
         .position(x: size.width / 2, y: bottomY)
+    }
+
+    @ViewBuilder
+    private func centerItem(_ control: PlayerControl) -> some View {
+        switch control {
+        case .playPause:
+            glyph("play.fill", base: m.playGlyph, weight: .semibold, box: m.playHit)
+        case .backTen:
+            glyph("gobackward.10", base: m.stepGlyph, box: m.stepHit)
+        case .forwardTen:
+            glyph("goforward.10", base: m.stepGlyph, box: m.stepHit)
+        case .previousEpisode:
+            glyph("backward.end.fill", base: m.stepGlyph, box: m.stepHit)
+        case .nextEpisode:
+            glyph("forward.end.fill", base: m.stepGlyph, box: m.stepHit)
+        default:
+            glyph(control.symbol, base: m.glyph)
+        }
+    }
+
+    @ViewBuilder
+    private func bottomItem(_ control: PlayerControl) -> some View {
+        if control == .timecode {
+            Text("0:12").font(.system(size: m.caption)).monospacedDigit()
+                .padding(.trailing, 8)
+        } else if control == .remaining {
+            Text("-1:39").font(.system(size: m.caption)).monospacedDigit()
+        } else if control == .progressBar {
+            seekBar
+        } else {
+            glyph(control.symbol, base: m.glyph)
+        }
+    }
+
+    /// 量出控件矩形（手势要按它算落点），顺手给正在拖的那颗描个边。
+    private func measured<V: View>(_ control: PlayerControl, _ content: V) -> some View {
+        content
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: ControlFrameKey.self,
+                                           value: [control: proxy.frame(in: .named(Self.space))])
+                }
+            }
+            .overlay {
+                if dragging == control {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(.white.opacity(0.95), lineWidth: 1.5)
+                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(.white.opacity(0.18)))
+                        .padding(-3)
+                        .allowsHitTesting(false)
+                }
+            }
     }
 
     private var seekBar: some View {
@@ -727,6 +934,15 @@ private struct PlayerWindowPreview: View {
         Image(systemName: symbol)
             .font(.system(size: base, weight: weight))
             .frame(width: box ?? m.hit, height: box ?? m.hit)
+    }
+}
+
+/// 每颗控件在窗口坐标系里的矩形。字典合并，缺的补上、有的覆盖。
+private struct ControlFrameKey: PreferenceKey {
+    static let defaultValue: [PlayerControl: CGRect] = [:]
+    static func reduce(value: inout [PlayerControl: CGRect],
+                       nextValue: () -> [PlayerControl: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 

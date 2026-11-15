@@ -2627,6 +2627,7 @@
 "Fixed in the Top Bar" = "固定在頂部工具列";
 "Add %@" = "加入「%@」";
 "Where does %@ go?" = "「%@」放哪一行？";
+"Press a control in the picture, then drag it — the lists below follow." = "在畫面裡按住控制項，再拖到新位置 —— 下面的兩張表會跟著動。";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "固定在頂部工具列：控制項鎖上之後，它是唯一的解鎖入口。";
 "Fixed Keys" = "固定鍵";
 "More (…) — top right" = "更多（…）—— 右上角";
