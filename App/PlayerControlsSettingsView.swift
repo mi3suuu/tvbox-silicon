@@ -21,10 +21,10 @@ struct PlayerControlsSettingsView: View {
     @AppStorage(PlayerControlsLayout.storageKey)
     private var stored = PlayerControlsLayout.standard.stored
 
-    /// 顶栏顺序。
-    @State private var topOrder: [PlayerControl] = PlayerControlsLayout.current.top
-    /// 底栏（进度那一行）顺序。
-    @State private var bottomOrder: [PlayerControl] = PlayerControlsLayout.current.bottom
+    /// 顶栏**槽位**（含空格）。空格是位置，不是空位 —— 拖到第 7 格就留在第 7 格。
+    @State private var topSlots: [PlayerControl?] = PlayerControlsLayout.current.topSlots
+    /// 底栏（进度那一行）槽位，同上。
+    @State private var bottomSlots: [PlayerControl?] = PlayerControlsLayout.current.bottomSlots
     /// 只看预览用的形态选择器 —— 不影响配置。
     @State private var previewShape: PlayerControlsLayout.Shape = Self.initialPreviewShape
     /// 正在问「放回哪一行」的控件：两边都能放的才需要问。
@@ -44,14 +44,17 @@ struct PlayerControlsSettingsView: View {
 
     private var layout: PlayerControlsLayout { PlayerControlsLayout(stored: stored) }
 
+    /// 顶栏里**实际有控件**的那些（列表区展示用；空格是预览里的事，不占列表行）。
+    private var topOrder: [PlayerControl] { topSlots.compactMap { $0 } }
+    /// 底栏同上。
+    private var bottomOrder: [PlayerControl] { bottomSlots.compactMap { $0 } }
+
     /// 预览用的布局：**由两段列表的状态数组拼出来**，不读存储。
     ///
     /// 拖动过程中每移动一格都让图片重画一次（"所见即所得"），如果每次读存储，
     /// 等于每帧写一次 UserDefaults；拼一份只读布局既不会落盘，也和列表共用同一份事实。
     private var liveLayout: PlayerControlsLayout {
-        PlayerControlsLayout(topSlots: topOrder.map { Optional($0) },
-                             bottomSlots: bottomOrder.map { Optional($0) },
-                             more: layout.more)
+        PlayerControlsLayout(topSlots: topSlots, bottomSlots: bottomSlots, more: layout.more)
     }
 
     var body: some View {
@@ -122,8 +125,8 @@ struct PlayerControlsSettingsView: View {
                         PlayerControlsLayout.reset()
                         let fresh = PlayerControlsLayout.standard
                         stored = fresh.stored
-                        topOrder = fresh.top
-                        bottomOrder = fresh.bottom
+                        topSlots = fresh.topSlots
+                        bottomSlots = fresh.bottomSlots
                     } label: {
                         Label(L10n.text("Reset to Default"), systemImage: "arrow.counterclockwise")
                     }
@@ -258,60 +261,106 @@ struct PlayerControlsSettingsView: View {
     private func add(_ control: PlayerControl, to placement: PlayerControl.Placement) {
         var updated = PlayerControlsLayout(stored: stored)
         updated.add(control, to: placement)
-        topOrder = updated.top
-        bottomOrder = updated.bottom
+        topSlots = updated.topSlots
+        bottomSlots = updated.bottomSlots
         stored = updated.stored
         addingTo = nil
     }
 
+    /// 列表里的「拖拽排序」：把这一行的**非空控件**按新顺序重排，空的格子保留在原位。
+    ///
+    /// 走列表拖拽时用户表达的是「先后」，不是「第几格」；所以仍然按顺序语义换算，
+    /// 但落点用**原来那些非空格子**，不会把整行压到左边。
     private func applyTopOrder(_ order: [PlayerControl]) {
-        var updated = PlayerControlsLayout(stored: stored)
-        updated.setTopOrder(order)
-        topOrder = updated.top
-        bottomOrder = updated.bottom
-        stored = updated.stored
+        applyOrder(order, isTop: true)
     }
 
     private func applyBottomOrder(_ order: [PlayerControl]) {
+        applyOrder(order, isTop: false)
+    }
+
+    private func applyOrder(_ order: [PlayerControl], isTop: Bool) {
+        let source = isTop ? topSlots : bottomSlots
+        // 非空格子的下标（这些位置被重新填上 order 里的控件，一个不多一个不少）。
+        let cells = source.indices.filter { source[$0] != nil }
+        var updated = isTop ? source : source
+        // 先把这一行的非空全清掉，再按 order 填回原来那些格子。
+        for index in cells { updated[index] = nil }
+        for (offset, control) in order.enumerated() {
+            if offset < cells.count { updated[cells[offset]] = control }
+        }
+        // order 比原来的非空格子多（加了新控件）：接在第一个空槽，没有就追加。
+        if order.count > cells.count {
+            for control in order.dropFirst(cells.count) {
+                updated = SlotBoard.appending(control, to: updated)
+            }
+        }
+        if isTop { setTopSlots(updated) } else { setBottomSlots(updated) }
+    }
+
+    /// 写盘（预览拖动与列表操作共用这一条）。
+    private func setTopSlots(_ slots: [PlayerControl?]) {
         var updated = PlayerControlsLayout(stored: stored)
-        updated.setBottomOrder(order)
-        topOrder = updated.top
-        bottomOrder = updated.bottom
+        updated.setTopSlots(slots)
+        topSlots = updated.topSlots
+        bottomSlots = updated.bottomSlots
         stored = updated.stored
     }
 
-    // MARK: 在图里直接拖
-
-    /// 预览里把控件拖到新位置：只改状态数组，**不落盘**。
-    ///
-    /// 用「插在谁前面」而不是索引：底栏那一行里既有中央传输组，又有进度条、时间码这些
-    /// 宽度不一的条目，索引在不同行之间对不上；指认邻居就没有这个问题。
-    /// `nil` 表示插到行尾。
-    private func moveInPicture(_ control: PlayerControl, to row: PlayerControl.Placement,
-                              before neighbor: PlayerControl?) {
-        var top = topOrder, bottom = bottomOrder
-        top.removeAll { $0 == control }
-        bottom.removeAll { $0 == control }
-        var list = row == .topBar ? top : bottom
-        if let neighbor, let index = list.firstIndex(of: neighbor) {
-            list.insert(control, at: index)
-        } else {
-            list.append(control)
-        }
-        if row == .topBar { top = list } else { bottom = list }
-        // 手势每帧都会调一次；没算出新顺序就别写状态，免得整页每秒重绘几十遍。
-        guard top != topOrder || bottom != bottomOrder else { return }
-        topOrder = top
-        bottomOrder = bottom
+    private func setBottomSlots(_ slots: [PlayerControl?]) {
+        var updated = PlayerControlsLayout(stored: stored)
+        updated.setBottomSlots(slots)
+        topSlots = updated.topSlots
+        bottomSlots = updated.bottomSlots
+        stored = updated.stored
     }
 
-    /// 手指离开：把状态数组落成一次写入，走的是列表拖动同一条通道（含 `assertComplete`）。
+    // MARK: 在图里直接拖（拖的是坐标，落点吸附到格子）
+
+    /// 预览里把控件拖到**某一格**：只改状态数组，**不落盘**。
+    ///
+    /// ## 为什么不再是「插在谁前面」
+    ///
+    /// 旧实现收的是 `(控件, 目标行, 插在谁前面)` —— 用户拖到哪都只影响「先后」，
+    /// 于是视觉上控件自己跑掉：它被塞进邻居之间，x 由前面所有控件累计宽度决定。
+    /// 现在收的是 `(控件, 目标行, 目标格下标)`，**第几格就是第几格**，
+    /// 用户拖到第 7 格松手，它就落在第 7 格（`SlotBoard.assign` 负责空槽保真）。
+    private func moveInPicture(_ control: PlayerControl,
+                               to row: PlayerControl.Placement,
+                               slot: Int) {
+        var top = topSlots, bottom = bottomSlots
+        // 先从两行里摘掉它自己（拖回原位时下面会重新写入）。
+        top = top.map { $0 == control ? nil : $0 }
+        bottom = bottom.map { $0 == control ? nil : $0 }
+
+        var target = (row == .topBar) ? top : bottom
+        let index = min(max(slot, 0), PlayerControlsLayout.slotCount - 1)
+        // 铺到目标格：不够长就补空格，**不压缩**已有位置。
+        while target.count <= index { target.append(nil) }
+        // 目标格原有的那颗被顶开到第一个空槽（不是丢掉）。
+        if let displaced = target[index], displaced != control {
+            target[index] = nil
+            target = SlotBoard.appending(displaced, to: target)
+        }
+        target[index] = control
+
+        if row == .topBar { top = target } else { bottom = target }
+        // 每帧都会调；顺序没变就别写状态，免得整页每秒重绘几十遍。
+        guard top != topSlots || bottom != bottomSlots else { return }
+        topSlots = top
+        bottomSlots = bottom
+    }
+
+    /// 手指离开：把槽位落成一次写入（含 `assertComplete`）。
+    ///
+    /// 走 `setTopSlots` / `setBottomSlots` 而不是 `setTopOrder`：后者会把空格压实，
+    /// 于是「拖到第 7 格」在落盘那一刻又变回第 1 格 —— 拖动期间对、松手就错位。
     private func commitPictureDrag() {
         var updated = PlayerControlsLayout(stored: stored)
-        updated.setTopOrder(topOrder)
-        updated.setBottomOrder(bottomOrder)
-        topOrder = updated.top
-        bottomOrder = updated.bottom
+        updated.setTopSlots(topSlots)
+        updated.setBottomSlots(bottomSlots)
+        topSlots = updated.topSlots
+        bottomSlots = updated.bottomSlots
         stored = updated.stored
     }
 }
@@ -321,13 +370,28 @@ struct PlayerControlsSettingsView: View {
 private struct PlayerControlsPreviewCard: View {
     let layout: PlayerControlsLayout
     @Binding var shape: PlayerControlsLayout.Shape
-    /// 在画面上拖动控件：`(控件, 目标行, 插在谁前面)`，`nil` 为行尾。
-    let move: (PlayerControl, PlayerControl.Placement, PlayerControl?) -> Void
+    /// 在画面上拖动控件：`(控件, 目标行, 目标格下标)`。
+    let move: (PlayerControl, PlayerControl.Placement, Int) -> Void
     /// 手指离开时落盘。
     let commit: () -> Void
 
     /// 预览画面的高度上限（见调用处的注释）。
     static let previewMaxHeight: CGFloat = 360
+
+    /// 1:1 实际尺寸模式。
+    ///
+    /// 默认关（缩到卡片里看得全）；打开后预览按**设备真实点数**画，可双指缩放、单指拖动画面。
+    /// 这是「精准摆放」的前提：横持 951pt 的窗口塞进 330pt 的卡片只有 0.35 倍，
+    /// 一颗 13pt 的图标画出来 4.5pt —— 靠眼睛对不准，拖也拖不准。
+    @State private var oneToOne: Bool = {
+        // `-qaOneToOne 1` 直接以 1:1 模式打开 —— 无输入设备的真机截图/自证日志需要它，
+        // 否则这个开关永远只能在模拟器上用手点开。
+        #if DEBUG
+        return UserDefaults.standard.bool(forKey: "qaOneToOne")
+        #else
+        return false
+        #endif
+    }()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -345,10 +409,30 @@ private struct PlayerControlsPreviewCard: View {
             // 高度封顶 360：竖持形态按真实比例铺满宽度要 727pt（466:678），
             // 整张卡比一屏还高，一进来就得先滚过它才碰得到任何一项可调的东西。
             // 封顶后竖持会缩成一块居中的窄屏 —— 版式仍然 1:1，只是整体更小。
-            PlayerShapePreview(shape: shape, layout: layout, move: move, commit: commit)
-                .frame(maxHeight: PlayerControlsPreviewCard.previewMaxHeight)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, 12)
+            if oneToOne {
+                // 1:1：真尺寸 + 可缩放可平移，摆位置时看得清每一格。
+                PlayerShapePreview(shape: shape, layout: layout, move: move, commit: commit,
+                                   fixedScale: 1, panZoom: true)
+                    .frame(height: PlayerControlsPreviewCard.previewMaxHeight)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.horizontal, 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                PlayerShapePreview(shape: shape, layout: layout, move: move, commit: commit)
+                    .frame(maxHeight: PlayerControlsPreviewCard.previewMaxHeight)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.horizontal, 12)
+            }
+
+            Toggle(isOn: $oneToOne) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L10n.text("Actual size (1:1)")).font(.footnote)
+                    Text(L10n.text("Draws the player at the screen's real points — pinch to zoom, drag the picture to pan."))
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 12).padding(.top, 8)
 
             // 这一行是**操作提示**，不是装饰：拖动只认长按 0.25 秒后的手势，
             // 不写出来没人会去试（而且直接拖会被页面的滚动吃掉，用户会以为坏了）。
@@ -537,14 +621,23 @@ enum PlayerShapeGeometry {
 private struct PlayerShapePreview: View {
     let shape: PlayerControlsLayout.Shape
     let layout: PlayerControlsLayout
-    let move: (PlayerControl, PlayerControl.Placement, PlayerControl?) -> Void
+    let move: (PlayerControl, PlayerControl.Placement, Int) -> Void
     let commit: () -> Void
+    /// 非 nil 时用这个固定倍率（1 = 设备真实点数）。nil = 按可用宽度自适应缩小。
+    var fixedScale: CGFloat? = nil
+    /// 允许双指缩放 + 单指拖动画面（只在 1:1 模式下开：小预览里拖动会与控件拖拽抢手势）。
+    var panZoom: Bool = false
+
+    @State private var zoom: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @GestureState private var liveZoom: CGFloat = 1
 
     var body: some View {
         let screen = shape.screenSize
         let window = PlayerShapeGeometry.windowRect(for: shape)
         GeometryReader { proxy in
-            let scale = proxy.size.width / screen.width
+            let fitScale = proxy.size.width / screen.width
+            let scale = (fixedScale ?? fitScale) * (panZoom ? (zoom * liveZoom) : 1)
             ZStack(alignment: .topLeading) {
                 screenBackground(screen)
                 if let right = PlayerShapeGeometry.rightColumn(for: shape) {
@@ -565,9 +658,42 @@ private struct PlayerShapePreview: View {
                     .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
             }
             .scaleEffect(scale, anchor: .topLeading)
-            .frame(width: proxy.size.width, height: screen.height * scale, alignment: .topLeading)
+            .onAppear {
+                // 自证探针：真机截不出来时，让 App 自己把几何写进 Documents/oneskin.log。
+                // 判据要能回答「1:1 模式下图标是不是真的 1:1」——
+                // 所以打的是 scale 与窗口尺寸，而不是「我觉得它变大了」。
+                OneSkinProbe.log("SLOTS shape=\(shape.rawValue) screen=\(Int(screen.width))x\(Int(screen.height))"
+                    + " window=\(Int(window.width))x\(Int(window.height))"
+                    + " fitScale=\(String(format: "%.4f", fitScale))"
+                    + " appliedScale=\(String(format: "%.4f", scale))"
+                    + " oneToOne=\(fixedScale != nil)"
+                    + " panZoom=\(panZoom) zoom=\(String(format: "%.2f", zoom))")
+            }
+            // 缩放后的实际占据尺寸：宽度也跟着缩放，否则在 1:1 下会被 proxy 宽度裁掉右半边。
+            .frame(width: screen.width * scale, height: screen.height * scale,
+                   alignment: .topLeading)
+            .offset(panZoom ? pan : .zero)
         }
-        .aspectRatio(screen.width / screen.height, contentMode: .fit)
+        // 1:1 模式不加 aspectRatio：那是"塞进卡片"用的，会把真尺寸再压一次。
+        .aspectRatio(panZoom ? nil : screen.width / screen.height, contentMode: .fit)
+        .contentShape(Rectangle())
+        .gesture(panZoom ? panGesture : nil)
+        .simultaneousGesture(panZoom ? magnification : nil)
+    }
+
+    /// 单指拖画面（1:1 下要看窗口右上角或底部时用）。
+    private var panGesture: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in pan = value.translation }
+    }
+
+    /// 双指缩放。
+    private var magnification: some Gesture {
+        MagnificationGesture()
+            .updating($liveZoom) { value, state, _ in state = value }
+            .onEnded { value in
+                zoom = min(max(zoom * value, 0.5), 4)
+            }
     }
 
     private func screenBackground(_ screen: CGSize) -> some View {
@@ -644,7 +770,7 @@ private struct PlayerShapePreview: View {
 private struct PlayerWindowPreview: View {
     let size: CGSize
     let layout: PlayerControlsLayout
-    let move: (PlayerControl, PlayerControl.Placement, PlayerControl?) -> Void
+    let move: (PlayerControl, PlayerControl.Placement, Int) -> Void
     let commit: () -> Void
 
     /// 量控件矩形用的坐标系：窗口自己的点，不受外层 `scaleEffect` 影响。
@@ -654,16 +780,32 @@ private struct PlayerWindowPreview: View {
     @State private var dragging: PlayerControl?
     /// 上一次算出来的落点（行 + 邻居）。只有它变了才触发一次触感，避免每帧都震。
     @State private var lastRow: PlayerControl.Placement?
-    @State private var lastBefore: PlayerControl?
+    @State private var lastCell: Int?
     @State private var ticks = 0
+    /// 拖动中手指落到的格（画一圈高亮，告诉用户「松手会放这里」）。
+    @State private var hoverCell: (row: PlayerControl.Placement, cell: Int)?
 
     private var m: PreviewMetrics { PreviewMetrics(size: size) }
 
     private var topY: CGFloat { max(size.height * 0.072, m.hit / 2 + m.edge) }
     private var bottomY: CGFloat { min(size.height * 0.928, size.height - m.hit / 2 - m.edge) }
 
+    /// 顶栏在预览里能画几格。
+    ///
+    /// ⛔ 这里**不再扣结构位**（旋转/锁定/更多）。旧算式 `- 4 * hit` 是播放器的口径
+    ///（`OneSkinChrome.topSurfaceCapacity` 要扣掉它自己画的那几颗结构位），
+    /// 但预览图里根本不画结构位 —— 于是出现「预览显示 11 格、实际只能落 7 格」，
+    /// 用户按预览去放，放到第 8 格就被挤走，观感正是「x 不受我控制」。
+    ///
+    /// 两边坐标系统一：预览画多少格，就能落多少格。真机容量口径见
+    /// `PlayerControlsFit`（它照旧扣结构位，用于「几颗会进更多」的估算）。
+    /// 顶栏在预览里画几格 —— **按实际宽度算满，不设人为上限**。
+    ///
+    /// 用户要求「每栏的格数都要尽可能自由」。宽度是唯一真实的约束（画不下就是画不下），
+    /// 所以这里只按 `可用宽 / 格宽` 算，不再与 `slotCount` 取小 —— 取小会让
+    /// 「能画出来的格」少于「能落进去的格」，用户看到格子却放不进去。
     private var topCapacity: Int {
-        max(0, Int((size.width - m.edge * 2 - CGFloat(4) * m.hit) / m.hit))
+        max(1, Int((size.width - m.edge * 2) / max(m.hit, 1)))
     }
 
     private var topSlots: [PlayerControl?] {
@@ -711,9 +853,26 @@ private struct PlayerWindowPreview: View {
             topBar
             centerBar
             bottomBar
+            slotGuides
             dragBands
         }
         .coordinateSpace(name: Self.space)
+        .onAppear {
+            let top = layout.topSlots.prefix(PlayerControlsLayout.slotCount)
+                .map { $0?.rawValue ?? "-" }.joined(separator: ",")
+            let bottom = layout.bottomSlots.prefix(PlayerControlsLayout.slotCount)
+                .map { $0?.rawValue ?? "-" }.joined(separator: ",")
+            OneSkinProbe.log("SLOTROW size=\(Int(size.width))x\(Int(size.height))"
+                + " top=[\(top)] bottom=[\(bottom)]"
+                + " topCell=\(Int(self.m.hit)) edge=\(Int(self.m.edge))"
+                + " topCap=\(self.topCapacity)"
+                // 存储上限（= 可摆放控件总数，动态）与预览可画格数（= 宽度决定）是两个数，
+                // 必须分别打出来 —— 混在一起看会以为「还是只能放 10 颗」。
+                + " storeCap=\(PlayerControlsLayout.slotCount)"
+                + " previewCap=\(self.topCapacity)"
+                + " storedTopLen=\(layout.topSlots.count)"
+                + " storedBottomLen=\(layout.bottomSlots.count)")
+        }
         .onPreferenceChange(ControlFrameKey.self) { frames = $0 }
         .foregroundStyle(.white)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -730,6 +889,63 @@ private struct PlayerWindowPreview: View {
             band(.topBar, height: m.barHeight, centerY: topY)
             band(.middle, height: m.playHit, centerY: size.height * 0.496)
             band(.progressRow, height: m.barHeight, centerY: bottomY)
+        }
+    }
+
+    /// 拖动中把**每一格**画出来 —— 用户要求的「显示出可摆放的槽位」。
+    ///
+    /// 只在拖动期间出现：平时画满格子会盖住画面，反而看不清播放器长什么样。
+    /// 每一格用一条细虚线方框表示「这里可以放」，手指当前对准的那一格实心高亮。
+    @ViewBuilder
+    private var slotGuides: some View {
+        if let dragging {
+            ZStack(alignment: .topLeading) {
+                guideRow(.topBar, centerY: topY, allowed: dragging.placements.contains(.topBar))
+                guideRow(.middle, centerY: size.height * 0.496,
+                         allowed: dragging.placements.contains(.middle))
+                guideRow(.progressRow, centerY: bottomY,
+                         allowed: dragging.placements.contains(.progressRow))
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private func guideRow(_ placement: PlayerControl.Placement,
+                          centerY: CGFloat,
+                          allowed: Bool) -> some View {
+        // 这一行画得出几格：与容量算法同一份（都按宽度算满，不设人为上限）。
+        let count = max(1, allowed ? rowCapacity(placement) : 0)
+        let cell = cellWidth
+        HStack(spacing: 0) {
+            ForEach(0..<count, id: \.self) { index in
+                let hot = hoverCell?.row == placement && hoverCell?.cell == index
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(hot ? Color.accentColor : Color.white.opacity(allowed ? 0.55 : 0.18),
+                                  style: StrokeStyle(lineWidth: hot ? 2 : 1, dash: hot ? [] : [3, 3]))
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(hot ? Color.accentColor.opacity(0.28)
+                                      : Color.white.opacity(allowed ? 0.06 : 0))
+                    )
+                    .frame(width: cell, height: cell)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, m.edge)
+        .frame(width: size.width, alignment: .leading)
+        .position(x: size.width / 2, y: centerY)
+    }
+
+    /// 某一行在当前窗口里能放几格。
+    private func rowCapacity(_ placement: PlayerControl.Placement) -> Int {
+        switch placement {
+        case .topBar:
+            return topCapacity
+        case .middle:
+            return max(1, Int((size.width - 2 * m.edge) / max(m.stepHit, 1)))
+        case .progressRow:
+            return bottomRow.count
         }
     }
 
@@ -758,7 +974,8 @@ private struct PlayerWindowPreview: View {
                 if dragging != nil { commit() }
                 dragging = nil
                 lastRow = nil
-                lastBefore = nil
+                lastCell = nil
+                hoverCell = nil
             }
     }
 
@@ -770,19 +987,30 @@ private struct PlayerWindowPreview: View {
         }
     }
 
-    /// 拖动中：算出目标行与"插在谁前面"，交给页面改状态。
+    /// 拖动中：算出目标行与**目标格**，交给页面改状态。
+    ///
+    /// 格子由横坐标吸附得到（`SlotBoard.cellIndex`），行由纵坐标最近的那条带得到。
+    /// 这样「拖到哪一格」就是「放进哪一格」——用户第一次能靠眼睛对准位置。
     private func place(_ dragged: PlayerControl, at point: CGPoint) {
         let target = targetRow(for: dragged, y: point.y)
-        let before = row(target).first {
-            $0 != dragged && (frames[$0]?.midX ?? .greatestFiniteMagnitude) > point.x
-        }
+        let cell = cellIndex(forX: point.x)
         // 落点没变就不动：手势每帧都调这里，重复写状态只会白白重绘。
-        guard target != lastRow || before != lastBefore else { return }
+        guard target != lastRow || cell != lastCell else { return }
         lastRow = target
-        lastBefore = before
+        lastCell = cell
+        hoverCell = (target, cell)
         ticks += 1
-        move(dragged, target, before)
+        move(dragged, target, cell)
     }
+
+    /// 横坐标 → 第几格。用**这一行的实际几何**（边距 + 格宽）算，与绘制共用同一组常量。
+    private func cellIndex(forX x: CGFloat) -> Int {
+        SlotBoard.cellIndex(forX: x, leading: m.edge, cell: cellWidth)
+    }
+
+    /// 每格宽度：顶栏与进度行都按 `m.hit` 一格算 —— 与 `topCapacity` / `bottomRow` 的容量
+    /// 算法一致，否则吸附到的格子与画出来的格子会错位。
+    private var cellWidth: CGFloat { max(m.hit, 1) }
 
     private func targetRow(for control: PlayerControl, y: CGFloat) -> PlayerControl.Placement {
         let bands: [(PlayerControl.Placement, CGFloat)] = [(.topBar, topY),

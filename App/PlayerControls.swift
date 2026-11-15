@@ -601,8 +601,18 @@ struct PlayerControlsLayout: Equatable {
         current
     }
 
-    /// The number of fixed slots in the top bar and in the bottom bar.
-    static let slotCount = 10
+    /// 一行最多几格。
+    ///
+    /// ⛔ 这里曾经硬编码 `10`。10 是**当初默认布局恰好用满的数**，不是任何物理约束 ——
+    /// 存储格式是逗号分隔（`a,b,-,-,c`），本来就没有长度上限。硬编码 10 的后果是
+    /// 用户想把第 11 颗控件拖进某一行时，被 `normalized()` 的 `prefix(slotCount)` 静默截掉，
+    /// 这正是「格数不够自由」的根。
+    ///
+    /// 现在按**可摆放控件总数**推导：任何一颗控件都应该能落到任意一行的任意一格。
+    /// （`fixedKeys` 不参与摆放，所以减掉。）
+    static var slotCount: Int {
+        max(PlayerControl.allCases.count - PlayerControl.fixedKeys.count, 1)
+    }
     /// The empty-slot marker in the stored form.
     private static let empty = "-"
 
@@ -667,6 +677,40 @@ struct PlayerControlsLayout: Equatable {
         bottomSlots = wanted.map(Optional.some)
         self.more = more
         assertComplete("setBottomOrder")
+    }
+
+    // MARK: - 按槽位写入（设置页「拖到某一格」）
+
+    /// 直接把一行的**槽位数组**写进去 —— 空格（`nil`）保留，不再被压实。
+    ///
+    /// `setTopOrder` 收的是「非空控件的顺序」，内部 `wanted.map(Optional.some)` 把整行压成
+    /// 连续的一串。用户把「画质」拖到第 7 格、前 6 格空着，走那条路写进来会变成第 1 格
+    /// —— 这就是「x 不受控制」的根：**行内没有位置，只有先后**。
+    ///
+    /// 算法在 `SlotBoard`（TVCore，纯数据，有 11 条单测）。这里只负责把 `PlayerControl`
+    /// 填进去、把结果搬回字段 —— 所以单测覆盖的就是这条真路径。
+    mutating func setTopSlots(_ slots: [PlayerControl?]) {
+        let allowed = Set(PlayerControl.allCases.filter { $0.placements.contains(.topBar) })
+        let out = SlotBoard.assign(slots, toTopRow: true,
+                                   top: topSlots, bottom: bottomSlots, more: more,
+                                   allowed: allowed,
+                                   center: Set(PlayerControl.centerControls),
+                                   slotCount: Self.slotCount)
+        topSlots = out.top; bottomSlots = out.bottom; more = out.more
+        assertComplete("setTopSlots")
+    }
+
+    mutating func setBottomSlots(_ slots: [PlayerControl?]) {
+        let allowed = Set(PlayerControl.allCases.filter {
+            $0.placements.contains(.progressRow) || $0.placements.contains(.middle)
+        })
+        let out = SlotBoard.assign(slots, toTopRow: false,
+                                   top: topSlots, bottom: bottomSlots, more: more,
+                                   allowed: allowed,
+                                   center: Set(PlayerControl.centerControls),
+                                   slotCount: Self.slotCount)
+        topSlots = out.top; bottomSlots = out.bottom; more = out.more
+        assertComplete("setBottomSlots")
     }
 
     /// 把控件放回它**唯一恰当的位置**（设置页「加回来」用）。
