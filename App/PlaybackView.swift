@@ -927,25 +927,55 @@ import TVCore
         // `baseSync` is nil until the listener is up. Rather than silently going direct — which
         // looked like the proxy simply did nothing — ask for it to start and log that this item
         // played direct, so the reason is in the diagnostic log afterwards.
-        var assetURL = url
-        if let context = channel.historyContext {
+        // ★ 2026-11-15：配了代理时，relay 必须**优先于**下面四个 asset 工厂。
+        //
+        // 原写法把 `assetURL` 只放在回退链的**最后一支**：
+        //     CloudStreams.asset(for:) ?? HongguoStreams.asset(for:) ?? DashStreams.asset(for:)
+        //     ?? LiveRepair.asset(for:) ?? AVURLAsset(url: assetURL, ...)
+        // 而前四个工厂（tvbox-cloud / tvbox-hongguo / tvbox-dash / tvbox-live-repair）各自
+        // 收下 `url` 就返回 asset，**根本看不到 `assetURL`**。真机上能出画面的源全部命中前四支
+        // ⇒ 观察者配了自定义代理，在主流源上完全不生效，而且没有任何一行日志说明为什么。
+        // 设备实证：runtime-0.jsonl 里 `relay listening` 出现 85 次（每次播放起一个端口），
+        // `relay upstream` / `relay done` 各 0 次 —— relay 起来了，但一次请求都没收到。
+        //
+        // 因此改成：代理生效时先看 relay。
+        var relayURL: URL?
+        let context0 = channel.historyContext
+        let proxyID = context0.map {
             // A line-level route (set on the line chip) wins over the source-level route.
-            let flag = context.episodeFlag
-            let lineRoute = LineSettings.shared.route(origin: context.origin, sourceKey: context.sourceKey, flag: flag)
-            let proxyID = lineRoute?.proxyID ?? CustomProxyStore.shared.route(origin: context.origin, sourceKey: context.sourceKey).proxyID
-            if let proxyID {
-                if let base = LocalProxyServer.shared.baseSync {
-                    assetURL = LocalProxyServer.proxyURL(base: base, url: url, proxyID: proxyID)
-                } else {
-                    // Not up yet on the first item after launch: start it so the next item is
-                    // relayed, and say so rather than pretending the route was honoured.
-                    LocalProxyServer.shared.ensureStarted()
-                    Diagnostics.shared.record(.warning, "proxy", "relay not listening yet; this item plays direct source=\(context.sourceKey)")
-                }
+            LineSettings.shared.route(origin: $0.origin, sourceKey: $0.sourceKey, flag: $0.episodeFlag)?.proxyID
+                ?? CustomProxyStore.shared.route(origin: $0.origin, sourceKey: $0.sourceKey).proxyID
+        } ?? nil
+        if let proxyID {
+            // ⛔ 只有 http/https 目标能走 relay：`LocalProxyServer.encode` 把目标拼成
+            // `/p/<id>/<scheme>/<host>/<port><path>`，再按 `<scheme>` 决定是否开 TLS；
+            // 而 `tvbox-hongguo:` / `tvbox-dash:` 这些自造 scheme 是由上面几个工厂自己的
+            // resourceLoader 就地解析密钥流，交给 relay 只会拼出一个打不开的地址。
+            // 换句话说：自造 scheme 必须留给对应工厂，这是**能力边界**，不是优先级问题。
+            let scheme = url.scheme?.lowercased() ?? ""
+            let relayable = scheme == "http" || scheme == "https"
+            if !relayable {
+                Diagnostics.shared.record(.debug, "proxy",
+                    "route set but target scheme is not relayable; using its own loader scheme=\(scheme) source=\(context0?.sourceKey ?? "-")")
+            } else if let base = LocalProxyServer.shared.baseSync {
+                relayURL = LocalProxyServer.proxyURL(base: base, url: url, proxyID: proxyID)
+            } else {
+                // Not up yet on the first item after launch: start it so the next item is
+                // relayed, and say so rather than pretending the route was honoured.
+                // ⚠ 这里必须**回退直连**：relay 起不来不能让「配了代理」变成「必然不能播」。
+                LocalProxyServer.shared.ensureStarted()
+                Diagnostics.shared.record(.warning, "proxy", "relay not listening yet; this item plays direct source=\(context0?.sourceKey ?? "-")")
             }
         }
-        let asset = CloudStreams.asset(for: url) ?? HongguoStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
-            ?? AVURLAsset(url: assetURL, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+        let asset: AVURLAsset
+        if let relayURL {
+            // 代理已生效：字节由 relay 搬运，四个工厂必须让路。
+            // headers 仍然传下去 —— relay 把请求原样转给源站，源站该看到的头不能丢。
+            asset = AVURLAsset(url: relayURL, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+        } else {
+            asset = CloudStreams.asset(for: url) ?? HongguoStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
+                ?? AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+        }
         let item = AVPlayerItem(asset: asset)
         if url.scheme == HongguoStreams.scheme { item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration }
         // [mi3s] 二开融合（N-W5-03）：给每个可能播放的 item 挂上字幕管线，见 App/SubtitleCues+Mi3s.swift。
