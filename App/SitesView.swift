@@ -224,6 +224,17 @@ struct SitesView: View {
             if pick == nil, store.subscription != nil {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Menu {
+                        // 「全部折叠」在列表顶上，滚动之后就够不着了；分组头吸顶解决了「折哪一组」，
+                        // 这一项解决「一次折全部」—— 滚到第几屏都能按到。
+                        Button {
+                            setAllCollapsed(!allFolded)
+                        } label: {
+                            Label(L10n.text(allFolded ? "Expand All" : "Collapse All"),
+                                  systemImage: allFolded ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                        }
+                        .disabled(!query.isEmpty)
+                        .accessibilityIdentifier("sources.foldAllMenu")
+                        Divider()
                         Button {
                             showingSpeedLab = true
                         } label: {
