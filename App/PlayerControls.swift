@@ -833,12 +833,29 @@ struct PlayerControlsLayout: Equatable {
             真机持久化串解析后布局不完整 —— 补位溢出被静默截断了：
             top=\(probe.top.map(\.rawValue)) bottom=\(probe.bottom.map(\.rawValue)) more=\(probe.more.map(\.rawValue))
             """)
-        // 被截掉的那项必须仍**可达**（进「更多」），不能凭空消失。
+        // ★ 锁死溢出**落点**：底栏被 8 项已配占位后，补位的 timecode/progressBar 填满
+        //   剩余 2 个槽位，第 11 项 `remaining` 必须进「更多」——这正是原实现丢弃的那一项。
+        assert(probe.more.contains(.remaining), """
+            补位溢出的 remaining 没有进「更多」：
+            bottom=\(probe.bottom.map(\.rawValue)) more=\(probe.more.map(\.rawValue))
+            原实现会在 normalized() 里把它静默截掉（用户底栏看不到剩余时间）
+            """)
+        // 三项都必须**可达**（顶栏/底栏/「更多」之一），一个都不能凭空消失。
         let progressRow: [PlayerControl] = [.timecode, .progressBar, .remaining]
         for control in progressRow {
             assert(probe.top.contains(control) || probe.bottom.contains(control) || probe.more.contains(control),
                    "进度行控件 \(control.rawValue) 既不在顶栏/底栏也不在「更多」—— 用户会看不到它")
         }
+        // 再来一个**更严**的构造：底栏直接塞满 slotCount 项，补位一项都放不下，
+        // 全部只能进「更多」。这条防的是「将来有人把 slotCount 或 standardBottom 改了，
+        // 溢出又回到静默丢弃」。
+        let fullBottomSlots = (PlayerControl.standardBottom + [.quality])
+            .prefix(slotCount).map(\.rawValue)
+        let fullStored = Array(repeating: Self.empty, count: slotCount).joined(separator: ",")
+            + "|" + fullBottomSlots.joined(separator: ",")
+            + "|" + Array(repeating: Self.empty, count: slotCount).joined(separator: ",")
+        let full = PlayerControlsLayout(stored: fullStored)
+        assert(full.isComplete, "底栏塞满 slotCount 项后布局不完整 —— 补位溢出又被丢了")
     }
     #endif
 
