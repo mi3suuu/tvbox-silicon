@@ -66,6 +66,8 @@ public final class PlaybackAccelerator: @unchecked Sendable {
     /// token → 已探到的总长。会话级缓存，`release` 时清掉。
     /// 见 `length(for:ranged:)` 的说明：只解决「同一会话重复探」，不跨会话复用。
     private var probedLengths: [String: Int64] = [:]
+    /// token → 源站明确不支持 Range（预探的结论）。这条会话的请求直接透传，不再重探。
+    private var unranged: Set<String> = []
 
     /// 是否值得为这个地址启用加速。
     ///
@@ -103,7 +105,23 @@ public final class PlaybackAccelerator: @unchecked Sendable {
         do {
             let base = try await base()
             let token = Self.token()
-            lock.withLock { routes[token] = Route(token: token, origin: url, headers: headers, lanes: width) }
+            let route = Route(token: token, origin: url, headers: headers, lanes: width)
+            lock.withLock { routes[token] = route }
+            // 登记的那一刻就把总长探掉。
+            //
+            // AVPlayer 的第一条请求要么是 `bytes=0-1`、要么是直接从 0 开始的区间；两者都要先
+            // 知道总长才能切段，不知道就得先等一个 `bytes=0-0` 的往返 —— 那一个往返正好压在
+            // 首帧上。这里提前发出去：AVPlayer 此时还在建 item、连回环都还没连上，探针已经在
+            // 路上了，等它的请求到达时总长大半已经就位。源站不支持 Range 时顺带记下，
+            // 让第一条请求直接透传，也不必再白探一次。
+            probe(route) { [weak self] length, ranged in
+                guard let self else { return }
+                self.lock.withLock {
+                    guard self.routes[token] != nil else { return }   // 已经 release，别再塞回去
+                    if ranged, let length { self.probedLengths[token] = length }
+                    else if !ranged { self.unranged.insert(token) }
+                }
+            }
             // 把源地址的扩展名带过去：AVPlayer 会根据它判断容器类型，
             // 丢成 `/p/<token>` 会让某些格式认不出来。
             let ext = url.pathExtension
@@ -123,6 +141,7 @@ public final class PlaybackAccelerator: @unchecked Sendable {
             routes.removeValue(forKey: token)
             // 总长缓存跟着会话走：同一个 token 不会复活，留着只会长内存。
             probedLengths.removeValue(forKey: token)
+            unranged.remove(token)
         }
     }
 
@@ -258,6 +277,12 @@ public final class PlaybackAccelerator: @unchecked Sendable {
                 return
             }
             pump(route, from: lower, to: upper, on: connection)
+            return
+        }
+
+        // 预探已经说明源站不支持 Range：原样透传，不必再白探一次。
+        if lock.withLock({ unranged.contains(route.token) }) {
+            redirect(connection, to: route.origin)
             return
         }
 
