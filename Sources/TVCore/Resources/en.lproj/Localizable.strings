@@ -2627,7 +2627,14 @@
 "Add %@" = "Add %@";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again.";
 "Fixed Keys" = "Fixed Keys";
-"These two cannot be moved or removed: More is the only way back for whatever did not fit, and Exit Full Screen is the only way out of full screen." = "These two cannot be moved or removed: More is the only way back for whatever did not fit, and Exit Full Screen is the only way out of full screen.";
 "More (…) — top right" = "More (…) — top right";
 "Exit Full Screen — top left, full screen only" = "Exit Full Screen — top left, full screen only";
 "Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there." = "Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there.";
+"This history entry came from a subscription you removed. Add it again to continue." = "This history entry came from a subscription you removed. Add it again to continue.";
+"Removed this source, along with %lld saved shows from it." = "Removed this source, along with %lld saved shows from it.";
+"Mute This One" = "Mute This One";
+"Unmute This One" = "Unmute This One";
+"Volume for this one" = "Volume for this one";
+"Follow the Global Setting" = "Follow the Global Setting";
+"These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again.";
+"Lock Controls — top right" = "Lock Controls — top right";

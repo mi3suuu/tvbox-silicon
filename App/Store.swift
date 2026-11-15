@@ -889,6 +889,26 @@ import TVCore
         }
         subscriptions = entries
         documents = copies
+        #if DEBUG
+        // ★ 2026-11-13 第 21 项诊断：`documents` 读回是否成功，一次打全。
+        //
+        // 「音乐/点播源/网盘文件消失」与「重启后历史记录看不了」是**同一个开关**：
+        //   extrasUnlocked = subscriptions.contains { enabled && documents[addr] 有 sites/lives }
+        // `documents` 读回失败 → extrasUnlocked=false → hiddenSections 含 .music；
+        // 同时 historyClient 找不到 site → 历史记录报「订阅中已没有此记录」。
+        // 两者不是两个 bug，是一条链。此处只在 init 末尾读局部量，不碰 self。
+        do {
+            let e0 = entries.count
+            let en = entries.filter { $0.enabled }.count
+            let wd = entries.filter { copies[$0.address] != nil }.count
+            let wc = entries.filter { e in
+                guard let d = copies[e.address] else { return false }
+                return !d.sites.isEmpty || !d.lives.isEmpty
+            }.count
+            let key = (defaults.data(forKey: "subscriptions") != nil) ? 1 : 0
+            oneSkinLog("BOOTDIAG entries=\(e0) enabled=\(en) docs=\(wd) withContent=\(wc) key=\(key)")
+        }
+        #endif
         // 迁移/去重改动过就必须落盘，否则下次启动读回的仍是那两个孤儿 UUID。
         // init 里不能读 `self.persistsChanges`（还没初始化完），按同样条件就地判断。
         #if DEBUG
@@ -2702,7 +2722,52 @@ import TVCore
         }
         if entry.context.sourceKey == CloudFiles.sourceKey { return resumeFile(entry) }
         guard let config = subscription, let client = historyClient(entry) else {
-            error = L10n.text("This history source is no longer in the current subscription. Restore that subscription to continue.")
+            #if DEBUG
+            // ★ 2026-11-13 第 23 项诊断：历史记录点进去报「订阅中已没有此记录」。
+            //
+            // 静态推演已排除数据层：BOOTDIAG withContent=22，且该条记录的
+            // origin/sourceKey 在缓存里能逐字找到。所以要么 subscription 当刻是 nil，
+            // 要么 sites 里确实找不到。这一行把两者分开 —— 纯读，不改行为。
+            do {
+                let hasConfig = subscription != nil
+                let siteCount = subscription?.sites.count ?? -1
+                let byKey = subscription?.sites.filter {
+                    $0.sourceKey == entry.context.sourceKey
+                }.count ?? -1
+                // 不用 `subscription!`：这一支本来就在「config 可能为 nil」时进来，
+                // 拆包崩溃会把一条诊断变成一次崩溃。
+                let byBoth = subscription.map { config in
+                    config.sites.filter {
+                        $0.origin(or: config.origin) == entry.context.origin
+                            && $0.sourceKey == entry.context.sourceKey
+                    }.count
+                } ?? -1
+                let clientOK = historyClient(entry) != nil
+                oneSkinLog("HISTDIAG config=\(hasConfig ? 1 : 0) sites=\(siteCount)"
+                    + " byKey=\(byKey) byBoth=\(byBoth) client=\(clientOK ? 1 : 0)"
+                    + " wantKey=\(entry.context.sourceKey)"
+                    + " wantOrigin=\(entry.context.origin.absoluteString)")
+            }
+            #endif
+            // ⛔ 2026-11-13 第 23 项：提示语必须与真实原因一致。
+            //
+            // 原来无论哪种失配都说「请恢复原订阅」——但实测（设备 history.json 24 条）：
+            //   3 条 origin=raw.githubusercontent.com/qist/tvbox/...  ← 换订阅前的旧地址
+            //   2 条 origin=macdeMacBook-Pro.local:8081/...           ← 开发机，早已关掉
+            // 用户**没有删过订阅**，只是换过地址/关过开发服务。让他「恢复原订阅」
+            // 等于让他去恢复一个他从没删过的东西 —— 这句话本身就是误导。
+            //
+            // 现在按「该地址是否仍在本环境的订阅列表里」分两种说法：
+            //   · 地址还在（无论启用与否）→ 订阅在，只是这个源被源站/合并去掉了
+            //                               → 说「来源已不在订阅中」
+            //   · 地址已不在             → 那条订阅被移除或换过地址
+            //                               → 说「这条记录来自已移除的订阅」
+            let addressStillSubscribed = environmentSubscriptions.contains {
+                $0.address == entry.context.origin.absoluteString
+            }
+            error = addressStillSubscribed
+                ? L10n.text("This show's source is no longer in your subscriptions.")
+                : L10n.text("This history entry came from a subscription you removed. Add it again to continue.")
             return
         }
         let site = client.site

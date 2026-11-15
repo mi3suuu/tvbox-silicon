@@ -4173,43 +4173,25 @@ struct OneSkinStage: View {
                 .scrollIndicators(.never)
             }
 
-            // 线路选择：展开显示所有线路，**每条带自己的延迟**，最快的打标。
-            // 只有一条线时隐藏（单线没有可选的）。
-            if showsLineMenu, lines.count > 1 {
-                let fastest = lineLatencies.min { $0.value < $1.value }?.key
-                ScrollView(.horizontal) {
-                    HStack(spacing: 7) {
-                        ForEach(lines, id: \.self) { line in
-                            Button {
-                                if line != activeLine { onSelectLine(line) }
-                                withAnimation(.smooth(duration: 0.2)) { showsLineMenu = false }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    chip(line.isEmpty ? "线路" : line,
-                                         on: line == activeLine || line == fastest)
-                                    // 延迟：测出来才显示，测不出就留空，不写假数。
-                                    if let ms = lineLatencies[line] {
-                                        Text("\(ms) ms")
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundStyle(line == fastest
-                                                             ? OneSkinPalette.primary
-                                                             : OneSkinPalette.tertiary)
-                                    } else if probingLines {
-                                        ProgressView().controlSize(.mini)
-                                    }
-                                    // 最快的那条加个标记，方便一眼选出。
-                                    if line == fastest, line != activeLine {
-                                        Image(systemName: "bolt.fill")
-                                            .font(.system(size: 9))
-                                            .foregroundStyle(OneSkinPalette.primary.opacity(0.8))
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .scrollIndicators(.never)
+            // 线路选择：**与未播放态、外屏、内屏用同一套竖排面板**（2026-11-13 第 20 项续）。
+            //
+            // ⛔ 这里原来是一段**横向 chip 条**（ScrollView + HStack + chip），
+            //    与详情列 CTA 下方那颗 `lineSelector`（竖向 lineRow 列表，
+            //    首行固定「自动（推荐）」）是两套完全不同的实现：
+            //      · 播放中 → 横向 chip，没有「自动」这一项
+            //      · 未播放 → 竖向列表，有「自动（推荐）」
+            //      · `lines.count == 1` → 这里整块不渲染，点了那颗 chip 什么都不出
+            //        （它照样 toggle 了 `showsLineMenu`，于是用户看到「点了没反应」）
+            //    用户要求三处合并成一套、按播放器坐标定位，故直接复用同一块面板 `linePanel`。
+            //
+            // ⛔ 这里只能画 `linePanel`（面板本体），不能画 `lineSelector`：后者自带一颗
+            //    收起态胶囊，而播放器上那颗 chip 就是触发器 —— 画整颗会出现两颗胶囊，
+            //    点新多出来的那颗还会把面板收起（自己关自己）。
+            // ⛔ 与 `lineSelector` 共用同一个 `showsLineMenu` 与同一份回调，
+            //    不新增状态，避免两处各自展开。
+            if showsLineMenu, !lines.isEmpty {
+                linePanel
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             // 画质展开：Auto + 各档。
@@ -4434,49 +4416,69 @@ struct OneSkinStage: View {
             .buttonStyle(.plain)
 
             // 展开态：竖排面板（真机样式）
-            if showsLineMenu, !lines.isEmpty {
-                let fastest = lineLatencies.min { $0.value < $1.value }?.key
-                VStack(alignment: .leading, spacing: 0) {
-                    // 首行固定「自动（推荐）」
-                    lineRow(title: "自动（推荐）",
-                            detail: nil,
-                            isActive: activeLine.isEmpty,
-                            isFastest: false,
-                            systemImage: "wand.and.stars") {
-                        if !activeLine.isEmpty { onSelectLine("") }
-                        withAnimation(.smooth(duration: 0.22)) { showsLineMenu = false }
-                    }
-                    ForEach(lines, id: \.self) { line in
-                        let ms = lineLatencies[line]
-                        lineRow(title: line.isEmpty ? "线路" : line,
-                                detail: ms.map { "\($0) ms" } ?? (probingLines ? nil : "不通"),
-                                isActive: line == activeLine,
-                                isFastest: line == fastest && ms != nil,
-                                systemImage: "antenna.radiowaves.left.and.right") {
-                            if line != activeLine { onSelectLine(line) }
-                            withAnimation(.smooth(duration: 0.22)) { showsLineMenu = false }
-                        }
-                    }
-                    // 底部独立按钮
-                    Button {
-                        Task { await probeLatency() }
-                    } label: {
-                        Text("重新测速")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(OneSkinPalette.secondary)
-                            .frame(maxWidth: .infinity, minHeight: 42)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 4)
-                }
-                .background(OneSkinPalette.card,
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(OneSkinPalette.buttonStroke, lineWidth: 0.5))
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
-            }
+            if showsLineMenu, !lines.isEmpty { linePanel }
         }
+    }
+
+    /// 展开态的线路面板本体 —— **不含**那颗收起态胶囊。
+    ///
+    /// ⛔ 播放器上那颗线路 chip 自己就是触发器（`showsLineMenu.toggle()`），
+    ///    那里只能画面板：整颗 `lineSelector` 会再画一颗胶囊出来，点它反而把面板收起，
+    ///    而播放器里恰好已经有一颗胶囊（就是那颗 chip）—— 于是出现两颗叠在一起。
+    private var linePanel: some View {
+        let fastest = lineLatencies.min { $0.value < $1.value }?.key
+        return VStack(alignment: .leading, spacing: 0) {
+            // 首行固定「自动（推荐）」
+            lineRow(title: "自动（推荐）",
+                    detail: nil,
+                    isActive: activeLine.isEmpty,
+                    isFastest: false,
+                    systemImage: "wand.and.stars") {
+                if !activeLine.isEmpty { onSelectLine("") }
+                withAnimation(.smooth(duration: 0.22)) { showsLineMenu = false }
+            }
+            ForEach(lines, id: \.self) { line in
+                let ms = lineLatencies[line]
+                lineRow(title: line.isEmpty ? "线路" : line,
+                        detail: ms.map { "\($0) ms" } ?? (probingLines ? nil : "不通"),
+                        isActive: line == activeLine,
+                        isFastest: line == fastest && ms != nil,
+                        systemImage: "antenna.radiowaves.left.and.right") {
+                    if line != activeLine { onSelectLine(line) }
+                    withAnimation(.smooth(duration: 0.22)) { showsLineMenu = false }
+                }
+            }
+            // 单线路时的说明行。
+            //
+            // ⛔ 只有一条线时，上面「自动（推荐）」+「线路N」两项里
+            //    线路N 就是当前项，用户点开看不到任何**可切换**的选项，
+            //    主观感受就是「点了没反应」。这一行把原因写清楚，
+            //    而不是让面板看起来是坏的。
+            if lines.count <= 1 {
+                Text("这个片源只有一条线路")
+                    .font(.system(size: 11))
+                    .foregroundStyle(OneSkinPalette.tertiary)
+                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                    .padding(.horizontal, 12)
+            }
+            // 底部独立按钮
+            Button {
+                Task { await probeLatency() }
+            } label: {
+                Text("重新测速")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(OneSkinPalette.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+        .background(OneSkinPalette.card,
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(OneSkinPalette.buttonStroke, lineWidth: 0.5))
+        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
     }
 
     /// 线路面板的一行。高度固定 42（真机实测行距 41.6~42.7）。

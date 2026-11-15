@@ -49,6 +49,7 @@
 "Unable to save favorites: %@" = "收藏保存失败：%@";
 "Tap the heart on a show's page or next to a live channel to save it on this device." = "在影视详情页或直播频道旁点爱心，收藏会保存在这台设备上。";
 "This show's source is no longer in your subscriptions." = "这部影视的来源已不在你的订阅中。";
+"This history entry came from a subscription you removed. Add it again to continue." = "这条观看记录来自一个已移除的订阅，重新添加该订阅后可继续观看。";
 "Remove %@ from favorites" = "取消收藏 %@";
 "Add %@ to favorites" = "收藏 %@";
 "Connect a Live Subscription" = "连接直播订阅";
@@ -2631,7 +2632,13 @@
 "Add %@" = "添加「%@」";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "固定在顶栏：控件锁上之后，它是唯一的解锁入口。";
 "Fixed Keys" = "固定键";
-"These two cannot be moved or removed: More is the only way back for whatever did not fit, and Exit Full Screen is the only way out of full screen." = "这两颗不能移动也不能删除：「更多」是放不下的控件唯一的去处，「退出全屏」是全屏里唯一的出口。";
 "More (…) — top right" = "更多（…）—— 右上角";
 "Exit Full Screen — top left, full screen only" = "退出全屏 —— 左上角，仅全屏时出现";
 "Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there." = "播放、±10 秒和选集键在画面中央；其余控件按这个顺序排在进度条一行，进度条本身也在其中。原版皮肤的进度行是固定版式，那里只有按钮会跟着动。";
+"Removed this source, along with %lld saved shows from it." = "已移除该来源，同时清掉 %lld 条已保存的影视记录。";
+"Mute This One" = "静音这一个";
+"Unmute This One" = "取消静音这一个";
+"Volume for this one" = "这一个的音量";
+"Follow the Global Setting" = "跟随全局设置";
+"These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "这三颗不能移动也不能删除：「更多」是放不下的控件唯一的去处，「退出全屏」是全屏里唯一的出口，锁定键是锁上之后唯一的解锁入口。";
+"Lock Controls — top right" = "锁定控件 —— 右上角";

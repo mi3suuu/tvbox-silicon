@@ -8,9 +8,22 @@ struct PhoneTabs: Equatable {
     static let storageKey = "phoneTabOrder"
     /// Off: the bar along the bottom shows only the icons.
     static let labelsKey = "phoneTabLabels"
+    /// tab bar 的位置数 —— **所有屏幕同一个值**（2026-11-13 第 22 项）。
+    ///
+    /// ⛔ 这里曾经还有一个 `wideBarSlots = 7`，宽屏（Duo 内屏 / iPad）用它。
+    ///    理由听起来没问题：「内屏的侧栏放得下七个」。但它的实际后果是
+    ///    `arranged(slots: 7)` 把 `Music` / `Sources` / `Cloud Files` 从「更多」
+    ///    **提到了 tab bar 里**，于是展开到内屏后「更多」页少了三块入口 ——
+    ///    用户的原话是「我们的音乐 点播源 网盘文件 这些菜单入口怎么都消失了」。
+    ///
+    ///    真机判据（MOREDIAG）：
+    ///      slots=7 → bar 7 项、more 只剩 5 项（丢了 Music/Sources/Cloud Files）
+    ///      slots=4 → bar 4 项、more 8 项 —— 内外屏同一个「更多」。
+    ///
+    ///    修完两个常量都是 4，那就只剩**一份事实**：再留一个同值常量，下一个人
+    ///    只要把其中一个改回 7 就又复现。所以宽屏那个已删除，宁可让这行注释
+    ///    把「为什么不再区分」写清楚。要几格由用户在「设置 › 编辑标签栏」里定。
     static let barSlots = 4
-    /// iPhone Duo's inner display (regular both ways): its side tab bar has room for seven before More.
-    static let wideBarSlots = 7
     /// Whether this screen uses the phone's tab bar (and so More and the tab bar editor). Every iPhone screen
     /// does, not only compact ones: iPhone Duo's inner display is regular both ways, and there the full set of
     /// sections overflowed the side tab bar into the system's own More list, without the editor. iPads on iOS 17
@@ -23,8 +36,11 @@ struct PhoneTabs: Equatable {
         return horizontal == .compact || UIDevice.current.userInterfaceIdiom == .phone
     }
     /// The bar's places on a screen with these size classes.
+    /// 内外屏一致：不再按尺寸类区分格数（见 `barSlots` 的注释）。
+    ///
+    /// 参数保留：调用处读起来仍是「这块屏幕有几格」，将来真要再分档时改这里一处即可。
     static func slots(horizontal: UserInterfaceSizeClass?, vertical: UserInterfaceSizeClass?) -> Int {
-        horizontal == .regular && vertical == .regular ? wideBarSlots : barSlots
+        barSlots
     }
     static let standard = PhoneTabs(bar: [.home, .discover, .live, .search], more: [.music, .manga, .sites, .files, .history, .favorites, .downloads, .messages, .settings])
     /// The iPad sidebar's order until the viewer arranges it. Messages is left out: only the phone lists it.
@@ -36,7 +52,7 @@ struct PhoneTabs: Equatable {
 
     /// One list, as the iPad's sidebar has it: the bar takes as many as it can hold and More the rest, so a narrow
     /// Split View window's tab bar keeps the same order.
-    init(order: [AppSection]) { self.init(bar: Array(order.prefix(Self.wideBarSlots)), more: Array(order.dropFirst(Self.wideBarSlots))) }
+    init(order: [AppSection]) { self.init(bar: Array(order.prefix(Self.barSlots)), more: Array(order.dropFirst(Self.barSlots))) }
 
     /// The sections of the iPad's sidebar (iOS 18 and later, full width), in the tab bar editor's order (#427).
     static func sidebar(stored: String, hiding hidden: [AppSection] = []) -> [AppSection] {
@@ -50,7 +66,7 @@ struct PhoneTabs: Equatable {
         }
         guard halves.count == 2, !halves[0].isEmpty else { self = .standard; return }
         var bar: [AppSection] = [], more: [AppSection] = []
-        for section in halves[0] where !bar.contains(section) && bar.count < Self.wideBarSlots { bar.append(section) }
+        for section in halves[0] where !bar.contains(section) && bar.count < Self.barSlots { bar.append(section) }
         // Add Discover once to an existing installation's visible tabs. Preserve their relative
         // order; arranged(slots:) carries the last tab into More when the bar is full.
         if !(halves[0] + halves[1]).contains(.discover) { bar.insert(.discover, at: min(1, bar.count)) }
@@ -146,6 +162,18 @@ struct MoreView: View {
 
     var body: some View {
         let tabs = PhoneTabs(stored: storedTabs).arranged(slots: slots, hiding: store.hiddenSections)
+        #if DEBUG
+        // ★ 2026-11-13 第 22 项诊断：「更多」页方块消失，一次打出全部中间量。
+        //
+        // 数据层已由 BOOTDIAG 排除（entries=22 docs=22 withContent=22 ⇒ extrasUnlocked=true）。
+        // 剩下只可能是 PhoneTabs 这条链：stored 串的内容、hiddenSections 的成员、
+        // slots 的值。三者任一不对都会让 More 少块或空。
+        let _ = oneSkinLog("MOREDIAG stored=\(storedTabs.isEmpty ? "<empty>" : storedTabs)"
+            + " hidden=\(store.hiddenSections.map(\.rawValue).joined(separator: ","))"
+            + " slots=\(slots) bar=\(tabs.bar.map(\.rawValue).joined(separator: ","))"
+            + " more=\(tabs.more.map(\.rawValue).joined(separator: ","))"
+            + " extras=\(store.extrasUnlocked ? 1 : 0)")
+        #endif
         ScrollView {
             VStack(spacing: 12) {
                 // Pairs; an odd last tile spans the row instead of leaving a hole.
@@ -316,7 +344,7 @@ private struct TabBarEditor: View {
     /// The iPad sidebar's sections in their order.
     init(sidebar order: [AppSection], save: @escaping (PhoneTabs) -> Void) {
         _rows = State(initialValue: Row.rows(PhoneTabs(order: order), sidebar: true))
-        slots = PhoneTabs.wideBarSlots
+        slots = PhoneTabs.barSlots
         sidebar = true
         standard = PhoneTabs(order: PhoneTabs.sidebarStandard.filter(order.contains))
         self.save = save
@@ -354,9 +382,10 @@ private struct TabBarEditor: View {
             } header: {
                 heading(L10n.text("Tab Bar"), symbol: "dock.rectangle")
             } footer: {
-                Text(L10n.text(sidebar ? "Drag to reorder. The tab bar and the sidebar show sections in this order."
-                               : slots > PhoneTabs.barSlots
-                               ? "Drag to reorder. Up to seven sections fit in the tab bar here, and four when the phone is closed; the rest stay in More."
+                // 不再有三档文案：宽屏不再多放，`slots > barSlots` 永远为假，
+                // 那一支的「Up to seven sections fit here」已经是假话。
+                Text(L10n.text(sidebar
+                               ? "Drag to reorder. The tab bar and the sidebar show sections in this order."
                                : "Drag to reorder. Up to four sections fit in the tab bar; the rest stay in More."))
             }
         }

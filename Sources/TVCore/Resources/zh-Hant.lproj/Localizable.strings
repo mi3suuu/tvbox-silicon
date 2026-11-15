@@ -2628,7 +2628,14 @@
 "Add %@" = "加入「%@」";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "固定在頂部工具列：控制項鎖上之後，它是唯一的解鎖入口。";
 "Fixed Keys" = "固定鍵";
-"These two cannot be moved or removed: More is the only way back for whatever did not fit, and Exit Full Screen is the only way out of full screen." = "這兩顆不能移動也不能刪除：「更多」是放不下的控制項唯一的去處，「退出全螢幕」是全螢幕裡唯一的出口。";
 "More (…) — top right" = "更多（…）—— 右上角";
 "Exit Full Screen — top left, full screen only" = "退出全螢幕 —— 左上角，僅全螢幕時出現";
 "Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there." = "播放、±10 秒和選集鍵在畫面中央；其餘控制項按這個順序排在進度列，進度條本身也在其中。原版面板的進度列是固定版式，那裡只有按鈕會跟著動。";
+"This history entry came from a subscription you removed. Add it again to continue." = "這筆觀看記錄來自一個已移除的訂閱，重新加入該訂閱後即可繼續觀看。";
+"Removed this source, along with %lld saved shows from it." = "已移除該來源，同時清掉 %lld 筆已儲存的影視記錄。";
+"Mute This One" = "靜音這一個";
+"Unmute This One" = "取消靜音這一個";
+"Volume for this one" = "這一個的音量";
+"Follow the Global Setting" = "跟隨全域設定";
+"These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "這三顆不能移動也不能刪除：「更多」是放不下的控制項唯一的去處，「退出全螢幕」是全螢幕裡唯一的出口，鎖定鍵是鎖上之後唯一的解鎖入口。";
+"Lock Controls — top right" = "鎖定控制項 —— 右上角";

@@ -2628,7 +2628,14 @@
 "Add %@" = "「%@」を追加";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "上部バーに固定されます。コントロールをロックすると、ここが唯一の解除入口になります。";
 "Fixed Keys" = "固定キー";
-"These two cannot be moved or removed: More is the only way back for whatever did not fit, and Exit Full Screen is the only way out of full screen." = "この 2 つは移動も削除もできません。「その他」は収まりきらなかった項目の唯一の避難先、「全画面を終了」は全画面から出る唯一の手段です。";
 "More (…) — top right" = "その他（…）—— 右上";
 "Exit Full Screen — top left, full screen only" = "全画面を終了 —— 左上、全画面時のみ";
 "Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there." = "再生・±10 秒・話数キーは画面中央に、それ以外はこの順で進行状況バーに並びます（進行状況バー自体も含みます）。オリジナルスキンの進行状況バーは固定レイアウトのため、そちらで動くのはボタンだけです。";
+"This history entry came from a subscription you removed. Add it again to continue." = "この視聴履歴は削除された購読に由来します。購読を追加し直すと続きから再生できます。";
+"Removed this source, along with %lld saved shows from it." = "この配信元を削除しました（保存済みの作品 %lld 件も削除）。";
+"Mute This One" = "この 1 件をミュート";
+"Unmute This One" = "この 1 件のミュートを解除";
+"Volume for this one" = "この 1 件の音量";
+"Follow the Global Setting" = "全体設定に従う";
+"These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "この 3 つは移動も削除もできません。「その他」は収まりきらなかった項目の唯一の避難先、「全画面を終了」は全画面から出る唯一の手段、ロックキーはロック後に解除できる唯一の入口です。";
+"Lock Controls — top right" = "コントロールをロック —— 右上";
