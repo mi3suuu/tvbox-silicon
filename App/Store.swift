@@ -1118,6 +1118,9 @@ import TVCore
     }
     /// Refetches enabled subscriptions whose cached copy is gone.
     func restoreSubscription() async {
+        // 内置包是**随 App 版本**走的：地址不变，所以「缓存里有一份」就再也不会去取 ——
+        // 不比对一次，用户升级之后看到的永远是上一版打包的源（新补的源、新的实测结论全都不出现）。
+        if refreshBundledDocuments() { rebuildSubscription() }
         let missing = environmentSubscriptions.filter { $0.enabled && documents[$0.address] == nil }
         guard !missing.isEmpty else { return }
         await beginImport()
@@ -1125,6 +1128,43 @@ import TVCore
         defer { importing = false; endImport() }
         await fetch(missing)
     }
+    /// 用包里的那一份替换缓存里过期的内置订阅。
+    ///
+    /// `builtin://` 的文档随 App 一起发出，`restoreSubscription` 只补「没有的」，于是**有过一份就
+    /// 永远不更新**：内置包在 1.14.5 里重新分过组、加过实测结论，而这个地址一直都在，
+    /// 老用户升级后看到的还是旧的那份（新的成人分家、书架、实测标记一个都不生效）。
+    /// 判据是包里的 `importedAt`（打包时间）比缓存的新 —— 同一版包里它不会变，所以这是幂等的。
+    @discardableResult
+    private func refreshBundledDocuments() -> Bool {
+        var changed = false
+        for index in subscriptions.indices where BundledSubscriptions.isBundled(subscriptions[index].address) {
+            let entry = subscriptions[index]
+            guard let bundled = BundledSubscriptions.document(for: entry.address),
+                  let cached = documents[entry.address],
+                  bundled.importedAt > cached.importedAt else { continue }
+            // 组名里的数量（「影视 · 可播(46)」）是打包时写死的，源少了却不改名字，
+            // 列表上就会出现「标题 46 / 实际 43」。只在**没被改名**时跟过去：
+            // 把末尾的 (数字) 去掉后原样相同，说明这是包给的名字，不是观众起的。
+            if let fresh = BundledSubscriptions.name(for: entry.address),
+               Self.withoutCount(entry.name) == Self.withoutCount(fresh) || entry.name.isEmpty {
+                subscriptions[index].name = fresh
+            }
+            documents[entry.address] = bundled
+            subscriptionErrors[entry.address] = nil
+            if persistsChanges, let data = try? JSONEncoder().encode(bundled) {
+                try? Self.save(data, to: Self.file(for: entry))
+            }
+            changed = true
+        }
+        return changed
+    }
+
+    /// 去掉名字末尾的「(46)」—— 比对「观众改过名没有」时只比主体部分。
+    private static func withoutCount(_ name: String) -> String {
+        name.replacingOccurrences(of: #"\(\d+\)$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
     /// On launch, makes sure the aggregated subscriptions are all present, importing any that are
     /// missing. Existing entries are left untouched (their saved copy wins), so overwriting either
     /// bundle never orphans the other bundle's sources.

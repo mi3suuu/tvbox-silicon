@@ -2644,3 +2644,15 @@
 "Stop Measuring" = "計測を中止";
 "Show the rest (%lld)" = "残り %lld 件を表示";
 "Fold the extra back" = "余分を折りたたむ";
+"Shelf Magnet" = "マグネット";
+"Shelf Danmaku" = "弾幕";
+"Shelf Kids" = "キッズ";
+"Shelf Short Drama" = "ショートドラマ";
+"Shelf Anime" = "アニメ";
+"Shelf Music" = "音楽・演劇";
+"Shelf Sports" = "スポーツ";
+"Shelf Live" = "ライブ";
+"Shelf Cloud" = "クラウド";
+"Shelf Blu-ray" = "ブルーレイ・4K";
+"Shelf Apps" = "アプリ";
+"Shelf Other" = "その他";

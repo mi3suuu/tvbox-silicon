@@ -33,6 +33,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import urllib.parse
 from pathlib import Path
 
 RELAY = "149.104.28.149:8100/"
@@ -135,17 +136,132 @@ def load_verdicts(path: Path | None) -> dict[str, bool]:
     return verdict
 
 
-def reaudit(document: dict) -> tuple[dict[str, dict], dict[str, int]]:
-    """把成人源从影视/4K/工具组里挑出来，按「能不能播」放进两个成人组。
+def mirror_name(site: dict) -> str:
+    """同站镜像的判据之一：名字。
 
-    第二轮打包只回答一个问题：**内容有没有混**。它不改分组之外的东西 ——
-    直播仍是一个组，影视的可播/待测仍按原来的 `_route`，4K 与工具仍是各自的书架。
-    成人那些进 `02`（`_route` 是直连）或 `07`（待测/失效），并打上 `_content: adult`，
-    让 App 侧将来要按内容过滤时不必再猜一遍。
+    采集站的镜像用的是同一个名字（偶尔带 `[直]` 前缀或 `1080P 365K` 这类后缀），
+    先把这些噪声去掉再比 —— 名字相同 + 接口路径相同，基本就是同一个站在两个域名上。
+    """
+    name = str(site.get("name") or "")
+    name = re.sub(r"^\s*\[(直|直连|内置|免扫|镜像)\]\s*", "", name)
+    name = re.sub(r"\s*\d{3,4}[Pp]\s*\d*[Kk]?\s*$", "", name)
+    return re.sub(r"\s+", "", name)
+
+
+def station_path(site: dict) -> str:
+    """判据之二：接口路径。`…/api.php/provide/vod` 与镜像的同一路径，是同一套接口。"""
+    api = str(site.get("api") or "")
+    if not api.startswith(("http://", "https://")):
+        return api
+    return urllib.parse.urlsplit(api).path.rstrip("/")
+
+
+def mirror_rank(site: dict) -> tuple:
+    """谁留下：先看验证结论，再看实测速度。"""
+    route = {"直连": 2, "待测": 1}.get(site.get("_route"), 0)
+    probe = site.get("_probe") if isinstance(site.get("_probe"), dict) else {}
+    kbps = probe.get("kbps") or 0
+    return (route, 1 if probe else 0, kbps)
+
+
+def merge_mirrors(buckets: dict[str, dict]) -> dict[str, int]:
+    """同名同接口的多域名镜像并成一张卡。
+
+    结果里只留验证最好的那条（直连 > 待测 > 失效，同档看实测速率）。镜像本来就是「同一个站
+    换个域名」，留着让列表变成 168 张而实际只有 140 个站，是纯噪声；真到主域名挂了的时候，
+    这一版的内置包会随下一个版本重新打包。
+    """
+    merged = {"merged": 0}
+    for bucket in buckets.values():
+        kept: list[dict] = []
+        index: dict[tuple[str, str], int] = {}
+        for site in bucket["sites"]:
+            key = (mirror_name(site), station_path(site))
+            if key[0] and key in index:
+                position = index[key]
+                if mirror_rank(site) > mirror_rank(kept[position]):
+                    kept[position] = site
+                merged["merged"] += 1
+                continue
+            index[key] = len(kept)
+            kept.append(site)
+        bucket["sites"] = kept
+    return merged
+
+
+def load_probe_rows(path: Path | None) -> dict[str, dict]:
+    """源 key → `--play-probe` 的一整行（不只是「能不能播」）。"""
+    if not path or not path.exists():
+        return {}
+    rows: dict[str, dict] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        rows[row["key"]] = row
+    return rows
+
+
+def hard_dead(row: dict, site: dict) -> bool:
+    """这次失败**只可能**是源自己没了，而不是插件/环境的问题。
+
+    探针在插件源上的失败大多来自环境：`plugin runtime is busy`（并发抢同一个运行时）、
+    `plugin download returned a web page`（jar 主机没了）、`no videos on the home page`
+    （网盘没配置）。拿这些去判死，会把一整柜 4K 源清空 —— 而它们换个网络、补上配置就能用。
+    所以只有「主机解析不到 / 证书坏了 / 页面 404」这类**主机级**证据才算死，
+    而且只对原生 CMS 源（type 1/4）生效：插件源的 api 是脚本地址，脚本挂了不代表站没了。
+    """
+    if site.get("type") not in (1, 4):
+        return False
+    error = str(row.get("error") or "")
+    for pattern in ("hostname could not be found", "certificate for this server is invalid",
+                    "TLS error", "HTTP 404", "HTTP 410", "bad URL"):
+        if pattern in error:
+            return True
+    return False
+
+
+PROBE_AT = dt.date.today().isoformat()
+
+
+def apply_probe(site: dict, row: dict) -> None:
+    """把一次实测写进源里：出过字节的记直连 + 速率，失败的只记结论不判死。
+
+    两处都写（顶层 + raw）：随包数据是「顶层 + raw 一份」的形态，Parser 读 raw，
+    脚本与人工排查读顶层，只写一处会让其中一侧看不到。
+    """
+    kbps = row.get("kbps") or 0
+    probe = {
+        "verdict": "direct" if kbps > 0 else "unreachable",
+        "via": "direct",
+        "media": row.get("media") or "none",
+        "stage": row.get("stage") or "play",
+        "kbps": kbps,
+        "at": PROBE_AT,
+    }
+    if kbps > 0:
+        site["_route"] = "直连"
+        if isinstance(site.get("raw"), dict):
+            site["raw"]["_route"] = "直连"
+    site["_probe"] = probe
+    if isinstance(site.get("raw"), dict):
+        site["raw"]["_probe"] = dict(probe)
+
+
+def reaudit(document: dict, probe_rows: dict[str, dict]) -> tuple[dict[str, dict], dict[str, int]]:
+    """第二轮打包：内容分家 + 实测回填 + 镜像合并。
+
+    它回答三件事，都不改「源属于哪个订阅」：
+    1. **内容**：成人源只进 02 / 07，其余组一个都不许有；失效桶按内容拆两份。
+    2. **实测**：`--verdicts` 里出过字节的标直连并排到组首（首屏那 12 张就是能用的）；
+       失败但可能只是环境的，原样留着，只有主机级证据（见 `hard_dead`）才挪进失效组。
+    3. **镜像**：同名同接口的多域名并成一张。
     """
     buckets: dict[str, dict] = {key: {"sites": [], "lives": []} for key in GROUPS}
     seen: set[str] = set()
-    moved = {"to_adult": 0, "to_adult_dead": 0, "kept_adult": 0}
+    moved = {"to_adult": 0, "to_adult_dead": 0, "kept_adult": 0,
+             "probed_playable": 0, "demoted": 0}
 
     for feed in document["feeds"]:
         key = feed["address"].rsplit("-", 1)[-1]
@@ -157,13 +273,28 @@ def reaudit(document: dict) -> tuple[dict[str, dict], dict[str, int]]:
             if site["key"] in seen:
                 continue
             seen.add(site["key"])
-            # 已经在成人组里的源不必再判：它们本来就是按内容分过来的。
+
+            row = probe_rows.get(site["key"])
+            if row:
+                apply_probe(site, row)
+                if (row.get("kbps") or 0) > 0:
+                    moved["probed_playable"] += 1
+                elif hard_dead(row, site) and site.get("_route") != "直连":
+                    site["_route"] = "失效"
+                    if isinstance(site.get("raw"), dict):
+                        site["raw"]["_route"] = "失效"
+                    moved["demoted"] += 1
+
             adult = key in ADULT_FEEDS or is_adult(site)
             if not adult:
-                buckets[key]["sites"].append(site)
+                # 实测判死的从「可播 / 待测」组挪进失效桶；4K 与工具保持各自的书架。
+                if site.get("_route") == "失效" and key in ("00", "01", "04", "05"):
+                    buckets["06"]["sites"].append(site)
+                else:
+                    buckets[key]["sites"].append(site)
                 continue
-            # 两处都写：随包数据里每个源是「顶层 + raw 一份」的形态（Parser 读 raw，
-            # 脚本与人工排查读顶层），只写一处会让其中一侧看不到这个标记。
+
+            # 两处都写：Parser 读 raw，脚本与人工排查读顶层，只写一处会让一侧看不到。
             site["_content"] = "adult"
             if isinstance(site.get("raw"), dict):
                 site["raw"]["_content"] = "adult"
@@ -176,6 +307,15 @@ def reaudit(document: dict) -> tuple[dict[str, dict], dict[str, int]]:
             else:
                 moved["to_adult_dead"] += 1
             buckets[destination]["sites"].append(site)
+
+    moved.update(merge_mirrors(buckets))
+    # 实测出过字节的排到组首：首屏 12 张预览里先出现的就是它们。
+    for key in ("01", "04", "05"):
+        sites = buckets[key]["sites"]
+        def rank(site: dict) -> int:
+            probe = site.get("_probe") if isinstance(site.get("_probe"), dict) else None
+            return 0 if probe and (probe.get("kbps") or 0) > 0 else 1
+        buckets[key]["sites"] = sorted(sites, key=rank)   # `sorted` 是稳定的
     return buckets, moved
 
 
@@ -249,12 +389,14 @@ def main() -> None:
     document = json.loads(pack.read_text())
 
     if args.reaudit:
-        buckets, moved = reaudit(document)
+        rows = load_probe_rows(Path(args.verdicts) if args.verdicts else None)
+        buckets, moved = reaudit(document, rows)
         note = (f"内容复核 {dt.date.today().isoformat()}：成人源只留在 02 / 07，"
                 "影视、4K、工具组里一个都没有；失效组按内容拆成影视 / 成人两个，都默认关闭。")
         out = write_pack(buckets, document, args, note)
         report(out, f"to_adult={moved['to_adult']} to_adult_dead={moved['to_adult_dead']} "
-                    f"kept_adult={moved['kept_adult']}")
+                    f"kept_adult={moved['kept_adult']} mirrors_merged={moved.get('merged', 0)} "
+                    f"probed_playable={moved['probed_playable']} demoted={moved['demoted']}")
         return
 
     feeds = {feed["address"].rsplit("-", 1)[-1]: feed for feed in document["feeds"]}

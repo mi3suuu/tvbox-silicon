@@ -90,6 +90,8 @@ struct SitesView: View {
     @State private var expandedGroups: Set<String> = []
     /// 每组先画多少张卡。手机上两列，12 张 = 六行，刚好一屏多一点。
     private var previewLimit: Int { 12 }
+    /// 组内二级书架里，哪几个被折起来了（键是 `组id|书架`）。
+    @State private var collapsedShelves: Set<String> = []
     /// 正在改名的分组（幂等：非 nil 就弹那个改名框）。
     @State private var renamingGroup: SourceGroup?
     /// 正在改名的订阅地址。
@@ -170,17 +172,7 @@ struct SitesView: View {
                             // 头仍然在，仍然可以点开。
                             Section {
                                 if !collapsed.contains(group.id) {
-                                    let preview = previewSites(group)
-                                    LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
-                                        ForEach(preview.sites) { site in
-                                            siteRow(site, group: group, config: config, sites: sites)
-                                        }
-                                    }
-                                    // Unfolds from under its header; folding only fades, as the groups below slide up.
-                                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -16)), removal: .opacity))
-                                    if preview.hidden > 0 || expandedGroups.contains(group.id) {
-                                        moreSourcesButton(group, hidden: preview.hidden)
-                                    }
+                                    groupBody(group, config: config, sites: sites)
                                 }
                             } header: {
                                 groupHeader(group)
@@ -490,24 +482,89 @@ struct SitesView: View {
         #endif
     }
 
-    /// 这一组现在该画哪些源。
+    /// 一个分组的内容：源少就直接铺，源多就先按内容形态分一层书架。
     ///
-    /// 一个组 168 个源一次全画出来，读者只会滚过去，不会看 —— 先给 `previewLimit` 张，
-    /// 剩下的收在一颗按钮后面。三种情况不预览：搜索中（要找的东西可能在后面）、
-    /// 选择中（整组勾选要靠满屏）、已经点过展开。
-    private func previewSites(_ group: SourceGroup) -> (sites: [Site], hidden: Int) {
-        let showAll = !query.isEmpty || selecting || expandedGroups.contains(group.id)
-        guard !showAll, group.sites.count > previewLimit else { return (group.sites, 0) }
-        return (Array(group.sites.prefix(previewLimit)), group.sites.count - previewLimit)
+    /// 168 个 4K 源铺成一面墙，读者既看不完也挑不出；分成「磁力 / 网盘 / 蓝光 / 弹幕…」
+    /// 五六个书架之后，每个书架二三十张，配上「先给 12 张」的预览，一屏就看完了。
+    /// 分层只发生在需要的组（≥24 个源、且真的能分出两类以上），小分组一点不变。
+    @ViewBuilder
+    private func groupBody(_ group: SourceGroup, config: Subscription, sites: [Site]) -> some View {
+        let shelves = SourceShelf.shelves(for: group.sites)
+        if shelves.isEmpty {
+            sourceGrid(group, members: group.sites, config: config, all: sites, scope: group.id)
+        } else {
+            VStack(alignment: .leading, spacing: Layout.cardSpacing) {
+                ForEach(shelves) { entry in
+                    let scope = group.id + "|" + entry.shelf.rawValue
+                    shelfHeader(scope: scope, shelf: entry.shelf, count: entry.sites.count)
+                    if !collapsedShelves.contains(scope) {
+                        sourceGrid(group, members: entry.sites, config: config, all: sites, scope: scope)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 二级书架的表头：小一号的标题 + 数量 + 折叠箭头。它比分组头轻，因为它只在分组里出现。
+    @ViewBuilder
+    private func shelfHeader(scope: String, shelf: SourceShelf, count: Int) -> some View {
+        let open = !collapsedShelves.contains(scope)
+        Button {
+            withAnimation(.snappy(duration: 0.25)) {
+                if open { collapsedShelves.insert(scope) } else { collapsedShelves.remove(scope) }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                Text(shelf.title).font(.subheadline.weight(.semibold))
+                Text("\(count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("sources.shelf." + scope)
+    }
+
+    /// 一格书架（或不分层的整组）里的卡：先给 `previewLimit` 张，其余收在按钮后面。
+    @ViewBuilder
+    private func sourceGrid(_ group: SourceGroup, members: [Site], config: Subscription,
+                            all sites: [Site], scope: String) -> some View {
+        let preview = previewSites(members, scope: scope)
+        LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
+            ForEach(preview.sites) { site in
+                siteRow(site, group: group, config: config, sites: sites)
+            }
+        }
+        // Unfolds from under its header; folding only fades, as the groups below slide up.
+        .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -16)), removal: .opacity))
+        if preview.hidden > 0 || expandedGroups.contains(scope) {
+            moreSourcesButton(scope: scope, hidden: preview.hidden)
+        }
+    }
+
+    /// 这一格现在该画哪些源。
+    ///
+    /// 一屏画不完的源只会在读者滚过去时被跳过 —— 先给 `previewLimit` 张，剩下的收在一颗按钮后面。
+    /// 三种情况不预览：搜索中（要找的东西可能在后面）、选择中（整组勾选要靠满屏）、
+    /// 已经点过展开。
+    private func previewSites(_ members: [Site], scope: String) -> (sites: [Site], hidden: Int) {
+        let showAll = !query.isEmpty || selecting || expandedGroups.contains(scope)
+        guard !showAll, members.count > previewLimit else { return (members, 0) }
+        return (Array(members.prefix(previewLimit)), members.count - previewLimit)
     }
 
     /// 「展开其余 156 个」/「收起」。展开是这一页的一次性操作，不写盘 ——
     /// 下次进来又回到一屏，否则一次展开会让之后每次进页面都铺一屏。
     @ViewBuilder
-    private func moreSourcesButton(_ group: SourceGroup, hidden: Int) -> some View {
+    private func moreSourcesButton(scope: String, hidden: Int) -> some View {
         Button {
             withAnimation(.snappy(duration: 0.28)) {
-                if hidden > 0 { expandedGroups.insert(group.id) } else { expandedGroups.remove(group.id) }
+                if hidden > 0 { expandedGroups.insert(scope) } else { expandedGroups.remove(scope) }
             }
         } label: {
             HStack(spacing: 6) {
@@ -523,7 +580,7 @@ struct SitesView: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity, alignment: .center)
-        .accessibilityIdentifier("sources.more." + group.id)
+        .accessibilityIdentifier("sources.more." + scope)
     }
 
     /// 长按分组头 → 「测速这一组」。
