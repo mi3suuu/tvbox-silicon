@@ -2670,3 +2670,4 @@
 "Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "一次測出 3 個以上能播的源之後，源列表會自動改按連通狀態分組內書架。";
 "Only Playable" = "只看能播";
 "Sort by Connection" = "按可播排序";
+"Nothing here is playable right now." = "現在沒有能播的來源。";

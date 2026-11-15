@@ -76,7 +76,8 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
         fileSizeBytes: Int? = nil,
         colourRange: String? = nil,
         measuredAt: Date = .distantPast,
-        declaredConflicted: Bool? = nil
+        declaredConflicted: Bool? = nil,
+        declared: Bool? = nil
     ) {
         self.reachability = reachability
         self.latencyMilliseconds = latencyMilliseconds
@@ -88,6 +89,7 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
         self.colourRange = colourRange
         self.measuredAt = measuredAt
         self.declaredConflicted = declaredConflicted
+        self.declared = declared
     }
 
     public static let unknown = SourceProbeResult()
@@ -119,6 +121,21 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
 
     public func isStale(now: Date = Date(), tolerance: TimeInterval = sourceProbeStaleness) -> Bool {
         now.timeIntervalSince(measuredAt) > tolerance
+    }
+
+    /// 这条读数还配不配当「它现在能用」的证据。
+    ///
+    /// 与 `isStale` 是两个问题，别混：
+    /// - `isStale`（600 秒）：**要不要再测一遍**。短，因为重测便宜。
+    /// - `isExpired`（7 天 / 包内 30 天）：**能不能拿它下结论**。长，因为结论要稳。
+    ///
+    /// 没有这一层，一个三周前测死的源会永远算「不通」：只看能播据此把它永久藏起来，
+    /// 分组头的红徽标也永远不消 —— 筛选就从「现在能不能用」退化成了「历史结论」。
+    public func isExpired(now: Date = Date()) -> Bool {
+        let window = declared == true
+            ? SourceConnectivity.declaredTrustWindow
+            : SourceConnectivity.measuredTrustWindow
+        return now.timeIntervalSince(measuredAt) > window
     }
 
     /// Higher sorts first. **0–100 分制**，每段都能单独解释。
@@ -248,6 +265,8 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
         // 没有速度读数：只能信声明（那是唯一的信息）。
         // 但**矛盾读数**的速度是被丢弃的，同样退回信声明。
         guard let speed = kilobytesPerSecond, speed > 0, confidence.trustsSpeed else { return declared }
+        // ⛔ 这套阶梯与 `SourceConnectivity.requiredSpeed(for:)` 是**同一套**（3000 / 750 / 375 / 150）：
+        // 一处问「这个画质撑得住多快」，另一处问「够不够这个画质」，答案必须一致。
         let supported: Int
         switch speed {
         case 3_000...: supported = 2160
@@ -337,6 +356,24 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
     /// `FullBackup` 的白名单也含这两个键，备份恢复同样读不出来。
     public var declaredConflicted: Bool? = nil
 
+    /// 这条读数是从**随包配置里读来的**，不是这台设备量的。
+    ///
+    /// ⛔ 为什么要单独一个标记，而不是比较 `measuredAt`：
+    ///
+    /// 1. **真测必须永远压过包标签**。此前导入层给每条包内读数打的是「此刻」的时间戳
+    ///    （`SourceProbeImport.reading` 的 `measuredAt: Date = Date()`），于是「昨天真测出来
+    ///    这源不通」会被「包里写着直连」按时间压掉 —— 方向正好反了。比时间更可靠的是来源：
+    ///    自测过的源，任何一次导入都不该再改动它。
+    /// 2. **包标签不算「刚测过」**。`Store.needsProbing` 跳过十分钟内的读数；包内读数若带
+    ///    此刻的时间戳，新装或刚刷新之后「测这一组 / 全部测速」会把所有源当新鲜的跳过，
+    ///    按钮等于没反应。
+    /// 3. 界面上也说得清：这一条是「打包时的结论」，不是「你刚才量的」。
+    ///
+    /// ⛔ **必须是 Optional**：`SourceProbeResult` 用合成的 `init(from:)`，非 Optional 属性
+    /// 即使有默认值也不参与解码，缺键直接抛 `keyNotFound` —— 老用户的整张读数表会被
+    /// `try?` 吞成空字典（`declaredConflicted` 的注释里记着这次事故的完整链条）。
+    public var declared: Bool? = nil
+
     /// Compact line for the picker's subtitle, e.g. "1080P · 320 ms · 2.4 MB/s".
     ///
     /// ⛔ 画质用**有效值**，不是 `resolutionLabel` 里那个声明值。
@@ -372,7 +409,14 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
 
 /// Caches probe readings per (source, video, line). Bounded, and least-recently
 /// measured rows are evicted first so a long-lived install stays small.
-@MainActor
+///
+/// `@Observable` 不是为了时髦：这个类此前是**普通类**，`revision` 只是「自增的数字」，
+/// 视图里的 `.onChange(of: SourceProbeStore.shared.revision)` 于是只在别的可观察状态
+/// （扫描进度）恰好同时变化时才顺带看到新值。选集页单独测出来的读数不经过扫描，
+/// 源列表的分组头徽标与书架就永远不更新 —— 注释里写要覆盖的正是这种情形。
+/// 加上 `@Observable` 之后，视图 body 里读到的 `health` / `revision` 会被登记成依赖，
+/// 读数一落盘就重画，与 `revision` 有没有被单独观察到无关。
+@MainActor @Observable
 public final class SourceProbeStore {
 
     public static let shared = SourceProbeStore()
@@ -438,25 +482,28 @@ public final class SourceProbeStore {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        // 全部先算在局部变量里，最后一次性赋值。
+        //
+        // ⛔ `@Observable` 之后不能一边赋值一边读：宏把每个存储属性改写成 `_x` + computed，
+        // 在「所有存储属性都初始化完」之前读任何一个（哪怕只是 `health[key] = value`）
+        // 都是 `self used before all stored properties are initialized`。旧写法能编过，
+        // 是因为普通类没有这层改写。
+        var probes: [String: SourceProbeResult] = [:]
         if let blob = defaults.data(forKey: Self.probeKey),
            let decoded = try? JSONDecoder().decode([String: SourceProbeResult].self, from: blob) {
-            self.probes = decoded
-        } else {
-            self.probes = [:]
+            probes = decoded
         }
-        self.order = defaults.stringArray(forKey: Self.orderKey) ?? []
+        var order = defaults.stringArray(forKey: Self.orderKey) ?? []
         for key in probes.keys where !order.contains(key) { order.append(key) }
+        var health: [String: SourceProbeResult] = [:]
         if let blob = defaults.data(forKey: Self.healthKey),
            let decoded = try? JSONDecoder().decode([String: SourceProbeResult].self, from: blob) {
-            self.health = decoded
-        } else {
-            self.health = [:]
+            health = decoded
         }
+        var baseLatency: [String: SourceProbeResult] = [:]
         if let blob = defaults.data(forKey: Self.baseKey),
            let decoded = try? JSONDecoder().decode([String: SourceProbeResult].self, from: blob) {
-            self.baseLatency = decoded
-        } else {
-            self.baseLatency = [:]
+            baseLatency = decoded
         }
         // Readings written before this table existed still answer `latest`: fold the newest detail
         // row of each source in once, so an upgrade does not look like a library nobody measured.
@@ -466,18 +513,22 @@ public final class SourceProbeStore {
             guard let seen = health[sourceKey] else { health[sourceKey] = value; continue }
             if value.measuredAt > seen.measuredAt { health[sourceKey] = value }
         }
+        var rotation = HostRotation()
         if let blob = defaults.data(forKey: Self.rotationKey),
            let decoded = try? JSONDecoder().decode(HostRotation.self, from: blob) {
-            self.rotation = decoded
-        } else {
-            self.rotation = HostRotation()
+            rotation = decoded
         }
+        var learning = HostLearning()
         if let blob = defaults.data(forKey: Self.learningKey),
            let decoded = try? JSONDecoder().decode(HostLearning.self, from: blob) {
-            self.learning = decoded
-        } else {
-            self.learning = HostLearning()
+            learning = decoded
         }
+        self.probes = probes
+        self.order = order
+        self.health = health
+        self.baseLatency = baseLatency
+        self.rotation = rotation
+        self.learning = learning
     }
 
     // MARK: - Base rotation（对应 One 的 avoidUntil / lastHeal / inflight）
@@ -819,9 +870,18 @@ public final class SourceProbeStore {
         guard !readings.isEmpty else { return 0 }
         var written = 0
         for (sourceKey, reading) in readings {
-            // 只在不覆盖更新的自测读数时写入。
-            // 外部读数带的是「导出那一刻」的时间戳，自己测的更新，应当压过它。
-            if let seen = health[sourceKey], seen.measuredAt > reading.measuredAt { continue }
+            if let seen = health[sourceKey] {
+                // ① 自测过的源，包内标签一律不再改动它。
+                //
+                //    旧写法只比时间戳，而导入层给包内读数打的是「此刻」——
+                //    于是每次刷新订阅都会把用户昨天真测的结论按时间压掉。
+                //    来源比时间可靠：不是这台设备量的，就没有资格覆盖这台设备量到的。
+                if seen.declared != true { continue }
+                // ② 同一条标签，内容没变就别重写（否则每次启动都要把整张表编码一遍）。
+                if seen == reading { continue }
+                // ③ 两份都来自包：新的那份更新，用新的。
+                if seen.measuredAt > reading.measuredAt { continue }
+            }
             health[sourceKey] = reading
             written += 1
         }

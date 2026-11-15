@@ -151,3 +151,38 @@ import Testing
         }
     }
 }
+
+/// 包内标签不许覆盖这台设备量到的结论。
+///
+/// 旧实现只比时间戳，而导入层给包内读数打的是「此刻」—— 于是每次刷新订阅都会把用户
+/// 昨天真测的 `unreachable` 按时间压回「直连」。来源比时间可靠：不是这台设备量的，
+/// 就没有资格覆盖这台设备量到的。
+@MainActor
+@Test func anImportedLabelNeverOverwritesAReadingTakenHere() {
+    let probes = SourceProbeStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+    let measured = SourceProbeResult(reachability: .unreachable, measuredAt: Date())
+    probes.record(measured, sourceKey: "alpha", videoID: "v1", lineFlag: "线路1")
+
+    // 包说它好得很 —— 而且日期比自测新（模拟「此刻打戳」那种写法）。
+    let label = SourceProbeResult(reachability: .reachable, kilobytesPerSecond: 900,
+                                 measuredAt: Date().addingTimeInterval(60), declared: true)
+    #expect(probes.importReadings(["alpha": label]) == 0)
+    #expect(probes.latest(sourceKey: "alpha")?.reachability == .unreachable)
+}
+
+/// 反过来：只有包标签时，更新的那份包才替换旧的；同一份重复导入不算「写入」。
+@MainActor
+@Test func reimportingTheSameLabelIsANoOp() {
+    let probes = SourceProbeStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+    let day = Date(timeIntervalSince1970: 1_700_000_000)
+    let older = SourceProbeResult(reachability: .reachable, kilobytesPerSecond: 400,
+                                 measuredAt: day, declared: true)
+    #expect(probes.importReadings(["beta": older]) == 1)
+    // 同一份再导一次：没有变化，就不该重写整张表（否则每次启动都要编码一遍）。
+    #expect(probes.importReadings(["beta": older]) == 0)
+
+    let newer = SourceProbeResult(reachability: .slow, kilobytesPerSecond: 120,
+                                 measuredAt: day.addingTimeInterval(86_400), declared: true)
+    #expect(probes.importReadings(["beta": newer]) == 1)
+    #expect(probes.latest(sourceKey: "beta")?.kilobytesPerSecond == 120)
+}

@@ -1134,9 +1134,15 @@ import TVCore
     /// 永远不更新**：内置包在 1.14.5 里重新分过组、加过实测结论，而这个地址一直都在，
     /// 老用户升级后看到的还是旧的那份（新的成人分家、书架、实测标记一个都不生效）。
     /// 判据是包里的 `importedAt`（打包时间）比缓存的新 —— 同一版包里它不会变，所以这是幂等的。
+    ///
+    /// ⛔ `builtin://kanju` 的这一份是**代码生成**的，它的 `importedAt` 必须取 App 的构建时间
+    /// （`BundledSubscriptions.buildDate`），不能取 `Date()`：取「现在」的话，每次冷启动它都
+    /// 比缓存「新」，于是每次启动都白重写一遍缓存文件、白重建一次合并列表 —— 注释里
+    /// 「这是幂等的」那半句就不成立了，而真正需要刷新的信号（换了新包）也被噪声盖住。
     @discardableResult
     private func refreshBundledDocuments() -> Bool {
         var changed = false
+        var renamed = false
         for index in subscriptions.indices where BundledSubscriptions.isBundled(subscriptions[index].address) {
             let entry = subscriptions[index]
             guard let bundled = BundledSubscriptions.document(for: entry.address),
@@ -1145,9 +1151,15 @@ import TVCore
             // 组名里的数量（「影视 · 可播(46)」）是打包时写死的，源少了却不改名字，
             // 列表上就会出现「标题 46 / 实际 43」。只在**没被改名**时跟过去：
             // 把末尾的 (数字) 去掉后原样相同，说明这是包给的名字，不是观众起的。
+            //
+            // ⛔ 改了名就必须落盘（`renamed`）。只改内存的话，下一次启动会从磁盘读回旧名，
+            // 而那时 `documents` 已经和包相等、不会再进这个函数 —— 旧数字就永久留下了。
             if let fresh = BundledSubscriptions.name(for: entry.address),
                Self.withoutCount(entry.name) == Self.withoutCount(fresh) || entry.name.isEmpty {
-                subscriptions[index].name = fresh
+                if subscriptions[index].name != fresh {
+                    subscriptions[index].name = fresh
+                    renamed = true
+                }
             }
             documents[entry.address] = bundled
             subscriptionErrors[entry.address] = nil
@@ -1156,6 +1168,7 @@ import TVCore
             }
             changed = true
         }
+        if renamed { saveSubscriptionList() }
         return changed
     }
 
@@ -1245,6 +1258,12 @@ import TVCore
     /// 地址、但这一版包里没有」来删。不写进 `dismissedAggregateAddresses`：那不是观众的选择，
     /// 将来包里如果又出现同一个地址，它该照常装回来。
     private func dropRetiredBundledFeeds() {
+        // ⛔ 包解析失败时 `addresses` 会是空的（`feeds` 解码出错就返回 `[:]`）。
+        // 那时「这一版包里没有这个地址」的判据对**所有**内置地址都成立 —— 于是运行时一次
+        // 打包错误会静默删掉观众订阅列表里的全部内置组（连带缓存文件），而
+        // `seedAggregatedSubscriptions` 也补不回来（它按同一份空名单算 pending）。
+        // 拿不到包就什么都别删：留着旧条目最多是一次「刷新失败」，删掉是不可逆的。
+        guard !BundledSubscriptions.feedsIsEmpty else { return }
         let live = Set(BundledSubscriptions.addresses)
         let retired = subscriptions.filter { BundledSubscriptions.isBundled($0.address) && !live.contains($0.address) }
         guard !retired.isEmpty else { return }
@@ -1670,12 +1689,16 @@ import TVCore
     /// 判定（两个速度字段是否矛盾、`_route` 怎么说）全在 `SourceProbeImport`，
     /// 这里只负责遍历与汇总 —— 判定逻辑留在 TVCore 才有测试钉着。
     ///
-    /// 不覆盖更新的自测读数由 `importReadings` 自己保证，所以反复刷新不会把
-    /// 用户刚测的实时数据冲回导出那一刻的旧值。
+    /// 不覆盖更新的自测读数由 `importReadings` 自己保证（它看的是来源，不只是时间），
+    /// 所以反复刷新不会把用户刚测的实时数据冲回导出那一刻的旧值。
+    ///
+    /// ⛔ 时间戳只能来自数据：`value.importedAt`（这份包什么时候打的），源自己写着日期时
+    /// 优先用源的（`_probe.at`）。**绝不能传 `Date()`** —— 那会让包内标签在时间上压过
+    /// 用户昨天真测的结论，也会让「刚装完测一遍」在十分钟内把全部源当新鲜的跳过。
     private func importBundledReadings(_ value: Subscription) {
         var found: [String: SourceProbeResult] = [:]
         for site in value.sites {
-            guard let reading = SourceProbeImport.reading(from: site.raw) else { continue }
+            guard let reading = SourceProbeImport.reading(from: site.raw, measuredAt: value.importedAt) else { continue }
             found[site.sourceKey] = reading
         }
         guard !found.isEmpty else { return }
@@ -2059,6 +2082,12 @@ import TVCore
     /// 这一轮测的是哪一批（分组名 / 订阅名）。源列表的进度胶囊与分组头靠它对上号 ——
     /// 否则读者只看到「12/46」，不知道这 46 个是谁。
     private(set) var probeScopeLabel: String?
+    /// 这一轮测的是**哪一个**分组（`SourceGroup.id`）。
+    ///
+    /// ⛔ 光有名字不够：名字是给人看的，不保证唯一 —— 两个订阅都叫「影视 · 可播」时，
+    /// 长按 B 组却让 A 组的头上出现进度（`probeScopeLabel == group.title` 两边都成立），
+    /// 而 B 组的头什么都不显示。id 才是身份（订阅组是地址、自建组是 `group:<id>`）。
+    private(set) var probeScopeID: String?
     @ObservationIgnored private var probeTask: Task<Void, Never>?
     /// Identifies the run in flight, so a stopped run finishing late cannot clear the next one's
     /// progress or its handle.
@@ -2097,6 +2126,8 @@ import TVCore
     /// One queued sweep: what to measure, and what to call it on screen.
     private struct ProbeRequest {
         var label: String?
+        /// 这一批属于哪个分组（`SourceGroup.id`），只用来让那一组的头上显示进度。
+        var scopeID: String?
         var targets: [ProbeTarget]
         var schedule: ProbeSchedule
     }
@@ -2146,6 +2177,9 @@ import TVCore
     private func needsProbing(_ sourceKey: String, maxAge: TimeInterval) -> Bool {
         guard maxAge > 0 else { return true }
         guard let reading = SourceProbeStore.shared.latest(sourceKey: sourceKey) else { return true }
+        // 包内标签不算「刚测过」。它不是这台设备量的，而且打包之后一直不变 ——
+        // 认它当新鲜的，就等于「刚装完 / 刚刷新」的十分钟里所有测速按钮都不干活。
+        if reading.declared == true { return true }
         return reading.measuredAt.timeIntervalSinceNow < -maxAge
     }
 
@@ -2158,9 +2192,14 @@ import TVCore
     /// The same, incremental: a source measured within maxAge seconds is left alone, and what was
     /// skipped is reported so the page can say so. 0 forces a fresh reading for every source.
     ///
+    /// ⛔ 全都「刚测过」时**强制重测**，不留空跑。旧实现在那时 `fresh` 为空 → `runProbe` 直接
+    /// return → 没有进度、没有提示、没有结果：长按没有反应、批量按钮说「正在测 N 个」然后
+    /// 什么都不发生。跳过是省流量的礼貌，不是拒绝工作的理由。
+    /// （全量测速走 `probeTargets` + `runProbe`，不经过这里：那一个的跳过数由测速页明说。）
+    ///
     /// - Parameter label: 这一批叫什么（分组名 / 订阅名），源列表用它给进度条标一个名字。
     func startProbing(_ sites: [Site], skippingFresh maxAge: TimeInterval,
-                      fast: Bool = true, label: String? = nil) {
+                      fast: Bool = true, label: String? = nil, scopeID: String? = nil) {
         guard let config = subscription else { return }
         var seen = Set<String>()
         let chosen = sites.filter { seen.insert($0.id).inserted }
@@ -2169,14 +2208,20 @@ import TVCore
         // who tapped "measure this subscription" is watching a progress bar, and the standard
         // schedule is four times more polite about concurrency than that moment calls for.
         let schedule: ProbeSchedule = fast ? .bulk : .standard
+        guard !targets.isEmpty else { return }
         guard maxAge > 0 else {
             probeSkipped = nil
-            runProbe(targets, schedule: schedule, label: label)
+            runProbe(targets, schedule: schedule, label: label, scopeID: scopeID)
             return
         }
-        let fresh = targets.filter { needsProbing($0.site.sourceKey, maxAge: maxAge) }
+        var fresh = targets.filter { needsProbing($0.site.sourceKey, maxAge: maxAge) }
+        if fresh.isEmpty {
+            // 一个都不剩：这一批整组都在窗口内。按旧语义这里什么都不做，读者看到的却是
+            // 「按了没反应」—— 而「再测一遍」正是他按下时所求。
+            fresh = targets
+        }
         probeSkipped = targets.count - fresh.count
-        runProbe(fresh, schedule: schedule, label: label)
+        runProbe(fresh, schedule: schedule, label: label, scopeID: scopeID)
     }
 
     /// 长按分组 → 「测速这一组」。只测这一组，跳过刚测过的，后台跑，进度写在该组的分组头上。
@@ -2185,13 +2230,14 @@ import TVCore
     /// 不用为了测 20 个源先进一次测速页、再挑一次范围。
     func measure(group: SourceGroup) {
         guard !group.sites.isEmpty else { return }
-        startProbing(group.sites, skippingFresh: probeMaxAge, label: group.title)
+        startProbing(group.sites, skippingFresh: probeMaxAge,
+                     label: group.title, scopeID: group.id)
     }
 
     private func runProbe(_ targets: [ProbeTarget], schedule: ProbeSchedule = .standard,
-                          label: String? = nil) {
+                          label: String? = nil, scopeID: String? = nil) {
         guard !targets.isEmpty else { return }
-        let request = ProbeRequest(label: label, targets: targets, schedule: schedule)
+        let request = ProbeRequest(label: label, scopeID: scopeID, targets: targets, schedule: schedule)
         // 已经在测：排到队里，等这一轮收尾自动接上。静默丢弃会让「长按测另一组」看起来没反应。
         guard probeTask == nil else {
             probeQueue.append(request)
@@ -2204,6 +2250,7 @@ import TVCore
         let targets = request.targets
         probeRun = ProbeRun(done: 0, total: targets.count)
         probeScopeLabel = request.label
+        probeScopeID = request.scopeID
         // 收尾整理要知道「这一轮测了哪些源」——只整理测过的，没测的不该被顺手移动。
         probeSwept = targets.map(\.site)
         let token = UUID()
@@ -2250,6 +2297,7 @@ import TVCore
     private func finishProbe() {
         endProbeBackgroundTask()
         probeScopeLabel = nil
+        probeScopeID = nil
         guard !probeQueue.isEmpty else { return }
         let next = probeQueue.removeFirst()
         startProbe(next)
@@ -2315,6 +2363,7 @@ import TVCore
         probeTask = nil
         probeRun = nil
         probeScopeLabel = nil
+        probeScopeID = nil
         // 停止 = 停止：排队等着的那几组也一起取消，否则「停止」之后它自己又跑起来。
         probeQueue.removeAll()
         endProbeBackgroundTask()

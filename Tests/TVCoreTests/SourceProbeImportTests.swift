@@ -122,3 +122,54 @@ private func raw(_ fields: [String: JSONValue]) -> [String: JSONValue] { fields 
                                      resolutionLabel: "1080P", measuredAt: Date())
     #expect(imported.sortScore < measured.sortScore)
 }
+
+// MARK: - 来源与时间
+
+/// 包内读数一律带 `declared`：它决定「真测能不能被覆盖」与「算不算刚测过」。
+@Test func importedReadingsAreMarkedAsDeclared() {
+    let r = SourceProbeImport.reading(from: raw(["_route": .string("直连"), "_speedKBps": .number(480)]))
+    #expect(r?.declared == true)
+    // 自己测的读数没有这个标记 —— 它是「这台设备量的」。
+    #expect(SourceProbeResult(reachability: .reachable).declared == nil)
+}
+
+/// 时间戳必须来自数据。
+///
+/// 旧实现默认 `measuredAt: Date()`，于是每次刷新订阅都给每个源盖一个「此刻」：
+/// 用户昨天真测的 `unreachable` 被包里的粗标签按时间压掉，而「刚装完测一遍」在十分钟内
+/// 又会因为读数「太新」而全部跳过。两头都反了。
+@Test func theDateComesFromTheDataNotFromNow() {
+    // 源自己写着哪天量的（打包脚本的 `_probe.at`）。
+    let probed = SourceProbeImport.reading(from: raw([
+        "_route": .string("直连"), "_speedKBps": .number(480),
+        "_probe": .object(["verdict": .string("direct"), "kbps": .number(480), "at": .string("2026-11-11")]),
+    ]))
+    let expected = try! #require(SourceProbeImport.parseDay("2026-11-11"))
+    #expect(probed?.measuredAt == expected)
+
+    // 只有 `_note` 里带日期也认。
+    let noted = SourceProbeImport.reading(from: raw([
+        "_route": .string("直连"), "_note": .string("2026-11-11 实测可播 · 1280x720"),
+    ]))
+    #expect(noted?.measuredAt == expected)
+
+    // 两样都没有 → 用调用方给的订阅导入时间。
+    let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+    let fallback = SourceProbeImport.reading(from: raw(["_route": .string("直连")]), measuredAt: stamp)
+    #expect(fallback?.measuredAt == stamp)
+
+    // 连调用方都没给 → 「很久以前」，绝不是「现在」。
+    let bare = SourceProbeImport.reading(from: raw(["_route": .string("直连")]))
+    #expect(bare?.measuredAt == .distantPast)
+}
+
+/// `parseDay` 只认真正的日期前缀，别把备注文本硬读成日期。
+@Test func dayParsingIsStrict() {
+    #expect(SourceProbeImport.parseDay("2026-11-11") != nil)
+    #expect(SourceProbeImport.parseDay("2026-11-11 实测") != nil)
+    #expect(SourceProbeImport.parseDay("源扩搜（旧公共中转站）") == nil)
+    #expect(SourceProbeImport.parseDay("2026-13-40") == nil)
+    #expect(SourceProbeImport.parseDay("") == nil)
+    // 同一天里带不带时间都是同一个瞬间：否则「谁更新」会因为时区差一天而翻面。
+    #expect(SourceProbeImport.parseDay("2026-11-11") == SourceProbeImport.parseDay("2026-11-11 23:59"))
+}

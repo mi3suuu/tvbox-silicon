@@ -2670,3 +2670,4 @@
 "Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "1 回の計測で再生できる源が 3 件以上になると、ソース一覧は自動で接続状態順の棚に切り替わります。";
 "Only Playable" = "再生可のみ";
 "Sort by Connection" = "再生可否で並べ替え";
+"Nothing here is playable right now." = "現在再生できるソースはありません。";

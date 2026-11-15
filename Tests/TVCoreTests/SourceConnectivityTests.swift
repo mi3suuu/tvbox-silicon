@@ -13,9 +13,11 @@ import Testing
     }
 
     private func reading(_ reachability: SourceProbeResult.Reachability,
-                         kbps: Int? = nil) -> SourceProbeResult {
+                         kbps: Int? = nil, height: Int? = nil,
+                         at: Date = Date(timeIntervalSince1970: 1_700_000_000),
+                         declared: Bool? = nil) -> SourceProbeResult {
         SourceProbeResult(reachability: reachability, kilobytesPerSecond: kbps,
-                          measuredAt: Date(timeIntervalSince1970: 1_700_000_000))
+                          resolutionHeight: height, measuredAt: at, declared: declared)
     }
 
     // MARK: 读数 → 档位
@@ -24,10 +26,28 @@ import Testing
         #expect(SourceConnectivity.tier(of: reading(.reachable, kbps: 1200)) == .playable)
     }
 
-    /// 300 KB/s 是 720P 的门槛：它自己就是「能播」。
+    /// 300 KB/s 是**没有声明画质**时的门槛：它自己就是「能播」。
     @Test func theThresholdItselfIsPlayable() {
         #expect(SourceConnectivity.tier(of: reading(.reachable, kbps: 300)) == .playable)
         #expect(SourceConnectivity.tier(of: reading(.reachable, kbps: 299)) == .slow)
+    }
+
+    /// 门槛跟着画质走，而不是一刀切 300。
+    ///
+    /// 反例来自随包数据：`👭播剧影视👭` 实测 495 KB/s、自报 1080P —— 495 KB/s ≈ 4 Mbps，
+    /// 刚好是一部 1080P 剧的码率，没有余量，打开必然转圈。按 300 的门槛它算「能播」，
+    /// 按 1080P 的 750 它算「偏慢」。后者才是这台设备上的实际观感。
+    @Test func theThresholdScalesWithDeclaredQuality() {
+        #expect(SourceConnectivity.requiredSpeed(for: nil) == 300)
+        #expect(SourceConnectivity.requiredSpeed(for: 480) == 150)
+        #expect(SourceConnectivity.requiredSpeed(for: 720) == 375)
+        #expect(SourceConnectivity.requiredSpeed(for: 1080) == 750)
+        #expect(SourceConnectivity.requiredSpeed(for: 2160) == 3_000)
+        // 同一份速度、不同画质 → 不同结论。
+        #expect(SourceConnectivity.tier(of: reading(.reachable, kbps: 495, height: 1080)) == .slow)
+        #expect(SourceConnectivity.tier(of: reading(.reachable, kbps: 495, height: 720)) == .playable)
+        // 4K 组不再被 720P 的底线放过。
+        #expect(SourceConnectivity.tier(of: reading(.reachable, kbps: 800, height: 2160)) == .slow)
     }
 
     @Test func aSilentReadingIsDead() {
@@ -35,10 +55,60 @@ import Testing
     }
 
     /// 连上了但只拿到握手、没有吞吐：不是「不通」，是「会转圈」。
-    @Test func reachableWithoutThroughputStaysPlayable() {
-        #expect(SourceConnectivity.tier(of: reading(.reachable)) == .playable)
+    @Test func reachableWithoutThroughputIsSlowNotPlayable() {
+        // 曾经判成 `.playable`（「能连上就能看」）。实测反例：只拿到握手、一个字节正文都
+        // 没读到的源，播放器打开是黑屏。`SourceTier.slow` 的定义本来就写着这种情形。
+        #expect(SourceConnectivity.tier(of: reading(.reachable)) == .slow)
         // 而「不知道」且没有数字，就是没有结论。
         #expect(SourceConnectivity.tier(of: reading(.unknown)) == .untested)
+    }
+
+    // MARK: 读数过期
+
+    /// 三周前测死的源不能永远算「不通」—— 只看能播据此会把它永久藏起来。
+    @Test func anOldReadingStopsBeingEvidence() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let fresh = reading(.unreachable, at: now.addingTimeInterval(-60 * 60))
+        let old = reading(.unreachable, at: now.addingTimeInterval(-21 * 24 * 60 * 60))
+        #expect(SourceConnectivity.tier(of: fresh) == .dead)
+        #expect(fresh.isExpired(now: now) == false)
+        #expect(old.isExpired(now: now))
+        // 过期之后不再当证据，回落到源定义上的结论（这里没有，所以是「未测」）。
+        #expect(SourceConnectivity.tier(of: site("a"), reading: old, now: now) == .untested)
+    }
+
+    /// 看不出日期的包内结论**不得**判过期。
+    ///
+    /// 旧包里大量源只有 `_route: "直连"` / `_probe.verdict`，没有 `at` / `_note` 日期。
+    /// 如果「拿不到日期」被当成「很旧」，老用户一升级就会看到整页「未测」（徽标全灭、
+    /// 「只看能播」清空）—— 那不是诚实，是把一个数据缺口变成一次显然的错误结论。
+    @Test func anUndatedDeclaredVerdictNeverExpires() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        // 只有 verdict、没有任何日期字段。
+        let undated = site("u", raw: ["_probe": .object(["verdict": .string("direct")])])
+        #expect(SourceConnectivity.declaredTier(of: undated, now: now) == .playable)
+
+        // 对照：同样内容 + 一个很旧的日期 ⇒ 过期后回落到「未测」。
+        let dated = site("d", raw: ["_probe": .object(["verdict": .string("direct"),
+                                                      "at": .string("2020-01-01")])])
+        #expect(SourceConnectivity.declaredTier(of: dated, now: now) == .untested)
+    }
+
+    /// 包内读数比自测宽：它是打包那天的实测行，且随每次发版刷新。
+    @Test func declaredReadingsLiveLongerThanMeasuredOnes() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let tenDaysAgo = now.addingTimeInterval(-10 * 24 * 60 * 60)
+        #expect(reading(.reachable, kbps: 900, at: tenDaysAgo).isExpired(now: now))
+        #expect(reading(.reachable, kbps: 900, at: tenDaysAgo, declared: true).isExpired(now: now) == false)
+    }
+
+    /// 包标签没有速度时，结论仍由 `declaredTier` 给 —— 不能拿「直连」这个路由标签当吞吐证据。
+    @Test func aDeclaredLabelWithoutSpeedDefersToTheRouteVerdict() {
+        let direct = site("direct", raw: ["_route": .string("直连")])
+        let label = reading(.reachable, at: Date(), declared: true)
+        #expect(SourceConnectivity.tier(of: direct, reading: label) == .playable)
+        let dead = site("dead", raw: ["_route": .string("失效")])
+        #expect(SourceConnectivity.tier(of: dead, reading: label) == .dead)
     }
 
     // MARK: 包内结论 → 档位
@@ -58,9 +128,12 @@ import Testing
     }
 
     /// App 里刚测的读数优先于包里那条：包说它直连，刚才这台设备连不上，就是不通。
+    ///
+    /// 「刚」是前提：过期的读数不再当证据（见 `anOldReadingStopsBeingEvidence`），
+    /// 那时包内结论重新说了算。
     @Test func aFreshReadingBeatsTheShippedVerdict() {
         let shipped = site("a", raw: ["_route": .string("直连")])
-        #expect(SourceConnectivity.tier(of: shipped, reading: reading(.unreachable)) == .dead)
+        #expect(SourceConnectivity.tier(of: shipped, reading: reading(.unreachable, at: Date())) == .dead)
     }
 
     // MARK: 分布与书架

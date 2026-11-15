@@ -319,11 +319,28 @@ def reaudit(document: dict, probe_rows: dict[str, dict]) -> tuple[dict[str, dict
     return buckets, moved
 
 
+def has_unresolvable_jar(site: dict) -> bool:
+    """相对 jar（`./libs/jar/x.jar`）在 `builtin://` 下**永远**解析不出来。
+
+    内置订阅的 origin 是 `builtin://yingxia-route-0x`，不是一个 HTTP 主机：相对路径只能
+    相对出 `builtin://…/libs/jar/x.jar`，而 `WebAddress.resolve` 只接受 http/https，
+    取 jar 的那一步直接抛错。这类源的 api 又通常是个 JVM 类名（`csp_XBPQ`），
+    没有 jar 就不可能跑 —— 留在「待测」里等于让读者去点一个注定失败的卡。
+    判失效而不是删掉：源还在数据里，只是不再假装它可能可用。
+    """
+    jar = site.get("jar")
+    return isinstance(jar, str) and (jar.startswith("./") or jar.startswith("../"))
+
+
 def write_pack(buckets: dict[str, dict], document: dict, args, note: str) -> dict:
     """把分好的桶写成随包 `route.json`（可选再写一份能喂回 `--play-probe` 的导出包）。"""
     now = dt.datetime.now().timestamp()
     out = {"format": document.get("format", "yingxia-builtin"),
            "version": document.get("version", 1), "feeds": []}
+    # 订阅级设置要跟着走：`spider` / `parses` / `flags` / `ijk` 是**整份订阅**共享的，
+    # 它们不在源定义里，丢掉就是静默丢数据 —— 依赖共享 spider 的源会在包里变成「无插件」。
+    # 这一版包里这几个字段恰好都是空的（所以今天没有实际损失），但写法不能靠这个巧合。
+    shared = document.get("raw") if isinstance(document.get("raw"), dict) else {}
     for key in ORDER:
         bucket = buckets[key]
         meta = GROUPS[key]
@@ -333,7 +350,8 @@ def write_pack(buckets: dict[str, dict], document: dict, args, note: str) -> dic
         address = f"builtin://yingxia-route-{key}"
         # `raw` keeps only the subscription-level settings. The source list lives once, at the top
         # level: copying it in here too cost 350 KB in the shipped pack and nothing reads it.
-        raw = {"warning": [], "spider": [], "parses": [], "flags": [], "ijk": [], "_note": note}
+        raw = {field: shared.get(field, []) for field in ("warning", "spider", "parses", "flags", "ijk")}
+        raw["_note"] = note
         out["feeds"].append({
             "address": address,
             "name": f"{meta['name']}({count})",
@@ -451,6 +469,16 @@ def main() -> None:
                 destination, route = group, (site.get("_route") or "待测")
 
             site["_route"] = route
+            # 相对 jar 的源无论分到哪一组都跑不起来：就地判失效，别挂着「待测」。
+            if has_unresolvable_jar(site):
+                site["_route"] = "失效"
+                note_text = site.get("_note") or ""
+                marker = "相对 jar 路径在 builtin:// 下不可用"
+                site["_note"] = f"{note_text} · {marker}" if marker not in note_text else note_text
+                if isinstance(site.get("raw"), dict):
+                    site["raw"]["_route"] = "失效"
+                    site["raw"]["_note"] = site["_note"]
+                moved["dead_jar"] += 1
             seen.add(site["key"])
             buckets[destination]["sites"].append(site)
 

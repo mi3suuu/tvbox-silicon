@@ -135,3 +135,38 @@ import Testing
     let plain = try JSONDecoder().decode(Site.self, from: Data(#"{"key":"x","name":"X","type":1,"api":"https://example.com/api.php/provide/vod","raw":{}}"#.utf8))
     #expect(!plain.prefetchesLineList)
 }
+
+/// 组名里不再带打包时写死的源数。
+///
+/// 「影视 · 可播(46)」在源变少之后就是错的，而分组头上本来就有实时计数 ——
+/// 两个数字并排（「影视 · 可播(46) 35」）时读者没法知道该信哪个。
+@Test func bundledNamesCarryNoStaleCount() throws {
+    // 包本身还在写，这一层出口剥掉：读的地方只有一个口径。
+    for address in BundledSubscriptions.addresses.dropFirst() {
+        let name = try #require(BundledSubscriptions.name(for: address))
+        #expect(name.range(of: #"\(\d+\)$"#, options: .regularExpression) == nil, "\(name)")
+        #expect(!name.isEmpty)
+        // 订阅列表种下的那条与显示名一致，否则升级后第一次启动会「改名」一次。
+        #expect(BundledSubscriptions.entry(for: address)?.name == name)
+    }
+    #expect(BundledSubscriptions.trimmed("影视 · 可播(46)") == "影视 · 可播")
+    // 观众自己起的名字里有括号数字，不该被改写（这一层只管包给的名字）。
+    #expect(BundledSubscriptions.trimmed("我的4K(1)") == "我的4K")
+}
+
+/// 看剧AI 的 `importedAt` 取**构建时间**，不是「现在」。
+///
+/// 取「现在」的话，每次冷启动它都比缓存「新」→ 每次都重写缓存、重建合并列表，
+/// 于是 `refreshBundledDocuments` 注释里「同一版包里这是幂等的」根本不成立。
+@Test func theBundledPluginIsStampedWithTheBuildDate() {
+    let first = BundledSubscriptions.kanju()
+    let second = BundledSubscriptions.kanju()
+    #expect(first.importedAt == second.importedAt)
+    #expect(first.importedAt == BundledSubscriptions.buildDate)
+}
+
+/// 包读不出来时，调用方必须能看出来 —— 否则「这一版包里没有这个地址」这条判据
+/// 会把观众列表里的内置组连同缓存一起删光。
+@Test func anEmptyPackIsDistinguishable() {
+    #expect(!BundledSubscriptions.feedsIsEmpty)
+}

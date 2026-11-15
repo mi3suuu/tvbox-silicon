@@ -47,9 +47,20 @@ public enum BundledSubscriptions {
 
     /// What the subscription list should call a bundled feed. Without it the row would show the
     /// address, and `builtin://kanju` reads like something a viewer typed by mistake.
+    ///
+    /// 名字末尾的「(46)」是打包脚本写死的源数，而分组头上本来就有实时计数 ——
+    /// 两个数字并排出现（「影视 · 可播(46) 35」）时，读者没法知道该信哪个，而写死的那个
+    /// 只要有一版没重新打包就是错的。所以显示名一律去掉它：**数量只由实时计数提供**。
     public static func name(for address: String) -> String? {
         if address.lowercased() == kanjuAddress { return "看剧AI" }
-        return feeds[address]?.name
+        return feeds[address].map { trimmed($0.name) }
+    }
+
+    /// 去掉名字末尾的「(46)」。包里的数据不动 —— 打包脚本与旧缓存都还写着它，
+    /// 只在这一层出口处剥掉，读的地方就只有一个口径。
+    static func trimmed(_ name: String) -> String {
+        name.replacingOccurrences(of: #"\(\d+\)$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// The entry a fresh install seeds: the bundled pack knows its own default routing and whether
@@ -59,8 +70,31 @@ public enum BundledSubscriptions {
             return SubscriptionEntry(address: kanjuAddress, name: "看剧AI", routing: .auto)
         }
         guard let feed = feeds[address] else { return nil }
-        return SubscriptionEntry(address: feed.address, name: feed.name, enabled: feed.enabled, routing: feed.routing)
+        return SubscriptionEntry(address: feed.address, name: trimmed(feed.name),
+                                 enabled: feed.enabled, routing: feed.routing)
     }
+
+    /// 包读不出来时是空的。
+    ///
+    /// 调用方（`Store.dropRetiredBundledFeeds`）必须据此**放弃清理**：把「这一版包里没有这个地址」
+    /// 用在空名单上，会把观众订阅列表里的内置组连同缓存一起删光，而 `seedAggregatedSubscriptions`
+    /// 也补不回来（它按同一份空名单算「还没装过谁」）。一次打包错误不该变成数据丢失。
+    public static var feedsIsEmpty: Bool { feeds.isEmpty }
+
+    /// The app's build time, standing in for "when this bundled document was written".
+    ///
+    /// 代码生成的内置订阅（看剧AI）没有打包时间可用。取「现在」会让它每次启动都比缓存「新」，
+    /// 于是每次冷启动都重写缓存、重建一次合并列表 —— 幂等性就没了。取可执行文件的修改时间
+    /// 是同一个问题的正确答案：同一版 App 内恒定（一次都不重写），换了新版本必然更新
+    /// （新二进制的时间一定晚于任何一次旧启动写下的时间戳）。
+    public static let buildDate: Date = {
+        if let url = Bundle.main.executableURL,
+           let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
+           let date = values.contentModificationDate {
+            return date
+        }
+        return .distantPast
+    }()
 
     // MARK: - Route pack
 
@@ -103,7 +137,7 @@ public enum BundledSubscriptions {
             "flags": .array([]),
             "ijk": .array([])
         ]
-        return Subscription(origin: origin, importedAt: Date(), sites: sites, lives: [], raw: raw)
+        return Subscription(origin: origin, importedAt: buildDate, sites: sites, lives: [], raw: raw)
     }
 
     /// A stable pseudo-origin: sources reach their script through `assets://`, so nothing is

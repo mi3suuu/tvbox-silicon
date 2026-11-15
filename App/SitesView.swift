@@ -87,6 +87,7 @@ struct SitesView: View {
     @State private var batchNote: String?
     /// 已经点过「展开其余」的分组。组里 168 个源不该一次全画出来 —— 先给一屏，
     /// 想全看的人自己点开；搜索与选择模式下不看这个（那两种时刻要的是「全都在」）。
+    /// 展开过哪几格会落盘（`SourceShelfState.expandedShelves`），关掉 App 再回来还是摊开的。
     @State private var expandedGroups: Set<String> = SourceShelfState().expandedShelves
     /// 每组先画多少张卡。手机上两列，12 张 = 六行，刚好一屏多一点。
     private var previewLimit: Int { 12 }
@@ -98,8 +99,11 @@ struct SitesView: View {
     @State private var onlyPlayable: Bool = SourceShelfState().onlyPlayable
     /// 组内按连通排序（能播 → 偏慢 → 未测 → 不通）。默认开，同一档内保留原有顺序。
     @State private var sortByConnection: Bool = SourceShelfState().sortByConnection
-    /// 读数落盘时 `SourceProbeStore` 只递增 `revision`，不是可观察对象；这一页靠它重画。
-    @State private var probeRevision = 0
+    /// 读数落盘时 `SourceProbeStore` 自己会通知（它是 `@Observable`），这一页靠 body 里那次
+    /// `probeTick` 的读取登记依赖 —— 不再需要本地计数。
+    /// （旧写法是 `@State probeRevision` + `.onChange(of: revision)`，而那时 store 不是可观察对象：
+    /// 只有扫描进度恰好同时在变时才会顺带看到新值，选集页单独测出来的读数永远不刷新。）
+    private var probeTick: Int { SourceProbeStore.shared.revision }
     /// 正在改名的分组（幂等：非 nil 就弹那个改名框）。
     @State private var renamingGroup: SourceGroup?
     /// 正在改名的订阅地址。
@@ -132,6 +136,9 @@ struct SitesView: View {
     var body: some View {
         Group {
             if let config = store.subscription {
+                // 读一次测速库的 revision：它是 `@Observable`，这一读把「读数落盘 → 重画」
+                // 变成结构性的保证（分组头的徽标、书架、只看能播都读那张表）。
+                let _ = probeTick
                 let all = store.sourceGroups(includeHidden: false)
                 let hiddenCount = all.first { $0.kind == .hidden }?.sites.count ?? 0
                 let searched = all.filtered(by: query).limited(to: pick == nil ? nil : Set(pickable.map(\.key)))
@@ -151,7 +158,12 @@ struct SitesView: View {
                         // 底部浮条会遮住正在勾的那一行。
                         if selecting {
                             selectionBar(groups: groups, all: sites)
-                        } else if pick == nil, !groups.isEmpty {
+                        } else if pick == nil, !groups.isEmpty || onlyPlayable {
+                            // 为什么要带 `|| onlyPlayable`：控制栏里装着「全部 / 只看能播」
+                            // 两颗胶囊。某个时刻一个能播的源都没有（刚测完、换了个网络、
+                            // 或者读数过期）时 `groups` 是空的 —— 只按 `!groups.isEmpty` 判断，
+                            // 整条控制栏连同唯一的开关一起消失，页面上只剩空列表，
+                            // 想关掉筛选只能进工具栏菜单。清空时最需要那个开关。
                             // Both numbers come from the same list: the groups drawn, and the sources
                             // inside them. Reading the source count off `orderedSites` counted a
                             // different set whenever hidden sources existed.
@@ -266,7 +278,6 @@ struct SitesView: View {
                             ForEach(SourceShelfMode.allCases) { mode in
                                 Button {
                                     withAnimation(.snappy(duration: 0.28)) { shelfMode = mode }
-                                    SourceShelfState().save(mode)
                                 } label: {
                                     if shelfMode == mode {
                                         Label(mode.title, systemImage: "checkmark")
@@ -334,15 +345,15 @@ struct SitesView: View {
                 foldBeforeSearch = nil
             }
         }
-        // 测速一边跑一边落读数：分组头的「可播 x/y」与连通书架都读那张表，
-        // 不在 revision 变化时重画，读者得离开再回来才看得到新结论。
-        .onChange(of: SourceProbeStore.shared.revision) { _, _ in probeRevision += 1 }
         // 下面这些是读者的选择：改一次就落盘。重启之后还按他上次看到的样子打开 ——
         // 折叠、展开、只看能播、按连通排序，一个都不该「关一次 App 就忘」。
         .onChange(of: collapsedShelves) { _, new in SourceShelfState().save(collapsedShelves: new) }
         .onChange(of: expandedGroups) { _, new in SourceShelfState().save(expandedShelves: new) }
         .onChange(of: onlyPlayable) { _, new in SourceShelfState().save(onlyPlayable: new) }
         .onChange(of: sortByConnection) { _, new in SourceShelfState().save(sortByConnection: new) }
+        // 书架依据也是读者的选择，走同一个出口。此前它只在菜单按钮的闭包里顺手存了一次 ——
+        // 从别处（QA 启动参数、以后加的入口）改 `shelfMode` 就不会落盘。
+        .onChange(of: shelfMode) { _, new in SourceShelfState().save(new) }
     }
 
     @ViewBuilder
@@ -360,7 +371,11 @@ struct SitesView: View {
                     // A picking visit folds for its own convenience and leaves the Sources page's saved
                     // fold alone: borrowing a page to choose from must not rearrange it.
                     // [mi3s] 二开：借用选择页时不动 Sources 页自己的折叠记忆
-                    if pick == nil { foldState.save(collapsed) }
+                    //
+                    // ⛔ 也不能在**搜索中**落盘。搜索一开始 `collapsed` 就被清空、结束时才从
+                    // `foldBeforeSearch` 恢复 —— 那是内存里的临时视图。搜索中折一个组，
+                    // 磁盘上就只剩「折了这一个」，下次启动按磁盘打开，整页折叠状态全错。
+                    if pick == nil, query.isEmpty { foldState.save(collapsed) }
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -390,7 +405,9 @@ struct SitesView: View {
                             .background(Brand.accent.opacity(0.16), in: Capsule())
                     }
                     // 正在测这一组：头的右边直接给出「测到第几个」，读者不必回测速页看。
-                    if let run = store.probeRun, store.probeScopeLabel == group.title {
+                    // 对号用 id，不用标题 —— 两个订阅同名时（「影视 · 可播」很常见），
+                    // 按标题会对到另一个组的头上。
+                    if let run = store.probeRun, store.probeScopeID == group.id {
                         HStack(spacing: 5) {
                             ProgressView().controlSize(.mini)
                             Text("\(run.done)/\(run.total)")
@@ -564,7 +581,9 @@ struct SitesView: View {
     /// 分层只发生在需要它的组：源少于阈值、或者只分得出一层时，`shelves` 返回空，这里就平铺。
     @ViewBuilder
     private func groupBody(_ group: SourceGroup, config: Subscription, sites: [Site]) -> some View {
-        let _ = probeRevision
+        // 读数落盘就重画（`@Observable`）。分组内的书架与排序都读那张表，
+        // body 顶上的那一次读取覆盖不到这里 —— 这一行是这里的依赖声明。
+        let _ = probeTick
         let members = sortedForDisplay(group.sites)
         let counts = SourceConnectivity.counts(members, reading: latestReading)
         let shelves = shelves(for: members, counts: counts)
@@ -692,8 +711,12 @@ struct SitesView: View {
         return (Array(members.prefix(previewLimit)), members.count - previewLimit)
     }
 
-    /// 「展开其余 156 个」/「收起」。展开是这一页的一次性操作，不写盘 ——
-    /// 下次进来又回到一屏，否则一次展开会让之后每次进页面都铺一屏。
+    /// 「展开其余 156 个」/「收起」。
+    ///
+    /// 展开/收起也落盘（`SourceShelfState.expandedShelves`）：读者把一组 168 个源摊开、
+    /// 翻到底，离开再回来又收成一屏，会以为那个「展开」没生效过。
+    /// （这里曾经写着「不写盘」，而页面装配处一直在存 —— 注释与代码对不上，
+    /// 后来的人照注释改就会把持久化删掉。以代码为准。）
     @ViewBuilder
     private func moreSourcesButton(scope: String, hidden: Int) -> some View {
         Button {
@@ -724,7 +747,8 @@ struct SitesView: View {
     /// 这两步。跑起来之后同一个位置变成「停止」，读者不用回测速页找那个按钮。
     @ViewBuilder
     private func measureGroupButton(_ group: SourceGroup) -> some View {
-        let running = store.probeRun != nil && store.probeScopeLabel == group.title
+        // 与分组头上的进度徽标同一个判据：id，不是标题。
+        let running = store.probeRun != nil && store.probeScopeID == group.id
         if running {
             Button(role: .destructive) {
                 store.cancelProbingAllSources()
@@ -756,7 +780,9 @@ struct SitesView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(store.probeScopeLabel ?? L10n.text("Measure Every Source"))
                         .font(.caption.weight(.semibold)).lineLimit(1)
-                    Text(L10n.text("%lld of %lld measured", run.done, run.total))
+                    // 跳过的要说出来：测了 12 个而这一组有 46 个，不说清就是「按钮坏了」。
+                    Text(L10n.text("%lld of %lld measured", run.done, run.total)
+                         + skippedSuffix(store.probeSkipped))
                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
                 Button {
@@ -776,6 +802,12 @@ struct SitesView: View {
             .accessibilityIdentifier("sources.probeBar")
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+    }
+
+    /// 「· 跳过 34 个：刚刚测过。」，没有跳过时是空串。
+    private func skippedSuffix(_ skipped: Int?) -> String {
+        guard let skipped, skipped > 0 else { return "" }
+        return " · " + L10n.text("%lld skipped: measured recently.", skipped)
     }
 
     /// Whether every listed group is folded — what decides whether the one press says
@@ -843,10 +875,28 @@ struct SitesView: View {
                     .accessibilityIdentifier("sources.selectMode")
                 }
             }
-            // 「只看能播」只在有读数时出现：没测过的时候它只会把整页清空，
+            // 「只看能播」只在有读数时出现 —— 没测过的时候它只会把整页清空，
             // 那不是筛选，是让人以为源都挂了。
-            if counts.measured > 0, pick == nil {
+            //
+            // ⛔ 但它自己开着的时候必须可见（`|| onlyPlayable`）：读数是会过期的，
+            // 今天测好的 46 个源一周后全部翻成「未测」，于是 `measured == 0` ——
+            // 胶囊按旧条件消失，而筛选仍然开着，页面就永久卡在空白上。
+            if counts.measured > 0 || onlyPlayable, pick == nil {
                 filterChips(counts)
+            }
+            // 筛到空的时候说一句为什么。没有这句，页面上只剩工具卡与空白，
+            // 与「源全丢了」「加载失败」长得一模一样。
+            if groupCount == 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.caption)
+                    Text(L10n.text("Nothing here is playable right now."))
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("sources.emptyState")
             }
         }
         .padding(.horizontal, 4)
@@ -1077,9 +1127,10 @@ struct SitesView: View {
     private func setAllCollapsed(_ all: Bool) {
         let ids = store.sourceGroups(includeHidden: false).map(\.id)
         withAnimation(.snappy(duration: 0.3)) { collapsed = all ? Set(ids) : [] }
-        // Same rule as a single header: only the Sources page owns the saved fold.
+        // Same rule as a single header: only the Sources page owns the saved fold, and a search's
+        // temporary fold is not the viewer's saved one.
         // [mi3s] 二开：展开/折叠全部后也只由 Sources 页写折叠记忆
-        if pick == nil { foldState.save(collapsed) }
+        if pick == nil, query.isEmpty { foldState.save(collapsed) }
     }
 
     // MARK: - 选择与批量
