@@ -134,6 +134,17 @@ struct OneSkinFixedPlayerLayer: UIViewRepresentable {
         // `renders=1 player=0`（闸放行、却没绑上）指向完全不同的病因。
         #if DEBUG
         view.noteIntent(renders: renders, gravity: videoGravity)
+        // ★ 第二格：这条 layer 上到底绑没绑 player。
+        //
+        // 用户报的现象：`VIDSRC st=1 pbt=true`、`PICCHK avPlayer=yes item=true`、
+        // 进度 1:36→1:48 在走，而画面像素 21 秒零变化。既有探针全绿 ——
+        // 因为它们量的都是 session / item，没有一个量「layer 上绑没绑 player」。
+        // 判断「时间在走、像素不动」只需这一行：bind=0 就是画面被摘掉了，
+        // 与源、解码、几何全都无关。真机复验先看它。
+        let wasBound = view.renderLayer.player != nil
+        if wasBound != renders {
+            oneSkinLog("RENDER bind=\(renders ? 1 : 0) was=\(wasBound ? 1 : 0) win=\(Int(size.width))x\(Int(size.height))")
+        }
         #endif
         view.update(player: renders ? player : nil, gravity: videoGravity)
         // ⛔ **无论是否渲染都必须 attach**。
