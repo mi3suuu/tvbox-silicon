@@ -208,6 +208,90 @@ final class EpisodeProbeController {
 
 // MARK: - Picker
 
+/// 选集/线路面板的**尺寸档**：由「可用宽度」决定，不认机型、不碰方向枚举。
+///
+/// ⛔ 为什么需要它（2026-11-13 第 20 项）：
+/// 面板此前只有一个布尔 `compact`（`playerLayout == .inline`），它描述的是
+/// **播放器在页面里的位置**，不是**屏幕有多宽**。于是：
+///   · 外屏 466pt 与内屏竖持 669pt 拿到同一个 `compact=false`；
+///   · 内屏横持 951pt 也是 `false`；
+///   · 但 951pt 上列宽 92 的网格会铺出 10 列、封面 108pt 显得很小，
+///     线路 chip 横排挤在一行 —— 与外屏观感完全不同，用户看到的就是
+///     「只有外屏做了款式，内屏没做」。
+///
+/// 这里按**内容宽度**分三档（外屏 / 内屏竖持 / 内屏横持与全屏），
+/// 全部尺寸只从这一处取，面板内不再有裸字面量，各形态自然统一。
+enum PickerMetrics: Equatable {
+    /// 外屏（≈430–480pt），也就是此前唯一被认真调过的那一档。
+    case outer
+    /// 内屏竖持（≈640–700pt）：比外屏宽，但仍是单列观感。
+    case innerPortrait
+    /// 内屏横持 / 全屏（≥820pt）：横向空间充裕，允许更宽的封面与更多列。
+    case innerLandscape
+
+    /// 由可用宽度选档。阈值刻意留出余量，避免旋转动画中途反复跳档。
+    static func forWidth(_ width: CGFloat) -> PickerMetrics {
+        if width >= 820 { return .innerLandscape }
+        if width >= 600 { return .innerPortrait }
+        return .outer
+    }
+
+    /// 面板外边距与区块间距。
+    var panelPadding: CGFloat {
+        switch self {
+        case .outer, .innerPortrait: return Spacing.panel
+        case .innerLandscape: return Spacing.panel * 1.4
+        }
+    }
+
+    /// 区块之间的竖向间距。
+    var blockSpacing: CGFloat {
+        switch self {
+        case .outer: return Spacing.panel
+        case .innerPortrait: return Spacing.panel * 1.2
+        case .innerLandscape: return Spacing.panel * 1.2
+        }
+    }
+
+    /// 封面在网格单元里的显示尺寸（宽, 高）。
+    ///
+    /// 外屏沿用实测过的 108×162；内屏两档放大，否则在 951pt 宽上
+    /// 一排十来个 108pt 封面会碎成「贴纸墙」，与 One 的观感不符。
+    var coverSize: (CGFloat, CGFloat) {
+        switch self {
+        case .outer: return (108, 162)
+        case .innerPortrait: return (124, 186)
+        case .innerLandscape: return (144, 216)
+        }
+    }
+
+    /// 网格最小列宽。与 `coverSize.width` 成比例，保证每格只放得下一张封面。
+    var gridMinColumn: CGFloat {
+        switch self {
+        case .outer: return 92
+        case .innerPortrait: return 108
+        case .innerLandscape: return 128
+        }
+    }
+
+    /// 网格间距。
+    var gridSpacing: CGFloat {
+        switch self {
+        case .outer: return 8
+        case .innerPortrait: return 10
+        case .innerLandscape: return 12
+        }
+    }
+
+    /// 封面圆角。
+    var coverRadius: CGFloat {
+        switch self {
+        case .outer, .innerPortrait: return Radius.card
+        case .innerLandscape: return Radius.card * 1.15
+        }
+    }
+}
+
 struct EpisodePicker: View {
     let video: Video
     let sourceKey: String
@@ -249,6 +333,16 @@ struct EpisodePicker: View {
     /// 读 `UserDefaults` 直取而不是 `@AppStorage`：这里只想让它跟着面板存活，
     /// 跨启动记忆反而不是用户要的（每次打开按最合适的那一种）。
     @State private var layout: PickerLayout = .grid
+
+    /// 面板可用宽度；由最外层 `GeometryReader` 写入。
+    ///
+    /// ⛔ 用 `@State` 存而不是每帧现算：`GeometryReader` 在旋转/折叠动画中
+    /// 每帧都报新宽度，直接拿它当布局输入会让网格列数逐帧跳变（与 OneSkin
+    /// 「控件推移」同一类病）。这里只存**离散档位**，同一档内宽度变化不触发重排。
+    @State private var availableWidth: CGFloat = 0
+
+    /// 当前尺寸档。宽度还没量到时（首帧 0）按外屏排，量到后会跳一次，肉眼不可见。
+    private var metrics: PickerMetrics { PickerMetrics.forWidth(availableWidth) }
     /// 正在重测线路。
     @State private var retesting = false
     /// `onAppear` 里由 `LinePreference` **自动解析**出来的那条线路。
@@ -394,9 +488,19 @@ struct EpisodePicker: View {
     }
 
     var body: some View {
+        // 量一次宽度决定档位。放在最外层是因为 sheet 与 Duo 内嵌面板的
+        // 容器宽度差别很大（466 vs 951），内部的 `compact` 布尔看不出来。
+        GeometryReader { proxy in
+            content
+                .onAppear { availableWidth = proxy.size.width }
+                .onChange(of: proxy.size.width) { _, w in availableWidth = w }
+        }
+    }
+
+    private var content: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: compact ? Spacing.medium : Spacing.panel) {
+                VStack(alignment: .leading, spacing: metrics.blockSpacing) {
                     if compact { compactHeader }
                     header
                     if let error = store.episodeError {
@@ -411,7 +515,7 @@ struct EpisodePicker: View {
                     if flags.count > 1 { lineSwitcher }
                     episodeGrid
                 }
-                .padding(compact ? Spacing.medium : Spacing.panel)
+                .padding(compact ? Spacing.medium : metrics.panelPadding)
             }
             // Transparent: the sheet shape gets the system sheet material, and the Duo's inline
             // panel gets the glass the surface host wraps it in. An opaque fill here would read as a
@@ -566,10 +670,10 @@ struct EpisodePicker: View {
     }
 
     private var poster: some View {
-        let size: (CGFloat, CGFloat) = compact ? (56, 84) : (108, 162)
+        let size: (CGFloat, CGFloat) = compact ? (56, 84) : metrics.coverSize
         return PosterImage(url: video.poster, headers: video.posterHeaders)
             .frame(width: size.0, height: size.1)
-            .clipShape(RoundedRectangle(cornerRadius: compact ? Radius.medium : Radius.card, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: compact ? Radius.medium : metrics.coverRadius, style: .continuous))
     }
 
     // MARK: Line switcher
@@ -577,10 +681,24 @@ struct EpisodePicker: View {
     private var lineSwitcher: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader(L10n.text("Source"), count: flags.count)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+            // 线路 chip：外屏与内屏竖持横滑（省竖向空间），内屏横持/全屏**换行铺开**。
+            //
+            // ⛔ 为什么宽屏要换行：951pt 上放 6 条线路，横滑版一次只能看到 2–3 条，
+            // 其余要手动滑 —— 而宽屏明明有余量。外屏 466pt 上横滑是对的（换行会把
+            // 选集网格整体推下去）。这一条此前没有，因为面板从不区分屏幕宽度。
+            if metrics == .innerLandscape {
+                // 宽档：`Grid` 自动换行，chip 等宽排布。
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
                     ForEach(flags, id: \.self) { flag in
                         lineChip(flag)
+                    }
+                }
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(flags, id: \.self) { flag in
+                            lineChip(flag)
+                        }
                     }
                 }
             }
@@ -707,7 +825,9 @@ struct EpisodePicker: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 24)
             } else if layout == .grid {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: metrics.gridMinColumn),
+                                            spacing: metrics.gridSpacing)],
+                          spacing: metrics.gridSpacing) {
                     ForEach(pagedEpisodes) { episode in
                         episodeCell(episode)
                     }
