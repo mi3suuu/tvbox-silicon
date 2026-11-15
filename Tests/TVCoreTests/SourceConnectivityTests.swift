@@ -133,6 +133,18 @@ import Testing
         #expect(shelves.last?.tier == .untested)
     }
 
+    // MARK: 组内排序
+
+    /// 能播的排前面，同一档里不动 —— 原来的顺序是 `SourceStrategy.arrange` 排出来的。
+    @Test func sortingPutsPlayableFirstAndKeepsTheOrderInsideATier() {
+        let sites = ["a", "b", "c", "d", "e"].map { site($0) }
+        let pin: [String: SourceTier] = [
+            "a": .untested, "b": .playable, "c": .dead, "d": .playable, "e": .slow,
+        ]
+        let sorted = SourceConnectivity.sorted(sites) { pin[$0.key] ?? .untested }
+        #expect(sorted.map(\.key) == ["b", "d", "e", "a", "c"])
+    }
+
     /// 强制按连通时听读者的：即便还没测过，也给出那一层「未测」。
     @Test func forcingConnectionKeepsTheChoice() {
         var sites: [Site] = (0..<6).map { site("good\($0)") }

@@ -2671,3 +2671,5 @@
 "%lld unreachable of %lld" = "不通 %1$lld / %2$lld";
 "%lld sources · %lld playable" = "%1$lld 个源 · %2$lld 个能播";
 "Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "一次测出 3 个以上能播的源之后，源列表会自动改按连通状态分组内书架。";
+"Only Playable" = "只看能播";
+"Sort by Connection" = "按可播排序";

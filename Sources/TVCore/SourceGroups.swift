@@ -24,6 +24,12 @@ public struct SourceGroup: Equatable, Sendable, Identifiable {
     public var kind: Kind
     public var title: String
     public var sites: [Site]
+
+    public init(kind: Kind, title: String, sites: [Site]) {
+        self.kind = kind
+        self.title = title
+        self.sites = sites
+    }
     public var id: String {
         switch kind {
         case .pinned: "pinned"

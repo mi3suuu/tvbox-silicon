@@ -2667,3 +2667,5 @@
 "%lld unreachable of %lld" = "%1$lld of %2$lld unreachable";
 "%lld sources · %lld playable" = "%1$lld sources · %2$lld playable";
 "Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "Once three or more sources in a group play, the Sources page shelves that group by connection on its own.";
+"Only Playable" = "Only Playable";
+"Sort by Connection" = "Sort by Connection";

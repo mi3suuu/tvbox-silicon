@@ -2668,3 +2668,5 @@
 "%lld unreachable of %lld" = "接続不可 %1$lld / %2$lld";
 "%lld sources · %lld playable" = "%1$lld 件 · 再生可 %2$lld";
 "Once three or more sources in a group play, the Sources page shelves that group by connection on its own." = "1 回の計測で再生できる源が 3 件以上になると、ソース一覧は自動で接続状態順の棚に切り替わります。";
+"Only Playable" = "再生可のみ";
+"Sort by Connection" = "再生可否で並べ替え";

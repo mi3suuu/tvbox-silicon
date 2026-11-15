@@ -116,6 +116,20 @@ public enum SourceConnectivity {
         for site in sites { counts.add(tier(of: site, reading: reading(site))) }
         return counts
     }
+
+    /// 按档位排序：能播 → 偏慢 → 未测 → 不通。
+    ///
+    /// **稳定排序**：同一档里保留调用方原来的顺序。这是关键 —— 组内的原始顺序是
+    /// `SourceStrategy.arrange` 排出来的（同一个站的不同接法挨着、运行时便宜的在前），
+    /// 用一次不稳定的排序会把那层秩序打散，读者看到的会是「换个页面顺序就变」。
+    public static func sorted(_ sites: [Site], tier: (Site) -> SourceTier) -> [Site] {
+        sites.enumerated()
+            .sorted { lhs, rhs in
+                let left = tier(lhs.element).rank, right = tier(rhs.element).rank
+                return left != right ? left < right : lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
 }
 
 /// 四个档位各有多少个源。

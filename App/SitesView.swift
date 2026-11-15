@@ -87,13 +87,17 @@ struct SitesView: View {
     @State private var batchNote: String?
     /// 已经点过「展开其余」的分组。组里 168 个源不该一次全画出来 —— 先给一屏，
     /// 想全看的人自己点开；搜索与选择模式下不看这个（那两种时刻要的是「全都在」）。
-    @State private var expandedGroups: Set<String> = []
+    @State private var expandedGroups: Set<String> = SourceShelfState().expandedShelves
     /// 每组先画多少张卡。手机上两列，12 张 = 六行，刚好一屏多一点。
     private var previewLimit: Int { 12 }
-    /// 组内二级书架里，哪几个被折起来了（键是 `组id|书架`）。
-    @State private var collapsedShelves: Set<String> = []
+    /// 组内二级书架里，哪几个被折起来了（键是 `组id|书架`）。落盘：离开再回来还是折着。
+    @State private var collapsedShelves: Set<String> = SourceShelfState().collapsedShelves
     /// 书架按什么分：连通 / 内容 / 有实测就按连通。跨分组生效，记住选择。
     @State private var shelfMode: SourceShelfMode = SourceShelfState().mode
+    /// 只看能播。开关落盘 —— 读者按了一次是想「以后都这么看」，不是只这一眼。
+    @State private var onlyPlayable: Bool = SourceShelfState().onlyPlayable
+    /// 组内按连通排序（能播 → 偏慢 → 未测 → 不通）。默认开，同一档内保留原有顺序。
+    @State private var sortByConnection: Bool = SourceShelfState().sortByConnection
     /// 读数落盘时 `SourceProbeStore` 只递增 `revision`，不是可观察对象；这一页靠它重画。
     @State private var probeRevision = 0
     /// 正在改名的分组（幂等：非 nil 就弹那个改名框）。
@@ -130,7 +134,8 @@ struct SitesView: View {
             if let config = store.subscription {
                 let all = store.sourceGroups(includeHidden: false)
                 let hiddenCount = all.first { $0.kind == .hidden }?.sites.count ?? 0
-                let groups = all.filtered(by: query).limited(to: pick == nil ? nil : Set(pickable.map(\.key)))
+                let searched = all.filtered(by: query).limited(to: pick == nil ? nil : Set(pickable.map(\.key)))
+                let groups = playedOnly(searched)
                 let sites = store.orderedSites(config)
                 ScrollViewReader { proxy in
                 ScrollView {
@@ -151,7 +156,10 @@ struct SitesView: View {
                             // inside them. Reading the source count off `orderedSites` counted a
                             // different set whenever hidden sources existed.
                             listControls(groups: groups.filter { $0.kind != .hidden },
-                                         sources: groups.filter { $0.kind != .hidden }.flatMap(\.sites).count)
+                                         sources: groups.filter { $0.kind != .hidden }.flatMap(\.sites).count,
+                                         counts: SourceConnectivity.counts(
+                                            searched.filter { $0.kind != .hidden }.flatMap(\.sites),
+                                            reading: latestReading))
                         }
                         if pick == nil, query.isEmpty && sites.count > 1, !selecting {
                             VStack(alignment: .leading, spacing: Layout.cardSpacing) {
@@ -240,6 +248,18 @@ struct SitesView: View {
                         .disabled(!query.isEmpty)
                         .accessibilityIdentifier("sources.foldAllMenu")
                         Divider()
+                        // 只看能播 / 按连通排序：与列表顶上那两颗胶囊是同一个状态，
+                        // 这里再给一份是因为胶囊只在「有读数」时出现，而这两项在测速页回来、
+                        // 或者列表滚下去之后也得能按到。
+                        Toggle(isOn: $onlyPlayable) {
+                            Label(L10n.text("Only Playable"), systemImage: "checkmark.circle")
+                        }
+                        .accessibilityIdentifier("sources.menu.onlyPlayable")
+                        Toggle(isOn: $sortByConnection) {
+                            Label(L10n.text("Sort by Connection"), systemImage: "arrow.up.arrow.down")
+                        }
+                        .accessibilityIdentifier("sources.menu.sortByConnection")
+                        Divider()
                         // 书架按什么分。放在这里而不是顶上一排胶囊：它是「这一页怎么读」的设置，
                         // 不是每次都要按的动作；而它一改，整页所有分组一起换依据，得有个说法。
                         Menu {
@@ -317,6 +337,12 @@ struct SitesView: View {
         // 测速一边跑一边落读数：分组头的「可播 x/y」与连通书架都读那张表，
         // 不在 revision 变化时重画，读者得离开再回来才看得到新结论。
         .onChange(of: SourceProbeStore.shared.revision) { _, _ in probeRevision += 1 }
+        // 下面这些是读者的选择：改一次就落盘。重启之后还按他上次看到的样子打开 ——
+        // 折叠、展开、只看能播、按连通排序，一个都不该「关一次 App 就忘」。
+        .onChange(of: collapsedShelves) { _, new in SourceShelfState().save(collapsedShelves: new) }
+        .onChange(of: expandedGroups) { _, new in SourceShelfState().save(expandedShelves: new) }
+        .onChange(of: onlyPlayable) { _, new in SourceShelfState().save(onlyPlayable: new) }
+        .onChange(of: sortByConnection) { _, new in SourceShelfState().save(sortByConnection: new) }
     }
 
     @ViewBuilder
@@ -539,10 +565,11 @@ struct SitesView: View {
     @ViewBuilder
     private func groupBody(_ group: SourceGroup, config: Subscription, sites: [Site]) -> some View {
         let _ = probeRevision
-        let counts = SourceConnectivity.counts(group.sites, reading: latestReading)
-        let shelves = shelves(for: group.sites, counts: counts)
+        let members = sortedForDisplay(group.sites)
+        let counts = SourceConnectivity.counts(members, reading: latestReading)
+        let shelves = shelves(for: members, counts: counts)
         if shelves.isEmpty {
-            sourceGrid(group, members: group.sites, config: config, all: sites, scope: group.id)
+            sourceGrid(group, members: members, config: config, all: sites, scope: group.id)
         } else {
             VStack(alignment: .leading, spacing: Layout.cardSpacing) {
                 ForEach(shelves) { entry in
@@ -554,6 +581,26 @@ struct SitesView: View {
                 }
             }
         }
+    }
+
+    /// 「只看能播」打开时，把每一组里不是能播的源去掉；整组都不剩就整组不画。
+    ///
+    /// 过滤发生在分组层，而不是在网格里逐张跳过：分组头要跟着消失 ——
+    /// 留一个「影视 · 失效 0」的空组头，读者会以为那一组加载失败了。
+    private func playedOnly(_ groups: [SourceGroup]) -> [SourceGroup] {
+        guard onlyPlayable else { return groups }
+        return groups.compactMap { group in
+            let playing = group.sites.filter { connectivityTier($0) == .playable }
+            guard !playing.isEmpty else { return nil }
+            return SourceGroup(kind: group.kind, title: group.title, sites: playing)
+        }
+    }
+
+    /// 组内顺序：能播的排前面。同一档里不动 —— 那层顺序是 `SourceStrategy.arrange` 排的
+    /// （同一站的不同接法挨着、运行时便宜的在前），重排会把它打散。
+    private func sortedForDisplay(_ sites: [Site]) -> [Site] {
+        guard sortByConnection else { return sites }
+        return SourceConnectivity.sorted(sites, tier: connectivityTier)
     }
 
     /// 这一组该按哪种依据分层。
@@ -746,57 +793,100 @@ struct SitesView: View {
     /// is a property of the list below it, and a control sitting directly over its own list needs no
     /// explaining. It is also the only place the count of groups is ever stated, which is what makes
     /// folding them all a thought someone can have.
-    private func listControls(groups: [SourceGroup], sources: Int) -> some View {
+    private func listControls(groups: [SourceGroup], sources: Int, counts: TierCounts) -> some View {
         let all = allFolded
         let groupCount = groups.count
-        let counts = SourceConnectivity.counts(groups.flatMap(\.sites), reading: latestReading)
-        return HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(L10n.text("%lld groups", groupCount)).font(.subheadline.weight(.semibold)).lineLimit(1)
-                // 测过之后第二行换成「多少能播」：这是读者来这一页最想知道的一个数，
-                // 而它比「多少源」更能说明这一页现在有没有用。
-                Text(counts.measured > 0
-                     ? L10n.text("%lld sources · %lld playable", sources, counts.usable)
-                     : L10n.text("%lld sources", sources))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            // 「一键」是这里的重点：分组一多，逐个点头标是唯一比测速更烦的事。
-            Button {
-                setAllCollapsed(!all)
-            } label: {
-                Label(L10n.text(all ? "Expand All" : "Collapse All"),
-                      systemImage: all ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1).fixedSize()
-                    .padding(.horizontal, 11).padding(.vertical, 6)
-                    .background(Color.white.opacity(0.10), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            // While a search narrows the list, "fold everything" would act on groups the reader
-            // cannot see — the old control refused for exactly this reason.
-            .disabled(!query.isEmpty)
-            .help(all ? L10n.text("Expand All") : L10n.text("Collapse All"))
-            .accessibilityIdentifier("sources.foldAll")
-            // 选择模式的入口放在同一行：这两件事都是「对整个列表做点什么」，
-            // 分开放会让人以为它们属于不同页面。
-            if pick == nil {
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.text("%lld groups", groupCount)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    // 测过之后第二行换成「多少能播」：这是读者来这一页最想知道的一个数，
+                    // 而它比「多少源」更能说明这一页现在有没有用。
+                    Text(counts.measured > 0
+                         ? L10n.text("%lld sources · %lld playable", sources, counts.usable)
+                         : L10n.text("%lld sources", sources))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                // 「一键」是这里的重点：分组一多，逐个点头标是唯一比测速更烦的事。
                 Button {
-                    withAnimation(.snappy(duration: 0.25)) { beginSelecting() }
+                    setAllCollapsed(!all)
                 } label: {
-                    Label(L10n.text("Select"), systemImage: "checkmark.circle")
+                    Label(L10n.text(all ? "Expand All" : "Collapse All"),
+                          systemImage: all ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
                         .font(.caption.weight(.semibold))
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 11).padding(.vertical, 6)
-                        .background(Brand.accent.opacity(0.18), in: Capsule())
-                        .foregroundStyle(Brand.accent)
+                        .background(Color.white.opacity(0.10), in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(sources == 0)
-                .accessibilityIdentifier("sources.selectMode")
+                // While a search narrows the list, "fold everything" would act on groups the reader
+                // cannot see — the old control refused for exactly this reason.
+                .disabled(!query.isEmpty)
+                .help(all ? L10n.text("Expand All") : L10n.text("Collapse All"))
+                .accessibilityIdentifier("sources.foldAll")
+                // 选择模式的入口放在同一行：这两件事都是「对整个列表做点什么」，
+                // 分开放会让人以为它们属于不同页面。
+                if pick == nil {
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) { beginSelecting() }
+                    } label: {
+                        Label(L10n.text("Select"), systemImage: "checkmark.circle")
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1).fixedSize()
+                            .padding(.horizontal, 11).padding(.vertical, 6)
+                            .background(Brand.accent.opacity(0.18), in: Capsule())
+                            .foregroundStyle(Brand.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(sources == 0)
+                    .accessibilityIdentifier("sources.selectMode")
+                }
+            }
+            // 「只看能播」只在有读数时出现：没测过的时候它只会把整页清空，
+            // 那不是筛选，是让人以为源都挂了。
+            if counts.measured > 0, pick == nil {
+                filterChips(counts)
             }
         }
         .padding(.horizontal, 4)
+    }
+
+    /// 全部 / 只看能播 两颗胶囊。
+    ///
+    /// 用胶囊而不是开关：开关只有「开/关」，读者看不出关掉之后会多出多少张卡；
+    /// 两颗并排时，「全部 505」与「只看能播 51」把代价与收益同时摆在眼前。
+    @ViewBuilder
+    private func filterChips(_ counts: TierCounts) -> some View {
+        HStack(spacing: 8) {
+            filterChip(title: L10n.text("All"), count: counts.total, active: !onlyPlayable) {
+                withAnimation(.snappy(duration: 0.25)) { onlyPlayable = false }
+            }
+            .accessibilityIdentifier("sources.filter.all")
+            filterChip(title: L10n.text("Only Playable"), count: counts.playable,
+                       active: onlyPlayable, tint: Brand.teal) {
+                withAnimation(.snappy(duration: 0.25)) { onlyPlayable = true }
+            }
+            .accessibilityIdentifier("sources.filter.playable")
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func filterChip(title: String, count: Int, active: Bool,
+                            tint: Color = Brand.accent,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title).font(.caption.weight(.semibold))
+                Text("\(count)").font(.caption2).monospacedDigit().opacity(0.7)
+            }
+            .lineLimit(1).fixedSize()
+            .padding(.horizontal, 11).padding(.vertical, 6)
+            .foregroundStyle(active ? tint : Color.secondary)
+            .background(active ? tint.opacity(0.16) : Color.primary.opacity(0.06), in: Capsule())
+            .overlay(Capsule().strokeBorder(active ? tint.opacity(0.45) : .clear))
+        }
+        .buttonStyle(.plain)
     }
 
     /// The bar that replaces the list controls while choosing: what is ticked, and everything that
