@@ -38,8 +38,8 @@ import Testing
 @Test func bundledRoutePackKeepsItsGroups() throws {
     let addresses = BundledSubscriptions.addresses
     #expect(addresses.first == BundledSubscriptions.kanjuAddress)
-    // 22 组并成 7 组：影视 可播/待测、成人 可播、直播、4K·网盘、工具·插件、失效（默认关闭）。
-    #expect(addresses.count == 8)
+    // 22 组并成 7 组，再按内容把失效拆成「影视 / 成人」两组 —— 8 组 + 看剧AI。
+    #expect(addresses.count == 9)
 
     let direct = try #require(BundledSubscriptions.document(for: "builtin://yingxia-route-00"))
     #expect(direct.origin.absoluteString == "builtin://yingxia-route-00")
@@ -51,9 +51,47 @@ import Testing
     #expect(playable.routing == .direct)
     #expect(playable.name.contains("可播"))
 
-    // The dead bucket ships switched off.
-    let dead = try #require(BundledSubscriptions.entry(for: "builtin://yingxia-route-06"))
-    #expect(dead.enabled == false)
+    // The dead buckets ship switched off — both of them, the adult one included.
+    for dead in ["builtin://yingxia-route-06", "builtin://yingxia-route-07"] {
+        let entry = try #require(BundledSubscriptions.entry(for: dead))
+        #expect(entry.enabled == false)
+    }
+}
+
+/// 影视和成人不许混在一组里。
+///
+/// 这不是排版偏好：`成人 · 可播` 里混进两个 🔞AV 源的时候，源列表第一屏就是它们；
+/// 反过来，搜「流浪地球」时若成人组也参与搜索，结果里会混进一堆不相干的条目。
+/// 判据只认明确的成人标记（🔞、成人、麻豆、4k-av、missav 这类），`WebDav`、`奶酪`
+/// 这种名字里带 `av` / `奶` 的正常源不会被误判 —— 误判会把好源从影视组里赶走。
+@Test func routePackKeepsAdultSeparate() throws {
+    let strong = try NSRegularExpression(pattern:
+        "🔞|成人|伦理|无码|有码|女优|探花|黑料|性吧|杏吧|色情|情色|淫|麻豆|番号|里番|约啪|桃色|黄片|裸",
+        options: [.caseInsensitive])
+    let token = try NSRegularExpression(pattern:
+        #"4k-?av|\bjav\b|\bporn\b|\bxxx\b|\bhentai\b|\bnsfw\b|missav|supjav|hstream"#,
+        options: [.caseInsensitive])
+
+    func looksAdult(_ site: Site) -> Bool {
+        let group = site.raw["group"]?.string ?? ""
+        if group.contains("成人") { return true }
+        let text = [site.name, site.key, group].joined(separator: " ")
+        let range = NSRange(text.startIndex..., in: text)
+        return strong.firstMatch(in: text, range: range) != nil
+            || token.firstMatch(in: text, range: range) != nil
+    }
+
+    for address in BundledSubscriptions.addresses {
+        guard let document = BundledSubscriptions.document(for: address) else { continue }
+        let adultFeed = BundledSubscriptions.isAdult(address)
+        for site in document.sites {
+            if adultFeed {
+                #expect(site.raw["_content"]?.string == "adult", "\(site.key) 在成人组里却没有成人标记")
+            } else {
+                #expect(!looksAdult(site), "\(site.key)（\(site.name)）是成人源，却混在 \(address) 里")
+            }
+        }
+    }
 }
 
 /// 中转只在映匣里：包里不能再有任何一台外部中继的地址。

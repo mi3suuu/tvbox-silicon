@@ -2641,3 +2641,4 @@
 "Follow the Global Setting" = "全体設定に従う";
 "These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "この 3 つは移動も削除もできません。「その他」は収まりきらなかった項目の唯一の避難先、「全画面を終了」は全画面から出る唯一の手段、ロックキーはロック後に解除できる唯一の入口です。";
 "Lock Controls — top right" = "コントロールをロック —— 右上";
+"Stop Measuring" = "計測を中止";

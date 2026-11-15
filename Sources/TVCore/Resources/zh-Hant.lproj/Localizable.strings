@@ -2641,3 +2641,4 @@
 "Follow the Global Setting" = "跟隨全域設定";
 "These cannot be moved or removed: More is the only way back for whatever did not fit, Exit Full Screen is the only way out of full screen, and the lock key is the only way to unlock the controls again." = "這三顆不能移動也不能刪除：「更多」是放不下的控制項唯一的去處，「退出全螢幕」是全螢幕裡唯一的出口，鎖定鍵是鎖上之後唯一的解鎖入口。";
 "Lock Controls — top right" = "鎖定控制項 —— 右上角";
+"Stop Measuring" = "停止測速";

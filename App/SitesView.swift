@@ -123,7 +123,13 @@ struct SitesView: View {
                 let sites = store.orderedSites(config)
                 ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Layout.cardSpacing) {
+                    // `pinnedViews: [.sectionHeaders]` —— 分组头吸顶。
+                    //
+                    // 这一页有几十个分组、几百张卡片：滚到第三屏之后，顶上那个「全部折叠」按钮
+                    // 早就滚没了，想折一个分组得先滚回去找它。分组头吸顶之后，**滚到哪儿都能**
+                    // 直接点当前那一组的头折起来 —— 「滑动到任何一个页面都可以折叠」就是这个意思。
+                    LazyVStack(alignment: .leading, spacing: Layout.cardSpacing,
+                               pinnedViews: [.sectionHeaders]) {
                         // 选择模式下顶部就是操作条：先看清楚选了几个，再决定做什么。
                         // 放在列表最上面而不是浮在底部，是为了和「选中的卡片」同处一屏——
                         // 底部浮条会遮住正在勾的那一行。
@@ -154,15 +160,21 @@ struct SitesView: View {
                             }.tvFocusSection()
                         }
                         ForEach(groups) { group in
-                            groupHeader(group)
-                            if !collapsed.contains(group.id) {
-                                LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
-                                    ForEach(group.sites) { site in
-                                    siteRow(site, group: group, config: config, sites: sites)
+                            // 用 `Section` 而不是「头 + 网格」两行：只有 Section 的 header 会被
+                            // `pinnedViews` 认成吸顶头。内容折起来时留一个空的 Section ——
+                            // 头仍然在，仍然可以点开。
+                            Section {
+                                if !collapsed.contains(group.id) {
+                                    LazyVGrid(columns: Layout.cardColumns, spacing: Layout.cardSpacing) {
+                                        ForEach(group.sites) { site in
+                                            siteRow(site, group: group, config: config, sites: sites)
+                                        }
                                     }
+                                    // Unfolds from under its header; folding only fades, as the groups below slide up.
+                                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -16)), removal: .opacity))
                                 }
-                                // Unfolds from under its header; folding only fades, as the groups below slide up.
-                                .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -16)), removal: .opacity))
+                            } header: {
+                                groupHeader(group)
                             }
                         }
                         // Picking leaves hidden sources out; the way to show them again is at the end, where the
@@ -175,6 +187,10 @@ struct SitesView: View {
                     }.pageContainer()
                 }
                 .reportsScrollingToPosterLoader()
+                // `safeAreaInset` 而不是 `overlay`：胶囊出现时把列表内容顶上去一格，
+                // 挡住最后一行卡片会让读者以为那一行点不到。
+                .safeAreaInset(edge: .bottom, spacing: 0) { probeBar }
+                .animation(.snappy(duration: 0.28), value: store.probeRun)
                 // Picking opens on the current choice rather than the top of a long page.
                 .defaultFocus($focusedSite, picked)
                 .onAppear { if pick != nil, let picked { proxy.scrollTo(picked, anchor: .center) } }
@@ -289,6 +305,15 @@ struct SitesView: View {
                             .padding(.horizontal, 7).padding(.vertical, 2)
                             .background(Brand.accent.opacity(0.16), in: Capsule())
                     }
+                    // 正在测这一组：头的右边直接给出「测到第几个」，读者不必回测速页看。
+                    if let run = store.probeRun, store.probeScopeLabel == group.title {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.mini)
+                            Text("\(run.done)/\(run.total)")
+                                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                        .accessibilityIdentifier("sources.groupProbe." + group.id)
+                    }
                     Spacer(minLength: 8)
                     // One chevron that turns, rather than two symbols swapped.
                     Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
@@ -317,6 +342,13 @@ struct SitesView: View {
                 .accessibilityIdentifier("sources.groupPick." + group.id)
             }
         }
+        // 吸顶头必须自带底色，否则卡片会从它下面透过去。
+        // 左右两个 padding 一正一负：文字仍与内容对齐，底色却铺到屏幕两侧 ——
+        // 否则吸顶时会在左右各留一条 gutter，卡片从缝里滑过去。
+        .padding(.horizontal, Layout.gutter)
+        .padding(.vertical, 6)
+        .background(CanvasColor())
+        .padding(.horizontal, -Layout.gutter)
         #if !os(tvOS)
         if case .subscription(let address) = group.kind, query.isEmpty {
             header
@@ -335,8 +367,10 @@ struct SitesView: View {
                     store.reassignSourceByKey(drag.key, origin: drag.origin, to: address)
                     return true
                 }
-                // 订阅头：改名 + 整订阅是否参与搜索（要求 7）。
+                // 订阅头：测速这一组 + 改名 + 整订阅是否参与搜索（要求 7）。
                 .contextMenu {
+                    measureGroupButton(group)
+                    Divider()
                     SubscriptionSearchMenu(address: address) { renamingSubscription = address }
                 }
         } else if case .custom(let id) = group.kind, query.isEmpty {
@@ -363,6 +397,8 @@ struct SitesView: View {
                     return true
                 }
                 .contextMenu {
+                    measureGroupButton(group)
+                    Divider()
                     Button { store.moveCustomGroup(id, by: -1) } label: {
                         Label(L10n.text("Move Group Up"), systemImage: "arrow.up")
                     }
@@ -391,8 +427,10 @@ struct SitesView: View {
                 store.reassignSourceByKey(drag.key, origin: drag.origin, to: nil)
                 return true
             }
+            .contextMenu { measureGroupButton(group) }
         } else {
-            header
+            // 固定 / 内置 / 来自订阅这些系统组没有别的菜单，但「测这一组」对哪一组都成立。
+            header.contextMenu { measureGroupButton(group) }
         }
         #else
         // tvOS：拖拽不存在，所以上面那整段（分组头拖拽 + 订阅头/分组头菜单）被排除了。
@@ -405,6 +443,8 @@ struct SitesView: View {
         switch group.kind {
         case .custom:
             header.contextMenu {
+                measureGroupButton(group)
+                Divider()
                 Button { store.moveCustomGroup(group.id, by: -1) } label: {
                     Label(L10n.text("Move Group Up"), systemImage: "arrow.up")
                 }
@@ -420,12 +460,75 @@ struct SitesView: View {
             }
         case .subscription(let address):
             header.contextMenu {
+                measureGroupButton(group)
+                Divider()
                 SubscriptionSearchMenu(address: address) { renamingSubscription = address }
             }
         default:
-            header
+            header.contextMenu { measureGroupButton(group) }
         }
         #endif
+    }
+
+    /// 长按分组头 → 「测速这一组」。
+    ///
+    /// 为什么是长按：测速是这一页上唯一会花几分钟、还会花掉流量的事，它不该占一个常驻按钮；
+    /// 而它要作用的范围（这一组）正好就是手指按着的那个头 —— 用长按省掉「进测速页 → 选范围」
+    /// 这两步。跑起来之后同一个位置变成「停止」，读者不用回测速页找那个按钮。
+    @ViewBuilder
+    private func measureGroupButton(_ group: SourceGroup) -> some View {
+        let running = store.probeRun != nil && store.probeScopeLabel == group.title
+        if running {
+            Button(role: .destructive) {
+                store.cancelProbingAllSources()
+            } label: {
+                Label(L10n.text("Stop Measuring"), systemImage: "stop.circle")
+            }
+        } else {
+            Button {
+                store.measure(group: group)
+            } label: {
+                Label(L10n.text("Measure This Group"), systemImage: "speedometer")
+            }
+            .disabled(group.sites.isEmpty)
+        }
+    }
+
+    /// 测速中一直挂在底部的进度条。
+    ///
+    /// 「后台执行」如果只体现在代码里（`Store` 里的 Task 不随页面销毁），读者看到的是
+    /// 「点了没反应」：他离开这一页、回来，不知道那轮测速还在不在跑。这条小胶囊把
+    /// 在测的是哪一批、走到第几个、以及怎么停，全都摆在眼皮底下。
+    @ViewBuilder
+    private var probeBar: some View {
+        if let run = store.probeRun, pick == nil, !selecting {
+            HStack(spacing: 10) {
+                ProgressView(value: Double(run.done), total: Double(max(run.total, 1)))
+                    .progressViewStyle(.linear)
+                    .frame(width: 54)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(store.probeScopeLabel ?? L10n.text("Measure Every Source"))
+                        .font(.caption.weight(.semibold)).lineLimit(1)
+                    Text(L10n.text("%lld of %lld measured", run.done, run.total))
+                        .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                }
+                Button {
+                    store.cancelProbingAllSources()
+                } label: {
+                    Image(systemName: "stop.circle.fill").font(.title3)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L10n.text("Stop"))
+                .accessibilityIdentifier("sources.probeStop")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.10)))
+            .shadow(radius: 12, y: 4)
+            .padding(.bottom, 14)
+            .accessibilityIdentifier("sources.probeBar")
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     /// Whether every listed group is folded — what decides whether the one press says

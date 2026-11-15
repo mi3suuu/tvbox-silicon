@@ -1136,6 +1136,7 @@ import TVCore
         guard !Distribution.isAppStore else { return }
         dropDeveloperHostedFeeds()
         dropRetiredBundledFeeds()
+        excludeAdultFeedsFromSearch()
         let pending = Self.aggregatedSubscriptionAddresses.filter { address in
             !dismissedAggregateAddresses.contains(address) && !subscriptions.contains { $0.address == address }
         }
@@ -1147,11 +1148,32 @@ import TVCore
             stamping(BundledSubscriptions.entry(for: address) ?? SubscriptionEntry(address: address, name: ""))
         }
         subscriptions += entries
+        // 新装进来的成人组同样默认不参与搜索（一次性迁移只管老机器上已经存在的那些）。
+        for entry in entries where BundledSubscriptions.isAdult(entry.address) {
+            searchScope.setSubscriptionExcluded(entry.address, excluded: true)
+        }
         saveSubscriptionList()
         await beginImport()
         importing = true; importError = nil; notice = nil
         defer { importing = false; endImport() }
         await fetch(entries)
+    }
+    /// 成人组默认退出搜索。
+    ///
+    /// 分组把成人源和影视分开了，但**搜索**是另一条通道：它挨个源问过去，谁参与谁出声。
+    /// 成人组若跟着参与，搜「流浪地球」会顺带问一遍十几个成人站，结果里混进一堆不相干的条目 ——
+    /// 家里有小孩拿这台机器搜动画片时更糟。所以内置的两个成人组默认不参与搜索。
+    ///
+    /// 这是一次性迁移（`adultSearchDefault.v1`）：之后观众自己在分组头菜单里勾上
+    /// 「Include This Subscription in Search」，这次选择不会再被启动覆盖。
+    private func excludeAdultFeedsFromSearch() {
+        let key = "adultSearchDefault.v1"
+        guard !playbackDefaults.bool(forKey: key) else { return }
+        playbackDefaults.set(true, forKey: key)
+        for address in BundledSubscriptions.adultAddresses
+        where subscriptions.contains(where: { $0.address == address }) {
+            searchScope.setSubscriptionExcluded(address, excluded: true)
+        }
     }
     /// 早期离线包把订阅挂在两个永远到不了的地方：开发机的 8081（`/api/rex/yingxia-*.json`），
     /// 以及占位保留域 `yingxia.invalid`。地址换成 `builtin://` 之后这些都是重复的死条目——
@@ -1994,10 +2016,20 @@ import TVCore
 
     /// What the Sources page shows while a probe runs, and the way to stop it.
     private(set) var probeRun: ProbeRun?
+    /// 这一轮测的是哪一批（分组名 / 订阅名）。源列表的进度胶囊与分组头靠它对上号 ——
+    /// 否则读者只看到「12/46」，不知道这 46 个是谁。
+    private(set) var probeScopeLabel: String?
     @ObservationIgnored private var probeTask: Task<Void, Never>?
     /// Identifies the run in flight, so a stopped run finishing late cannot clear the next one's
     /// progress or its handle.
     @ObservationIgnored private var probeToken = UUID()
+    /// 排队等着跑的批次。一轮没跑完又长按了第二个分组时，它排在这里而不是被静默丢掉 ——
+    /// 旧实现是 `guard probeTask == nil`，第二次长按什么都不发生，读者以为菜单坏了。
+    @ObservationIgnored private var probeQueue: [ProbeRequest] = []
+    /// iOS 的后台续命令牌：不拿它，锁屏或切走后测速会被系统挂起。
+    #if canImport(UIKit)
+    @ObservationIgnored private var probeBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    #endif
 
     /// One source to measure: everything a `CatalogClient` needs, copied so the work can leave the
     /// main actor.
@@ -2020,6 +2052,13 @@ import TVCore
         /// 让消费方能把进度分母从「全部源」校正为「真正要细测的源」——
         /// 否则 350 个源筛掉 200 个时，进度条会停在 150/350 然后凭空消失。
         var screenedOut = 0
+    }
+
+    /// One queued sweep: what to measure, and what to call it on screen.
+    private struct ProbeRequest {
+        var label: String?
+        var targets: [ProbeTarget]
+        var schedule: ProbeSchedule
     }
 
     /// Starts measuring every listed source — built-in ones included.
@@ -2078,7 +2117,10 @@ import TVCore
 
     /// The same, incremental: a source measured within maxAge seconds is left alone, and what was
     /// skipped is reported so the page can say so. 0 forces a fresh reading for every source.
-    func startProbing(_ sites: [Site], skippingFresh maxAge: TimeInterval, fast: Bool = true) {
+    ///
+    /// - Parameter label: 这一批叫什么（分组名 / 订阅名），源列表用它给进度条标一个名字。
+    func startProbing(_ sites: [Site], skippingFresh maxAge: TimeInterval,
+                      fast: Bool = true, label: String? = nil) {
         guard let config = subscription else { return }
         var seen = Set<String>()
         let chosen = sites.filter { seen.insert($0.id).inserted }
@@ -2089,27 +2131,51 @@ import TVCore
         let schedule: ProbeSchedule = fast ? .bulk : .standard
         guard maxAge > 0 else {
             probeSkipped = nil
-            runProbe(targets, schedule: schedule)
+            runProbe(targets, schedule: schedule, label: label)
             return
         }
         let fresh = targets.filter { needsProbing($0.site.sourceKey, maxAge: maxAge) }
         probeSkipped = targets.count - fresh.count
-        runProbe(fresh, schedule: schedule)
+        runProbe(fresh, schedule: schedule, label: label)
     }
 
-    private func runProbe(_ targets: [ProbeTarget], schedule: ProbeSchedule = .standard) {
-        guard probeTask == nil, !targets.isEmpty else { return }
+    /// 长按分组 → 「测速这一组」。只测这一组，跳过刚测过的，后台跑，进度写在该组的分组头上。
+    ///
+    /// 这是「测速要在后台执行」最需要的入口：读者在源列表上长按一下就走开，
+    /// 不用为了测 20 个源先进一次测速页、再挑一次范围。
+    func measure(group: SourceGroup) {
+        guard !group.sites.isEmpty else { return }
+        startProbing(group.sites, skippingFresh: probeMaxAge, label: group.title)
+    }
+
+    private func runProbe(_ targets: [ProbeTarget], schedule: ProbeSchedule = .standard,
+                          label: String? = nil) {
+        guard !targets.isEmpty else { return }
+        let request = ProbeRequest(label: label, targets: targets, schedule: schedule)
+        // 已经在测：排到队里，等这一轮收尾自动接上。静默丢弃会让「长按测另一组」看起来没反应。
+        guard probeTask == nil else {
+            probeQueue.append(request)
+            return
+        }
+        startProbe(request)
+    }
+
+    private func startProbe(_ request: ProbeRequest) {
+        let targets = request.targets
         probeRun = ProbeRun(done: 0, total: targets.count)
+        probeScopeLabel = request.label
         // 收尾整理要知道「这一轮测了哪些源」——只整理测过的，没测的不该被顺手移动。
         probeSwept = targets.map(\.site)
         let token = UUID()
         probeToken = token
+        // 锁屏 / 切到别的 App 之后测速还该继续：拿一张后台续命令牌，测完立刻归还。
+        beginProbeBackgroundTask()
         probeTask = Task { [weak self] in
             var done = 0
             // 分母先按「全部源」建，第一条批次到了再按阶段 1 的结果校正 ——
             // 否则被筛掉的那些永远等不到自己的 done，进度条走不满就消失。
             var total = targets.count
-            for await batch in Self.probeBatches(targets, schedule: schedule) {
+            for await batch in Self.probeBatches(targets, schedule: request.schedule) {
                 if !batch.videoID.isEmpty {
                     SourceProbeStore.shared.record(batch.rows.map { ($0.result, $0.flag) },
                                                    sourceKey: batch.sourceKey, videoID: batch.videoID)
@@ -2134,7 +2200,44 @@ import TVCore
             if let swept = self?.probeSwept {
                 self?.lastTidyNote = self?.tidyAfterSweep(swept, tidy: self?.postSweepTidy ?? .standard)
             }
+            self?.finishProbe()
         }
+    }
+
+    /// 一轮收尾：清状态、归还后台续命令牌、接上排队的那一批。
+    ///
+    /// 顺序不能反 —— 整理（`tidyAfterSweep`）读的是本轮的 `probeSwept`，下一轮一开始就会把它覆盖掉。
+    private func finishProbe() {
+        endProbeBackgroundTask()
+        probeScopeLabel = nil
+        guard !probeQueue.isEmpty else { return }
+        let next = probeQueue.removeFirst()
+        startProbe(next)
+    }
+
+    // MARK: 后台续命
+    //
+    // 测速是「按下就走开」的动作：锁屏、切到微信、翻两个页面，回来时它该还在跑。
+    // iOS 的应用在进入后台几秒后就会被挂起，唯一能多争取一段时间的办法是
+    // `beginBackgroundTask`。系统给的额度（约 30 秒）用完时会回调，那时把令牌还回去 ——
+    // 已经测到的读数早就逐个写进 `SourceProbeStore`，中断也不会丢。
+
+    private func beginProbeBackgroundTask() {
+        #if canImport(UIKit)
+        guard probeBackgroundTask == .invalid else { return }
+        probeBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SourceProbe") { [weak self] in
+            // 额度用尽：先还令牌。任务本身继续挂着，回到前台照样接着测。
+            self?.endProbeBackgroundTask()
+        }
+        #endif
+    }
+
+    private func endProbeBackgroundTask() {
+        #if canImport(UIKit)
+        guard probeBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(probeBackgroundTask)
+        probeBackgroundTask = .invalid
+        #endif
     }
 
     /// 按最新测速得分重排源的优先顺序。
@@ -2171,6 +2274,10 @@ import TVCore
         probeTask?.cancel()
         probeTask = nil
         probeRun = nil
+        probeScopeLabel = nil
+        // 停止 = 停止：排队等着的那几组也一起取消，否则「停止」之后它自己又跑起来。
+        probeQueue.removeAll()
+        endProbeBackgroundTask()
         probeToken = UUID()
     }
 

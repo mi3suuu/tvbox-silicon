@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 from pathlib import Path
 
 RELAY = "149.104.28.149:8100/"
@@ -71,9 +72,41 @@ GROUPS = {
     "03": dict(name="直播 · 可播", routing="direct", enabled=True),
     "04": dict(name="4K · 网盘", routing="auto", enabled=True),
     "05": dict(name="工具 · 插件", routing="auto", enabled=True),
-    "06": dict(name="探测失效（默认关闭）", routing="auto", enabled=False),
+    # 失效与待测按**内容**再分一次：一个装满成人源的「失效」桶对家里有小孩的人是雷，
+    # 对只想复活影视源的人也是噪声。两个桶都默认关闭，开关是观众自己的事。
+    "06": dict(name="影视 · 失效（默认关闭）", routing="auto", enabled=False),
+    "07": dict(name="成人 · 待测/失效（默认关闭）", routing="auto", enabled=False),
 }
-ORDER = ["00", "01", "02", "03", "04", "05", "06"]
+ORDER = ["00", "01", "02", "03", "04", "05", "06", "07"]
+
+# ---- 内容分类（影视 / 成人） -------------------------------------------------------
+#
+# 判据只认**明确的成人标记**：`raw.group` 写着「成人」、名字里有 🔞、或者带成人站点惯用的
+# 词与域名片段。宁可漏判（漏在影视组里的是少数），也不要把奶酪、WebDav 这类名字里的
+# 字母 `av` 判成成人 —— 那会把正常的源从影视组里赶走，比不分类更糟。
+ADULT_STRONG = re.compile("|".join([
+    "🔞", "成人", "伦理", "无码", "有码", "女优", "探花", "黑料", "性吧", "杏吧",
+    "色情", "情色", "淫", "麻豆", "番号", "里番", "约啪", "桃色", "黄片", "裸",
+]), re.I)
+# 字母类词必须有边界：`WebDav`、`Navi` 里都有 `av`，它们不是成人站。
+ADULT_TOKEN = re.compile("|".join([
+    r"4k-?av", r"\bjav\b", r"\bporn\b", r"\bxxx\b", r"\bhentai\b", r"\bnsfw\b",
+    r"missav", r"supjav", r"hstream",
+]), re.I)
+
+ADULT_FEEDS = ("02", "07")
+
+
+def is_adult(site: dict) -> bool:
+    """这条源是不是成人内容。`raw.group` 是最强的证据 —— 采集站自己就这么分的。"""
+    raw = site.get("raw") if isinstance(site.get("raw"), dict) else {}
+    group = str(raw.get("group") or site.get("group") or "")
+    if "成人" in group:
+        return True
+    name = str(site.get("name") or "")
+    key = str(site.get("key") or "")
+    return bool(ADULT_STRONG.search(name) or ADULT_STRONG.search(group)
+                or ADULT_TOKEN.search(name) or ADULT_TOKEN.search(key))
 
 
 def unwrap(api: str) -> str:
@@ -102,6 +135,105 @@ def load_verdicts(path: Path | None) -> dict[str, bool]:
     return verdict
 
 
+def reaudit(document: dict) -> tuple[dict[str, dict], dict[str, int]]:
+    """把成人源从影视/4K/工具组里挑出来，按「能不能播」放进两个成人组。
+
+    第二轮打包只回答一个问题：**内容有没有混**。它不改分组之外的东西 ——
+    直播仍是一个组，影视的可播/待测仍按原来的 `_route`，4K 与工具仍是各自的书架。
+    成人那些进 `02`（`_route` 是直连）或 `07`（待测/失效），并打上 `_content: adult`，
+    让 App 侧将来要按内容过滤时不必再猜一遍。
+    """
+    buckets: dict[str, dict] = {key: {"sites": [], "lives": []} for key in GROUPS}
+    seen: set[str] = set()
+    moved = {"to_adult": 0, "to_adult_dead": 0, "kept_adult": 0}
+
+    for feed in document["feeds"]:
+        key = feed["address"].rsplit("-", 1)[-1]
+        source = feed["document"]
+        if key == "03":
+            buckets["03"]["lives"].extend(source.get("lives") or [])
+            continue
+        for site in source.get("sites") or []:
+            if site["key"] in seen:
+                continue
+            seen.add(site["key"])
+            # 已经在成人组里的源不必再判：它们本来就是按内容分过来的。
+            adult = key in ADULT_FEEDS or is_adult(site)
+            if not adult:
+                buckets[key]["sites"].append(site)
+                continue
+            # 两处都写：随包数据里每个源是「顶层 + raw 一份」的形态（Parser 读 raw，
+            # 脚本与人工排查读顶层），只写一处会让其中一侧看不到这个标记。
+            site["_content"] = "adult"
+            if isinstance(site.get("raw"), dict):
+                site["raw"]["_content"] = "adult"
+            playable = site.get("_route") == "直连"
+            destination = "02" if playable else "07"
+            if destination == key:
+                moved["kept_adult"] += 1
+            elif playable:
+                moved["to_adult"] += 1
+            else:
+                moved["to_adult_dead"] += 1
+            buckets[destination]["sites"].append(site)
+    return buckets, moved
+
+
+def write_pack(buckets: dict[str, dict], document: dict, args, note: str) -> dict:
+    """把分好的桶写成随包 `route.json`（可选再写一份能喂回 `--play-probe` 的导出包）。"""
+    now = dt.datetime.now().timestamp()
+    out = {"format": document.get("format", "yingxia-builtin"),
+           "version": document.get("version", 1), "feeds": []}
+    for key in ORDER:
+        bucket = buckets[key]
+        meta = GROUPS[key]
+        count = len(bucket["sites"]) + len(bucket["lives"])
+        if count == 0:
+            continue
+        address = f"builtin://yingxia-route-{key}"
+        # `raw` keeps only the subscription-level settings. The source list lives once, at the top
+        # level: copying it in here too cost 350 KB in the shipped pack and nothing reads it.
+        raw = {"warning": [], "spider": [], "parses": [], "flags": [], "ijk": [], "_note": note}
+        out["feeds"].append({
+            "address": address,
+            "name": f"{meta['name']}({count})",
+            "enabled": meta["enabled"],
+            "routing": meta["routing"],
+            "document": {
+                "origin": address,
+                "importedAt": now,
+                "sites": bucket["sites"],
+                "lives": bucket["lives"],
+                "raw": raw,
+            },
+        })
+
+    Path(args.out).write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
+    if args.export_out:
+        export = {
+            "format": "yingxia-config",
+            "version": 1,
+            "exportedAt": now,
+            "subscriptions": [
+                {"rank": index, "entry": {"address": feed["address"], "name": feed["name"],
+                                          "enabled": feed["enabled"], "routing": feed["routing"]},
+                 "document": feed["document"]}
+                for index, feed in enumerate(out["feeds"])
+            ],
+        }
+        Path(args.export_out).write_text(json.dumps(export, ensure_ascii=False, separators=(",", ":")))
+    return out
+
+
+def report(out: dict, extra: str) -> None:
+    total_sites = sum(len(feed["document"]["sites"]) for feed in out["feeds"])
+    total_lives = sum(len(feed["document"]["lives"]) for feed in out["feeds"])
+    print(f"feeds={len(out['feeds'])} sites={total_sites} lives={total_lives} {extra}")
+    for feed in out["feeds"]:
+        mark = "" if feed["enabled"] else "  (off)"
+        print(f"  {feed['address'].rsplit('-', 1)[-1]}  {feed['name']:<28} {feed['routing']}{mark}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pack", default="Sources/TVCore/ScriptAssets/builtin/route.json")
@@ -109,10 +241,22 @@ def main() -> None:
     parser.add_argument("--out", default="Sources/TVCore/ScriptAssets/builtin/route.json")
     parser.add_argument("--export-out", default=None,
                         help="also write a ConfigBundle (the --play-probe input) for the new pack")
+    parser.add_argument("--reaudit", action="store_true",
+                        help="只做内容分家：把成人源挑出影视/4K/工具组，按可播性放进 02 / 07")
     args = parser.parse_args()
 
     pack = Path(args.pack)
     document = json.loads(pack.read_text())
+
+    if args.reaudit:
+        buckets, moved = reaudit(document)
+        note = (f"内容复核 {dt.date.today().isoformat()}：成人源只留在 02 / 07，"
+                "影视、4K、工具组里一个都没有；失效组按内容拆成影视 / 成人两个，都默认关闭。")
+        out = write_pack(buckets, document, args, note)
+        report(out, f"to_adult={moved['to_adult']} to_adult_dead={moved['to_adult_dead']} "
+                    f"kept_adult={moved['kept_adult']}")
+        return
+
     feeds = {feed["address"].rsplit("-", 1)[-1]: feed for feed in document["feeds"]}
     verdict = load_verdicts(Path(args.verdicts) if args.verdicts else None)
 
@@ -168,58 +312,13 @@ def main() -> None:
             seen.add(site["key"])
             buckets[destination]["sites"].append(site)
 
-    now = dt.datetime.now().timestamp()
     note = (f"重打包 {dt.date.today().isoformat()}：22 组并为 {len(ORDER)} 组；"
             "旧公共中转地址一律解包成源自己的地址（映匣不再依赖外部中继）；"
-            "只有探测真出过字节的源才留在「可播」组，其余进默认关闭的失效组。")
-    out = {"format": document.get("format", "yingxia-builtin"), "version": document.get("version", 1), "feeds": []}
-    for key in ORDER:
-        bucket = buckets[key]
-        meta = GROUPS[key]
-        count = len(bucket["sites"]) + len(bucket["lives"])
-        if count == 0:
-            continue
-        address = f"builtin://yingxia-route-{key}"
-        # `raw` keeps only the subscription-level settings. The source list lives once, at the top
-        # level: copying it in here too cost 350 KB in the shipped pack and nothing reads it.
-        raw = {"warning": [], "spider": [], "parses": [], "flags": [], "ijk": [], "_note": note}
-        out["feeds"].append({
-            "address": address,
-            "name": f"{meta['name']}({count})",
-            "enabled": meta["enabled"],
-            "routing": meta["routing"],
-            "document": {
-                "origin": address,
-                "importedAt": now,
-                "sites": bucket["sites"],
-                "lives": bucket["lives"],
-                "raw": raw,
-            },
-        })
-
-    Path(args.out).write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
-    if args.export_out:
-        export = {
-            "format": "yingxia-config",
-            "version": 1,
-            "exportedAt": now,
-            "subscriptions": [
-                {"rank": index, "entry": {"address": feed["address"], "name": feed["name"],
-                                          "enabled": feed["enabled"], "routing": feed["routing"]},
-                 "document": feed["document"]}
-                for index, feed in enumerate(out["feeds"])
-            ],
-        }
-        Path(args.export_out).write_text(json.dumps(export, ensure_ascii=False, separators=(",", ":")))
-    total_sites = sum(len(feed["document"]["sites"]) for feed in out["feeds"])
-    total_lives = sum(len(feed["document"]["lives"]) for feed in out["feeds"])
-    print(f"feeds={len(out['feeds'])} sites={total_sites} lives={total_lives} "
-          f"unwrapped={moved['unwrapped']} promoted={moved['promoted']} "
-          f"demoted={moved['demoted']} unverified={moved['unverified']}")
-    for feed in out["feeds"]:
-        mark = "" if feed["enabled"] else "  (off)"
-        print(f"  {feed['address'].rsplit('-', 1)[-1]}  {feed['name']:<24} {feed['routing']}{mark}")
-
+            "只有探测真出过字节的源才留在「可播」组，其余进默认关闭的失效组；"
+            "成人源只落在 02 / 07 两组，影视、4K、工具组里一个都没有。")
+    out = write_pack(buckets, document, args, note)
+    report(out, f"unwrapped={moved['unwrapped']} promoted={moved['promoted']} "
+                f"demoted={moved['demoted']} unverified={moved['unverified']}")
 
 if __name__ == "__main__":
     main()

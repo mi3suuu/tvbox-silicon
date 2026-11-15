@@ -22,6 +22,18 @@ public enum BundledSubscriptions {
         address.lowercased().hasPrefix("builtin://")
     }
 
+    /// 包里装成人内容的两组。分组把它们和影视分开了，**搜索**是另一条通道 —— 它按源问过去，
+    /// 谁参与谁出声。这两组默认退出搜索（见 `Store.excludeAdultFeedsFromSearch`），
+    /// 想看的时候在分组头的菜单里勾回来即可。
+    public static let adultAddresses = [
+        routePrefix + "02",   // 成人 · 可播
+        routePrefix + "07",   // 成人 · 待测/失效
+    ]
+
+    public static func isAdult(_ address: String) -> Bool {
+        adultAddresses.contains(address)
+    }
+
     /// Every bundled feed, in the order `route.json` lists them. Seeded on a fresh install.
     public static var addresses: [String] {
         [kanjuAddress] + feeds.keys.sorted { $0 < $1 }

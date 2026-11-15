@@ -228,11 +228,25 @@ extension View {
 }
 
 /// Shared opaque surfaces keep content and controls legible in both appearances.
-struct Backdrop: View {
+/// 画布本色，不带 `ignoresSafeArea`。
+///
+/// ⛔ 不能叫 `Canvas` —— SwiftUI 自己有一个 `Canvas`（立刻模式绘图层），同名会把
+/// `DanmakuView` 里那种 `Canvas { context, size in … }` 的调用变成「多了一个尾闭包」。
+///
+/// `Backdrop` 是给整页铺底的（它要撑满安全区），而**吸顶的分组头**只需要在滚动内容上盖一层
+/// 与画布同色的底 —— 用 `Backdrop` 会把那层底撑到屏幕边缘，压住导航栏与标签栏。
+/// 两处必须是同一个颜色：写两份 RGB 就会在某一版里慢慢跑偏，分组头看起来像一块补丁。
+struct CanvasColor: View {
     @Environment(\.colorScheme) private var scheme
     var body: some View {
+        (scheme == .dark ? Color(red: 0.020, green: 0.035, blue: 0.090) : Color(red: 0.955, green: 0.965, blue: 0.985))
+    }
+}
+
+struct Backdrop: View {
+    var body: some View {
         // Flat canvas (the icon's navy / cool white); artwork supplies the rest of the colour.
-        (scheme == .dark ? Color(red: 0.020, green: 0.035, blue: 0.090) : Color(red: 0.955, green: 0.965, blue: 0.985)).ignoresSafeArea()
+        CanvasColor().ignoresSafeArea()
     }
 }
 
