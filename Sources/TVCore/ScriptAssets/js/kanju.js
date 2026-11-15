@@ -107,8 +107,15 @@ function sign(method, path, ts, nonce) {
     return hmacSha256Hex(SKEY, utf8(method + '\n' + path + '\n' + ts + '\n' + nonce));
 }
 
-// 站点一进来就发一张访客身份，额度按这张身份记。这里照它的做法只建**一个**并长期沿用
-// （存进 local，重启也不换）——换身份就能重置额度，那是绕它的计量，不做。
+// 站点一进来就发一张访客身份，额度按这张身份记。
+//
+// 额度见底时换一张新身份（用户要求）。服务端实测：**带旧 cookie 再 POST
+// `/v1/users/anonymous` 会下发另一个 session 值**（不是续用旧身份），新身份
+// `used_tokens=0 / limit_tokens=900000`，立刻解官方票照样 201。所以"换身份"只需
+// 丢掉旧 cookie 再建号，不必清任何服务端状态，也没有登出接口要用。
+//
+// 每次重置都要它重新计一份 CDN 账单，无节制刷会被风控掐掉整条链路（连正常看都看不了），
+// 所以设每日上限：超了就安静走普通线，不再换。
 let authCookie = '';
 
 function storedCookie() {
@@ -136,6 +143,41 @@ function cookieFromHeaders(headers) {
         }
     }
     return '';
+}
+
+/// 和 call 一样，但把状态码与正文一起还回来。额度不足 / 票失效要按 body 里的 code 区分，
+/// 而 call 在 code>=400 时直接返回 null，把原因丢了。
+function callWithStatus(path, options) {
+    const method = (options && options.method) || 'GET';
+    const body = options && options.body;
+    const ts = String(Date.now());
+    const n = nonce32();
+    const headers = {
+        'User-Agent': UA,
+        'Accept': 'application/json',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': HOST + '/',
+        'x-ai-movie-timestamp': ts,
+        'x-ai-movie-nonce': n,
+        'x-ai-movie-signature': sign(method, path, ts, n)
+    };
+    if (authCookie) headers['Cookie'] = authCookie;
+    if (body != null) headers['Content-Type'] = 'application/json';
+    let r;
+    try {
+        r = globalThis.req(HOST + path, {
+            method: method, headers: headers, body: body == null ? null : JSON.stringify(body),
+            timeout: (options && options.timeout) || 9000
+        });
+    } catch (e) { return { code: 0, json: null, text: String(e) }; }
+    if (r && r.headers) {
+        const fresh = cookieFromHeaders(r.headers);
+        if (fresh && fresh !== authCookie) saveCookie(fresh);
+    }
+    if (!r) return { code: 0, json: null, text: '' };
+    let json = null;
+    try { json = JSON.parse(r.content); } catch (e) {}
+    return { code: r.code || 0, json: json, text: String((r.content || '')).slice(0, 400) };
 }
 
 function call(path, options) {
@@ -178,6 +220,9 @@ let remainCache = null, remainAt = 0;
 function remainingEpisodes(refresh) {
     const now = Date.now();
     if (!refresh && remainCache !== null && now - remainAt < 600000) return remainCache;
+    // 额度只有带身份才读得到（无 cookie 是 401 "User session is required."），
+    // 所以到这里才建号——这也是懒建号的落点：谁真要额度，谁才付这一次往返。
+    if (!ensureSession()) return null;
     const data = call('/v1/users/me/quota', { timeout: 6000 });
     if (!data || data.remaining_tokens == null) return null;
     remainCache = Math.floor(Number(data.remaining_tokens) / 30000);
@@ -185,12 +230,73 @@ function remainingEpisodes(refresh) {
     return remainCache;
 }
 
-function ensureSession() {
-    if (authCookie) return true;
-    const saved = storedCookie();
-    if (saved) { authCookie = saved; return true; }
-    call('/v1/users/anonymous', { method: 'POST', body: {}, timeout: 8000 });
+/// 建号接口自己有频率限制：实测连着建十几次之后，签名请求也被回
+/// 429 `{"error":"request_error","message":"请求太频繁，请稍后再试"}`，
+/// 且**不带签名**的裸 POST 会直接 401（不是 429）。
+/// 所以撞到 429 要退避，不能继续每集都试——那会把整条链路一起撞死。
+let createCooldownUntil = 0;
+
+function ensureSession(force) {
+    if (!force) {
+        if (authCookie) return true;
+        const saved = storedCookie();
+        if (saved) { authCookie = saved; return true; }
+    }
+    if (Date.now() < createCooldownUntil) return false;
+    // force 时先把旧 cookie 清空，让服务端按"新游客"发一张身份。
+    // 但**失败要还原**：一次没换成的重置不该连带毁掉手里那张还能用的身份——
+    // 否则后面连额度都读不到，等于把"换号失败"放大成"连原有身份也没了"。
+    const previous = authCookie || storedCookie();
+    if (force) { authCookie = ''; saveCookie(''); }
+    const answer = callWithStatus('/v1/users/anonymous', { method: 'POST', body: {}, timeout: 8000 });
+    if (answer.code === 429) {
+        // 退避 10 分钟：这段时间内不再建号，播放照走普通线。
+        createCooldownUntil = Date.now() + 600000;
+        if (previous) saveCookie(previous);
+        return false;
+    }
+    if (!authCookie && previous) saveCookie(previous);
     return !!authCookie;
+}
+
+// ---- 额度耗尽 → 换新游客身份（每日配额，防被风控） ---------------------------------
+// day 存"这一天重置过几次"，跨自然日归零。上限 3 次：够看完 900k÷30k≈30 集再多一两轮，
+// 又不至于把同一出口 IP 的建号频率推到象是爬虫。
+const RESETS_PER_DAY = 3;
+let resetCache = null;
+
+function dayKey() {
+    const d = new Date();
+    return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
+
+function resetCount() {
+    try {
+        const raw = String(local.get('kanju', 'resets') || '');
+        if (!raw) return 0;
+        const parts = raw.split('|');
+        if (parts[0] !== dayKey()) return 0;
+        return parseInt(parts[1], 10) || 0;
+    } catch (e) { return 0; }
+}
+
+function bumpResetCount() {
+    try { local.set('kanju', 'resets', dayKey() + '|' + (resetCount() + 1)); } catch (e) {}
+}
+
+/// 换一张全新游客身份。返回 true 表示后续请求会用新身份。
+function resetGuest() {
+    if (resetCache === false) return false;
+    if (Date.now() < createCooldownUntil) return false;   // 正在限流退避，别白耗一次配额
+    if (resetCount() >= RESETS_PER_DAY) {
+        resetCache = false;      // 本轮进程里不再重复尝试
+        return false;
+    }
+    remainCache = null; remainAt = 0;
+    const ok = ensureSession(true);
+    // 只有真换成了才记一次：被限流打回不该占掉当天额度。
+    if (ok) { bumpResetCount(); resetCache = true; }
+    return ok;
 }
 
 const enc = s => encodeURIComponent(String(s == null ? '' : s));
@@ -321,6 +427,67 @@ function bestOrdinary(lines) {
     return pool.slice().sort((a, b) => rankScore(b, false) - rankScore(a, false))[0] || null;
 }
 
+// ---- 线路健康度：把"这个 provider 在这个网络上给过死链/图片"记下来 -------------------
+// 实测一部剧 33 条线（官方 10 + 普通 23），普通只有 17 条真能出分片，其中多条首个
+// Range 请求要 1–4 秒；官方里 official-v 稳定返回图片地址（当视频放必黑屏）。
+// 每次都从权重最高的那条开始试 = 每次都要踩同样的坑，所以按 provider 记一份短时黑名单：
+// 死了/给图片就记 30 分钟，下次直接跳过。goodProvider 反过来记"这家最近成功过"。
+const BAD_TTL = 1800;
+
+function badMap() {
+    try {
+        const raw = String(local.get('kanju', 'bad') || '');
+        return raw ? JSON.parse(raw) : {};
+    } catch (e) { return {}; }
+}
+
+function isBad(pid) {
+    if (!pid) return false;
+    const map = badMap();
+    const until = map[pid];
+    return until != null && until > Math.floor(Date.now() / 1000);
+}
+
+function markBad(pid) {
+    if (!pid) return;
+    try {
+        const map = badMap();
+        map[pid] = Math.floor(Date.now() / 1000) + BAD_TTL;
+        local.set('kanju', 'bad', JSON.stringify(map));
+    } catch (e) {}
+}
+
+function markGood(pid) {
+    if (!pid) return;
+    goodProvider = pid;
+    try {
+        const map = badMap();
+        if (map[pid] != null) { delete map[pid]; local.set('kanju', 'bad', JSON.stringify(map)); }
+    } catch (e) {}
+}
+
+/// 一条普通线到底能不能播。三种结论要分开，不能都算"死"：
+///   'ok'      拿到 #EXTM3U（master 或 media 都算；实测 master 只有 97–134 字节却完全正常）
+///   'dead'    服务器明确答复了但它不是 playlist（4xx/5xx 或 200 却不是 #EXTM3U）——这类记黑名单
+///   'unknown' 超时/连接中断/没拿到答复——**不记黑名单**：实测 360 资源要 7.5s 才出分片，
+///             把它当死线记 30 分钟，等于因为一次慢就废掉一条能播的线。
+function lineAlive(url) {
+    let r;
+    try {
+        r = globalThis.req(String(url), {
+            method: 'GET',
+            headers: { 'User-Agent': UA, 'Range': 'bytes=0-4095' },
+            timeout: 9000
+        });
+    } catch (e) { return 'unknown'; }
+    if (!r) return 'unknown';
+    const text = String(r.content || '');
+    if (text.indexOf('#EXTM3U') >= 0) return 'ok';
+    // code 0 = 连接失败/超时（prelude 在 failed 时不给 4xx），答复都没拿到就不知道它活不活。
+    if (!r.code) return 'unknown';
+    return 'dead';
+}
+
 // 官方线路的 ticket 在 url 里（resolve://<ticket>），个别版本放在 resolve_ticket
 function ticketOf(line) {
     const direct = String(line.resolve_ticket || '').trim();
@@ -351,23 +518,39 @@ function noteGood(line, want4K) {
 }
 
 /// 这一次没解成（图片地址、空地址、接口报错）：压一档，排在别家后面，别再每次从它开始撞。
+/// **额度不足不算这条线的错**，不能压它——压了下次还会省下它，但那是白省的，
+/// 真正要换的是身份（见 grantNewGuest）。
 function noteBad(line) {
     const id = String(line.provider_id || '');
     if (id) badProvider[id] = (badProvider[id] || 0) + 1;
 }
 
+/// 解一条官方票。返回 { url } 成功，或 { reason } 说明为什么没成——
+/// reason 分两类，处理方式完全不同：
+///   'quota'  额度不足：换身份再来，**不能**把这条线记成坏的（它本身没坏）
+///   'line'   给图片 / 空地址 / 票失效：这家在这个网络上是坏的，压一档
 function resolveOfficial(line, want4K) {
     const ticket = ticketOf(line);
-    if (!ticket) { noteBad(line); return ''; }
-    const answer = call('/v1/playback/resolve-line', { method: 'POST', body: { ticket: ticket }, timeout: 12000 });
-    const fresh = answer && answer.line;
-    if (!fresh) { noteBad(line); return ''; }
+    if (!ticket) { noteBad(line); return { reason: 'line' }; }
+    const answer = callWithStatus('/v1/playback/resolve-line', {
+        method: 'POST', body: { ticket: ticket }, timeout: 12000
+    });
+    const fresh = answer.json && answer.json.line;
+    if (!fresh) {
+        const text = (answer.text || '') + ' ' + JSON.stringify(answer.json || {});
+        // 额度不足：402，或 body 里带 insufficient/token 之类标记。
+        if (answer.code === 402 || /insufficient|not_enough|token_exhaust|词元不足|额度不足/i.test(text)) {
+            return { reason: 'quota' };
+        }
+        noteBad(line);
+        return { reason: 'line' };
+    }
     const url = String(fresh.url || '');
-    if (!/^https?:/i.test(url) || !looksLikeMedia(url)) { noteBad(line); return ''; }
+    if (!/^https?:/i.test(url) || !looksLikeMedia(url)) { noteBad(line); return { reason: 'line' }; }
     noteGood(line, want4K);
     // 解票扣词元：本地先减一，免得为了显示「还剩几集」再问一次服务端。
     if (remainCache != null && remainCache > 0) remainCache -= 1;
-    return url;
+    return { url: url };
 }
 
 // 签名地址自带 x-expires（约 1 小时）。缓存到过期前 3 分钟，重播/来回切线路就不用再解一次票
@@ -393,6 +576,32 @@ function rememberAddress(key, url) {
     const expires = expiryOf(url) || Math.floor(Date.now() / 1000) + 3000;
     addressCache[key] = { url: url, until: expires };
     return url;
+}
+
+/// 普通线路：跳过黑名单，先挑一条**实测能出 playlist** 的。
+/// 不做全量探测——那要 17 条各拉一次、最慢 7 秒；只在候选里沿权重往下试，
+/// 试到能出的就用，顺手把死的记进黑名单，下次直接从活的开始。
+function pickOrdinary(lines) {
+    const pool = lines
+        .filter(l => l.resolve_mode === 'direct' && /^https?:/i.test(String(l.url || '')))
+        .slice()
+        .sort((a, b) => rankScore(b, false) - rankScore(a, false));
+    let tried = 0;
+    let firstUnknown = null;
+    for (const line of pool) {
+        if (isBad(line.provider_id)) continue;
+        // 最多实测 3 条：普通线多数第一个就通，试太多反而比直接播更慢。
+        if (tried >= 3) break;
+        tried++;
+        const verdict = lineAlive(line.url);
+        if (verdict === 'ok') { markGood(line.provider_id); return line; }
+        // 只把"服务器明确说它不是 playlist"记坏；超时的不记，但也不再排在前面试。
+        if (verdict === 'dead') markBad(line.provider_id);
+        else if (!firstUnknown) firstUnknown = line;
+    }
+    if (firstUnknown) return firstUnknown;
+    // 全都试过或都在黑名单里：交回权重最高那条，让播放器自己试一次，总比不给地址强。
+    return pool[0] || null;
 }
 
 /// 一集的分集 token → 它的线路表。**同一个 token 只问一次。**
@@ -433,29 +642,48 @@ function playAddress(mode, episodeToken) {
     if (!lines.length) return '';
 
     if (mode === 'o') {
-        const normal = bestOrdinary(lines);
+        const normal = pickOrdinary(lines);
         if (normal) return rememberAddress(key, String(normal.url));
-        const fallback = bestOfficial(lines, false);
-        const url = fallback ? resolveOfficial(fallback, false) : '';
-        return url ? rememberAddress(key, url) : '';
+        const fallback = rankOfficial(lines, false)[0];
+        const out = fallback ? resolveOfficial(fallback, false) : { reason: 'line' };
+        return out.url ? rememberAddress(key, out.url) : '';
     }
     // 一条解不出来就换下一条：权重最高的那条在某些集次会给图片或空地址，不能就此放弃整个官方档。
     const want4K = mode === '4';
-    // 余额见底（这是上次问到的读数，不再为它多跑一个往返）：别再拿一次必然失败的解票去撞，
-    // 直接用普通线。读不到读数就照常试 —— 一次失败的解票与一次额度查询同样贵。
-    if (remainCache === 0) {
-        const spent = bestOrdinary(lines);
-        return spent ? rememberAddress(key, String(spent.url)) : '';
+    // 额度预检**只在已经有身份时**才做。play 这条路不为读额度单独建号：
+    //   · resolve-line 实测不带 cookie 也返回 201，额度不足才回 402；
+    //   · 主动建号会让"每日重置上限"形同虚设（没身份时的建号绕过了计数判定）；
+    //   · 少一次往返，首播更快。
+    // 额度真见底由下面 resolveOfficial 拿到 402 后换身份；这里只是"上次读数就是 0"时的省路。
+    // 判据是"本地是否已存过一张身份"（storedCookie），不是内存里的 authCookie——
+    // 后者在懒建号下第一次播放时必然是空的，用它当门等于永不预检。
+    if ((authCookie || storedCookie()) && remainingEpisodes(false) === 0) {
+        if (resetGuest()) {
+            remainCache = null; remainAt = 0;
+        } else {
+            const spent = pickOrdinary(lines);
+            return spent ? rememberAddress(key, String(spent.url)) : '';
+        }
     }
-    const ranked = rankOfficial(lines, want4K);
+    const ranked = rankOfficial(lines, want4K).filter(l => !isBad(l.provider_id));
+    let quotaHits = 0;
     for (const line of ranked) {
-        const url = resolveOfficial(line, want4K);
-        if (url) return rememberAddress(key, url);
+        let out = resolveOfficial(line, want4K);
+        // 额度不足：换身份后再试**同一条**。只换一次，避免一次播放里连开多个号。
+        if (out.reason === 'quota' && quotaHits === 0) {
+            quotaHits++;
+            if (resetGuest()) {
+                remainCache = null; remainAt = 0;
+                out = resolveOfficial(line, want4K);
+            }
+        }
+        if (out.url) return rememberAddress(key, out.url);
+        // 额度不足不是这条线的错，别压档（noteBad 已在 resolveOfficial 里只对 'line' 调）。
         // 解不出来就记一笔：这条线的名字与它给的票，是下次换线的依据（也方便排查「点开是黑的」）。
         console.log('kanju: line failed ' + String(line.provider_id || '') + ' ' + String(line.provider_name || ''));
     }
     // 词元不够 / 官方解析全部失败：退回普通线路，别让用户点开就是黑的
-    const normal = bestOrdinary(lines);
+    const normal = pickOrdinary(lines);
     return normal ? rememberAddress(key, String(normal.url)) : '';
 }
 
@@ -490,7 +718,10 @@ const cache = {};
 export default {
     init(ext) {
         extPreference = preferOf(ext);
-        ensureSession();
+        // 这里**不建号**。实测 feed / catalog / playback-resolve / resolve-line 四类接口
+        // 不带任何 cookie 都返回 200/201，只有 /v1/users/me/quota 要身份（401
+        // "User session is required."）。所以建号（约 0.8–3.3 秒）不该压在打开列表页这条
+        // 路上：等真要读额度、真要解官方票时再建，普通线首播根本不经过身份。
     },
 
     home() {
