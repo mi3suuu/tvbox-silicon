@@ -31,6 +31,18 @@ enum QALaunch {
         }
     }
     static var page: String? { UserDefaults.standard.string(forKey: "qaPage") }
+    /// `open-detail:` 在没有 `-qaAutoOpen` 时是否自动导航进详情页。
+    ///
+    /// iOS 默认开：真机/模拟器截图场景无人点击，不自动导航就永远停在「Open video」那一页，
+    /// 而**不导航就不会登记 `watchPageScopes`** —— 被测机制本身压根没跑。
+    /// tvOS 默认关：`TVNavigationUITests` 必须靠点这个按钮才测得 Back，自动导航会把按钮顶掉。
+    static var autoOpensDetailByDefault: Bool {
+        #if os(tvOS)
+        false
+        #else
+        true
+        #endif
+    }
     /// `-qaScroll live` scrolls Watch Now to that section once recommendations have loaded.
     static var scrollTarget: String? { UserDefaults.standard.string(forKey: "qaScroll") }
 
@@ -461,9 +473,24 @@ enum QALaunch {
                     VideoDetailView(video: video, client: CatalogClient(site: site, origin: config.origin, jarURL: config.spiderURL))
                 }
             case "open-detail":
+                // `-qaPage open-detail:<site>:<video>`：经 `RouteLink` **真实导航**进详情页。
+                //
+                // ⛔ 为什么必须是真实导航而不是直接 `VideoDetailView(...)`（`detail:` 那条分支）：
+                // `watchPageScopes` 的登记在 `VideoDetailView.watchPageLifecycleBody.onAppear` 里，
+                // 只有页面被 push 上栈才会跑。绕过导航就等于绕过被测机制本身。
+                //
+                // `-qaAutoOpen 0` 关掉自动导航（tvOS 的 Back 测试要点这个按钮，抢跑会把按钮顶掉）；
+                // 不给就用平台默认：iOS 开、tvOS 关。
                 if parts.count == 3, let site = config.sites.first(where: { $0.key == parts[1] }),
                    let video = Video(json: ["vod_id": .string(parts[2]), "vod_name": .string("测试影片 \(parts[2])")], origin: config.origin) {
-                    RouteLink { VideoDetailView(video: video, client: CatalogClient(site: site, origin: config.origin, jarURL: config.spiderURL)) } label: {
+                    // 用 `object(forKey:) != nil` 判「传了没有」：`bool(forKey:)` 对缺失键返回 false，
+                    // 分不清「没传」和「显式传 0」，而这正是默认值要区分的两件事。
+                    let autoOpen = UserDefaults.standard.object(forKey: "qaAutoOpen") != nil
+                        ? UserDefaults.standard.bool(forKey: "qaAutoOpen")
+                        : Self.autoOpensDetailByDefault
+                    QAAutoRouteLink(autoOpen: autoOpen) {
+                        VideoDetailView(video: video, client: CatalogClient(site: site, origin: config.origin, jarURL: config.spiderURL))
+                    } label: {
                         Text("Open video").font(.title2).padding(24)
                     }
                     .accessibilityIdentifier("qa.open-detail")

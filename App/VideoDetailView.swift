@@ -3861,6 +3861,13 @@ struct VideoDetailView: View {
                 // 下面的 `.onChange(of: watchChannel)` 会在频道就绪/换集后再挂一次，
                 // 保证最终挂上的是有值的那个。
                 armSleepTimer()
+                // QA 取证：`watchPageScopes` 是否登记，是「观看页真的挂上了」的**唯一可读证据**。
+                //
+                // 深链 `-qaPage open-detail:` 过去停在「Open video」按钮上不导航，于是这里从不执行，
+                // 现象是「页面对着，机制没跑」。把这行留下，日志里一眼能分清两种失败：
+                //   · 没有 `[WatchScope] onAppear` → 页面压根没被 push（导航没发生）
+                //   · 有 onAppear 但 scopes 空       → scope 算不出来（origin/sourceKey 不对）
+                oneSkinLog("[WatchScope] onAppear page=\(video.id) scopes=\(watchScopes.count) total=\(store.watchPageScopes.count)")
                 // ⛔ 这里**不再动坞**。
                 //
                 // 上一版写的是 `store.miniPlayerActive = false`（「回到观看页，小窗授权作废」）。

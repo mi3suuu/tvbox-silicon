@@ -943,6 +943,46 @@ struct RouteLink<Label: View>: View {
     }
 }
 
+/// `RouteLink` + **自动导航一次**。只在 DEBUG 的 QA 深链里用。
+///
+/// 为什么需要它：`-qaPage open-detail:` 过去只渲染一个 `RouteLink` 按钮，必须有人点才会导航，
+/// 于是无人值守时截图永远停在「Open video」那一页 —— 而**不导航就不会登记 `watchPageScopes`**
+/// （登记在 `VideoDetailView.watchPageLifecycleBody` 的 `.onAppear` 里，只有真正 push 才会跑）。
+///
+/// ⛔ 这不是造替身。它落到的页面、走的路径和用户点同一个 `RouteLink` **完全一致**：
+/// 同一个 `Route` 值 → 同一个 `RoutePath.opener` → 同一条 `path` →
+/// `navigationDestination(for: Route.self)` → `PushedRouteTabSafeArea { route.build() }`。
+/// 唯一差别是触发器（自动 vs 手指），而「导航发生了」这件事本身就是被验证的对象。
+///
+/// `autoOpen` 由 `QALaunch` 按平台给默认：iOS 默认开（真机/模拟器截图无需点击），
+/// tvOS 默认关 —— `TVNavigationUITests` 要靠点这个按钮来测 Back，抢跑会把按钮顶掉。
+struct QAAutoRouteLink<Label: View>: View {
+    private let route: Route
+    private let label: Label
+    private let autoOpen: Bool
+    @Environment(\.openRoute) private var openRoute
+    @State private var opened = false
+    init<Destination: View>(autoOpen: Bool, @ViewBuilder destination: @escaping @MainActor () -> Destination,
+                            @ViewBuilder label: () -> Label) {
+        route = Route { AnyView(destination()) }
+        self.autoOpen = autoOpen
+        self.label = label()
+    }
+    var body: some View {
+        NavigationLink(value: route) { label }
+            .task {
+                guard autoOpen, !opened else { return }
+                opened = true
+                guard let openRoute else {
+                    oneSkinLog("[QA] autoOpen skipped: no openRoute in environment")
+                    return
+                }
+                openRoute(route)
+                oneSkinLog("[QA] autoOpen pushed route (watch page should now register its scopes)")
+            }
+    }
+}
+
 extension EnvironmentValues {
     /// Pushes a page onto the enclosing stack's path. A page opened with `navigationDestination(item:)` is not on the
     /// path, so a `RouteLink` on it pushed underneath it: the new page only showed after Back.
