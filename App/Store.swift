@@ -3,25 +3,18 @@ import TVCore
 
 @MainActor @Observable final class Store {
     static let defaultURL = "https://raw.githubusercontent.com/qist/tvbox/master/fty.json"
-    /// Every subscription a fresh install should carry. The three addresses aggregate the two
-    /// bundles' sources so an overwritten install keeps nothing orphaned: the public fty.json,
-    /// the 124.223.214.31 server, and the local Rex aggregate served by the Mac on the LAN.
-    /// Feeds this build adds on a fresh install.
+    /// Every subscription a fresh install should carry: the public fty.json, the 124.223.214.31
+    /// server, and the 看剧AI pack that ships inside the app.
     ///
-    /// A `.local` name is not one of them: `macdemacbook-pro.local` only resolves on the LAN it was
-    /// named on, so every fresh install on a phone elsewhere spent its first launch on a DNS failure
-    /// and an error banner. The development Mac's feed is kept for debug builds, where the Mac is
-    /// usually the machine serving it.
-    static let aggregatedSubscriptionAddresses: [String] = {
-        var addresses = [
-            "https://raw.githubusercontent.com/qist/tvbox/master/fty.json",
-            "http://124.223.214.31:55316/9981",
-        ]
-        #if DEBUG
-        addresses.append("http://macdemacbook-pro.local:8081/api/rex/movie-degraded.json")
-        #endif
-        return addresses
-    }()
+    /// ⛔ No address here may name a machine on one LAN. `macdemacbook-pro.local:8081` did, and
+    /// every fresh install elsewhere spent its first launch on a DNS failure and an error banner —
+    /// a phone imported the sources and then could never refresh them. A feed the app itself
+    /// carries is spelled `builtin://…` (see `BundledSubscriptions`) and answers from the bundle,
+    /// so a Mac, a phone on a train and an offline iPad all behave the same.
+    static let aggregatedSubscriptionAddresses: [String] = [
+        "https://raw.githubusercontent.com/qist/tvbox/master/fty.json",
+        "http://124.223.214.31:55316/9981",
+    ] + BundledSubscriptions.addresses
     private static let dismissedAggregatesKey = "dismissedAggregateSubscriptions"
     /// Aggregate addresses the viewer deleted on purpose. Launch-time seeding skips them; adding one
     /// back by hand clears it again.
@@ -1123,7 +1116,10 @@ import TVCore
         guard !pending.isEmpty else { return }
         // Add them up front, then fetch side by side: the merged list grows as each one answers,
         // instead of a serial loop where the viewer waits through every full fetch in turn.
-        let entries = pending.map { stamping(SubscriptionEntry(address: $0, name: "")) }
+        let entries = pending.map { address in
+            // 内置包自带默认路由与开关（失效组、无实现体组默认关闭），别一律当成 enabled 的新订阅。
+            stamping(BundledSubscriptions.entry(for: address) ?? SubscriptionEntry(address: address, name: ""))
+        }
         subscriptions += entries
         saveSubscriptionList()
         await beginImport()
@@ -1458,8 +1454,30 @@ import TVCore
         var rebuilt = false
         importTotal = entries.count
         importDone = 0
+        // 内置订阅没有地址可拉：内容就在 bundle 里，已经有的一律保持原样（用户改过的源设置、填过的
+        // Cookie 不会被一次刷新冲掉）。它们算作已完成，进度条只对真正要联网的那几条走。
+        var remote: [SubscriptionEntry] = []
+        var loadedBundled = false
+        for entry in entries {
+            guard BundledSubscriptions.isBundled(entry.address) else { remote.append(entry); continue }
+            if documents[entry.address] == nil, let document = BundledSubscriptions.document(for: entry.address) {
+                keep(document, for: entry)
+                loadedBundled = true
+            }
+            subscriptionErrors[entry.address] = nil
+            importDone += 1
+        }
+        // 二十几组内置订阅一次性装进来，重建一次源列表就够——逐组重建会把列表重排二十遍。
+        if loadedBundled {
+            rebuildSubscription(resetting: !rebuilt)
+            rebuilt = true
+        }
+        guard !remote.isEmpty else {
+            saveSubscriptionList()
+            return
+        }
         await withTaskGroup(of: (SubscriptionEntry, Result<SubscriptionImport, any Error>).self) { group in
-            for entry in entries {
+            for entry in remote {
                 group.addTask {
                     do { return (entry, .success(try await http.subscriptionImport(WebAddress.resolve(entry.address)))) }
                     catch { return (entry, .failure(error)) }

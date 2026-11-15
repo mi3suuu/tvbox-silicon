@@ -351,6 +351,12 @@ public struct CatalogClient: Sendable {
            ScriptRuntime.runsWebBox(site, script) {
             return try await ScriptRuntime.shared.request(site: site, scriptURL: script, params: params, http: http, origin: origin)
         }
+        // A script that ships inside the app (`assets://…`) has no HTTP address for the Mac's Node host
+        // to fetch, and the in-process runtime reads the bundle directly — same reason as WeBox above.
+        if site.api.hasPrefix("assets://"), ScriptRuntime.available,
+           let script = try? site.scriptURL(origin: origin) {
+            return try await ScriptRuntime.shared.request(site: site, scriptURL: script, params: params, http: http, origin: origin)
+        }
         // A bundled lite port runs first, in-process on QuickJS everywhere; when it fails or answers
         // with nothing usable, the source's JAR spider answers instead.
         if let script = site.liteScript, ScriptRuntime.available, await LiteFallback.shared.prefersPort(site.key) {
