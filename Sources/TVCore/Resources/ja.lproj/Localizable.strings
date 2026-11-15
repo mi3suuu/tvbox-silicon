@@ -2626,6 +2626,7 @@
 "Add to the Middle" = "画面中央に追加";
 "Fixed in the Top Bar" = "上部バーに固定";
 "Add %@" = "「%@」を追加";
+"Where does %@ go?" = "「%@」はどちらに置きますか？";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "上部バーに固定されます。コントロールをロックすると、ここが唯一の解除入口になります。";
 "Fixed Keys" = "固定キー";
 "More (…) — top right" = "その他（…）—— 右上";

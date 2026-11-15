@@ -27,6 +27,8 @@ struct PlayerControlsSettingsView: View {
     @State private var bottomOrder: [PlayerControl] = PlayerControlsLayout.current.bottom
     /// 只看预览用的形态选择器 —— 不影响配置。
     @State private var previewShape: PlayerControlsLayout.Shape = Self.initialPreviewShape
+    /// 正在问「放回哪一行」的控件：两边都能放的才需要问。
+    @State private var addingTo: PlayerControl?
 
     /// 预览默认看横持（配置最满的那个形态）。
     /// `-qaPreviewShape unfolded` 可预选，供无输入设备的截图 QA 用。
@@ -61,20 +63,16 @@ struct PlayerControlsSettingsView: View {
             // ── 顶栏 ──
             orderSection(
                 title: L10n.text("Top Bar"),
-                symbol: "arrow.up",
                 controls: topOrder,
                 footer: L10n.text("Drag to reorder. A screen too narrow for all of them moves the rest into More instead of dropping them."),
-                zone: .topBar,
                 apply: applyTopOrder
             )
 
             // ── 底栏（进度那一行）──
             orderSection(
                 title: L10n.text("Progress Row"),
-                symbol: "arrow.down",
                 controls: bottomOrder,
                 footer: L10n.text("Play, ±10 seconds and the episode keys sit in the middle of the picture; everything else lines up along the progress bar, in this order — the progress bar itself included. The Original skin keeps its own fixed progress row, so only the buttons move there."),
-                zone: .progressRow,
                 apply: applyBottomOrder
             )
 
@@ -121,22 +119,47 @@ struct PlayerControlsSettingsView: View {
                 }
             }
         }
+        // 拖拽排序靠 List 自带的 `onMove`，而它只在编辑态下露出把手。
+        // ⚠️ 这一行必须挂在**整页**（也就是 Form）上：editMode 是被 List 从自己环境里读的，
+        // 挂在 Section 上写的是 List 的子节点，读不到 —— 那正是上一版「写着能拖、实际拖不动」。
+        .environment(\.editMode, .constant(.active))
+        .confirmationDialog(addTitle, isPresented: isAdding, titleVisibility: .visible) {
+            if let control = addingTo {
+                ForEach(control.placements, id: \.self) { placement in
+                    Button(placement.title) { add(control, to: placement) }
+                }
+            }
+            Button(L10n.text("Cancel"), role: .cancel) { addingTo = nil }
+        }
+    }
+
+    private var addTitle: String {
+        guard let control = addingTo else { return "" }
+        return L10n.text("Where does %@ go?", control.title)
+    }
+
+    private var isAdding: Binding<Bool> {
+        Binding(get: { addingTo != nil }, set: { if !$0 { addingTo = nil } })
     }
 
     // MARK: 行
 
     /// 一个可拖拽排序的列表段。
     ///
-    /// 用**整行拖拽 + 行尾删除键**，不用 `EditMode`：
-    /// `Form` 里把 `.environment(\.editMode, .constant(.active))` 挂在 Section 上
-    /// 并不会让行进入编辑态（把手与删除键都不出现），用户看到的就是「说能拖，实际拖不动」。
-    /// 整行 `.draggable` + 落到某一行 `.dropDestination` 在 Form 里是可靠的，
-    /// 也不需要额外的「编辑」开关。
+    /// ## 为什么是 `onMove`，不是 `draggable` + `dropDestination`
+    ///
+    /// 上一版用的是 `.draggable(字符串)` 落 `.dropDestination`。实测症状：行提得起来，
+    /// 松手什么都不发生 —— 目标行的 `dropDestination` 一次也没回调。`Form`（= `List`）
+    /// 自己有托放与滚动的一整套 hit test，行内自建的 `Transferable` 落点在里面并不可靠，
+    /// 而重排本来就有系统实现，没理由自己再写一套。
+    ///
+    /// 现在用 List 自己的 `onMove`（与「标签栏编辑」「测速源排序」同一套）：编辑态下
+    /// 每行尾部出现真正的拖拽把手，手感由系统给。
+    /// 编辑态由整页 `editMode` 打开，见 `body` 末尾那条注释。
     @ViewBuilder
-    private func orderSection(title: String, symbol: String,
+    private func orderSection(title: String,
                               controls: [PlayerControl],
                               footer: String,
-                              zone: PlayerControl.Placement,
                               apply: @escaping ([PlayerControl]) -> Void) -> some View {
         SettingsGroup(title: title, footer: footer) {
             if controls.isEmpty {
@@ -144,14 +167,25 @@ struct PlayerControlsSettingsView: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(controls) { control in
-                orderRow(control, in: controls, zone: zone, apply: apply)
+                orderRow(control) {
+                    var updated = controls
+                    updated.removeAll { $0 == control }
+                    apply(updated)
+                }
+            }
+            .onMove { source, destination in
+                var updated = controls
+                updated.move(fromOffsets: source, toOffset: destination)
+                apply(updated)
             }
         }
     }
 
-    private func orderRow(_ control: PlayerControl, in list: [PlayerControl],
-                          zone: PlayerControl.Placement,
-                          apply: @escaping ([PlayerControl]) -> Void) -> some View {
+    /// 一行：图标 + 名称（+ 装不下/只在某形态可用的说明）+ 行尾「收进更多」。
+    ///
+    /// 拖拽把手由 List 在编辑态下补在行尾，这里不再自己画一个 ——
+    /// 两个把手并排只会让人不知道该抓哪个。
+    private func orderRow(_ control: PlayerControl, remove: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
             ControlChip(control: control)
             VStack(alignment: .leading, spacing: 1) {
@@ -162,13 +196,7 @@ struct PlayerControlsSettingsView: View {
                 }
             }
             Spacer(minLength: 8)
-            Image(systemName: "line.3.horizontal")
-                .font(.footnote).foregroundStyle(.tertiary)
-            Button {
-                var updated = list
-                updated.removeAll { $0 == control }
-                apply(updated)
-            } label: {
+            Button(action: remove) {
                 Image(systemName: "minus.circle.fill")
                     .font(.title3)
                     .foregroundStyle(.red.opacity(0.85))
@@ -177,33 +205,14 @@ struct PlayerControlsSettingsView: View {
             .accessibilityLabel(L10n.text("Move %@ to More", control.title))
         }
         .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .draggable(zone.rawValue + Self.dragSeparator + control.rawValue)
-        .dropDestination(for: String.self) { items, _ in
-            guard let payload = items.first,
-                  // 拖拽串带**来源区**：顶栏 ↔ 进度行之间不允许互拖。
-                  // 以前不分来源，把「播放键」拖进顶栏会先加进去再被播放器挪回底栏，
-                  // 表现为「松手后它自己跳回去了」。
-                  let dropped = Self.control(from: payload),
-                  dropped != control,
-                  dropped.placements.contains(zone) else { return false }
-            var updated = list.filter { $0 != dropped }
-            let target = updated.firstIndex(of: control) ?? updated.count
-            updated.insert(dropped, at: target)
-            apply(updated)
-            return true
-        }
     }
 
-    /// 拖拽串里「区」与「控件」之间的分隔符。控件 rawValue 只有字母，用 `|` 不会撞。
-    static let dragSeparator = "|"
-
-    static func control(from payload: String) -> PlayerControl? {
-        guard let bar = payload.firstIndex(of: Character(dragSeparator)) else { return nil }
-        return PlayerControl(rawValue: String(payload[payload.index(after: bar)...]))
-    }
-
-    /// 「加回来」的一行：菜单里每一项都是它**真正画得出来**的落点。
+    /// 「加回来」的一行：每一个落点都是它**真正画得出来**的位置。
+    ///
+    /// 用按钮 + 确认面板，不用 `Menu`：这一页常驻编辑态（`onMove` 需要），
+    /// 行内 `Menu` 的弹出依赖行点击，容易与 List 的编辑手势重叠；
+    /// 按钮 + 面板两条路都不经过行点击，编辑态开着也照常。
+    /// 只有一个落点的控件（绝大多数）连面板都不弹，点一下直接回去。
     private func addRow(_ control: PlayerControl) -> some View {
         HStack(spacing: 12) {
             ControlChip(control: control)
@@ -215,17 +224,11 @@ struct PlayerControlsSettingsView: View {
                 }
             }
             Spacer(minLength: 8)
-            Menu {
-                ForEach(control.placements, id: \.self) { placement in
-                    Button {
-                        var updated = PlayerControlsLayout(stored: stored)
-                        updated.add(control, to: placement)
-                        topOrder = updated.top
-                        bottomOrder = updated.bottom
-                        stored = updated.stored
-                    } label: {
-                        Label(placement.title, systemImage: placement.symbol)
-                    }
+            Button {
+                if control.placements.count == 1, let only = control.placements.first {
+                    add(control, to: only)
+                } else {
+                    addingTo = control
                 }
             } label: {
                 Image(systemName: "plus.circle.fill")
@@ -233,11 +236,22 @@ struct PlayerControlsSettingsView: View {
                     .foregroundStyle(.tint)
                     .accessibilityLabel(L10n.text("Add %@", control.title))
             }
+            .buttonStyle(.plain)
         }
         .padding(.vertical, 2)
     }
 
     // MARK: 写盘
+
+    /// 把控件放回它选定的那一行（追加在末尾，之后可以拖到位）。
+    private func add(_ control: PlayerControl, to placement: PlayerControl.Placement) {
+        var updated = PlayerControlsLayout(stored: stored)
+        updated.add(control, to: placement)
+        topOrder = updated.top
+        bottomOrder = updated.bottom
+        stored = updated.stored
+        addingTo = nil
+    }
 
     private func applyTopOrder(_ order: [PlayerControl]) {
         var updated = PlayerControlsLayout(stored: stored)

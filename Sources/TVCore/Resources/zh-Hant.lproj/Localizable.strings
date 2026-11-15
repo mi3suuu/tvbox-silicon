@@ -2626,6 +2626,7 @@
 "Add to the Middle" = "加入畫面中央";
 "Fixed in the Top Bar" = "固定在頂部工具列";
 "Add %@" = "加入「%@」";
+"Where does %@ go?" = "「%@」放哪一行？";
 "Stays in the Top Bar: once the controls are locked it is the only way to unlock them again." = "固定在頂部工具列：控制項鎖上之後，它是唯一的解鎖入口。";
 "Fixed Keys" = "固定鍵";
 "More (…) — top right" = "更多（…）—— 右上角";
