@@ -234,6 +234,30 @@ import TVCore
         rebuildSubscription(resetting: true)
     }
 
+    /// Moves the whole app to another environment, and then gives that environment the feeds the
+    /// app ships with.
+    ///
+    /// The second half is not optional. A new environment starts with no subscriptions at all, so
+    /// switching to one used to land on an empty home — while the same install's default
+    /// environment had the 看剧AI pack and the route pack. The seed only runs on launch, so the
+    /// viewer's first look at a fresh environment was a blank page that fixed itself on next start.
+    /// Everything that changes the active environment goes through here so the two halves cannot
+    /// drift apart again: switch, create, delete, and launch all end in the same place.
+    func switchEnvironment(to id: UUID) async {
+        guard environments.activate(id) else { return }
+        saveVault()
+        // 偏好 store（置顶/隐藏/排序/源改派/分组/线路/搜索）与下载都按环境分键/打戳，
+        // 切环境必须一起跟过去，否则上一个环境的东西会留在这里继续生效。
+        applyEnvironmentToPreferenceStores(environments)
+        DownloadLibrary.shared.activeEnvironmentID = environments.activeID
+        MusicDownloadLibrary.shared.activeEnvironmentID = environments.activeID
+        MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
+        rebuildForActiveEnvironment()
+        // Last, because it adds rows and then fetches them: the merge above already ran, and this
+        // brings the list up to date as each bundled feed answers.
+        await seedAggregatedSubscriptions()
+    }
+
     /// [mi3s] 二开：把所有「按环境分键」的偏好 store 指向 `environments` 当前环境，并重读各自那一份。
     ///
     /// 环境隔离的第一版只覆盖了带 `environmentID` 字段的数据。置顶 / 隐藏 / 源排序 / 源改派 /

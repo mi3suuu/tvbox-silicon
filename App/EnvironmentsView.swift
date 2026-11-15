@@ -40,13 +40,9 @@ struct EnvironmentsView: View {
                 guard !name.isEmpty else { return }
                 // `add` 会直接激活新环境，所以偏好与下载也要跟着切过去：
                 // 新环境是一张白纸，不该继承上一个环境的置顶/隐藏/排序/分组。
+                // 也要补上 App 自带的订阅 —— 否则新环境第一次进来是空首页，要等下次启动才自愈。
                 store.environments.add(name: name)
-                store.saveVault()
-                store.applyEnvironmentToPreferenceStores(store.environments)
-                DownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
-                MusicDownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
-                MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
-                store.rebuildForActiveEnvironment()
+                Task { await store.switchEnvironment(to: store.environments.activeID) }
                 newName = ""
             }
         }
@@ -64,12 +60,7 @@ struct EnvironmentsView: View {
                     DownloadLibrary.shared.delete(environment: target.id)
                     MusicDownloadLibrary.shared.delete(environment: target.id)
                     store.deletePreferences(of: target.id)
-                    store.saveVault()
-                    store.applyEnvironmentToPreferenceStores(store.environments)
-                    DownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
-                    MusicDownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
-                MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
-                    store.rebuildForActiveEnvironment()
+                    Task { await store.switchEnvironment(to: store.environments.activeID) }
                 }
                 removing = nil
             }
@@ -85,15 +76,8 @@ struct EnvironmentsView: View {
 
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                store.environments.activate(environment.id)
-                store.saveVault()
-                // 偏好 store（置顶/隐藏/排序/源改派/分组）与下载都按环境分键/打戳，
-                // 切环境必须一起跟过去，否则上一个环境的东西会留在这里继续生效。
-                store.applyEnvironmentToPreferenceStores(store.environments)
-                DownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
-                MusicDownloadLibrary.shared.activeEnvironmentID = store.environments.activeID
-                MusicDownloadLibrary.shared.pauseWorkForOtherEnvironments()
-                store.rebuildForActiveEnvironment()
+                // 一次换完：激活 + 偏好 store + 下载 + 重合并 + 补齐自带订阅。
+                Task { await store.switchEnvironment(to: environment.id) }
             } label: {
                 HStack {
                     Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
