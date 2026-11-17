@@ -50,6 +50,8 @@ import TVCore
         // [mi3s] 出口代理：回环中继必须在播放前起来。此前 `LocalProxyServer.base()` 零调用点，
         // `baseSync` 恒为 nil，配了代理也只会静默直连——这里在启动时就把它拉起。
         LocalProxyServer.shared.ensureStarted()
+        // 给 Loon 拉订阅用的规则服务：绑所有网卡，局域网地址与回环都能连。
+        RulesHost.shared.start()
         Task.detached { LoonConfigProbe.logOnce() }
     }
     var body: some Scene {

@@ -493,7 +493,9 @@ public final class EgressRouter: @unchecked Sendable {
             table.record(key, leg: leg)
             return result
         } catch {
-            if leg.isProxy { noteProxyTimeout(key, error: error) }
+            if leg.isProxy {
+                noteProxyTimeout(key, error: error, url: url, headers: headers, purpose: purpose)
+            }
             guard Self.isEgressFailure(error) else { throw error }
             Diagnostics.shared.record(.info, "egress",
                 "\(leg.label) failed on \(key) (\(error.localizedDescription)); trying \(fallback.label)")
@@ -548,7 +550,7 @@ public final class EgressRouter: @unchecked Sendable {
                         if leg.isProxy {
                             // 赛跑路径也要记：奥斯卡这类源走的就是这条（直连优先 → 双腿齐发），
                             // 只在 `follow` 里记会漏掉它们，名单永远是空的。
-                            noteProxyTimeout(key, error: error)
+                            noteProxyTimeout(key, error: error, url: url, headers: headers, purpose: purpose)
                         } else {
                             directFailed = true
                         }
@@ -586,16 +588,47 @@ public final class EgressRouter: @unchecked Sendable {
     /// 的 `LoonPreset` 里对着真机实测过。所以对「已被观众自己的规则判成直连」的域名，
     /// 我们把连接交给 Loon 也没用 —— Loon 会照旧直连，直连被墙就是超时，
     /// 而我们这侧只看到「代理腿也超时」，很容易误判成出口选择坏了。
-    private func noteProxyTimeout(_ key: String, error: Error) {
+    private func noteProxyTimeout(_ key: String, error: Error,
+                                  url: URL? = nil, headers: [String: String] = [:],
+                                  purpose: EgressPurpose = .catalog) {
         guard let urlError = error as? URLError, urlError.code == .timedOut else { return }
         // 记进「必须显式走节点」的名单：设置页复制规则时一起带出去。
         if let host = key.split(separator: "|").first.map(String.init) {
+            let isNew = !ForcedNodeHosts.shared.hosts.contains(host.lowercased())
             ForcedNodeHosts.shared.note(host: host)
+            // 记下之后自己定期重测：Loon 一旦刷新了订阅、把这条域名指向节点，
+            // 下一次探测就会成功，这台 host 的结论自动翻成代理 —— 观众不需要重开页面。
+            //
+            // 不能替 Loon 刷新：`loon://update?sub=all` 是唯一手段，而它会切到 Loon 前台。
+            // 所以「无感」的正确形态是：我们等，Loon 按它自己的间隔刷新。
+            if isNew, let url { scheduleRecoveryProbe(for: url, headers: headers, purpose: purpose) }
         }
         Diagnostics.shared.record(.warning, "egress",
             "\(key): the proxy leg timed out — Loon accepted the connection and never answered. "
             + "Loon 的域名规则优先于 SRC-PORT：这个站的出口由你配置的规则决定,App 无法覆盖。"
             + " 要强制走节点,把该域名加进指向节点的规则集,并放在判直连的规则之前。")
+    }
+
+    /// 隔一段时间重试这条 host 的代理腿；成功就把结论钉成代理。
+    ///
+    /// 间隔递增（60s → 5min → 15min）：Loon 的订阅刷新间隔通常按分钟到小时，
+    /// 我们没必要更密，密了只是在烧电量。
+    private func scheduleRecoveryProbe(for url: URL, headers: [String: String], purpose: EgressPurpose) {
+        let delays: [Duration] = [.seconds(60), .seconds(300), .seconds(900)]
+        Task.detached(priority: .utility) { [weak self] in
+            for delay in delays {
+                try? await Task.sleep(for: delay)
+                guard let self else { return }
+                guard let proxyLeg = self.proxyLeg(for: .automatic(proxyID: CustomProxyStore.shared.bestEndpointID()))
+                else { return }
+                if let _ = try? await self.attempt(url, headers: headers, purpose: purpose, leg: proxyLeg) {
+                    self.table.record(Self.key(url, purpose), leg: proxyLeg)
+                    Diagnostics.shared.record(.info, "egress",
+                        "\(Self.key(url, purpose)) recovered through the proxy leg after the rule was refreshed")
+                    return
+                }
+            }
+        }
     }
 
     private func attempt(_ url: URL, headers: [String: String], purpose: EgressPurpose,

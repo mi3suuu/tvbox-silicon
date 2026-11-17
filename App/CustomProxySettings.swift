@@ -57,7 +57,15 @@ struct ProxySettingsView: View {
                                 title: L10n.text("Nothing recorded yet"),
                                 subtitle: L10n.text("Open a source that fails to load; the site is recorded once both lines fail."))
                 } else {
+                    if let rules = RulesHost.shared.rulesURLs().first {
+                        SettingsRow(symbol: "link", tint: .secondary,
+                                    title: L10n.text("Rule URL"),
+                                    subtitle: rules.absoluteString)
+                    }
                     SettingsActionRow(title: L10n.text("Subscribe in Loon")) { openInLoon() }
+                    // Loon 只暴露了 scheme 这一个「立刻刷新」入口，它会切到 Loon 前台。
+                    // 所以这条是显式动作，不自动跳 —— 自动跳会打断观看。
+                    SettingsActionRow(title: L10n.text("Sync Now (opens Loon)")) { syncLoon() }
                     SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
                 }
             }
@@ -242,10 +250,20 @@ struct ProxySettingsView: View {
     ///
     /// 没有记录、或中继还没起来时也照常打开 —— 只是内容为空。
     /// 隐藏这个按钮只会让观众找不到它（上一版就是这么错的）。
+    /// 让 Loon 立刻重拉订阅资源。会切到 Loon 前台，所以只能由观众主动点。
+    private func syncLoon() {
+        guard let url = LoonScheme.updateAll else { return }
+        #if os(iOS)
+        UIApplication.shared.open(url)
+        #elseif os(macOS)
+        NSWorkspace.shared.open(url)
+        #endif
+    }
+
     private func openInLoon() {
-        let hosted = LocalProxyServer.shared.baseSync?.port.flatMap { LoonScheme.hostedRulesURL(port: $0) }
-            ?? URL(string: "http://127.0.0.1:1/loon/rules.list")!
-        guard let schemeURL = LoonScheme.importRules(hosted) else { return }
+        RulesHost.shared.start()
+        guard let hosted = RulesHost.shared.rulesURLs().first,
+              let schemeURL = LoonScheme.importRules(hosted) else { return }
         #if os(iOS)
         UIApplication.shared.open(schemeURL)
         #elseif os(macOS)
