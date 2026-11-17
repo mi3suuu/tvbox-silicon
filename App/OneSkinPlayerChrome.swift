@@ -205,6 +205,8 @@ struct OneSkinChrome: View {
     @State private var showsSkip = false
     /// 手标广告区间那一页是否打开。
     @State private var showsAdRange = false
+    /// 画面内剪辑层是否打开（直接在视频上拖选起止点）。
+    @State private var showsAdTrim = false
     /// 「更多」面板是否展开。
     ///
     /// 它是个普通 `@State`，不是系统菜单 —— 这样父视图每秒重算（进度条读 `position`）
@@ -494,6 +496,18 @@ struct OneSkinChrome: View {
                     }
                 }
                 morePanel
+                // 画面内剪辑层：铺满窗口、盖在所有控件之上 ——
+                // 剪的时候手势必须归它，否则一拖就变成"单击显示/隐藏控件"。
+                if showsAdTrim, let session {
+                    AdTrimOverlay(session: session,
+                                  onCancel: { withAnimation(.easeOut(duration: 0.16)) { showsAdTrim = false } },
+                                  onSaved: { range in
+                                      withAnimation(.easeOut(duration: 0.16)) { showsAdTrim = false }
+                                      showAdHUD(.marked(seconds: range.length))
+                                      Task { await loadSkipMarkers() }
+                                  })
+                        .frame(width: winW, height: winH)
+                }
                 gestureHUD
                 boostLayer
                 infoLayer
@@ -1200,12 +1214,12 @@ struct OneSkinChrome: View {
                     HStack(spacing: 0) {
                         Text(L10n.text("Playback Options"))
                             .font(.system(size: m.caption, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
+                            .foregroundStyle(.white)
                         Spacer(minLength: 6)
                         Button { closeMore() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: m.caption, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(.white.opacity(0.85))
                                 .frame(width: 32, height: 32)
                                 .contentShape(Rectangle())
                         }
@@ -1213,14 +1227,19 @@ struct OneSkinChrome: View {
                         .accessibilityLabel(L10n.text("Close"))
                     }
                     .padding(.leading, 12).padding(.trailing, 2).padding(.top, 2)
-                    Divider().overlay(Color.white.opacity(0.14))
+                    Divider().overlay(Color.white.opacity(0.22))
 
                     ScrollView(.vertical, showsIndicators: true) {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(visibleMoreGroups.enumerated()), id: \.offset) { _, group in
+                                // ⛔ 这一行原本是 `.white.opacity(0.45)`，压在
+                                //    `.black.opacity(0.80)` 的半透明底上 —— 实测对比度
+                                //    3.90:1（纯白画面）～4.48:1（中灰），**低于 WCAG AA
+                                //    正文 4.5:1**。先把底色改成不透明近黑（底不再随帧变），
+                                //    再把字提到 0.80：现在是 10.54:1，任何画面下一致。
                                 Text(group.title.uppercased())
-                                    .font(.system(size: max(9, m.caption * 0.84), weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.45))
+                                    .font(.system(size: max(11, m.caption), weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.80))
                                     .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 2)
                                 ForEach(group.controls) { control in
                                     moreRow(control)
@@ -1234,7 +1253,12 @@ struct OneSkinChrome: View {
                 .frame(width: min(winW * 0.68, 330))
                 .frame(maxHeight: max(120, min(winH - m.edge * 2, 420)))
                 // 纯色底 + 细边：材质压在运动画面上每帧重绘，与 `PlaybackInfoPanel` 同理。
-                .background(.black.opacity(0.80),
+                // ⛔ 半透明底是「字看不清」的根：画面从后面透上来，
+                //    底色随每一帧在变，细字既被抖糊、对比度也压不住。
+                //    0.80 时白字 0.45 只有 3.90:1（低于 WCAG 正文 4.5:1）；
+                //    0.90 时仍会透 10%，只是把问题减轻。⇒ 直接改成**不透明**近黑：
+                //    底固定不动，字在任何画面下都是同一组对比度。
+                .background(Color(white: 0.07),
                             in: RoundedRectangle(cornerRadius: max(10, m.glyph * 0.8), style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: max(10, m.glyph * 0.8), style: .continuous)
@@ -1334,6 +1358,16 @@ struct OneSkinChrome: View {
             //
             // 它现在是枚举里的一项（`PlayerControl.markAd`），所以设置页里能隐藏、
             // 也能拖到控制栏 —— 原先写死在这个分支里，两头都做不到。
+            // 主入口：直接在画面上剪（拖两根手柄，边拖边看那一帧）。
+            if canMarkAd {
+                Button {
+                    closeMore()
+                    showsAdTrim = true
+                } label: {
+                    Label(L10n.text("Trim the Ad Here"), systemImage: "timeline.selection")
+                }
+            }
+            // 次要：需要精确敲时间码 / 管理本集已标段时用表单版。
             if canMarkAd {
                 Button {
                     closeMore()
@@ -2660,8 +2694,8 @@ struct OneSkinChrome: View {
             // 顶栏是「一下就点」的位置，而标广告需要两个时间点，所以这里是**入口**，
             // 不是动作本身 —— 打开后起点默认就是当前播放位置，用户只需补终点。
             // （原来这里直接跑 `markAdHere()` 猜边界，猜歪了没有任何纠正手段。）
-            iconButton("megaphone", label: L10n.text("Mark Ad Range…")) {
-                showsAdRange = true
+            iconButton("timeline.selection", label: L10n.text("Trim the Ad Here")) {
+                showsAdTrim = true
             }
         case .adBlock:
             // 顶栏形态：一下切换广告拦截总开关。图标直接反映当前状态
