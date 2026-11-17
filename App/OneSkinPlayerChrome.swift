@@ -942,10 +942,18 @@ struct OneSkinChrome: View {
     ///
     /// 剔除这 8 项后，全屏可用集只剩 22 项 —— 全屏横（951）顶栏放 19 格、**溢出 0**；
     /// 全屏竖（669）顶栏只有 12 格、**溢出 5**（`speechSubtitles` / `adBlock` /
-    /// `autoPlayNext` / `skipIntroAuto` / `skipIntroManual`，按默认布局顺序）。
-    /// 所以全屏竖仍需一个出口，见 `fullScreenOverflowDot`。
+    /// `speechSubtitles` / `adBlock` / `autoPlayNext` / `skipIntroAuto` / `skipIntroManual`，
+    /// 按默认布局顺序）。所以全屏竖仍需一个出口，见 `fullScreenOverflowDot`。
+    ///
+    /// ⛔ `videoInfo` **不排除**（2026-11-18 用户裁决：「语音字幕没有视频信息重要」）。
+    ///
+    /// 它虽是左上角浮层（`infoLayer`，会叠在画面上，本属该排除的那类），但用户明确
+    /// 认为它比 `speechSubtitles` 重要，所以按**价值排序**保留它、让它进前 12 颗直接可点，
+    /// 代价是 `speechSubtitles` 落到溢出位——仍可从抽屉点到，不是不可达。
+    ///
+    /// 先前一轮反向的取舍（排除 videoInfo 换 speechSubtitles 进前 12）已按用户裁决撤销。
     private static let fullScreenHidden: Set<PlayerControl> = [
-        .episodes, .moreInSeries, .anotherPlayer, .markAd, .videoInfo,
+        .episodes, .moreInSeries, .anotherPlayer, .markAd,
         .timecode, .progressBar, .remaining,
     ]
 
