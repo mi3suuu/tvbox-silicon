@@ -237,10 +237,51 @@ public final class LocalProxyServer: @unchecked Sendable {
 
         // 拨代理的地址可能不是端点上写的那个（见 `LocalNetwork`）：回环地址要换成局域网地址，
         // 否则 Loon 收下连接却按它自己的规则透传 —— 用户看到的就是「没用我们规定的端口」。
+        //
+        // 同一个目标已经连续在代理腿上失败过几次：这一条就直接走直连，不再先赔一次失败。
+        // 剧集列表一次并发几十个请求，每条都「先挂一次再重试」会让整页慢到像没反应。
+        let directNow = endpoint != nil && ProxyCircuit.isOpen(host: parsed.host)
         let state = TunnelState(connection: connection, head: rewrittenHead, leftover: leftover,
                                 scheme: parsed.scheme, host: parsed.host, port: parsed.port,
                                 endpoint: endpoint, queue: queue)
-        Self.open(state, dialHost: endpoint.map { ProxyDialHost.primary(for: $0) })
+        Self.open(state, dialHost: directNow ? nil : endpoint.map { ProxyDialHost.primary(for: $0) },
+                  forceDirect: directNow)
+    }
+
+    /// 代理腿按目标熔断：同一个 host 连续失败几次之后，短时间内直接走直连。
+    ///
+    /// 不是「禁用代理」，而是「别对同一个已经证明不通的目标反复尝试」。任何一次走代理成功
+    /// 都会把计数清零，所以它只会影响真正不通的那些目标。
+    enum ProxyCircuit {
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var failures: [String: (count: Int, until: Date)] = [:]
+        private static let threshold = 3
+        private static let cooldown: TimeInterval = 60
+
+        static func isOpen(host: String) -> Bool {
+            lock.withLock {
+                guard let record = failures[host] else { return false }
+                if record.count < threshold { return false }
+                if Date() >= record.until { failures[host] = nil; return false }
+                return true
+            }
+        }
+
+        static func noteFailure(host: String) {
+            lock.withLock {
+                let count = (failures[host]?.count ?? 0) + 1
+                let until = Date().addingTimeInterval(cooldown)
+                failures[host] = (count, until)
+                if count == threshold {
+                    Diagnostics.shared.record(.warning, "proxy",
+                        "proxy failed \(count)× for \(host); going direct for \(Int(cooldown))s")
+                }
+            }
+        }
+
+        static func noteSuccess(host: String) {
+            lock.withLock { if failures[host] != nil { failures[host] = nil } }
+        }
     }
 
     /// 一次隧道尝试的状态。抽成类是因为「局域网地址失败后退回回环」要在
@@ -257,6 +298,8 @@ public final class LocalProxyServer: @unchecked Sendable {
         private let lock = NSLock()
         private var retried = false
         private var rebinds = 0
+        private var directFallback = false
+        private var retrying = false
 
         init(connection: NWConnection, head: String, leftover: Data, scheme: String,
              host: String, port: UInt16, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
@@ -298,11 +341,36 @@ public final class LocalProxyServer: @unchecked Sendable {
                 }
             }
         }
+
+        /// 代理那条腿整体走不通（不是端口问题）→ 换成「不经代理」再拨一次。
+        ///
+        /// 真机上这就是「有的源能看、有的源不能」的解法：这些源的 HTTPS 会话被
+        /// Loon 交给节点后立刻被对端关掉（`NWError -9816`，服务器未通知即关闭），
+        /// 而同样的域名走直连腿是通的。代理只该是「换条路试试」，不是「只能走这条路」。
+        func claimDirectFallback() -> Bool {
+            lock.withLock {
+                guard !directFallback else { return false }
+                directFallback = true
+                retrying = true
+                // 换了一条腿，端口重试预算也要跟着重来 —— 否则代理腿上用掉的两次
+                // 会让直连腿第一次撞上 TIME_WAIT 就直接判死。
+                rebinds = 0
+                return true
+            }
+        }
+
+        /// 正在换腿：这条 upstream 的 `.cancelled` 不能把本地连接一起关掉，
+        /// 否则重试时已经没有客户端可回了。
+        var isRetrying: Bool { lock.withLock { retrying } }
+
+        func finishedRetrying() { lock.withLock { retrying = false } }
     }
 
-    private static func open(_ state: TunnelState, dialHost: String?, bindSourcePort: Bool = true) {
+    private static func open(_ state: TunnelState, dialHost: String?, bindSourcePort: Bool = true,
+                             forceDirect: Bool = false) {
+        let endpoint = forceDirect ? nil : state.endpoint
         let built = connectionParameters(secure: state.scheme.lowercased() == "https",
-                                         serverName: state.host, proxy: state.endpoint,
+                                         serverName: state.host, proxy: endpoint,
                                          dialHost: dialHost, bindSourcePort: bindSourcePort)
         guard let port = NWEndpoint.Port(rawValue: state.port) else {
             state.connection.cancel()
@@ -315,7 +383,9 @@ public final class LocalProxyServer: @unchecked Sendable {
         upstream.stateUpdateHandler = { connectionState in
             switch connectionState {
             case .ready:
-                let via = state.endpoint.map { "proxy=\($0.name)" } ?? "direct"
+                state.finishedRetrying()
+                if endpoint != nil { ProxyCircuit.noteSuccess(host: state.host) }
+                let via = endpoint.map { "proxy=\($0.name)" } ?? (forceDirect ? "direct(after proxy failed)" : "direct")
                 let viaPort = sourcePort.map { " src=:\($0)" } ?? ""
                 let dial = dialHost.map { " dial=\($0)" } ?? ""
                 Diagnostics.shared.record(.debug, "proxy",
@@ -332,11 +402,11 @@ public final class LocalProxyServer: @unchecked Sendable {
                     case .anotherPort:
                         Diagnostics.shared.record(.debug, "proxy",
                             "source port \(sourcePort.map(String.init) ?? "-") busy; retrying on another port \(state.scheme)://\(state.host):\(state.port)")
-                        open(state, dialHost: dialHost)
+                        open(state, dialHost: dialHost, forceDirect: forceDirect)
                     case .ephemeral:
                         Diagnostics.shared.record(.warning, "proxy",
                             "source port range unusable; falling back to an ephemeral port \(state.scheme)://\(state.host):\(state.port)")
-                        open(state, dialHost: dialHost, bindSourcePort: false)
+                        open(state, dialHost: dialHost, bindSourcePort: false, forceDirect: forceDirect)
                     case .giveUp:
                         Diagnostics.shared.failure("proxy",
                             "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(state.endpoint?.name ?? "direct") (source port)", error)
@@ -356,6 +426,18 @@ public final class LocalProxyServer: @unchecked Sendable {
                     open(state, dialHost: fallback)
                     return
                 }
+                // 代理那条腿对这条请求就是不工作（真机典型形态：`NWError -9816`，
+                // Loon 交出去之后目标侧直接关会话）。换成不经代理再拨一次 ——
+                // 播放器和源站用的都是幂等 GET，重发一次没有副作用。
+                if state.endpoint != nil, !forceDirect, state.claimDirectFallback() {
+                    ProxyCircuit.noteFailure(host: state.host)
+                    Diagnostics.shared.record(.warning, "proxy",
+                        "proxy route failed for \(state.host):\(state.port); retrying direct")
+                    if let sourcePort { SRCPortPool.shared.release(sourcePort) }
+                    upstream.cancel()
+                    open(state, dialHost: nil, bindSourcePort: bindSourcePort, forceDirect: true)
+                    return
+                }
                 Diagnostics.shared.failure("proxy",
                     "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(state.endpoint?.name ?? "direct")",
                     error)
@@ -363,7 +445,8 @@ public final class LocalProxyServer: @unchecked Sendable {
                 state.connection.cancel(); upstream.cancel()
             case .cancelled:
                 if let sourcePort { SRCPortPool.shared.release(sourcePort) }
-                state.connection.cancel()
+                // 换腿重试时这条 upstream 是被我们自己取消的 —— 本地连接还要接着用。
+                if !state.isRetrying { state.connection.cancel() }
             default: break
             }
         }

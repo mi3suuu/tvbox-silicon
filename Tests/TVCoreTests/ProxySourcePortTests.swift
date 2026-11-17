@@ -404,4 +404,65 @@ import Testing
             }
         }
     }
+
+    /// 一个「收下连接就断」的坏代理：模拟真机上 Loon 交出去之后目标侧直接关会话
+    /// （`Network.NWError -9816`，服务器未通知即关闭）。
+    private final class BrokenProxy: @unchecked Sendable {
+        let listener: NWListener
+        let queue = DispatchQueue(label: "test.proxy.broken")
+
+        init() throws {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: "0.0.0.0", port: .any)
+            listener = try NWListener(using: parameters)
+        }
+
+        var port: UInt16 { listener.port?.rawValue ?? 0 }
+
+        func start() async throws {
+            listener.newConnectionHandler = { connection in
+                connection.start(queue: self.queue)
+                connection.cancel()
+            }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: continuation.resume()
+                    case .failed(let error): continuation.resume(throwing: error)
+                    default: break
+                    }
+                }
+                listener.start(queue: queue)
+            }
+        }
+
+        func stop() { listener.cancel() }
+    }
+
+    /// 代理那条腿不通时，请求必须换直连腿再走一次 —— 这是真机上「有的源能看、有的源不能」的解法。
+    ///
+    /// 证据形态：`upstream failed https://jkunzyapi.com:443 via=Loon error=Network.NWError -9816`，
+    /// 而同一个域名在直连（Loon TUN）下是通的。代理不该是「只能走这条」，只该是「先试这条」。
+    @Test func aFailingProxyFallsBackToDirectInsteadOfFailingTheRequest() async throws {
+        let origin = try PortSpy()
+        try await origin.start()
+        defer { origin.stop() }
+        let broken = try BrokenProxy()
+        try await broken.start()
+        defer { broken.stop() }
+
+        let endpoint = CustomProxyEndpoint(name: "Broken", scheme: .http,
+                                           host: Self.lanHost, port: Int(broken.port))
+        CustomProxyStore.shared.upsert(endpoint)
+        defer { CustomProxyStore.shared.removeEndpoint(id: endpoint.id) }
+
+        let base = try await LocalProxyServer.shared.base()
+        let target = URL(string: "http://\(Self.lanHost):\(origin.port)/probe")!
+        let relayed = LocalProxyServer.proxyURL(base: base, url: target, proxyID: endpoint.id)
+        let (data, _) = try await URLSession.shared.data(from: relayed)
+        #expect(String(decoding: data, as: UTF8.self) == "spy-ok", "代理腿失败后请求整条挂了，没有换直连重试")
+
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(!origin.peerPorts.isEmpty, "直连腿一次都没拨")
+    }
 }
