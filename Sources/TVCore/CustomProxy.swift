@@ -116,6 +116,12 @@ public final class CustomProxyStore: @unchecked Sendable {
            let saved = try? JSONDecoder().decode([CustomProxyEndpoint].self, from: data) { _endpoints = saved }
         if let data = defaults.data(forKey: Self.routesKey),
            let saved = try? JSONDecoder().decode([String: CustomProxyRoute].self, from: data) { _routes = saved }
+        // 老版本允许同一台代理存多条（点两次「添加 Loon」就是两条 `127.0.0.1:7221`）。
+        // 两条重复记录会让「只配了一台 → 它就是默认出口」这条规则失效，结果是**全站直连**。
+        // 这里在加载后整理一次，并把路由/默认出口一起改指到保留的那条。
+        let before = _endpoints.count
+        collapseAllDuplicatesLocked()
+        if _endpoints.count != before { persistLocked() }
     }
 
     // MARK: Reads
@@ -128,11 +134,67 @@ public final class CustomProxyStore: @unchecked Sendable {
 
     // MARK: Mutations
 
+    /// 同一台代理的判据：**同协议 + 同主机 + 同端口**。
+    ///
+    /// 名字不参与：观众把「Loon」再导入一次时名字是一样的，改了名也不该变成两台。
+    /// 账号密码也不参与 —— 同一台机器换密码不是「另一台代理」，而是一条要更新的记录。
+    private func identityKey(_ endpoint: CustomProxyEndpoint) -> String {
+        "\(endpoint.scheme.rawValue)|\(endpoint.host.lowercased())|\(endpoint.port)"
+    }
+
+    /// 加一台代理（或更新已有的那一台）。
+    ///
+    /// ## 为什么必须去重
+    ///
+    /// 观众点两次「添加 Loon」会得到两条一模一样的 `127.0.0.1:7221`。而「默认出口」的规则是
+    /// 「只配了一台代理 → 那台就是出口」（见 `fallbackEndpoint`），
+    /// 两条重复记录让它变成「配了多台又没指定」→ **返回 nil → 全站直连**。
+    /// 现象就是：Loon 明明设置好了，App 却一条请求都没发给它，
+    /// Loon 那边只看到临时端口 —— 与用户报的「没有按我们规定好的端口去连接」完全一致。
+    ///
+    /// 去重时**保留原有 id**：源路由、行路由都按 id 记，换 id 等于把它们一起作废。
     public func upsert(_ endpoint: CustomProxyEndpoint) {
         lock.withLock {
-            if let index = _endpoints.firstIndex(where: { $0.id == endpoint.id }) { _endpoints[index] = endpoint }
-            else { _endpoints.append(endpoint) }
+            let identity = identityKey(endpoint)
+            if let index = _endpoints.firstIndex(where: { $0.id == endpoint.id }) {
+                _endpoints[index] = endpoint
+                // 改名/改端口之后可能和另一条撞上，撞了就并掉后出现的那条。
+                collapseDuplicatesLocked(keeping: index, identity: identity)
+            } else if let index = _endpoints.firstIndex(where: { identityKey($0) == identity }) {
+                let existing = _endpoints[index]
+                _endpoints[index] = CustomProxyEndpoint(id: existing.id, name: endpoint.name,
+                                                        scheme: endpoint.scheme, host: endpoint.host,
+                                                        port: endpoint.port,
+                                                        username: endpoint.username,
+                                                        password: endpoint.password)
+            } else {
+                _endpoints.append(endpoint)
+            }
             persistLocked()
+        }
+    }
+
+    /// 把与 `keeping` 同一身份的多余记录删掉，并把指向它们的路由改指到保留的那条。
+    private func collapseDuplicatesLocked(keeping index: Int, identity: String) {
+        let keepID = _endpoints[index].id
+        let duplicates = _endpoints.filter { $0.id != keepID && identityKey($0) == identity }
+        guard !duplicates.isEmpty else { return }
+        let duplicateIDs = Set(duplicates.map(\.id))
+        _endpoints.removeAll { duplicateIDs.contains($0.id) }
+        for (key, route) in _routes where route.proxyID.map(duplicateIDs.contains) == true {
+            _routes[key] = .proxy(keepID)
+        }
+        if let fallback = defaultProxyID, duplicateIDs.contains(fallback) {
+            defaults.set(keepID, forKey: Self.defaultKey)
+        }
+    }
+
+    /// 启动时整理一遍历史记录：老版本允许同一台代理存多条。
+    private func collapseAllDuplicatesLocked() {
+        var index = 0
+        while index < _endpoints.count {
+            collapseDuplicatesLocked(keeping: index, identity: identityKey(_endpoints[index]))
+            index += 1
         }
     }
 

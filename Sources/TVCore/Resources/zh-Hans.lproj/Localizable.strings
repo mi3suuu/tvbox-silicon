@@ -2713,3 +2713,6 @@
 "Lock Tiled Layout" = "锁定整理";
 "Unlock Layout" = "解除锁定";
 "Open Episode List" = "回到选集页";
+
+"Default Exit" = "默认出口";
+"With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "配了多台代理时，选一台作为「代理」源的出口。只配一台时会自动使用它。";

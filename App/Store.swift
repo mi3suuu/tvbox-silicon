@@ -49,6 +49,11 @@ import TVCore
     let sourceRouting: SourceRouting
     /// The viewer's own HTTP/HTTPS/SOCKS5 proxy endpoints, chosen per source instead of the built-in relay.
     let customProxy: CustomProxyRouter
+    /// 回环中继「还没绑上端口」时，已经排了一次「起来之后重算路由」。
+    ///
+    /// ⛔ 不重算就等于代理没配：源地址停在直连写法，Loon 只会看到临时端口。
+    ///    用 `@ObservationIgnored` 是因为它纯属内部节流，不该触发任何视图重算。
+    @ObservationIgnored private var relayStartRetryPending = false
     /// Per-source rename and API override (the viewer edits one source without editing the subscription).
     let sourceOverrides: SourceOverrides
     /// Per-line (flag) route and hide choices, finer than the source-level routing.
@@ -1899,6 +1904,25 @@ import TVCore
         let byAddress = Dictionary(environmentSubscriptions.map { ($0.address, $0) }, uniquingKeysWith: { $1 })
         // 中转地址是回环的，要端口：中继没起来时只能退直连（下一次合并会补上）。
         let relayBase = LocalProxyServer.shared.baseSync
+        // 中继还没绑上端口：把这一点记下来，起好之后**一定要重算一次**。
+        //
+        // ⛔ 不重算的后果正是用户报的「配了代理但没按端口连接」：
+        //    `applySourceRouting` 把源的 api 改写成 `http://127.0.0.1:<port>/p/…`，
+        //    没有端口就退成原地址；而这一轮之后没有任何东西会再跑一遍，
+        //    于是列表、海报、播放全都直连 —— Loon 只能看到临时端口。
+        if relayBase == nil, !CustomProxyStore.shared.endpoints.isEmpty,
+           !relayStartRetryPending {
+            relayStartRetryPending = true
+            LocalProxyServer.shared.ensureStarted()
+            Task { @MainActor [weak self] in
+                _ = try? await LocalProxyServer.shared.base()
+                self?.relayStartRetryPending = false
+                self?.rebuildSubscription()
+            }
+        }
+        // 「这台源经哪台出口出去」的结论表：播放侧（没有 Store）从这里读，
+        // 保证列表页与视频走的是**同一条腿**。
+        var relayed: [String: String] = [:]
         let sites = config.sites.map { site -> Site in
             let origin = site.origin(or: config.origin)
             let sub: SubscriptionEntry? = {
@@ -1919,6 +1943,8 @@ import TVCore
             case .direct:
                 return site.routed(.direct)
             case .proxy:
+                guard let relayBase, let proxyID else { return site.routed(.direct) }
+                relayed[RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)] = proxyID
                 return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
             case .auto:
                 // Follow connectivity only for native sources whose address can be relayed.
@@ -1928,17 +1954,21 @@ import TVCore
                 // 包里已经写明「直连不通、需出口代理」的（route.json 的 `_route: 需代理`）：
                 // 有出口就**第一次就走代理**，别让观众先撞一次墙再翻。实测依据见
                 // `Scripts/audit-route-health.py` —— 那批源本机 TLS 握手被中断，经境外可读。
-                if Self.needsOutboundProxy(site), proxyID != nil {
+                if Self.needsOutboundProxy(site), let proxyID, let relayBase {
+                    relayed[RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)] = proxyID
                     return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
                 }
                 // 其余按连通性翻：只有配了出口代理才值得翻（没配时「中转」只是绕一圈回环）。
-                if SourceHealth.shared.failedRepeatedly(site, origin: origin), proxyID != nil {
+                if SourceHealth.shared.failedRepeatedly(site, origin: origin),
+                   let proxyID, let relayBase {
+                    relayed[RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)] = proxyID
                     return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
                 }
                 return site
             }
         }
         subscription = config.with(sites: sites)
+        RelayRouteRegistry.shared.replace(relayed)
     }
 
     /// 这个源的直连地址已知不可达，需要出口代理。

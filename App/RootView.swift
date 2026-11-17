@@ -213,6 +213,16 @@ struct RootView: View {
         .onChange(of: store.section) { _, section in
             if section != .search { store.searchModel.suspend() }
         }
+        // 增删改代理之后必须重算路由。
+        //
+        // ⛔ 源的「经代理」不是请求时决定的，而是合并订阅时把 `api` 改写成
+        //    `http://127.0.0.1:<port>/p/<proxyID>/…`。不重算就还是原来的直连地址 ——
+        //    观众配好 Loon、回到源页点播放，连接却从本机直接出去，
+        //    Loon 那边只看到临时端口。用户报的「设置好了 Loon 但没按我们规定好的端口连接」
+        //    有一半是这条：`customProxy.touch()` 以前没有任何观察者。
+        .onChange(of: store.customProxy.revision) { _, _ in
+            store.rebuildSubscription()
+        }
         // A Baidu or Aliyun line waiting for its plugin's sign-in code to be scanned.
         .sheet(item: Binding(get: { PluginSignIn.shared.prompt }, set: { if $0 == nil { PluginSignIn.shared.dismiss() } })) {
             PluginSignInView(prompt: $0)

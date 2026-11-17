@@ -20,6 +20,8 @@ struct ProxySettingsView: View {
     @State private var probe: LoonPortRuleProbe?
 
     var body: some View {
+        // 读一次 revision：代理/默认出口改动后要重算这一页（`CustomProxyStore` 本身不可观察）。
+        let _ = store.customProxy.revision
         let endpoints = store.customProxy.store.endpoints
         SettingsPage(title: L10n.text("Outbound Proxy"), symbol: "network") {
             SettingsGroup(footer: L10n.text("Proxies carry the sources you route through them; a source without a route goes direct.")) {
@@ -36,6 +38,29 @@ struct ProxySettingsView: View {
                     .formRowButton()
                 }
                 SettingsActionRow(title: L10n.text("Add Proxy")) { adding = true }
+            }
+            // 默认出口：多台代理时，「源路由 = 代理」该从哪条腿出去，必须能指定。
+            //
+            // ⛔ 没有这一块时它是**静默失效**的：`fallbackEndpoint` 在「配了两台以上又没指定」
+            //    时返回 nil，于是源路由选了「代理」也还是直连 —— Loon 那边一条请求都收不到。
+            //    `defaultProxyID` 早就存在，只是从来没有写入点。
+            if endpoints.count > 1 {
+                let current = store.customProxy.store.defaultProxyID
+                SettingsGroup(title: L10n.text("Default Exit"),
+                              footer: L10n.text("With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically.")) {
+                    ForEach(endpoints) { endpoint in
+                        Button {
+                            store.customProxy.store.defaultProxyID = current == endpoint.id ? nil : endpoint.id
+                            store.customProxy.touch()
+                        } label: {
+                            SettingsRow(symbol: current == endpoint.id ? "checkmark.circle.fill" : "circle",
+                                        tint: current == endpoint.id ? .accentColor : .secondary,
+                                        title: endpoint.name,
+                                        subtitle: "\(endpoint.scheme.title) · \(endpoint.host):\(endpoint.port)")
+                        }
+                        .formRowButton()
+                    }
+                }
             }
             SettingsGroup(title: L10n.text("From Loon"),
                           footer: L10n.text("Loon shares its proxy on the local network while Allow Wi-Fi Access is on. Point this at its configuration page and the proxy ports are filled in for you.")) {

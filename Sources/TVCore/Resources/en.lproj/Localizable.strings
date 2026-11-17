@@ -2708,3 +2708,6 @@
 "Lock Tiled Layout" = "Lock Tiled Layout";
 "Unlock Layout" = "Unlock Layout";
 "Open Episode List" = "Open Episode List";
+
+"Default Exit" = "Default Exit";
+"With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically.";

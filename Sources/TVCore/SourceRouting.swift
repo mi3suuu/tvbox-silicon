@@ -117,6 +117,39 @@ public enum SourceRoute: String, Codable, CaseIterable, Sendable {
 /// ⚠️ 一句必须说清的话：**回环中继不能让一个被墙的源变得能访问**。它改变的是「从哪条腿出去」
 /// 和「请求长什么样」，不改「这台手机能不能连上那台机器」。149 之所以能救活那些源，是因为它
 /// 是一台境外服务器；本机做不到这件事。要救，只有观众自己给一个出口。
+/// 「这台源此刻经哪台出口代理出去」的结论表。
+///
+/// ## 为什么需要一张表，而不是各处各推一次
+///
+/// 这个结论只有 `applySourceRouting` 算得出来：它看得到订阅里的默认路由、观众的默认出口、
+/// 包里写的 `_route: 需代理`、以及这台源的失败历史。而**播放侧拿不到 `Store`**
+/// （`PlaybackSession` 是个独立类），于是它过去只看「行级/源级显式指定的代理」——
+/// 于是出现了这种分叉：列表页经代理（`api` 被改写成 `/p/<id>/…`），
+/// 视频却从本机直接出去。观众那边看到的现象是「Loon 设置好了，但连接根本不用我们规定的端口」。
+///
+/// 现在：算一次，存一份，两边读同一个答案。
+public final class RelayRouteRegistry: @unchecked Sendable {
+    public static let shared = RelayRouteRegistry()
+
+    private let lock = NSLock()
+    private var table: [String: String] = [:]
+
+    public init() {}
+
+    /// 每次重算路由后**整表替换** —— 迟到的那条结论不该继续生效。
+    public func replace(_ table: [String: String]) {
+        lock.withLock { self.table = table }
+    }
+
+    public func proxyID(origin: URL, sourceKey: String) -> String? {
+        lock.withLock { table[Self.key(origin: origin, sourceKey: sourceKey)] }
+    }
+
+    public nonisolated static func key(origin: URL, sourceKey: String) -> String {
+        origin.absoluteString + "|" + sourceKey
+    }
+}
+
 public enum SourceRelay {
     /// 旧公共中继的地址，**只用于解包**：历史订阅里带过来的中转地址要能还原成真实地址。
     /// 新的中转地址不再由它产生，也不会再出现在任何随包数据里。

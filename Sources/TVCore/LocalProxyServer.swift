@@ -316,6 +316,12 @@ public final class LocalProxyServer: @unchecked Sendable {
             // this one request" with nothing else to go on.
             Diagnostics.shared.record(.warning, "proxy", "source port lane exhausted lane=\(lane); request will follow Loon's own rules")
         }
+        // 「配了代理却悄悄直连」是这个功能最坏的失败方式：观众以为在走 Loon，
+        // 实际上一条请求都没出去过。地址/端口不合法时必须留一行日志。
+        if let proxy, proxy.address == nil || !(1...65535).contains(proxy.port) {
+            Diagnostics.shared.record(.warning, "proxy",
+                "endpoint unusable (host=\"\(proxy.host)\" port=\(proxy.port)); this request goes direct")
+        }
         if let proxy, let host = proxy.address.flatMap({ NWEndpoint.Host($0) }), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
             let context = NWParameters.PrivacyContext(description: "tvbox.proxy.\(proxy.id)")
             let endpoint = NWEndpoint.hostPort(host: host, port: port)

@@ -120,4 +120,55 @@ import Testing
         other.replaceRoutes(table)
         #expect(other.route(origin: origin, sourceKey: sourceKey).proxyID == proxy.id)
     }
+
+    // MARK: - 同一台代理只能有一条（2026-11-17）
+
+    /// 点两次「添加 Loon」→ 两条 `127.0.0.1:7221`。
+    ///
+    /// ⛔ 这不是「列表里多一行」的小事：`fallbackEndpoint` 的规则是「只配了一台 → 它就是出口」，
+    ///    两条重复记录让它变成「配了多台又没指定」→ 返回 nil → **全站直连**。
+    ///    真机日志里就是这个形状：`relay listening` 出现 50+ 次，`upstream ready proxy=` 一次都没有。
+    @Test func addingTheSameProxyTwiceKeepsOneEntry() {
+        let store = CustomProxyStore(defaults: clean("dedupe-1"))
+        store.upsert(CustomProxyEndpoint(name: "Loon", scheme: .socks5, host: "127.0.0.1", port: 7221))
+        store.upsert(CustomProxyEndpoint(name: "Loon", scheme: .socks5, host: "127.0.0.1", port: 7221))
+
+        #expect(store.endpoints.count == 1)
+        // 去重之后「只配了一台」成立，默认出口才回得到它。
+        #expect(store.fallbackEndpoint?.port == 7221)
+    }
+
+    /// 去重保留**原来的 id**，并把指向被删那条的路由改指过来 —— 否则源路由会一起作废。
+    @Test func dedupeKeepsTheSurvivingIDAndRemapsRoutes() {
+        let store = CustomProxyStore(defaults: clean("dedupe-2"))
+        let first = CustomProxyEndpoint(name: "Loon", scheme: .socks5, host: "127.0.0.1", port: 7221)
+        store.upsert(first)
+        store.setRoute(.proxy(first.id), origin: origin, sourceKey: sourceKey)
+
+        let duplicate = CustomProxyEndpoint(name: "Loon", scheme: .socks5, host: "127.0.0.1", port: 7221)
+        store.upsert(duplicate)
+
+        #expect(store.endpoints.count == 1)
+        #expect(store.endpoints.first?.id == first.id)
+        #expect(store.endpoint(origin: origin, sourceKey: sourceKey)?.id == first.id)
+    }
+
+    /// 名字不同、但协议/主机/端口相同 → 仍是同一台（引号里的名字不该造出第二台机器）。
+    @Test func sameAddressUnderAnotherNameIsStillOneEntry() {
+        let store = CustomProxyStore(defaults: clean("dedupe-3"))
+        store.upsert(CustomProxyEndpoint(name: "Loon", scheme: .socks5, host: "127.0.0.1", port: 7221))
+        store.upsert(CustomProxyEndpoint(name: "Loon (家里)", scheme: .socks5, host: "127.0.0.1", port: 7221))
+        #expect(store.endpoints.count == 1)
+        #expect(store.endpoints.first?.name == "Loon (家里)")
+    }
+
+    /// 不同端口的代理是两台，不能并掉。
+    @Test func differentPortsStaySeparate() {
+        let store = CustomProxyStore(defaults: clean("dedupe-4"))
+        store.upsert(CustomProxyEndpoint(name: "A", scheme: .socks5, host: "127.0.0.1", port: 7221))
+        store.upsert(CustomProxyEndpoint(name: "B", scheme: .http, host: "127.0.0.1", port: 7222))
+        #expect(store.endpoints.count == 2)
+        // 两台又没指定默认出口 → 不替观众挑。
+        #expect(store.fallbackEndpoint == nil)
+    }
 }

@@ -952,6 +952,13 @@ import TVCore
             // A line-level route (set on the line chip) wins over the source-level route.
             LineSettings.shared.route(origin: $0.origin, sourceKey: $0.sourceKey, flag: $0.episodeFlag)?.proxyID
                 ?? CustomProxyStore.shared.route(origin: $0.origin, sourceKey: $0.sourceKey).proxyID
+                // ★ 最后读「源路由已经算好的那份结论」。
+                //
+                // ⛔ 少了这一句，配了「默认出口」（只配一台代理时它就是出口）的观众会看到：
+                //    源的列表页经代理（`api` 被改写成 `/p/<id>/…`），**视频却直连出去** ——
+                //    因为播放侧只认「行级/源级显式指定的代理」，不认默认出口。
+                //    Loon 那边于是只看到临时端口，永远等不到我们规定的那两个端口段。
+                ?? RelayRouteRegistry.shared.proxyID(origin: $0.origin, sourceKey: $0.sourceKey)
         } ?? nil
         if let proxyID {
             // ⛔ 只有 http/https 目标能走 relay：`LocalProxyServer.encode` 把目标拼成
