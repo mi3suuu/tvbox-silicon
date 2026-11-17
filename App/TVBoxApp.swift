@@ -329,6 +329,8 @@ enum LoonConfigProbe {
             for url in urls {
                 do {
                     let preset = try await LoonPreset.load(from: url)
+                    // 记住规则指向的组名：设置页「Copy Loon Rule」要按这个组名生成强制节点规则。
+                    ForcedNodeHosts.shared.targetGroup = preset.portRuleTarget
                     Diagnostics.shared.record(.info, "egress",
                         "loon config host=\(url.host ?? "-") wifi=\(preset.sharesOnLAN)"
                         + " http=\(preset.httpPort) socks=\(preset.socksPort)"

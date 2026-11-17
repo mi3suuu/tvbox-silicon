@@ -25,6 +25,10 @@ import Foundation
 ///
 /// That last point is the one the UI has to be honest about, which is what `caveat` is for.
 public struct LoonPreset: Sendable, Equatable {
+    /// 生成的规则默认指向的策略组名。观众把它改成自己的组名即可；
+    /// 真机读到配置时会用 `portRuleTarget` 覆盖（见 `ForcedNodeHosts.targetGroup`）。
+    public static let defaultGroupName = "Proxy"
+
     /// The API URL this was read from, kept so the row can show what it points at.
     public let source: URL
     /// The host the proxy ports answer on — Loon's own LAN address, not the API's host:port.

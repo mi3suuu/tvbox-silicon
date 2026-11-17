@@ -582,6 +582,10 @@ public final class EgressRouter: @unchecked Sendable {
     /// 而我们这侧只看到「代理腿也超时」，很容易误判成出口选择坏了。
     private func noteProxyTimeout(_ key: String, error: Error) {
         guard let urlError = error as? URLError, urlError.code == .timedOut else { return }
+        // 记进「必须显式走节点」的名单：设置页复制规则时一起带出去。
+        if let host = key.split(separator: "|").first.map(String.init) {
+            ForcedNodeHosts.shared.note(host: host)
+        }
         Diagnostics.shared.record(.warning, "egress",
             "\(key): the proxy leg timed out — Loon accepted the connection and never answered. "
             + "Loon 的域名规则优先于 SRC-PORT：这个站的出口由你配置的规则决定,App 无法覆盖。"

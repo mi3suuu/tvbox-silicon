@@ -206,18 +206,29 @@ struct ProxySettingsView: View {
         }
     }
 
+    /// 端口段规则 + 「被迫显式走节点」的域名行。
+    ///
+    /// 后者不是锦上添花：Loon 的域名/IP 规则优先于端口段，所以对已被判成直连的站，
+    /// 端口段规则等于不存在。App 只能把这些站记下来，交给观众粘贴一次。
+    static func loonRuleText() -> String {
+        guard let extra = ForcedNodeHosts.shared.ruleFragment(fallbackTarget: LoonPreset.defaultGroupName)
+        else { return LoonSRCPortRule.fragment }
+        return LoonSRCPortRule.fragment + "\n\n" + extra
+    }
+
     private func copyLoonRule() {
         // 三个平台各不相同，不能两分支：
         //   · iOS   → UIPasteboard
         //   · macOS → NSPasteboard（AppKit）
         //   · tvOS  → 两者都不可用（UIPasteboard 标 unavailable，NSPasteboard 属 AppKit 不编入）
         // 原来写的是 `#if os(iOS) || os(tvOS)` → UIPasteboard，tvOS 编译不过。
+        let text = Self.loonRuleText()
         #if os(iOS)
-        UIPasteboard.general.string = LoonSRCPortRule.fragment
+        UIPasteboard.general.string = text
         ruleCopied = true
         #elseif os(macOS)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(LoonSRCPortRule.fragment, forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
         ruleCopied = true
         #else
         // tvOS 没有系统粘贴板：电视端无法把规则文本交给外部剪贴板。
