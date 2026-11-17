@@ -177,12 +177,35 @@ struct RootView: View {
             platformTabs
             #if os(iOS)
                 .overlay(alignment: .bottomTrailing) {
-                    // 前台已经在演的时候不画坞 —— 否则两层视频叠在一起（用户报的现象）。
+                    // 前台已经在演的时候不画坞里的卡片 —— 否则两层视频叠在一起。
                     // 用 `opacity` 而不是 `if`：坞里的任务不能因为「这一帧被前台盖住」
                     // 而被销毁重建（那会把正在播的 AVPlayer 一起丢掉，切回来要重新缓冲）。
                     videoMiniPlayer
-                        .opacity(dockCoveredByForeground ? 0 : 1)
-                        .allowsHitTesting(!dockCoveredByForeground)
+                        .opacity(store.videoTasks.showsCards(coveredByForeground: dockCoveredByForeground) ? 1 : 0)
+                        .allowsHitTesting(store.videoTasks.showsCards(coveredByForeground: dockCoveredByForeground))
+                }
+                // ⛔ 坞的**管理入口**：只要有任务就常驻，与「卡片画不画」无关。
+                //
+                // 用户报「进入播放页迷你小窗就消失了，误触也没了」——
+                // 卡片让位是对的（两层视频叠一起会穿帮），但没有入口能把它叫回来，
+                // 屏幕上就没有任何东西证明「这里还有几集在播」。
+                //
+                // 位置贴右下角但**在坞卡片之上**（后加 = 更上层），
+                // 这样卡片被隐藏时它是唯一可见的东西，卡片显示时它叠在角落也不挡内容。
+                .overlay(alignment: .bottomTrailing) {
+                    if store.videoTasks.showsHandle(coveredByForeground: dockCoveredByForeground) {
+                        DockHandleButton(coveredByForeground: dockCoveredByForeground)
+                            .padding(12)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                // 管理器：悬浮列表，不 push 页面（坞的意义就是不打断当前操作）。
+                .overlay(alignment: .topTrailing) {
+                    if store.videoTasks.showsManager {
+                        DockManagerPanel()
+                            .padding(.top, 8).padding(.trailing, 8)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
             #endif
             #endif

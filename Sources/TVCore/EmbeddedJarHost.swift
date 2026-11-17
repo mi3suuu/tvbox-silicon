@@ -22,6 +22,20 @@ public actor EmbeddedJarHost {
         Bundle.main.url(forResource: "host", withExtension: "jar", subdirectory: "JavaHost") != nil
         #endif
     }
+
+    /// 这个运行时**现在能不能碰**：包里有它，而且它没在上一版把自己崩掉。
+    ///
+    /// 与 `available` 分开是有意的：`available` 决定「这个源还算不算个源」（列表、分组、搜索都读它），
+    /// 而这一条决定「要不要真的去创建 JVM」。把两者混成一个，运行时一停用，源就会从列表里整片消失 ——
+    /// 读者会以为订阅坏了。现在的效果是：源还在，点进去说一句为什么打不开。
+    public static var isEnabled: Bool {
+        #if os(macOS)
+        // Mac 上插件跑在独立进程里，它崩了不会带走 App，不需要这层闸。
+        PluginProcess.available
+        #else
+        available && JarRuntimeHealth.isEnabled
+        #endif
+    }
     #if os(macOS)
     private let worker = SerializedPluginWorker(width: EmbeddedJarHost.searchWidth, abandon: { resources, id in
         _ = PluginProcess.shared.call(resources: resources, json: EmbeddedJarHost.cancelCommand(id))
@@ -91,6 +105,11 @@ public actor EmbeddedJarHost {
 
     public func request(site: Site, jarURL: URL, params: [String: String], http: HTTPClient, configurationOrigin: URL, progress: PluginPreparation? = nil) async throws -> [String: JSONValue] {
         guard Self.available, let resources = Bundle.main.resourcePath else { throw TVError.unsupported("The on-device plugin runtime is missing from this build.") }
+        // 停用的运行时一律在这里挡住。⛔ 必须在 `worker.request` 之前 —— 那一步会创建 JVM，
+        // 而 JVM 起不来时是 abort()，不是 throw：留到这个函数外面就没有「返回错误」这种可能了。
+        guard Self.isEnabled else { throw TVError.unsupported(JarRuntimeHealth.disabledMessage) }
+        // 创建之前落痕：进程如果死在里面，下次启动 `JarRuntimeHealth.audit()` 会看到它。
+        JarRuntimeHealth.noteStarting()
         // Ahead-of-time conversion waits until requests have been quiet for a while.
         PluginConversionAhead.requestStarted()
         defer { PluginConversionAhead.requestEnded() }
@@ -142,6 +161,8 @@ public actor EmbeddedJarHost {
             response = try await worker.request(resources: resources, json: json, search: params["wd"] != nil) {
                 progress?.report(PluginPreparation.runtimeReady ? .loading : .preparing)
             }
+            // VM 应答了 → 它这一次是真的起来了，把「启动中」的痕擦掉。
+            JarRuntimeHealth.noteStarted()
             await signIn?.end()
         } catch {
             await signIn?.end()
@@ -216,6 +237,9 @@ public actor EmbeddedJarHost {
     func convertAhead(jarURL: URL, spiders: [String], from: Int, limit: Int, batch: Int, http: HTTPClient,
                       isDone: @Sendable (String) -> Bool) async throws -> ConversionBatch {
         guard Self.available, let resources = Bundle.main.resourcePath else { throw TVError.unsupported("The on-device plugin runtime is missing from this build.") }
+        // 预转换也会创建 JVM（第一枪常常就是它），同样要过闸、同样要落痕。
+        guard Self.isEnabled else { throw TVError.unsupported(JarRuntimeHealth.disabledMessage) }
+        JarRuntimeHealth.noteStarting()
         let data = try await PluginDownloads.shared.data(at: jarURL, http: http)
         try Self.refuseWebPage(data)
         let (digest, jar) = try Self.store(data)
@@ -228,6 +252,7 @@ public actor EmbeddedJarHost {
         ]
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let response = try await worker.background(resources: resources, json: String(decoding: try encoder.encode(input), as: UTF8.self))
+        JarRuntimeHealth.noteStarted()
         let envelope = try JSONDecoder().decode([String: JSONValue].self, from: Data(response.utf8))
         guard case .object(let result)? = envelope["result"] else { throw TVError.unsupported(envelope["error"]?.string ?? "The plugin runtime returned no response.") }
         return ConversionBatch(digest: digest, converted: result["converted"]?.int ?? 0, reused: result["reused"]?.int ?? 0,

@@ -2671,3 +2671,37 @@
 "Only Playable" = "只看能播";
 "Sort by Connection" = "按可播排序";
 "Nothing here is playable right now." = "現在沒有能播的來源。";
+"Turn Off" = "關閉";
+"Turn On" = "開啟";
+"Runtime Health" = "執行時狀態";
+"Use Plugin Runtime" = "使用外掛執行時";
+"Off · crashed while starting" = "已停用 · 啟動時崩潰過";
+"It crashed while starting in this build, so it is off. Sources that need it will say so instead of closing the app. Turning it on tries once more and may crash again." = "這一版裡它在啟動時崩過一次，已自動停用。需要它的來源會提示原因，而不再把 App 關掉。再開啟會重試一次，可能仍會閃退。";
+"If the plugin runtime ever crashes while starting, it turns itself off here and stays off until a new build." = "外掛執行時如果在啟動時崩潰，會自動在這裡停用，直到裝上新版本。";
+"The plugin runtime (Java) is off: starting it takes the app down. Sources that need it cannot open until it works. Settings › JAR Runtime can try once more." = "外掛執行時（Java）已關閉：現在啟動它會讓 App 直接結束，需要它的來源暫時打不開；可在 設定 › JAR 執行時 裡再試一次。";
+"The runtime in this build cannot start; it ends the app. So it is off, and sources that need it say why instead of closing the app. Turning it on tries once and may crash." = "這一版裡的執行時啟動即崩潰（會把 App 關掉），所以預設關閉：需要它的來源會說明原因，而不是閃退。開啟會真試一次，可能仍會崩。";
+"Plugin Runtime Is Off" = "外掛執行時已關閉";
+"Sources like this one run on the built-in Java runtime, and it is off because starting it ended the app. Settings › JAR Runtime can turn it back on and try again." = "這類來源要靠內建的 Java 執行時，而它啟動時會把 App 直接關掉，所以已停用。可在 設定 › JAR 執行時 裡重新開啟再試。";
+"Back to Sources" = "返回來源列表";
+"Mini Players" = "迷你播放器";
+"Show Mini Players" = "顯示迷你播放器";
+"Hide Mini Players" = "收起迷你播放器";
+"Manage Mini Players" = "管理迷你播放器";
+"Play All" = "全部播放";
+"Reset Placement" = "全部歸位";
+"Close All" = "全部關閉";
+"%@ paused — too many playing at once" = "%@ 個已暫停 — 同時播放太多了";
+"%@ playing at once" = "%@ 路同時播放";
+"%@ playing · %@ paused" = "%@ 路播放 · %@ 路已暫停";
+"Make Active" = "設為主窗";
+"Restore Last Windows" = "恢復上次視窗";
+"Put away %@ — at most %@ at once" = "已收起《%@》— 同時最多 %@ 個";
+"This layout applies to all skins — Original, One and Bilibili — in every shape, including full screen." = "這套佈局對全部皮膚生效（原版 / One / 嗶哩嗶哩），且在每種形態與全螢幕下都一致。";
+"Episode List" = "選集頁";
+"Tile Windows" = "並排視窗";
+"Free Arrange" = "自由擺放";
+"Bring Forward" = "上移一層";
+
+"Needs parsing" = "需解析";
+
+"That line didn't play. Switched to %@." = "那條線路播不出來，已自動切到「%@」。";

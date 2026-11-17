@@ -774,11 +774,17 @@ private actor PosterLoader {
             let ticket = disk.ticket()
             let scope = PosterResource.artworkScope(resource.url)
             let cached = disk.data(for: resource.cacheKey, kind: .artwork, scope: scope)
-            let data: Data
+            var data: Data
             if let cached { data = cached }
             // Saved songs keep their covers, for listening with no connection.
             else if let saved = try? Data(contentsOf: MusicDownloadLibrary.artworkFile(for: resource.url)) { data = saved }
-            else { data = try await HTTPClient().get(resource.url, headers: resource.headers).0 }
+            else { data = try await Self.fetchArtwork(resource) }
+            // 加密封面（GS/avbox、月色那类站给的 `xxx.jpg` 其实是 AES 密文）：只在新下载的字节
+            // 不像图片时试一次。缓存里存的是**解出来的明文**，所以滚动列表不会反复解。
+            if cached == nil, !ArtworkDecryptor.isImage(data),
+               let plain = ArtworkDecryptor.decode(data, hint: resource.url.host()) {
+                data = plain
+            }
             guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                   let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -805,6 +811,34 @@ private actor PosterLoader {
 
     /// Told by a grid as it starts and stops moving.
     func setScrolling(_ scrolling: Bool) { gate.setScrolling(scrolling) }
+
+    /// 一张封面：先直连取，取不到再走观众的出口代理试一次。
+    ///
+    /// 为什么需要这一层：一批源的接口在自己域名下（能通），封面却在另一个图床域名上，
+    /// 而那个域名在本机被 TLS 阻断（实测 `SSL_ERROR_SYSCALL`：握手就被打断，连 HTTP 状态码
+    /// 都没有）。表现正是「点进去能播，封面永远是灰的」—— 播放地址走的是 m3u8 域名，
+    /// 和封面不是同一台机器。这类源在 149 中转时代也一样灰，不是近期的回归。
+    ///
+    /// 兜底用「默认出口」而不是逐源配置：观众只配了一台代理时，那就是他的出口
+    /// （规则见 `CustomProxyStore.fallbackEndpoint`）。没配代理就没有第二条腿可走，
+    /// 保持原来的失败 —— 不要假装加载成功。
+    private static func fetchArtwork(_ resource: PosterResource) async throws -> Data {
+        do {
+            return try await HTTPClient().get(resource.url, headers: resource.headers).0
+        } catch {
+            guard let relayed = relayedArtwork(resource.url) else { throw error }
+            return try await HTTPClient().get(relayed, headers: resource.headers).0
+        }
+    }
+
+    /// 同一张图经本机回环中继 + 默认出口的地址；没有出口（或地址不是能转发的那种）时 nil。
+    private static func relayedArtwork(_ url: URL) -> URL? {
+        guard let endpoint = CustomProxyStore.shared.fallbackEndpoint,
+              let base = LocalProxyServer.shared.baseSync,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host() != nil else { return nil }
+        return LocalProxyServer.proxyURL(base: base, url: url, proxyID: endpoint.id)
+    }
 }
 
 struct PosterImage: View {

@@ -65,6 +65,15 @@ import TVCore
                 .task { Diagnostics.shared.record(.info, "app", "Application scene opened") }
                 .task { await ErrorReports.shared.start() }
                 .task {
+                    // ★ 结账上一次启动：如果「创建 JVM → VM 应答」这段窗口没走完，进程就没了。
+                    // 必须在**任何一次插件请求之前**跑，否则这一轮又会拿一次点击去撞同一个 abort。
+                    // 读上次的小窗快照，供管理器「恢复上次窗口」使用。
+                    // ⛔ 只读不恢复：见 `VideoTaskCenter.loadResumable` 的说明。
+                    store.videoTasks.loadResumable()
+                    if JarRuntimeHealth.audit() {
+                        Diagnostics.shared.record(.error, "jar.runtime",
+                            "embedded JVM aborted while starting; disabled for build \(JarRuntimeHealth.currentBuild) failures=\(JarRuntimeHealth.failures)")
+                    }
                     // ★ 无条件清理 QA 换皮残留 —— 必须放在 QA 门控**之前**。
                     // 写它的要 QA 启动、清它的也要 QA 启动时，就永远解不开；
                     // 真机实证过「选 One 无效、杀进程重进还是哔哩哔哩」。

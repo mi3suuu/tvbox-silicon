@@ -4,6 +4,31 @@ public struct PlaybackChoice: Identifiable, Sendable {
     public let id: Int
     public let name: String
     public let address: String
+
+    /// 这条地址是不是「一个网页」，而不是媒体流。
+    ///
+    /// 采集站把云播页（`/share/<hash>`、`/play/<id>`）与平台页（优酷/爱奇艺/腾讯/芒果/B站）
+    /// 直接填在 `vod_play_url` 里是常态：内置 141 个源实测 26 条线是这样。
+    /// 它们回 200、回几十 KB HTML，探针判「通」，播放器拿到却打不开 —— 转圈到超时。
+    ///
+    /// 判据只看**地址长相**（不看内容，播放前没有内容可看）：
+    /// 不是直链媒体 + （已知平台域名 或 路径像播放页）。真正的内容判定在解析之后
+    /// （`SourceProbeResult.mediaKind`），两层各管一段。
+    public var looksLikePage: Bool { PlaybackChoice.isPageAddress(address) }
+
+    static func isPageAddress(_ address: String) -> Bool {
+        let lower = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty, !lower.hasPrefix("magnet:") else { return false }
+        // 已带 scheme 前缀的解析服务地址（`parse:` / `json:`）不在这里判。
+        guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return false }
+        if CatalogClient.isDirectMedia(address) { return false }
+        guard let url = try? WebAddress.resolve(address), let host = url.host()?.lowercased() else { return false }
+        let platforms = ["youku.com", "v.qq.com", "iqiyi.com", "mgtv.com", "bilibili.com",
+                         "b23.tv", "sohu.com", "le.com", "pptv.com", "tudou.com", "wasu.cn"]
+        if platforms.contains(where: { host == $0 || host.hasSuffix("." + $0) }) { return true }
+        let path = url.path.lowercased()
+        return path.contains("/share/") || path.contains("/play/") || path.hasPrefix("/v_show/")
+    }
     static func parse(_ value: JSONValue?, prefix: String = "", fallbackName: String) -> [PlaybackChoice] {
         if let text = value?.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return [PlaybackChoice(id: 0, name: fallbackName, address: prefix + text)]

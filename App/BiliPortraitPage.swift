@@ -62,6 +62,21 @@ struct BiliPortraitPage: View {
     var onSettings: () -> Void = {}
     var onTogglePlay: () -> Void = {}
     var onFullScreen: () -> Void = {}
+    /// 「切成小窗」：把这一幕收进坞，人留在当前页。
+    ///
+    /// ⛔ 竖屏页此前**没有这个入口** —— 全集播放页（`BiliFullScreenPage`）一直有
+    /// （`sideIcon("pip", …)`，二进制实证 `bbplayer_fullscreen_miniscreen`），
+    /// 而竖屏/横屏这两页漏了。用户看到的就是「有的播放页能切小窗、有的不能」。
+    /// 三个页面是同一套皮的不同形态，这个键必须三处都有。
+    var onMiniScreen: () -> Void = {}
+    /// 用户在设置页排好的控件顺序（`PlayerControlsLayout.top`）。
+    ///
+    /// ⛔ 原来这里**没有这个参数**：顶栏那三颗是硬编码的
+    /// （pip / airplayvideo / ellipsis），于是设置页怎么排，B 站皮都不变 ——
+    /// 用户报的「三个形态的控件都不一样，设置一个页面其他两个不跟着变」就是这条。
+    ///
+    /// 现在顶栏按这个数组画；为空时退回内置版式（保持老版视觉不变）。
+    var controls: [PlayerControl] = []
     var onToggleDanmu: () -> Void = {}
     var onFollow: () -> Void = {}
     var onLike: () -> Void = {}
@@ -200,7 +215,13 @@ struct BiliPortraitPage: View {
                 HStack(spacing: 0) {
                     topButton("chevron.backward", L10n.text("Back"), onBack)
                     Spacer(minLength: 0)
-                    topButton("airplayvideo", L10n.text("Cast"), onCast)
+                    // 顶栏右侧：按用户在设置页排的顺序画。
+                    // `controls` 为空 ⇒ 退回内置三颗（老版视觉不变）。
+                    ForEach(renderedControls, id: \.rawValue) { control in
+                        topButton(BiliControlSupport.symbol(for: control) ?? "circle",
+                                  L10n.text(label(for: control)),
+                                  action(for: control))
+                    }
                     topButton("ellipsis", L10n.text("More operations"), onMore)
                 }
                 .frame(height: M.topBarHeight)
@@ -233,6 +254,51 @@ struct BiliPortraitPage: View {
         // 量一次真实容器宽度给上面两个常量用（`.onGeometryChange` 不参与布局，无副作用）。
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
             if abs(w - cardWidth) > 0.5 { cardWidth = w }
+        }
+    }
+
+    /// 顶栏实际要画的那几颗。
+    ///
+    /// ⛔ 必须有「退回内置」这一支：`controls` 为空（老用户、或布局串还没迁移）
+    ///    时不能画成空顶栏 —— 那样用户会以为「更新把小窗键弄没了」。
+    private var renderedControls: [PlayerControl] {
+        let wanted = controls.filter { BiliControlSupport.isSupported($0) }
+        if wanted.isEmpty {
+            // 内置版式：小窗、投屏。
+            return [.miniPlayer, .airPlay]
+        }
+        return wanted
+    }
+
+    private func label(for control: PlayerControl) -> String {
+        switch control {
+        case .miniPlayer: return "Mini Player"
+        case .airPlay:    return "Cast"
+        case .episodes:   return "Episodes"
+        case .lock:       return "Lock screen"
+        case .danmaku:    return "Danmu"
+        case .speed:      return "Speed"
+        case .quality:    return "Resolution"
+        case .subtitles:  return "Subtitles"
+        case .pictureSize: return "Aspect Ratio"
+        case .videoInfo:  return "Video Info"
+        case .anotherPlayer: return "Another Player"
+        case .rotate:     return "Rotate"
+        default:          return control.rawValue
+        }
+    }
+
+    private func action(for control: PlayerControl) -> () -> Void {
+        switch control {
+        case .miniPlayer: return onMiniScreen
+        case .airPlay:    return onCast
+        case .episodes:   return onEpisodes
+        case .lock:       return onMore   // 竖屏页没有锁屏面板，落到「更多」
+        case .danmaku:    return onToggleDanmu
+        case .speed, .quality, .subtitles, .pictureSize, .videoInfo, .anotherPlayer, .rotate:
+            // 这几项在 B 站皮里都收在「更多」那个面板里 —— 顶栏按钮直接打开它。
+            return onMore
+        default:          return {}
         }
     }
 

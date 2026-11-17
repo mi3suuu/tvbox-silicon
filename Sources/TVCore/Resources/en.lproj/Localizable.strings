@@ -2670,3 +2670,36 @@
 "Only Playable" = "Only Playable";
 "Sort by Connection" = "Sort by Connection";
 "Nothing here is playable right now." = "Nothing here is playable right now.";
+"Turn Off" = "Turn Off";
+"Turn On" = "Turn On";
+"Runtime Health" = "Runtime Health";
+"Use Plugin Runtime" = "Use Plugin Runtime";
+"Off · crashed while starting" = "Off · crashed while starting";
+"It crashed while starting in this build, so it is off. Sources that need it will say so instead of closing the app. Turning it on tries once more and may crash again." = "It crashed while starting in this build, so it is off. Sources that need it will say so instead of closing the app. Turning it on tries once more and may crash again.";
+"If the plugin runtime ever crashes while starting, it turns itself off here and stays off until a new build." = "If the plugin runtime ever crashes while starting, it turns itself off here and stays off until a new build.";
+"The plugin runtime (Java) is off: starting it takes the app down. Sources that need it cannot open until it works. Settings › JAR Runtime can try once more." = "The plugin runtime (Java) is off: starting it takes the app down. Sources that need it cannot open until it works. Settings › JAR Runtime can try once more.";
+"The runtime in this build cannot start; it ends the app. So it is off, and sources that need it say why instead of closing the app. Turning it on tries once and may crash." = "The runtime in this build cannot start; it ends the app. So it is off, and sources that need it say why instead of closing the app. Turning it on tries once and may crash.";
+"Plugin Runtime Is Off" = "Plugin Runtime Is Off";
+"Sources like this one run on the built-in Java runtime, and it is off because starting it ended the app. Settings › JAR Runtime can turn it back on and try again." = "Sources like this one run on the built-in Java runtime, and it is off because starting it ended the app. Settings › JAR Runtime can turn it back on and try again.";
+"Back to Sources" = "Back to Sources";
+"Mini Players" = "Mini Players";
+"Show Mini Players" = "Show Mini Players";
+"Hide Mini Players" = "Hide Mini Players";
+"Manage Mini Players" = "Manage Mini Players";
+"Play All" = "Play All";
+"Reset Placement" = "Reset Placement";
+"Close All" = "Close All";
+"%@ paused — too many playing at once" = "%@ paused — too many playing at once";
+"%@ playing at once" = "%@ playing at once";
+"%@ playing · %@ paused" = "%@ playing · %@ paused";
+"Make Active" = "Make Active";
+"Restore Last Windows" = "Restore Last Windows";
+"Put away %@ — at most %@ at once" = "Put away %@ — at most %@ at once";
+"Episode List" = "Episode List";
+"Tile Windows" = "Tile Windows";
+"Free Arrange" = "Free Arrange";
+"Bring Forward" = "Bring Forward";
+
+"Needs parsing" = "Needs parsing";
+
+"That line didn't play. Switched to %@." = "That line didn't play. Switched to %@.";

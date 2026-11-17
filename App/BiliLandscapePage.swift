@@ -54,6 +54,10 @@ struct BiliLandscapePage: View {
     var onBack: () -> Void = {}
     var onCast: () -> Void = {}
     var onMore: () -> Void = {}
+    /// 「切成小窗」（与竖屏页、全集页一致）。三页是同一套皮的不同形态，这个键必须三处都有。
+    var onMiniScreen: () -> Void = {}
+    /// 设置页排好的控件顺序（见 `BiliPortraitPage.controls` 的说明）。
+    var controls: [PlayerControl] = []
     var onFollow: () -> Void = {}
     var onLike: () -> Void = {}
     var onDislike: () -> Void = {}
@@ -115,7 +119,12 @@ struct BiliLandscapePage: View {
             HStack(spacing: 0) {
                 iconButton("chevron.backward", "Back", onBack)
                 Spacer(minLength: 0)
-                iconButton("airplayvideo", "Cast", onCast)
+                // 顶栏右侧按设置页的顺序画；`controls` 为空退回内置两颗。
+                ForEach(renderedControls, id: \.rawValue) { control in
+                    iconButton(BiliControlSupport.symbol(for: control) ?? "circle",
+                               label(for: control),
+                               action(for: control))
+                }
                 iconButton("ellipsis", "More operations", onMore)
             }
             .padding(.horizontal, 10)
@@ -313,6 +322,42 @@ struct BiliLandscapePage: View {
             }
         }
         .padding(.top, 6)
+    }
+
+    private var renderedControls: [PlayerControl] {
+        let wanted = controls.filter { BiliControlSupport.isSupported($0) }
+        return wanted.isEmpty ? [.miniPlayer, .airPlay] : wanted
+    }
+
+    private func label(for control: PlayerControl) -> String {
+        switch control {
+        case .miniPlayer: return "Mini Player"
+        case .airPlay:    return "Cast"
+        case .episodes:   return "Episodes"
+        case .lock:       return "Lock screen"
+        case .danmaku:    return "Danmu"
+        case .speed:      return "Speed"
+        case .quality:    return "Resolution"
+        case .subtitles:  return "Subtitles"
+        case .pictureSize: return "Aspect Ratio"
+        case .videoInfo:  return "Video Info"
+        case .anotherPlayer: return "Another Player"
+        case .rotate:     return "Rotate"
+        default:          return control.rawValue
+        }
+    }
+
+    private func action(for control: PlayerControl) -> () -> Void {
+        switch control {
+        case .miniPlayer: return onMiniScreen
+        case .airPlay:    return onCast
+        case .episodes:   return onEpisodes
+        case .danmaku:    return onMore
+        case .speed, .quality, .subtitles, .pictureSize, .videoInfo,
+             .anotherPlayer, .rotate, .lock:
+            return onMore
+        default:          return {}
+        }
     }
 
     private func iconButton(_ symbol: String, _ label: String,

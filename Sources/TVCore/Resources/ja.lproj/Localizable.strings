@@ -2671,3 +2671,37 @@
 "Only Playable" = "再生可のみ";
 "Sort by Connection" = "再生可否で並べ替え";
 "Nothing here is playable right now." = "現在再生できるソースはありません。";
+"Turn Off" = "オフにする";
+"Turn On" = "オンにする";
+"Runtime Health" = "ランタイムの状態";
+"Use Plugin Runtime" = "プラグインランタイムを使う";
+"Off · crashed while starting" = "オフ · 起動時にクラッシュ";
+"It crashed while starting in this build, so it is off. Sources that need it will say so instead of closing the app. Turning it on tries once more and may crash again." = "このビルドでは起動時にクラッシュしたためオフになっています。必要なソースは理由を表示し、アプリは終了しません。オンにすると再試行します（再びクラッシュする可能性があります）。";
+"If the plugin runtime ever crashes while starting, it turns itself off here and stays off until a new build." = "プラグインランタイムが起動時にクラッシュすると、ここで自動的にオフになり、新しいビルドまでオフのままです。";
+"The plugin runtime (Java) is off: starting it takes the app down. Sources that need it cannot open until it works. Settings › JAR Runtime can try once more." = "プラグインランタイム（Java）はオフです：起動するとアプリが終了します。必要なソースは開けません。設定 › JAR ランタイム で再試行できます。";
+"The runtime in this build cannot start; it ends the app. So it is off, and sources that need it say why instead of closing the app. Turning it on tries once and may crash." = "このビルドのランタイムは起動時にクラッシュし、アプリが終了します。そのため既定でオフです。必要なソースは理由を表示します。オンにすると一度だけ試します（クラッシュする可能性があります）。";
+"Plugin Runtime Is Off" = "プラグインランタイムはオフです";
+"Sources like this one run on the built-in Java runtime, and it is off because starting it ended the app. Settings › JAR Runtime can turn it back on and try again." = "この種のソースは内蔵 Java ランタイムで動きますが、起動時にアプリが終了するためオフになっています。設定 › JAR ランタイム で再びオンにして試せます。";
+"Back to Sources" = "ソース一覧に戻る";
+"Mini Players" = "ミニプレーヤー";
+"Show Mini Players" = "ミニプレーヤーを表示";
+"Hide Mini Players" = "ミニプレーヤーを閉じる";
+"Manage Mini Players" = "ミニプレーヤーを管理";
+"Play All" = "すべて再生";
+"Reset Placement" = "配置をリセット";
+"Close All" = "すべて閉じる";
+"%@ paused — too many playing at once" = "%@ 件停止中 — 同時再生が多すぎます";
+"%@ playing at once" = "%@ 路同時再生中";
+"%@ playing · %@ paused" = "%@ 路再生 · %@ 路一時停止";
+"Make Active" = "メインにする";
+"Restore Last Windows" = "前回のウィンドウを復元";
+"Put away %@ — at most %@ at once" = "%@ を閉じました — 同時に最大 %@ 件";
+"This layout applies to all skins — Original, One and Bilibili — in every shape, including full screen." = "この配置はすべてのスキン（オリジナル / One / Bilibili）に、全形態・全画面でも反映されます。";
+"Episode List" = "エピソード一覧";
+"Tile Windows" = "ウィンドウを並べる";
+"Free Arrange" = "自由配置";
+"Bring Forward" = "前面へ移動";
+
+"Needs parsing" = "解析が必要";
+
+"That line didn't play. Switched to %@." = "この回線は再生できませんでした。「%@」に切り替えました。";

@@ -19,6 +19,13 @@ struct VideoDetailView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.dismiss) private var dismiss
     @Environment(Store.self) private var store
+
+    /// 设置页排好的控件布局。
+    ///
+    /// ⛔ B 站皮三页（竖屏/横屏/全屏）的顶栏原来是**硬编码**的，完全不理这个键 ——
+    ///    用户报「三个形态的控件都不一样，设置一个页面其他两个不跟着变」就是它。
+    ///    现在从这一处读、传下去，三页与 One/原版共用同一份配置。
+    @AppStorage(PlayerControlsLayout.storageKey) private var controlsOrder = PlayerControlsLayout.standard.stored
     let video: Video
     let client: CatalogClient
     /// Opened from Continue Watching: on an iPhone the page resumes it at once.
@@ -317,6 +324,9 @@ struct VideoDetailView: View {
     @State private var queuedNotice: Int?
     /// A line has no episode to continue the one playing: shown briefly under the header.
     @State private var lineNotice: String?
+    /// 这一集已经因为「播不出来」被自动跳过的线路。按集记账：换集就该重新给每条线一次机会。
+    @State private var autoTriedLines: Set<String> = []
+    @State private var autoTriedEpisode: String?
     /// TMDB's details for the video (TMDBViews.swift). The page shows the source's own until they are in, then fades them in.
     @State var tmdb = TMDBLookup()
     /// The source's own recommendations, shown under the video when TMDB has none for it. Loaded lazily, once TMDB
@@ -805,7 +815,10 @@ struct VideoDetailView: View {
         .confirmationDialog(L10n.text("Choose quality"), isPresented: $choosingQuality, titleVisibility: .visible) {
             if let plan = pendingPlan, let episode = pendingEpisode {
                 ForEach(plan.choices) { choice in
-                    Button(choice.name) { startRequest { await resolve(plan, choice: choice, episode: episode) } }
+                    Button(choice.name) {
+                        rememberChoice(choice, episode: episode)
+                        startRequest { await resolve(plan, choice: choice, episode: episode) }
+                    }
                 }
             }
         }
@@ -996,7 +1009,11 @@ struct VideoDetailView: View {
                     flags: flags,
                     picked: nil,          // 走到这里即 `selectedFlag == nil`，没有本次选择
                     watched: watchedFlag,
-                    playableNow: { CloudDrive.preferredFlag([$0]) != nil }
+                    playableNow: { CloudDrive.preferredFlag([$0]) != nil },
+                    // 有实测读数时按**长边**取最好的一条：同一部剧里 720p 的线常排在 1080p 前面，
+                    // 而「第一条像直链的」就是它（`Video.init` 的 playable 排序）。
+                    quality: SourceProbeStore.shared.qualityReader(
+                        sourceKey: client.site.key, videoID: video.id)
                 )
             }
             #if os(tvOS)
@@ -1642,13 +1659,17 @@ struct VideoDetailView: View {
         do {
             let plan = try await client.preparePlayback(episode)
             try Task.checkCancellation()
-            if plan.choices.count > 1 {
+            if plan.choices.count > 1, let remembered = rememberedChoice(plan, episode: episode) {
+                // 上一集选过这一档：直接用，不再弹窗。弹窗挡在起播前面，等于每次都要等一次点击。
+                await resolve(plan, choice: remembered, episode: episode)
+            } else if plan.choices.count > 1 {
                 pendingPlan = plan; pendingEpisode = episode; choosingQuality = true
             } else {
                 let playback = store.subscription.map { client.applying($0) } ?? client
                 let resolved = try await playback.resolvePlayback(plan, choice: plan.choices[0])
                 try Task.checkCancellation()
                 store.playing = store.catalogChannel(resolved, video: currentVideo(), episode: episode, client: playback)
+                warmNextEpisode(after: episode, client: playback)
                 #if DEBUG
                 oneSkinLog("play OK url=\(String(describing: resolved.url).prefix(90))")
                 #endif
@@ -1660,6 +1681,35 @@ struct VideoDetailView: View {
             fail(episode, error)
         }
     }
+    /// 把下一集的**线路表**先问一次（免费的那一半）。
+    ///
+    /// 看剧AI 这类源的分集地址是 token，每换一集都要先取一次线路表（实测 1–3 秒），
+    /// 然后才是签名（0.8–2 秒）。用户看完一集点下一集时，这两段串行就成了「点了要等」。
+    /// 起播成功之后顺手把下一集的表取回来，那段等待就落到用户看片的这几分钟里了。
+    ///
+    /// 只对声明了 `prefetch: lines` 的源做：别的脚本没有这个入口，
+    /// 调它只会白花一个脚本往返。
+    private func warmNextEpisode(after episode: Episode, client playback: CatalogClient) {
+        guard playback.site.prefetchesLineList, let episodes = detail?.episodes else { return }
+        let line = episodes.filter { $0.flag == episode.flag }
+        guard let index = line.firstIndex(where: { $0.id == episode.id }), index + 1 < line.count else { return }
+        let next = line[index + 1]
+        Task { await playback.prefetchPlayback(next) }
+    }
+
+    /// 这一集上次选的清晰度（同源、同剧、同线路），仍然在候选里才返回。
+    private func rememberedChoice(_ plan: PlaybackPlan, episode: Episode) -> PlaybackChoice? {
+        let key = QualityPreference.key(site: client.site.key, video: video.id, flag: episode.flag)
+        guard let name = QualityPreference.remembered(key) else { return nil }
+        return QualityPreference.match(plan.choices, named: name, nameOf: \.name)
+    }
+
+    private func rememberChoice(_ choice: PlaybackChoice, episode: Episode) {
+        QualityPreference.remember(
+            choice.name,
+            for: QualityPreference.key(site: client.site.key, video: video.id, flag: episode.flag))
+    }
+
     private func resolve(_ plan: PlaybackPlan, choice: PlaybackChoice, episode: Episode) async {
         busy = true; loadingEpisode = episode.id
         defer { busy = false; pendingPlan = nil; pendingEpisode = nil; loadingEpisode = nil }
@@ -1668,6 +1718,7 @@ struct VideoDetailView: View {
             let resolved = try await playback.resolvePlayback(plan, choice: choice)
             try Task.checkCancellation()
             store.playing = store.catalogChannel(resolved, video: currentVideo(), episode: episode, client: playback)
+            warmNextEpisode(after: episode, client: playback)
         } catch { fail(episode, error) }
     }
     private func retryAfterSignIn() {
@@ -1678,6 +1729,13 @@ struct VideoDetailView: View {
         oneSkinLog("fail \(episode.name): \(error)")
         #endif
         guard !Task.isCancelled, !(error is CancellationError) else { return }
+        // 先试着换一条线再报错。
+        //
+        // 实测：内置「可播」组里 19 个源各有一条「网页型」线路（回 HTML 不是媒体），
+        // 另有 4 个源**第一条线**就播不出来 —— 用户看到的是「点播放转圈 → 报错 → 自己切线路」。
+        // 而换线这个动作不需要用户做判断：他已经表达了「要看这一集」。
+        // 只自动换**一次**：换来换去会把真实的错误刷掉，变成看不懂的循环。
+        if autoAdvanceLine(from: episode, error: error) { return }
         // [融合修正] 原来这里调 `CloudDriveLoginRequired(bundleMessage:)`，
         // 但那个初始化器在全仓库都不存在（备份分支也没有）——这行一直是编译不过的死代码，
         // 只是本文件此前没进 target 才没暴露。改为按错误文本判断，语义不变：
@@ -1703,6 +1761,47 @@ struct VideoDetailView: View {
                                               drive: CloudDrive.missingLogin(forFlag: episode.flag), blockedBeforeRequest: false)
             }
         }
+    }
+
+    /// 这条线播不出来时，自动换到下一条并重播一次。
+    ///
+    /// 只在「真的播不出来」时动手：网盘要登录（`CloudDriveLoginRequired`）不换 —— 换一条线
+    /// 同样要登录，弹登录卡才是对的答案。同一集只换一次，换过的那条不再回头。
+    ///
+    /// 选哪条：优先有实测读数（说明之前探通过）的线，其次按源给的顺序。
+    /// 网页型线路在读数里会被 `qualityReader` 判成 nil（它不是媒体），所以天然排在后面。
+    @discardableResult
+    private func autoAdvanceLine(from episode: Episode, error: Error) -> Bool {
+        guard error as? CloudDriveLoginRequired == nil,
+              CloudDriveLoginRequired.matching(message: error.localizedDescription) == nil,
+              flags.count > 1 else { return false }
+        if autoTriedEpisode != episode.id {
+            autoTriedEpisode = episode.id
+            autoTriedLines = []
+        }
+        let tried = autoTriedLines.union([episode.flag])
+        let quality = SourceProbeStore.shared.qualityReader(sourceKey: client.site.key, videoID: video.id)
+        let candidates = flags.filter { !tried.contains($0) }
+        guard let next = candidates.first(where: { quality($0) != nil }) ?? candidates.first,
+              let target = (detail?.episodes ?? []).first(where: { $0.flag == next && $0.name == episode.name })
+                ?? detail?.episodes.first(where: { $0.flag == next })
+        else { return false }
+        autoTriedLines = tried
+        selectedFlag = next
+        #if DEBUG
+        oneSkinLog("auto-switch \(episode.flag) → \(next) after \(error.localizedDescription.prefix(60))")
+        #endif
+        let label = next.isEmpty ? L10n.text("Line 1") : next
+        withAnimation(.smooth(duration: 0.2)) {
+            lineNotice = L10n.text("That line didn't play. Switched to %@.", label)
+        }
+        Task { try? await Task.sleep(for: .seconds(4)); withAnimation(.smooth(duration: 0.2)) { lineNotice = nil } }
+        Task {
+            // 让当前这次 `play` 的 `defer`（busy = false）先跑完，否则会被 busy 挡回去。
+            try? await Task.sleep(for: .milliseconds(60))
+            await play(target)
+        }
+        return true
     }
 
     /// This video's playback scopes (`PlaybackHistoryContext.id`); the details may carry another ID than the list's.
@@ -3328,6 +3427,7 @@ struct VideoDetailView: View {
                 // 现在走 `onMiniPlayer`（One 皮肤同一套），由页面置
                 // `store.miniPlayerActive` 并 dismiss，RootView 挂小窗卡片。
                 onMiniScreen: { collapseToMiniPlayer() },
+                controls: PlayerControlsLayout(stored: controlsOrder).top,
                 onScreenshot: { saveCurrentFrame() },
                 onSeekTo: { fraction in
                     guard let session = playerSession, session.duration > 0 else { return }
@@ -3374,6 +3474,9 @@ struct VideoDetailView: View {
                 onBack: { leavePlayer() },
                 onCast: {},
                 onMore: { biliPanel = .actionMenu },
+                // 与全集页同一个实现（先登记进坞再 pop，顺序不能换）。
+                onMiniScreen: { collapseToMiniPlayer() },
+                controls: PlayerControlsLayout(stored: controlsOrder).top,
                 onFollow: {},
                 onLike: {},
                 onDislike: {},
@@ -3411,6 +3514,9 @@ struct VideoDetailView: View {
                     }
                 },
                 onFullScreen: { setFullScreenEnteringCurrentOrientation() },
+                // 与全集页同一个实现（先登记进坞再 pop，顺序不能换）。
+                onMiniScreen: { collapseToMiniPlayer() },
+                controls: PlayerControlsLayout(stored: controlsOrder).top,
                 onToggleDanmu: { toggleSkinDanmaku() },
                 onFollow: {},
                 onLike: {},

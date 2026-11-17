@@ -13,6 +13,12 @@ struct SiteView: View {
     /// The source's home as another page already has it (Watch Now's recommendations): shown at once, then refreshed.
     var preview: (videos: [Video], categories: [TVCore.Category])? = nil
     private var canLoad: Bool { site.canBrowse(jarURL: jarURL) }
+    /// 这个源要靠内嵌 Java 运行时，而运行时现在是关着的（上一版启动即崩，见 `JarRuntimeHealth`）。
+    ///
+    /// 为什么要单独一条：`canLoad` 其实还是 true（源仍然算「能浏览」的源，列表里不该消失），
+    /// 请求会带着一句错误回来 —— 但那条错误折在「查看错误详情」里，读者看不到原因，
+    /// 只会觉得「这个源坏了」。这里直接把原因摆在页面上，并告诉他在哪能再试。
+    private var runtimeOff: Bool { site.runtime == .jar && !EmbeddedJarHost.isEnabled }
     private var isIndex: Bool { (site.raw["indexs"]?.int ?? 0) == 1 }
     @State var browser = CatalogBrowser()
     @State private var query = ""
@@ -49,6 +55,19 @@ struct SiteView: View {
                              : site.runtime == .python ? L10n.text("This source requires a Python runtime, which is not available on this platform.")
                              : L10n.text("This source requires a JavaScript engine, which is not supported yet."))
                     }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                #if os(tvOS)
+                .focusable()
+                .onExitCommand { dismiss() }
+                #endif
+            } else if runtimeOff {
+                ContentUnavailableView {
+                    Label(L10n.text("Plugin Runtime Is Off"), systemImage: "bolt.slash")
+                } description: {
+                    Text(L10n.text("Sources like this one run on the built-in Java runtime, and it is off because starting it ended the app. Settings › JAR Runtime can turn it back on and try again."))
+                } actions: {
+                    Button(L10n.text("Back to Sources")) { dismiss() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 #if os(tvOS)

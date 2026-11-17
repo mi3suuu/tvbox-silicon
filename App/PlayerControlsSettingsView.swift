@@ -60,7 +60,7 @@ struct PlayerControlsSettingsView: View {
     var body: some View {
         SettingsPage(title: L10n.text("Player Controls"), symbol: "slider.horizontal.3") {
             if PlaySkin.current == .bilibili {
-                SettingsGroup(footer: L10n.text("This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel.")) {
+                SettingsGroup(footer: L10n.text("This layout applies to all skins — Original, One and Bilibili — in every shape, including full screen.")) {
                     FormLabel(symbol: "info.circle.fill", tint: .orange,
                               title: L10n.text("Not used by the Bilibili skin"))
                 }

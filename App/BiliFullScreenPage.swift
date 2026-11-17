@@ -50,6 +50,8 @@ struct BiliFullScreenPage: View {
     var onPrevious: () -> Void = {}
     /// 小窗（二进制实证 `bbplayer_fullscreen_miniscreen`）。
     var onMiniScreen: () -> Void = {}
+    /// 设置页排好的控件顺序（见 `BiliPortraitPage.controls` 的说明）。
+    var controls: [PlayerControl] = []
     /// 截图（二进制实证 `bbplayer_fullscreen_screenshot`）。
     var onScreenshot: () -> Void = {}
     var onSeekTo: (Double) -> Void = { _ in }
@@ -144,6 +146,56 @@ struct BiliFullScreenPage: View {
             } else {
                 armAutoHide()
             }
+        }
+    }
+
+    /// 右侧栏实际要画的那几颗。
+    ///
+    /// ⛔ 与竖屏/横屏不同：全屏页**必须**保留小窗键 —— 用户明确要求
+    ///    「全屏播放页要有一个直接的迷你小窗播放按钮」。
+    ///    所以 `controls` 为空时退回 `.miniPlayer`，而不是空栏。
+    private var railControls: [PlayerControl] {
+        let wanted = controls.filter { BiliControlSupport.isSupported($0) }
+        if wanted.isEmpty { return [.miniPlayer] }
+        // 小窗键在全屏页是**不可移除**的（用户要求的"直接按钮"），
+        // 即使用户在设置里把它从顶栏摘掉，这里也补回来。
+        return wanted.contains(.miniPlayer) ? wanted : [.miniPlayer] + wanted
+    }
+
+    private func railLabel(for control: PlayerControl) -> String {
+        switch control {
+        case .miniPlayer: return "Mini player"
+        case .airPlay:    return "Cast"
+        case .episodes:   return "Episodes"
+        case .lock:       return "Lock screen"
+        case .danmaku:    return "Danmu"
+        case .speed:      return "Speed"
+        case .quality:    return "Resolution"
+        case .subtitles:  return "Subtitles"
+        case .pictureSize: return "Aspect Ratio"
+        case .videoInfo:  return "Video Info"
+        case .anotherPlayer: return "Another Player"
+        case .rotate:     return "Rotate"
+        default:          return control.rawValue
+        }
+    }
+
+    private func railAction(_ control: PlayerControl) -> () -> Void {
+        switch control {
+        case .miniPlayer: return onMiniScreen
+        // 全屏页**没有**投屏/选集回调（它的版式里没有这两个入口）——
+        // 指向「设置」面板，而不是留一颗点了没反应的键。
+        case .airPlay, .episodes: return onSettings
+        case .lock:       return {
+            withAnimation(.easeInOut(duration: 0.24)) {
+                locked = true
+                chromeVisible = false
+            }
+            hideTask?.cancel()
+        }
+        default:
+            // 其余收在「设置」面板里（全屏页那颗齿轮）。
+            return onSettings
         }
     }
 
@@ -245,7 +297,14 @@ struct BiliFullScreenPage: View {
         // overlay(alignment: .trailing) 里高度不受限，`Spacer` 会塌成 0 →
         // 用固定 top padding 把三键压到实测的 y≈204。
         VStack(spacing: 4) {
-            sideIcon("pip", L10n.text("Mini player")) { onMiniScreen() }
+            // 按设置页的顺序画（`controls` 为空退回内置：只有小窗）。
+            ForEach(railControls, id: \.rawValue) { control in
+                sideIcon(BiliControlSupport.symbol(for: control) ?? "circle",
+                         L10n.text(railLabel(for: control))) {
+                    railAction(control)()
+                }
+            }
+            // 截图与锁屏是 B 站全屏特有的，`PlayerControl` 里没有对应项，恒常驻。
             sideIcon("camera", L10n.text("Screenshot")) { onScreenshot() }
             sideIcon("lock.open", L10n.text("Lock screen")) {
                 withAnimation(.easeInOut(duration: 0.24)) {

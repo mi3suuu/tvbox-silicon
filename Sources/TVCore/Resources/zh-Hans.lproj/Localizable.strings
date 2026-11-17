@@ -2674,3 +2674,37 @@
 "Only Playable" = "只看能播";
 "Sort by Connection" = "按可播排序";
 "Nothing here is playable right now." = "现在没有能播的源。";
+"Turn Off" = "关闭";
+"Turn On" = "开启";
+"Runtime Health" = "运行时状态";
+"Use Plugin Runtime" = "使用插件运行时";
+"Off · crashed while starting" = "已停用 · 启动时崩溃过";
+"It crashed while starting in this build, so it is off. Sources that need it will say so instead of closing the app. Turning it on tries once more and may crash again." = "这一版里它在启动时崩过一次，已自动停用。需要它的源会提示原因，而不再把 App 关掉。再开启会重试一次，可能仍会闪退。";
+"If the plugin runtime ever crashes while starting, it turns itself off here and stays off until a new build." = "插件运行时如果在启动时崩溃，会自动在这里停用，直到装上新版本。";
+"The plugin runtime (Java) is off: starting it takes the app down. Sources that need it cannot open until it works. Settings › JAR Runtime can try once more." = "插件运行时（Java）已关闭：现在启动它会让 App 直接退出，需要它的源暂时打不开；可在 设置 › JAR 运行时 里再试一次。";
+"The runtime in this build cannot start; it ends the app. So it is off, and sources that need it say why instead of closing the app. Turning it on tries once and may crash." = "这一版里的运行时启动即崩溃（会把 App 关掉），所以默认关闭：需要它的源会说明原因，而不是闪退。打开会真试一次，可能仍会崩。";
+"Plugin Runtime Is Off" = "插件运行时已关闭";
+"Sources like this one run on the built-in Java runtime, and it is off because starting it ended the app. Settings › JAR Runtime can turn it back on and try again." = "这类源要靠内置的 Java 运行时，而它启动时会把 App 直接关掉，所以已停用。可在 设置 › JAR 运行时 里重新开启再试。";
+"Back to Sources" = "返回来源列表";
+"Mini Players" = "迷你播放器";
+"Show Mini Players" = "显示迷你播放器";
+"Hide Mini Players" = "收起迷你播放器";
+"Manage Mini Players" = "管理迷你播放器";
+"Play All" = "全部播放";
+"Reset Placement" = "全部归位";
+"Close All" = "全部关闭";
+"%@ paused — too many playing at once" = "%@ 个已暂停 — 同时播放太多了";
+"%@ playing at once" = "%@ 路同时播放";
+"%@ playing · %@ paused" = "%@ 路播放 · %@ 路已暂停";
+"Make Active" = "设为主窗";
+"Restore Last Windows" = "恢复上次窗口";
+"Put away %@ — at most %@ at once" = "已收起《%@》— 同时最多 %@ 个";
+"This layout applies to all skins — Original, One and Bilibili — in every shape, including full screen." = "这套布局对全部皮肤生效（原版 / One / 哔哩哔哩），且在每种形态与全屏下都一致。";
+"Episode List" = "选集页";
+"Tile Windows" = "平铺窗口";
+"Free Arrange" = "自由摆放";
+"Bring Forward" = "上移一层";
+
+"Needs parsing" = "需解析";
+
+"That line didn't play. Switched to %@." = "那条线路播不出来，已自动切到「%@」。";

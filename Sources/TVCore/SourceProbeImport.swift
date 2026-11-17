@@ -46,10 +46,16 @@ public enum SourceProbeImport {
         //
         //    「不通」是确定的负结论，比任何速度数字都强 —— 有源标着 0 KB/s
         //    却也标着 720x1280 的画质，那种自相矛盾只有 route 能裁决。
+        //
+        // ⛔ 「需代理」必须排在「代理」之前判。它含「代理」两个字，而被中转时代的措辞
+        //    （「需中转」「代理」）判的是**可达**；漏了这一条，「需代理」会被读成
+        //    「经代理可达」—— 方向正好反了，一个本机连不上的源会拿到 `reachable` 的读数。
         let reachability: SourceProbeResult.Reachability
         switch route {
         case let text? where text.contains("不通") || text.contains("失败"):
             reachability = .unreachable
+        case let text? where text.contains("需代理"):
+            reachability = .unknown
         case let text? where text.contains("慢"):
             reachability = .slow
         case let text? where text.contains("直连") || text.contains("代理") || text.contains("现状"):

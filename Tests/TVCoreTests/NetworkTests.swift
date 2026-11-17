@@ -42,16 +42,51 @@ private final class MockProtocol: URLProtocol, @unchecked Sendable {
             // Three pages of search results; the last page repeats, as some sources do.
             let page = min(3, Int(query.first(where: { $0.name == "pg" })?.value ?? "1") ?? 1)
             status = 200; body = #"{"pagecount":4,"list":[{"vod_id":"p\#(page)a","vod_name":"A"},{"vod_id":"p\#(page)b","vod_name":"B"}]}"#
-        } else if path == "/cms" {
-            // A CMS API: its home answer has no posters; `ac=detail` for those ids has them, in another order.
+        } else if path == "/cms" || path == "/cms-old" {
+            // A CMS API, in the two shapes real ones come in:
+            //   · `/cms`     — `ac=videolist` gives everything in one answer (posters, play urls,
+            //                  pagecount) but **no** `class`; `ac=list` is the cheap taxonomy call.
+            //   · `/cms-old` — refuses `videolist` (empty list); home then has to be pieced together
+            //                  from `ac=list` plus one `ac=detail` for the missing posters.
             status = 200
-            if query.contains(where: { $0.name == "ac" && $0.value == "detail" }) {
+            let action = query.first(where: { $0.name == "ac" })?.value
+            let modern = path == "/cms"
+            switch action {
+            case .some("detail"):
                 let ids = query.first(where: { $0.name == "ids" })?.value ?? ""
                 body = ids == "7,8"
                     ? #"{"list":[{"vod_id":8,"vod_name":"B","vod_pic":"https://img.example.com/b.jpg"},{"vod_id":7,"vod_name":"A","vod_pic":"https://img.example.com/a.jpg"}]}"#
                     : #"{"list":[]}"#
-            } else {
+            case .some("videolist"):
+                body = modern
+                    ? #"{"pagecount":"3","list":[{"vod_id":7,"vod_name":"A","vod_remarks":"HD","vod_pic":"https://img.example.com/a.jpg","vod_play_url":"1$https://cdn.example.com/7.m3u8"},{"vod_id":8,"vod_name":"B","vod_pic":"https://img.example.com/b.jpg","vod_play_url":"1$https://cdn.example.com/8.m3u8"},{"vod_id":9,"vod_name":"C","vod_pic":"https://img.example.com/c.jpg","vod_play_url":"1$https://cdn.example.com/9.m3u8"}]}"#
+                    : #"{"list":[]}"#
+            default:
+                // `ac=list` / no action: categories, names and remarks — but no posters.
                 body = #"{"class":[{"type_id":1,"type_name":"Movie"}],"list":[{"vod_id":7,"vod_name":"A","vod_remarks":"HD"},{"vod_id":8,"vod_name":"B"},{"vod_id":9,"vod_name":"C","vod_pic":"https://img.example.com/c.jpg"}]}"#
+            }
+        } else if path == "/cms-cat" {
+            // 分类页的两种真实形态：认 `t` 的站给一页 14 条；不认 `t` 的站把 `t` 当 id，
+            // 只回一条（`pagecount=1 total=1`）—— 那正是「分类页只显示一部片」的观感。
+            status = 200
+            let action = query.first(where: { $0.name == "ac" })?.value
+            let category = query.first(where: { $0.name == "t" })?.value
+            if action == "videolist" {
+                let rows = (1...14).map { #"{"vod_id":"c\#($0)","vod_name":"C\#($0)","vod_pic":"https://img.example.com/c\#($0).jpg"}"# }
+                switch category {
+                case "1": body = #"{"pagecount":1,"list":[\#(rows.joined(separator: ","))]}"#
+                case "bad": body = #"{"pagecount":1,"total":1,"list":[{"vod_id":"c1","vod_name":"C1"}]}"#
+                default: body = #"{"pagecount":5924,"total":118476,"list":[\#(rows.joined(separator: ","))]}"#
+                }
+            } else {
+                body = #"{"class":[{"type_id":1,"type_name":"Movie"}],"pagecount":1,"list":[{"vod_id":"c1","vod_name":"C1"}]}"#
+            }
+        } else if path == "/cms-ref" {
+            // 校验来源页的采集站：没有 `Referer: <源站>/` 一律 403 —— 与线上那批站同一行为。
+            if request.value(forHTTPHeaderField: "Referer") == "https://example.com/" {
+                status = 200; body = #"{"pagecount":2,"list":[{"vod_id":"r1","vod_name":"R"}]}"#
+            } else {
+                status = 403; body = "forbidden"
             }
         } else if path == "/bili" {
             status = 200; body = #"{"parse":0,"url":["480P","http://127.0.0.1:-1/proxy?do=bili&aid=123&cid=456&qn=32&type=mpd"]}"#
@@ -97,7 +132,12 @@ private func client() -> HTTPClient {
     await #expect(throws: (any Error).self) { try await parseAPI.playback(episode) }
 }
 
-@Test func cmsHomeTakesPostersFromDetails() async throws {
+/// 采集站的首页是 `ac=videolist`：**一条请求**就带齐封面、线路与页数。
+///
+/// 旧实现发的是不带 `ac` 的裸请求（等同 `ac=list`）：有名字、没封面、没线路，
+/// 于是首页要再补一次 `ac=detail&ids=…` —— 那两个请求任何一个失败，首页就是一片灰。
+/// `pagecount` 也只有 `videolist` 给，所以「共几页」在旧实现里永远是 1。
+@Test func cmsHomeTakesEverythingFromOneVideolist() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"cms","type":1,"api":"/cms"}]}"#.utf8), origin: base)
     let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
@@ -105,9 +145,28 @@ private func client() -> HTTPClient {
     #expect(home.videos.map(\.id) == ["7", "8", "9"])
     #expect(home.videos.map { $0.poster?.absoluteString } == ["https://img.example.com/a.jpg", "https://img.example.com/b.jpg", "https://img.example.com/c.jpg"])
     #expect(home.videos.first?.remarks == "HD")
+    // 线路也一并到位：详情页不必再问一次。
+    #expect(home.videos.first?.episodes.first?.address == "https://cdn.example.com/7.m3u8")
+    #expect(home.pageCount == 3)
+    // `videolist` 不带 `class`，分类栏靠并行的 `ac=list` 补上 —— 缺了它首页就是「有片没有分类」。
     #expect(home.categories.first?.id == "1")
     let recommended = try await api.recommendationPage().items
     #expect(recommended.map { $0.poster?.url.absoluteString } == ["https://img.example.com/a.jpg", "https://img.example.com/b.jpg", "https://img.example.com/c.jpg"])
+}
+
+/// 不认 `videolist` 的老站：退回「`ac=list` + 一次 `ac=detail` 补图」，行为与旧版一致。
+///
+/// 这条路径必须留着：采集站里老实现占多数，而 `videolist` 被拒时如果直接报错，
+/// 一批本来好好的源会整片变黑。
+@Test func cmsHomeFallsBackWhenVideolistIsRefused() async throws {
+    let base = URL(string: "https://example.com/config.json")!
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"old","type":1,"api":"/cms-old"}]}"#.utf8), origin: base)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let home = try await api.home()
+    #expect(home.videos.map(\.id) == ["7", "8", "9"])
+    #expect(home.videos.map { $0.poster?.absoluteString }
+            == ["https://img.example.com/a.jpg", "https://img.example.com/b.jpg", "https://img.example.com/c.jpg"])
+    #expect(home.categories.first?.id == "1")
 }
 
 @Test func pluginStyleDetailMayOmitRequestedID() async throws {
@@ -448,4 +507,51 @@ private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
     order.enabled = false
     model.search("film", config: sub)
     #expect(model.matches.map(\.site.key) == ["a", "b", "c"]) // Cached results are listed in the current order.
+}
+
+/// 分类页必须是一整页，不能是一条。
+///
+/// ⛔ 旧实现发 `ac=detail&t=<type_id>` —— 那是「按 id 取详情」的写法。新一代采集站照字面执行，
+/// 于是分类页永远只剩那一条、`pagecount` 永远 1，「翻不动」就是这么来的。
+/// 正确写法是 `ac=videolist&t=…&pg=…`。
+@Test func aCategoryPageIsAPageNotASingleTitle() async throws {
+    let base = URL(string: "https://example.com/config.json")!
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"cat","type":1,"api":"/cms-cat"}]}"#.utf8), origin: base)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let page = try await api.list(category: "1", query: "", page: 1)
+    #expect(page.videos.count == 14)
+    #expect(page.pageCount == 1)
+}
+
+/// 站不认 `t` 时退回全量列表：分类不精确，也强过一页一条。
+@Test func anUnknownCategoryFallsBackToTheFullList() async throws {
+    let base = URL(string: "https://example.com/config.json")!
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"cat","type":1,"api":"/cms-cat"}]}"#.utf8), origin: base)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let page = try await api.list(category: "bad", query: "", page: 1)
+    // 「按 id 查到一条」被识别出来 → 换成全量：条数与页数都回到真实规模。
+    #expect(page.videos.count == 14)
+    #expect(page.pageCount == 5924)
+}
+
+/// 采集站请求要带来源页：一批站校验 Referer，缺了它回 403 或空列表。
+///
+/// 这不是「多加一个头」的洁癖：公共中继时代一直带着 `Referer: <源站>/`，
+/// 拆掉之后映匣发的是裸请求，于是同一批站在浏览器里好好的、在 App 里 403。
+@Test func cmsRequestsCarryARefererFromTheSourceItself() async throws {
+    let base = URL(string: "https://example.com/config.json")!
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"ref","type":1,"api":"/cms-ref"}]}"#.utf8), origin: base)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let home = try await api.home()
+    #expect(home.videos.map(\.id) == ["r1"])
+    #expect(home.pageCount == 2)
+}
+
+/// 源自己写的 `header` 优先：自带了 Referer 时不能再被改写。
+@Test func aSourcesOwnRefererIsNotOverridden() async throws {
+    let base = URL(string: "https://example.com/config.json")!
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"ref","type":1,"api":"/cms-ref","header":{"Referer":"https://other.example/"}}]}"#.utf8), origin: base)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    // 带上的是源自己的 Referer，所以这个 mock（只认 example.com）应当拒绝它。
+    await #expect(throws: (any Error).self) { _ = try await api.home() }
 }

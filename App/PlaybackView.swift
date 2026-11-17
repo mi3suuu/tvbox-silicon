@@ -79,6 +79,13 @@ import TVCore
     let subtitles = SubtitleCues()
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
+
+    /// 解码分辨率上限（`.zero` = 跟随源）。
+    ///
+    /// ⛔ 只有**坞卡片**会把它设成 480p/720p 之类的档：小窗只有 120–320pt 宽，
+    ///    按 4K 全解是纯浪费，而且 8 路一起解必然互相抢。
+    ///    前台 / 全屏永远是 `.zero`（要画质），由 `DockDecodeResolution` 决定档位。
+    var preferredMaximumResolution: CGSize = .zero
     /// 当前画面的宽高比（宽÷高）。**可观察的镜像**，不是每次去问 `presentationSize`。
     ///
     /// ⛔ 为什么必须镜像：`AVPlayerItem.presentationSize` 是**普通属性**，
@@ -977,6 +984,10 @@ import TVCore
                 ?? AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
         }
         let item = AVPlayerItem(asset: asset)
+        // 小窗限制解码分辨率：`.zero` 时不写，跟随源（前台/全屏走这条）。
+        if preferredMaximumResolution != .zero {
+            item.preferredMaximumResolution = preferredMaximumResolution
+        }
         if url.scheme == HongguoStreams.scheme { item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration }
         // [mi3s] 二开融合（N-W5-03）：给每个可能播放的 item 挂上字幕管线，见 App/SubtitleCues+Mi3s.swift。
         subtitles.prepare(item)

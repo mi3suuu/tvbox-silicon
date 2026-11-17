@@ -311,6 +311,22 @@ struct HistoryCard: View {
         if let details = detailsRoute {
             Button(L10n.text("Show Details"), systemImage: "info.circle") { openDetails?(details) }
         }
+        // 「迷你播放器播放」：坞里起播，不打断正在看的那一集。
+        //
+        // ⛔ 少了这一条的后果（用户报「部分海报长按还是没有迷你小窗」）：
+        // 同一屏上，「继续播放」与「播放历史」的卡片走的是这里，而点播源/订阅源的
+        // 海报走 `CatalogPosterMenu` —— 后者一直有这颗键，前者从来没有。
+        // 于是用户看到的是「有的海报有、有的没有」，像是随机漏掉了。
+        //
+        // 取 client 失败时（历史里那条源已被删/改地址）就不给这颗键：
+        // 拿不到 client 就没有源，按下去只会报错 —— 一颗必然失败的键比没有更糟。
+        if let client = store.historyClient(entry) {
+            Button {
+                Task { await store.videoTasks.start(video: entry.listVideo, client: client, store: store) }
+            } label: {
+                Label(L10n.text("Play in Mini Player"), systemImage: "rectangle.inset.bottomright.filled")
+            }
+        }
         FavoriteMenuButton(item: entry.favoriteItem(), name: entry.context.videoName)
         Button(L10n.text("Remove from history"), systemImage: "trash", role: .destructive) { store.playbackHistory.remove(entry.id, environment: entry.environment) }
     }

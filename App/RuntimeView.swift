@@ -8,6 +8,9 @@ struct RuntimeView: View {
     @State private var probe: JarReport?
     @State private var error: String?
     private let runtime = JarRuntime()
+    /// 运行时是不是被自己停用了（上一次启动把进程带走过）。
+    @State private var runtimeBlocked = JarRuntimeHealth.blockedHere
+    @State private var runtimeEnabled = JarRuntimeHealth.userEnabled
     var body: some View {
         SettingsPage(title: L10n.text("JAR Runtime"), symbol: "cpu") {
             #if os(iOS) || os(tvOS)
@@ -15,6 +18,27 @@ struct RuntimeView: View {
                           footer: L10n.text("Plugin sources run on this device without a server. First use prepares and caches the required classes. Some Android features are not supported.")) {
                 SettingsRow(symbol: "cpu.fill", tint: Brand.indigo, title: L10n.text("Java Plugin Support"),
                             subtitle: EmbeddedJarHost.available ? L10n.text("Installed · Experimental") : L10n.text("Not installed in this build"))
+            }
+            // 运行时自己停用了会送到这里：说清为什么、以及怎么再试一次。
+            // 内嵌 JVM 起不来时是 abort()，App 直接消失 —— 对读者来说和「闪退」没有区别，
+            // 所以宁可不碰它：源还在列表里，点开给一句原因，而不是把整个 App 带走。
+            SettingsGroup(title: L10n.text("Runtime Health"),
+                          footer: runtimeBlocked
+                            ? L10n.text("It crashed while starting in this build, so it is off. Sources that need it will say so instead of closing the app. Turning it on tries once more and may crash again.")
+                            : (runtimeEnabled
+                               ? L10n.text("If the plugin runtime ever crashes while starting, it turns itself off here and stays off until a new build.")
+                               : L10n.text("The runtime in this build cannot start; it ends the app. So it is off, and sources that need it say why instead of closing the app. Turning it on tries once and may crash."))) {
+                SettingsRow(symbol: "bolt.shield.fill", tint: runtimeBlocked ? Brand.amber : .green,
+                            title: L10n.text("Use Plugin Runtime"),
+                            subtitle: runtimeBlocked ? L10n.text("Off · crashed while starting") : L10n.text(runtimeEnabled ? "On" : "Off")) {
+                    Button(runtimeBlocked ? L10n.text("Try Again") : L10n.text(runtimeEnabled ? "Turn Off" : "Turn On")) {
+                        if runtimeBlocked { JarRuntimeHealth.retryInThisBuild() }
+                        else { JarRuntimeHealth.userEnabled.toggle() }
+                        runtimeBlocked = JarRuntimeHealth.blockedHere
+                        runtimeEnabled = JarRuntimeHealth.userEnabled
+                    }
+                    .settingsButton()
+                }
             }
             #endif
             SettingsGroup(title: L10n.text("Built-in Runtime · Experimental"),

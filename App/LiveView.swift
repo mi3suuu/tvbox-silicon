@@ -568,6 +568,21 @@ struct FavoriteVideoOpener<Label: View>: View {
         if let listing = video.listingVideo(), let client = store.catalogClient(for: video) {
             RouteLink { VideoDetailView(video: listing, client: client) } label: { label }
                 .buttonStyle(IgnoreStripDragCardStyle(drag: drag))
+                // 「迷你播放器播放」：与点播源海报一致（`CatalogPosterMenu`）。
+                //
+                // ⛔ 原来收藏卡片**完全没有长按菜单** —— 于是同一屏上「点播源里的海报」
+                // 长按有小窗，而「收藏/推荐里的卡片」长按什么都没有，用户看到的就是
+                // 时有时无。这里补上与点播源海报同一颗键，行为也同一份实现。
+                .contextMenu {
+                    Button {
+                        Task { await store.videoTasks.start(video: listing, client: client, store: store) }
+                    } label: {
+                        // ⛔ 必须写 `SwiftUI.Label`：这个文件的泛型参数就叫 `Label`，
+                        // 不限定会解析成泛型形参，报 "type 'Label' has no member 'init'"。
+                        SwiftUI.Label(L10n.text("Play in Mini Player"),
+                                      systemImage: "rectangle.inset.bottomright.filled")
+                    }
+                }
         } else {
             Button {
                 if drag?.active != true { store.reportMissingFavoriteSource() }

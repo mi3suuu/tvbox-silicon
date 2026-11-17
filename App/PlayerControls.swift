@@ -877,12 +877,20 @@ struct PlayerControlsLayout: Equatable {
             真机持久化串解析后布局不完整 —— 补位溢出被静默截断了：
             top=\(probe.top.map(\.rawValue)) bottom=\(probe.bottom.map(\.rawValue)) more=\(probe.more.map(\.rawValue))
             """)
-        // ★ 锁死溢出**落点**：底栏被 8 项已配占位后，补位的 timecode/progressBar 填满
-        //   剩余 2 个槽位，第 11 项 `remaining` 必须进「更多」——这正是原实现丢弃的那一项。
-        assert(probe.more.contains(.remaining), """
-            补位溢出的 remaining 没有进「更多」：
-            bottom=\(probe.bottom.map(\.rawValue)) more=\(probe.more.map(\.rawValue))
-            原实现会在 normalized() 里把它静默截掉（用户底栏看不到剩余时间）
+        // ★ 溢出**落点**曾经被锁成「`remaining` 必须在『更多』里」—— 那是 `slotCount` 还硬编码
+        //   `10` 时的一次快照：底栏已被 8 项占位，timecode/progressBar 填满剩下 2 格，
+        //   第 11 项 `remaining` 只能溢出。
+        //
+        //   ⛔ 2026-11-16 真机闪退就是这个断言：`slotCount` 后来改成按「可摆放控件数」推导
+        //   （`allCases - fixedKeys` = 29），底栏一次装得下三项，`remaining` 合法地留在底栏
+        //   ⇒ 断言假失败 ⇒ Debug 版**一进播放页就 SIGTRAP**（真机 12:14 / 02:44 两份
+        //   EXC_BREAKPOINT，栈顶都是 `assertOverflowReachable`）。模拟器同样复现。
+        //
+        //   落点不该被冻结：该冻结的是「一个都不能消失」，下一段就是它。溢出真的发生时
+        //   「是不是进了更多」由下面那个塞满底栏的构造去验。
+        assert(!probe.more.isEmpty || probe.bottom.count + probe.top.count == slotCount, """
+            补位既没进「更多」，行里也没填满 —— 溢出路径不成立了：
+            top=\(probe.top.map(\.rawValue)) bottom=\(probe.bottom.map(\.rawValue)) more=\(probe.more.map(\.rawValue))
             """)
         // 三项都必须**可达**（顶栏/底栏/「更多」之一），一个都不能凭空消失。
         let progressRow: [PlayerControl] = [.timecode, .progressBar, .remaining]

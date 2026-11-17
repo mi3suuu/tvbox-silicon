@@ -55,7 +55,7 @@ public actor PluginConversionAhead {
         task?.cancel()
         task = nil
         #if os(iOS) || os(tvOS)
-        guard EmbeddedJarHost.available else { return }
+        guard EmbeddedJarHost.isEnabled else { return }
         let archives = Self.archives(sites, origin: origin, spider: spider)
         guard !archives.isEmpty else { return }
         observeAppState()

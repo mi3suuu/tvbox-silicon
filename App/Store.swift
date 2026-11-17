@@ -1909,7 +1909,12 @@ import TVCore
             let effective = explicit ?? (sub?.routing ?? .auto)
             // 这台源在设置里指定了哪台出口代理。中转只在这时候才有意义：
             // 回环中继换的是「从哪条腿出去」，不是「这台手机能不能连上」。
+            //
+            // 没指定时用「默认出口」：只配了一台代理的观众，那台就是他的出口。
+            // 不这样兜，`_route: 需代理` 的那批源（本机直连被 TLS 阻断、经境外可读）
+            // 就只能在设置里逐个点代理才活 —— 等于没有这个功能。
             let proxyID = CustomProxyStore.shared.route(origin: origin, sourceKey: site.sourceKey).proxyID
+                ?? CustomProxyStore.shared.fallbackEndpoint?.id
             switch effective {
             case .direct:
                 return site.routed(.direct)
@@ -1920,7 +1925,13 @@ import TVCore
                 guard site.native, !site.api.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return site }
                 // 旧公共中继的地址一律解包：那台服务器不在映匣里，留着就是一条随时会断的腿。
                 if SourceRelay.isRelayed(site.api) { return site.routed(.direct) }
-                // 只有配了出口代理才值得翻：没配的时候「中转」只是绕一圈回环，还是同一条腿出去。
+                // 包里已经写明「直连不通、需出口代理」的（route.json 的 `_route: 需代理`）：
+                // 有出口就**第一次就走代理**，别让观众先撞一次墙再翻。实测依据见
+                // `Scripts/audit-route-health.py` —— 那批源本机 TLS 握手被中断，经境外可读。
+                if Self.needsOutboundProxy(site), proxyID != nil {
+                    return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
+                }
+                // 其余按连通性翻：只有配了出口代理才值得翻（没配时「中转」只是绕一圈回环）。
                 if SourceHealth.shared.failedRepeatedly(site, origin: origin), proxyID != nil {
                     return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
                 }
@@ -1928,6 +1939,15 @@ import TVCore
             }
         }
         subscription = config.with(sites: sites)
+    }
+
+    /// 这个源的直连地址已知不可达，需要出口代理。
+    ///
+    /// 两个来源都认：打包复核写的 `_route: 需代理`，与 `_direct: blocked` 这条事实标记。
+    /// 只读数据、不猜：判定是 `audit-route-health.py` 单次实测绘出来的，写在包里。
+    static func needsOutboundProxy(_ site: Site) -> Bool {
+        if site.raw["_direct"]?.string == "blocked" { return true }
+        return site.raw["_route"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines) == "需代理"
     }
 
     private func adoptLegacyMoves() {

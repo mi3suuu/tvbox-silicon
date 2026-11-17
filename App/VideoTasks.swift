@@ -158,6 +158,15 @@ import TVCore
 
     var isPaused: Bool { session.paused }
     var isLoading: Bool { session.loading }
+    /// 这个窗口**当前摆在哪**（相对右下角锚点）。
+    ///
+    /// 由摆放层在拖动/缩放结束时写回 —— 坞自己不知道卡片位置（那是视图层的事），
+    /// 但存档时必须知道，否则「记住坐标」无从谈起。
+    var lastKnownOffset: CGSize = .zero
+
+    /// 海报地址（管理器列表的缩略图）。云文件/直播没有作品，返回 nil 由调用方兜底。
+    var posterURL: URL? { video?.poster }
+    var posterHeaders: [String: String] { video?.posterHeaders ?? [:] }
 
     /// 卡片画面比例取**实际画面**：唯一真源仍是 `presentationSize`，
     /// 但必须读 `session.presentationAspect` 这个**可观察镜像**。
@@ -210,6 +219,267 @@ import TVCore
     var hasTasks: Bool { !tasks.isEmpty }
     var activeTask: VideoTask? { tasks.first { $0.id == activeTaskID } }
 
+    // MARK: 收起与管理器
+    //
+    // 用户报的现象：「进入播放页迷你小窗就消失了，误触也没了」。
+    //
+    // 根因不是「消失」本身（进观看页必须让位，否则两层视频叠在一起），
+    // 而是**隐藏之后没有任何入口能把它叫回来**：卡片 opacity 归零之后，
+    // 屏幕上再没有东西能证明「这里还有几集在播」。
+    //
+    // 现在拆成两件事（判定在 `TVCore/DockVisibility.swift`）：
+    //   · `collapsed` / 被前台盖住 → 不画**卡片**
+    //   · 只要有任务 → 永远画**管理入口**（收起/展开 + 打开管理器）
+    /// 用户手动把坞收起了（不是被前台盖住）。
+    var collapsed = false
+
+    /// 坞管理器（悬浮列表）是否打开。
+    var showsManager = false
+
+    /// 当前的可见性判定输入。
+    var visibilityState: DockVisibility.State {
+        DockVisibility.State(taskCount: tasks.count, coveredByForeground: false, collapsed: collapsed)
+    }
+
+    /// 卡片画不画。被前台盖住那一项由 `RootView` 传进来（它才知道观看页在不在）。
+    func showsCards(coveredByForeground: Bool) -> Bool {
+        DockVisibility.showsCards(.init(taskCount: tasks.count,
+                                        coveredByForeground: coveredByForeground,
+                                        collapsed: collapsed))
+    }
+
+    func showsHandle(coveredByForeground: Bool) -> Bool {
+        DockVisibility.showsHandle(.init(taskCount: tasks.count,
+                                         coveredByForeground: coveredByForeground,
+                                         collapsed: collapsed))
+    }
+
+    func badge(coveredByForeground: Bool) -> String? {
+        DockVisibility.badge(.init(taskCount: tasks.count,
+                                   coveredByForeground: coveredByForeground,
+                                   collapsed: collapsed))
+    }
+
+    func handleShowsHiddenContent(coveredByForeground: Bool) -> Bool {
+        DockVisibility.handleShowsHiddenContent(.init(taskCount: tasks.count,
+                                                      coveredByForeground: coveredByForeground,
+                                                      collapsed: collapsed))
+    }
+
+    /// 收起 / 展开。收起时卡片不画，入口仍在。
+    func toggleCollapsed() { collapsed.toggle() }
+
+    /// 请求把坞里所有卡片的位置与缩放复位。
+    ///
+    /// ⛔ 为什么需要「复位」这个动作，而不只是钳位：
+    ///    钳位只约束**之后**的拖动。已经拖出去的卡片，它的偏移还存在
+    ///    `perCardOffset` 里，重启前一直是个坏值。而且用户也可能把卡片
+    ///    缩到极小（0.6）再也点不准。给一个「一键归位」比任何边界算法都可靠 ——
+    ///    它是**用户可执行的自救**，不依赖我们猜得对。
+    var resetRequest = 0
+
+    func resetCardPlacement() { resetRequest &+= 1 }
+
+    /// 最近一次因为「超过容量」被逐出的标题。
+    ///
+    /// UI 读它弹一句「已收起《X》—— 同时最多 8 个」。
+    /// ⛔ 必须让用户知道：静默消失与「自己弄丢了」在体感上没有区别。
+    var lastEvictedTitle: String?
+
+    // MARK: 上次的窗口（持久化，跨启动一键恢复）
+
+    /// 上次退出前开着的那些小窗。恢复过一次就清空，避免反复弹。
+    ///
+    /// ⛔ **不自动恢复**。用户要的是「可以一键恢复」——
+    ///    自动恢复会在每次冷启动都起 4–8 路流，既费流量又吵；
+    ///    一键恢复把决定权留给用户，也符合「坞是临时工作区」的直觉。
+    private(set) var resumable: [DockSessionSnapshot] = []
+
+    /// 窗口摆放（位置/缩放）—— 与播放列表分开存，因为它的变化频率高得多。
+    private static let dockStorageKey = "dockTasks.snapshot"
+    /// 窗口摆放（按 episode scope 索引），拖动/缩放结束时写。
+    private static let placementKey = "dockTasks.placement"
+
+    /// 扫一遍当前坞，生成快照并落盘。坞的内容或进度变化时调用（节流在外面做）。
+    func saveSnapshot() {
+        let items: [DockSessionSnapshot] = tasks.compactMap { task -> DockSessionSnapshot? in
+            guard let context = task.channel.historyContext else { return nil }
+            let placement = Self.loadPlacement()[Self.placementID(context)]
+            return DockSessionSnapshot(
+                context: context,
+                position: task.session.position,
+                duration: task.session.duration,
+                scale: placement?.scale ?? 1,
+                offset: placement?.offset ?? task.lastKnownOffset,
+                savedAt: Date())
+        }
+        if let data = DockSessionStore.encode(items) {
+            UserDefaults.standard.set(data, forKey: Self.dockStorageKey)
+        }
+    }
+
+    /// 读上次的快照（App 启动时调一次，供管理器显示「恢复上次」）。
+    func loadResumable() {
+        guard let data = UserDefaults.standard.data(forKey: Self.dockStorageKey) else {
+            resumable = []; return
+        }
+        let saved = DockSessionStore.decode(data)
+        // 已经在坞里的不再算「可恢复」。
+        let live = Set(tasks.compactMap { t in
+            t.channel.historyContext.map { $0.id + "|" + $0.episodeID }
+        })
+        resumable = saved.filter { !live.contains($0.context.id + "|" + $0.context.episodeID) }
+    }
+
+    /// 恢复完成后清掉，避免同一个「恢复」动作被点两次。
+    func consumeResumable() { resumable = [] }
+
+    // MARK: 从管理器把窗口「拖出来」
+
+    /// 管理器里一次拖放请求：把某一集摆到屏幕上的某一点。
+    ///
+    /// ## 为什么是「摆位」而不是「新建」
+    ///
+    /// 坞里的卡片**一直都在**（管理器只是同一批任务的列表视图，
+    /// `showsManager` 只控制那个浮层画不画）。所以「拖出来」不是新建一个窗口，
+    /// 而是**把这扇已经存在的窗挪到手指松开的位置** ——
+    /// 用户说的「拖拽出来的就是真身」，落点就在这里：
+    /// 同一个 `VideoTask`、同一个 `AVPlayer`，不重新解析、不重新缓冲。
+    struct DropRequest: Equatable {
+        public let id: UUID
+        /// 落点（相对坞容器的坐标）。`nil` = 位置未知，退回当前存档坐标。
+        public let point: CGPoint?
+    }
+
+    /// 待处理的拖放请求。坞视图消费后清空。
+    var dropRequest: DropRequest?
+
+    /// 把某一集摆到 `point`。
+    func requestDrop(_ id: UUID, at point: CGPoint?) {
+        guard tasks.contains(where: { $0.id == id }) else { return }
+        dropRequest = DropRequest(id: id, point: point)
+        // 拖出来之后它就是用户在主操作的那一个。
+        activate(id)
+    }
+
+    func consumeDrop() { dropRequest = nil }
+
+    /// 刚落下的位置（视图层消费后清掉）。键是任务 id。
+    ///
+    /// ⛔ 必须经过一次「中心 → 视图」的传递：位置住在视图的 `@State` 里
+    ///    （拖动时不该让整坞失效），中心不能直接写它。
+    var pendingDropOffset: [UUID: CGSize] = [:]
+
+    // MARK: 排布模式与图层顺序
+
+    /// 当前排布方式：自由摆放 / 平铺。
+    ///
+    /// 用户要求：「多个窗口需要支持平铺处理」。
+    /// 平铺时位置由 `DockLayout.tiles` 统一算，用户拖不动单张（位置由布局决定）；
+    /// 切回自由时，各卡回到各自记住的位置。
+    var layoutMode: DockLayoutMode = .free
+
+    func toggleLayoutMode() {
+        layoutMode = layoutMode == .free ? .tiled : .free
+    }
+
+    /// 把某张卡提到最前（z-order 最高）。
+    ///
+    /// 坞是按 `tasks` 数组顺序渲染的，**越靠前越在上层**。
+    /// 所以「提到最前」= 挪到数组首位。
+    func bringToFront(_ id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }), i != 0 else { return }
+        tasks.insert(tasks.remove(at: i), at: 0)
+        activeTaskID = id
+        saveSnapshot()
+    }
+
+    /// 把某张卡往后压一层（z-order 降低）。
+    ///
+    /// 供「图层顺序」面板用：逐层下调比「一步到底」更可控。
+    func sendBackward(_ id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }), i < tasks.count - 1 else { return }
+        let t = tasks.remove(at: i)
+        tasks.insert(t, at: i + 1)
+        saveSnapshot()
+    }
+
+    /// 把某张卡挪到指定层（0 = 最前）。
+    ///
+    /// 管理器里拖动行排序时用这个 —— 一次就到位，不逐层挪。
+    func moveToLayer(_ id: UUID, _ index: Int) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let clamped = min(max(index, 0), tasks.count - 1)
+        guard i != clamped else { return }
+        let t = tasks.remove(at: i)
+        tasks.insert(t, at: clamped)
+        if clamped == 0 { activeTaskID = id }
+        saveSnapshot()
+    }
+
+    /// 一键恢复上次的所有小窗。
+    ///
+    /// 每条快照都走**和「长按海报播小窗」完全一样**的路径（`start(video:client:)`）：
+    /// 重新解析 → 建会话 → 入坞。所以这里不重复写解析逻辑，只负责
+    /// ① 把作品拿回来 ② 把进度与窗口坐标贴回去。
+    ///
+    /// ⛔ 逐条 `await` 而不是并发：8 路同时解析会把源站的并发限制打满，
+    ///    而且用户看到的是「一个一个回来」，比「一起转圈」更可信。
+    @MainActor
+    func restore(_ items: [DockSessionSnapshot], store: Store) async {
+        for item in items {
+            let entry = PlaybackHistoryEntry(context: item.context,
+                                             position: item.position,
+                                             duration: item.duration,
+                                             updatedAt: item.savedAt,
+                                             environment: nil)
+            guard let client = store.historyClient(entry) else { continue }
+            let video = entry.listVideo
+            await start(video: video, client: client, store: store)
+            // 起播后把进度与坐标贴回去。
+            if let task = tasks.first(where: { t in
+                guard let c = t.channel.historyContext else { return false }
+                return c.id == item.context.id && c.episodeID == item.context.episodeID
+            }) {
+                if item.position > 0 { task.session.seek(to: item.position) }
+                task.lastKnownOffset = item.offset
+                perCardScaleHint[task.id] = CGFloat(item.scale)
+            }
+        }
+        consumeResumable()
+    }
+
+    /// 恢复时要用的缩放值（视图层读它作为初值，避免依赖跨层状态）。
+    var perCardScaleHint: [UUID: CGFloat] = [:]
+
+    // MARK: 窗口摆放（按 episode scope 存）
+
+    /// 摆放记录的 id：同一集换了线路也算同一个窗口。
+    private static func placementID(_ context: PlaybackHistoryContext) -> String {
+        context.id + "|" + context.episodeID
+    }
+
+    struct Placement: Codable {
+        var scale: Double
+        var offsetX: Double
+        var offsetY: Double
+        var offset: CGSize { CGSize(width: offsetX, height: offsetY) }
+    }
+
+    static func loadPlacement() -> [String: Placement] {
+        guard let data = UserDefaults.standard.data(forKey: placementKey),
+              let map = try? JSONDecoder().decode([String: Placement].self, from: data) else { return [:] }
+        return map
+    }
+
+    static func savePlacement(_ id: String, scale: CGFloat, offset: CGSize) {
+        var map = loadPlacement()
+        map[id] = Placement(scale: Double(scale), offsetX: Double(offset.width), offsetY: Double(offset.height))
+        if let data = try? JSONEncoder().encode(map) {
+            UserDefaults.standard.set(data, forKey: placementKey)
+        }
+    }
+
     // MARK: 增删
 
     /// 放一个任务进坞。**不碰前台** —— 这是「不影响已有的已打开迷你播放器」的落点。
@@ -229,7 +499,9 @@ import TVCore
         }
         tasks.insert(task, at: 0)
         activate(task.id)
-        trim()
+        if let evicted = trim() {
+            lastEvictedTitle = evicted
+        }
         return task
     }
 
@@ -266,19 +538,32 @@ import TVCore
 
     /// 点卡片：这一个开始出声，其余静音。
     func activate(_ id: UUID) {
-        guard tasks.contains(where: { $0.id == id }) else { return }
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         activeTaskID = id
+        // 提到队首：`applyMuting` 用 `prefix(decoding)` 决定谁在解码，
+        // 不置顶的话「刚点的那一路」仍可能排在预算之外而拿不到解码。
+        if index != 0 { tasks.insert(tasks.remove(at: index), at: 0) }
         applyMuting()
     }
 
-    private func trim() {
+    /// 超过容量时逐出**最久没被切到**的那一个。
+    ///
+    /// ⛔ 原来这里是**静默**逐出：用户点了第 9 个小窗，最早那个无声消失，
+    ///    他只会觉得「小窗自己没了」。现在逐出时把标题记下来，由调用方提示。
+    ///    这是用户列出的「可能把迷你小窗弄丢的途径」之一 —— 丢可以，但必须说。
+    @discardableResult
+    private func trim() -> String? {
+        var evicted: String?
         while tasks.count > Self.capacity {
-            tasks.removeLast().session.stop()
+            let dropped = tasks.removeLast()
+            dropped.session.stop()
+            evicted = dropped.title
         }
         if let active = activeTaskID, !tasks.contains(where: { $0.id == active }) {
             activeTaskID = tasks.first?.id
         }
         applyMuting()
+        return evicted
     }
 
     /// 按设置里的策略分配声音（`DockAudioPolicy`）。
@@ -297,7 +582,21 @@ import TVCore
     func applyMuting() {
         let policy = DockAudioPolicy.current
         let count = tasks.count
+        // 解码预算：`decoding == dock` 时全部同时解码（用户 2026-11-16 明确要求）。
+        //
+        // 预算仍留在这里而不是删掉，是为了保留一个**可下调的旋钮**：
+        // 真机上 8 路同时解码若出现整体卡顿，把 `PlaybackCapacity.decoding` 调小即可
+        // 回到「超出预算的那几路暂停」，不需要动这条链路。
+        //
+        // ⛔ 只暂停**正在播**的，不动本来就已经暂停的：
+        //    用户手动暂停的那一路不该被我们「恢复」成播放。
+        let decoding = DockDecodingBudget.decodeSet(order: tasks.map(\.id),
+                                                    budget: PlaybackCapacity.decoding)
         for (index, task) in tasks.enumerated() {
+            let overBudget = !decoding.contains(task.id)
+            if overBudget, task.session.player.rate != 0 {
+                task.session.player.rate = 0
+            }
             let output = policy.output(isActive: task.id == activeTaskID,
                                        taskIndex: index, taskCount: count,
                                        override: task.audioOverride)
@@ -366,6 +665,11 @@ import TVCore
             guard !Task.isCancelled else { return }
             let channel = store.catalogChannel(resolved, video: video, episode: episode, client: client)
             let session = PlaybackSession()
+            // 坞卡片按**自己的宽度**限解码分辨率（480p/720p 两档就够）。
+            // 卡片最宽 320pt、@3x ≈ 960px，所以永远不需要超过 1080p。
+            // ⛔ 这不是可选的画质取舍：8 路同时解码时，单路解 4K 会直接把解码器拖死。
+            session.preferredMaximumResolution = DockDecodeResolution.preferredMaximumResolution(
+                forCardWidth: 320, scale: 3)
             session.history = store.playbackHistory
             session.skipDefaults = store.playbackDefaults
             session.player.isMuted = true
@@ -787,6 +1091,34 @@ extension View {
 /// 于是「上滑回主界面该浮窗」变成对着一张坞卡片的 layer 去 `startPictureInPicture`。
 /// 所以坞共用一个实例，只交接给当前活跃的那一张 —— 用户离开 App 时，浮起来的是
 /// 他刚才在操作的那一个，语义正确。
+/// 视频层的 `Equatable` 包装：让 `updateUIView` 只在真正需要时被调用。
+///
+/// 用包装视图而不是给 `VideoTaskCard` 加 `Equatable` —— 后者在 Swift 6 下会
+/// 跨 actor 隔离报错（`view` 是 `@MainActor` 的），而包装视图天然只在主 actor 里比较。
+private struct DockVideoLayerBox: View, Equatable {
+    let player: AVPlayer
+    let gravity: AVLayerVideoGravity
+    let pip: PictureInPicture?
+    let coveredByForeground: Bool
+    let width: CGFloat
+    let height: CGFloat
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        // 只比较影响画面的四项 + 尺寸。`player` 是引用，比对象身份即可。
+        lhs.player === rhs.player
+            && lhs.gravity == rhs.gravity
+            && lhs.pip === rhs.pip
+            && lhs.coveredByForeground == rhs.coveredByForeground
+            && lhs.width == rhs.width
+            && lhs.height == rhs.height
+    }
+
+    var body: some View {
+        DockPlayerLayer(player: player, gravity: gravity, pip: pip,
+                        coveredByForeground: coveredByForeground)
+    }
+}
+
 private struct DockPlayerLayer: UIViewRepresentable {
     let player: AVPlayer
     let gravity: AVLayerVideoGravity
@@ -843,7 +1175,8 @@ struct VideoTaskCard: View {
     /// 它是不是正在出声的那一张（其余静音，卡片描边亮起以示区别）。
     let isActive: Bool
     /// 坞共用的画中画控制器；只交给活跃的那一张。
-    let pip: PictureInPicture
+    /// 只有活跃卡片拿得到（PiP 控制器共用一个实例，见 `DockPlayerLayer` 的说明）。
+    let pip: PictureInPicture?
     /// 前台观看页在演 —— 这张卡的画面必须让出 `AVPlayer`（见 `DockPlayerLayer.updateUIView`）。
     var coveredByForeground: Bool = false
     /// **这张卡自己**的缩放。坞里多张卡各有一份，不共享 ——
@@ -864,20 +1197,123 @@ struct VideoTaskCard: View {
     var taskIndex: Int = 0
     var taskCount: Int = 1
 
+    /// 画面区容器。拖动已上移到摆放层（`DockPlacedCard`），这里只负责命中形状。
+    @ViewBuilder private func dragSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            // 让画面区（除底部进度条热区外）成为实心命中区域。
+            .contentShape(DockDragShape(bottomInset: dockProgressHitHeight))
+            // ★ 搬窗口的手势挂在**画面区**，与本卡的进度条、tap **同层**。
+            //
+            // ⛔ 这是本问题（拖不动 / 松手才跳 / 进度条拖不动）的最终解。
+            //    前几版试过的三种位置都不行，原因各不相同：
+            //      ① 挂在整张卡（`simultaneousGesture`）→ 覆盖进度条热区，
+            //         拖进度时窗口跟着跑。
+            //      ② 挂在摆放层 `.gesture` → 被本卡 tap 的 `simultaneousGesture`
+            //         抢先，父层收不到触摸 ⇒ **松手才跳**。
+            //      ③ 挂在摆放层 `simultaneousGesture` → 与进度条并行识别，
+            //         拖进度时窗口也动 ⇒ **进度条很难拖**。
+            //
+            //    挂在这里（画面区内部）就对了：
+            //      · 与进度条**同层**，进度条的 `highPriorityGesture` 是它的邻居，
+            //        热区内进度条赢（`.gesture` 优先级低于 `highPriorityGesture`）；
+            //      · 画面区没有别的竞争手势，拖动逐帧收到 ⇒ 跟手；
+            //      · 位移写本卡的 `livePan`（`@GestureState`），
+            //        父层拖动期间**完全不重算** ⇒ 不抖。
+            .gesture(
+                DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                    .updating($livePan) { value, state, transaction in
+                        transaction.animation = nil
+                        state = value.translation
+                    }
+                    .onEnded { value in
+                        onPanEnded?(value.translation)
+                    }
+            )
+    }
+
     /// 捏合的**瞬时**倍率：只影响画面，松手时才算进 `ownScale`。
     ///
     /// ⛔ 原来直接把 `MagnificationGesture.value` 写回 `ownScale`。那个 value 是
     /// 「相对**本次起手**的倍率」，不是绝对缩放 —— 已经捏到 1.6 的卡再捏一下，
     /// 它又从 1 起算，`ownScale` 立刻跳回 1.0，每捏一次都「弹回原大小」。
     @GestureState private var pinch: CGFloat = 1
+    /// 由 `DockPlacedCard` 传进来的**瞬时**倍率。
+    ///
+    /// ⛔ 与上面那个 `@GestureState pinch` 并存但**不重复计算**：
+    ///    `@GestureState` 只在本卡自己持有手势时有效；手势已经移到摆放层之后，
+    ///    这里拿到的是摆放层算出的值。两者相乘会让捏合量翻倍。
+    ///
+    ///    所以：手势还在本卡上时（`pinch` 生效）就不再用 `externalPinch`。
+    ///    现在手势统一在摆放层，本卡只读 `externalPinch`，`pinch` 恒为 1，
+    ///    乘上去无害，但保留它是为了不破坏既有单卡手势路径。
+    var externalPinch: CGFloat = 1
 
-    private var scaledWidth: CGFloat { width * ownScale * pinch }
+    /// 画面区被拖动时上报的**累计位移**。摆放层据此落定最终位置。
+    ///
+    /// ⛔ 只在 `onEnded` 里上报，拖动过程**不报** ——
+    ///    拖动中的逐帧位移由本卡自己的 `@GestureState livePan` 承担，
+    ///    这样父层（摆放层）在拖动期间完全不用重算，卡片树也就不会重建。
+    var onPanEnded: ((CGSize) -> Void)? = nil
+    /// 拖动中每帧的位移（不含基准），由摆放层在拖动开始时告知基准。
+    var panBase: CGSize = .zero
+
+    /// 拖动中的实时位移。
+    ///
+    /// ⛔ `@GestureState`：手势进行中**不触发依赖重算**，只让布局拿新值。
+    ///    这正是「跟手又不抖」需要的；`@State` 每帧写入会重建卡片树。
+    @GestureState private var livePan: CGSize?
+
+
+    /// 有手指正在抓进度条/标题栏。
+    ///
+    /// ⛔ **这是本卡搬窗口顺滑的关键。**
+    ///
+    /// 进度条与标题栏都用 `DragGesture(minimumDistance: 0)` + `highPriorityGesture`：
+    /// 手指一落下就立即激活（这是「按住就能调进度」所必需的）。
+    /// 但 `highPriorityGesture` **只在本视图层级内生效** —— 它无法阻止
+    /// **父层**（`dragSurface` 的搬窗口手势）同时被识别。
+    ///
+    /// 后果：手指按在进度条/标题栏上时，搬窗口那一路也在跑，
+    /// 每一帧都在算 `dragOffset` → 整卡 body 失效 → 画面跟着抖。
+    /// 用户感受到的就是「加了进度条/标题栏拖动之后，窗口移动不顺滑了」。
+    ///
+    /// 所以搬窗口那一路必须**主动让路**：只要进度手势活着，它就整段不响应。
+
+
+
+    private var scaledWidth: CGFloat { width * ownScale * pinch * externalPinch }
     private var height: CGFloat { scaledWidth / task.aspectRatio }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            DockPlayerLayer(player: task.session.player, gravity: gravity, pip: isActive ? pip : nil,
-                            coveredByForeground: coveredByForeground)
+            // ★ 「可拖动区」= 只有**画面**这一块。
+            //
+            // 用户报：「进度条部分 和下方白条标题栏 部分不应该拖动小窗位置，
+            // 它要用于进度条，否则进度条不好拖拽调整」。
+            //
+            // 原来拖动手势挂在**整张卡**上（`DockPlacedCard` 对 `card` 整体挂手势），
+            // 于是手指落在底部 22pt 的进度条热区、或下方标题栏上时，
+            // 拖动会先被父层吃掉 —— 进度条那个 `DragGesture` 根本拿不到触摸。
+            //
+            // 现在把画面单独包成一层，拖动只认它：
+            //   · 画面区 → 拖动窗口（这里就是「抓着画面搬窗口」的直觉）
+            //   · 进度条 → 只调进度，不搬窗口（它有 22pt 热区，够按）
+            //   · 标题栏 → 既不搬窗口也不调进度，只接轻点/双击
+            dragSurface {
+            // ⛔ 视频层用 `EquatableView` 包住，只在这些值真正变化时才更新 UIKit 层。
+            //
+            // 这是「拖动/缩放卡顿」的第二处修法。`DockPlayerLayer` 是
+            // `UIViewRepresentable`，它的 `updateUIView` 每次都会重设 `videoGravity`、
+            // 重跑 `pip.attach`、重新布局 AVPlayerLayer。拖动时这些值一个字都没变，
+            // 但原来每帧都会走一遍 —— 8 张卡一起就是明显的掉帧。
+            //
+            // `DockVideoLayerBox` 自己实现 `Equatable`，比较的就是真正影响画面的四项。
+            DockVideoLayerBox(player: task.session.player,
+                              gravity: gravity,
+                              pip: isActive ? pip : nil,
+                              coveredByForeground: coveredByForeground,
+                              width: scaledWidth, height: height)
+                .equatable()
                 .frame(width: scaledWidth, height: height)
                 .clipped()
                 .overlay {
@@ -905,6 +1341,7 @@ struct VideoTaskCard: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel(Text(task.isPaused ? "Play" : "Pause"))
 
+                        DockSpeedButton(task: task)
                         DockVolumeButton(task: task, isActive: isActive,
                                          taskIndex: taskIndex, taskCount: taskCount)
                     }
@@ -917,16 +1354,39 @@ struct VideoTaskCard: View {
                 //
                 // 新设计见卡片外层的 `dockCloseButton`：贴在**卡片右上外沿**、
                 // 红底 + 白 X、32pt 热区、与画面无重叠。
-                // 进度细线：坞里同时挂好几个时，用户靠它一眼分清「哪个在看、看到哪」。
-                .overlay(alignment: .bottom) {
-                    GeometryReader { geo in
-                        Rectangle().fill(.white.opacity(0.85))
-                            .frame(width: geo.size.width * task.fraction, height: 2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(height: 2)
-                }
+                // 进度条：既能看进度，也能拖。
+                //
+                // 原来这里是一条 2px 的**只读**细线 —— 「哪个看到哪」看得出，但想往回退 30 秒
+                // 只能点进播放页。小窗的全部意义是不打断观看，所以它必须能直接调进度。
+                //
+                // ⛔ 拖动手势必须挂在**比细线更高**的热区上（`contentShape` 给 22pt），
+                //    否则 2pt 的命中区用户根本按不住；视觉上仍然是细线，不占画面。
+                // ⛔ 拖动期间不能用 `task.fraction` 画：那读的是 `session.position`，
+                //    而 seek 之后位置要等下一拍 tick 才更新 —— 手指还没抬起来线就跳回去。
+                //    所以拖的时候用本地 `dragFraction`，松手才交出控制权。
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                // ⛔ 进度条**必须挂在 dragSurface 之外**。
+                //
+                // 它原来是画面区的 `.overlay` —— 而画面区整个包在 `dragSurface` 里，
+                // 于是「调进度」和「搬窗口」同一个视图层级里竞争：
+                // 进度条是 `highPriorityGesture(minimumDistance: 0)`，手指一落下就激活；
+                // 父层的搬窗口手势也在同一串触摸上被识别 → 每帧既 seek 又算 dragOffset，
+                // 画面跟着抖、窗口移动不顺滑。
+                //
+                // 现在把进度条移到 `dragSurface` **外层**：它覆盖在画面上，
+                // 触摸先由它接（`highPriorityGesture`），搬窗口那一路在它下面，
+                // 落在进度条以外的区域才轮到搬窗口。两者在层级上就分开了，
+                // 不再需要 `seekFlag` 那种运行时让路。
+                .overlay(alignment: .bottom) {
+                    DockProgressBar(task: task)
+                }
+            }
+            // ↓ 下方标题栏：**也用来调进度**。
+            //
+            // 用户要求：「拖标题栏需要=拖进度条，因为进度条太窄」。
+            // 底部那条 22pt 热区在小屏上确实不好按，而标题栏有 30pt 高、几乎占满卡宽，
+            // 是更自然的进度拖动面。所以整条标题栏都接 seek，且**不搬窗口**
+            // （它不在 `dragSurface` 里）。
             VStack(alignment: .leading, spacing: 1) {
                 Text(task.title).font(.caption.weight(.semibold)).lineLimit(1)
                 if !task.subtitle.isEmpty {
@@ -934,6 +1394,19 @@ struct VideoTaskCard: View {
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            // 复用同一份 seek 实现：水平位置 → 百分比。
+            // ⛔ 用 `highPriorityGesture` 压过外层（若将来这里也被包进拖动区）。
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard task.session.duration > 0 else { return }
+                        let w = max(scaledWidth - 20, 1)   // 减去左右 padding
+                        let f = min(max((value.location.x - 10) / w, 0), 1)
+                        task.session.seek(to: f * task.session.duration)
+                    }
+            )
             // ⛔ 必须是 `scaledWidth`，不是 `width`。
             //
             // 原来这里写死基础宽度：视频画面按 `scaledWidth` 缩放，标题行却始终满宽。
@@ -964,7 +1437,32 @@ struct VideoTaskCard: View {
                 .offset(x: 8, y: -8)
         }
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .onTapGesture { open() }
+        // ⛔ 轻点 = **只做「主选择」**，不跳页、不摘除。
+        //
+        // 原来这里是 `onTapGesture { open() }`，而 `open()` 会
+        // `activate` + **`take`**（把这集从坞里摘走并压到选集页）。于是：
+        //   · 想「点一下把它设成主窗」这个动作**根本不存在** —— 一点就离开了；
+        //   · 用户报的「点击迷你小窗不会视为主选择，需要重新进入页面才能视为主选择」
+        //     就是这个：主选择（蓝框 / PiP 主体）只在 `take` 那一瞬间被顺带设了一次，
+        //     之后想换主体只能重新走一遍「点进去 → 再回来」。
+        //
+        // 现在拆成两个动作：
+        //   · **轻点** → `activate`（蓝框点亮、成为 PiP 与音频的主体、置顶到队首）
+        //   · **双击** → 才回到那一集的选集页（`open()`，它内部会 `take`）
+        // ⛔ 用显式 `TapGesture` 组合，不用两个 `onTapGesture` 叠加。
+        //
+        // `.onTapGesture(count: 2)` 会让单击**等双击超时**才触发（约 0.3s）。
+        // 两个 onTapGesture 叠在一起时，SwiftUI 还会把它们各自做成独立识别器，
+        // 与父层的拖动争抢触摸 —— 这正是上一版拖动完全收不到 `onChanged` 的原因之一。
+        //
+        // `.exclusively(before:)` 让「双击优先、否则单击」在**一个识别器**里判定，
+        // 不再各自占一个通道。
+        // ⛔ 用 `simultaneousGesture` 而不是 `gesture`：子层**不能独占**触摸。
+        //    父层的拖动要用同一串触摸的坐标，独占会让它一帧都收不到。
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded { open() }
+                .exclusively(before: TapGesture().onEnded { store.videoTasks.activate(task.id) })
+        )
         // ★ 每张卡**自己**可以捏合缩放。
         //
         // 用户要求：「迷你小窗每个窗口要能单独调整大小，而不是黏成一块」。
@@ -981,6 +1479,14 @@ struct VideoTaskCard: View {
                     onScaleChange(min(max(ownScale * value, 0.6), 2.2))
                 }
         )
+        // ★ 拖动中的实时位移**在本卡叠加**。
+        //
+        // ⛔ 这一行是「跟手」的关键读取点：`livePan`（`@GestureState`）
+        //    在拖动期间每帧给新值，但**不触发依赖重算** ——
+        //    所以只有这一处 offset 会变，卡片树本身不重建。
+        //    没有这一行，手势收到了事件也没人用，表现就是「松手才跳」。
+        .offset(x: livePan?.width ?? 0, y: livePan?.height ?? 0)
+        .transaction { $0.animation = nil }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(task.title))
     }
@@ -1016,6 +1522,132 @@ struct VideoTaskCard: View {
 /// （点外面自动关、外接键盘、VoiceOver），手搓浮层在坞这种**可拖动浮层**上
 /// 容易与拖动/缩放手势打架 —— 坞的外层就挂着 `DragGesture` 和 `MagnificationGesture`。
 ///
+/// 坞卡片的**进度条**：既能看，也能拖。
+///
+/// ## 为什么原来那条不够
+/// 原来是一条 2pt 的只读细线 —— 「哪个看到哪」看得出，但想往回退 30 秒只能点进播放页。
+/// 小窗存在的意义就是**不打断观看**，所以调进度必须能在这里直接做。
+///
+/// ## 三个必须守住的点
+/// 1. **命中区要比视觉大**：视觉 2pt 好看，但按不住。`contentShape` 给到 22pt，
+///    手指落在画面底部五分之一处都能拖。
+/// 2. **拖动时不能读 `session.position`**：seek 之后要等下一拍 tick 才更新，
+///    手指还没抬线就跳回去。拖动期间用本地 `dragFraction`，松手才交出控制权。
+/// 3. **拖动中暂停跟随**：`isDragging` 时不再把外部进度写进 `dragFraction`，
+///    否则后台 tick 会把手指的位置覆盖掉。
+private struct DockProgressBar: View {
+    let task: VideoTask
+    @State private var dragFraction: Double?
+    @State private var isDragging = false
+
+    /// 手指按下时，先停掉 ticker 的进度跟随，记住当前位置。
+    private var shown: Double { dragFraction ?? task.fraction }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let shownFraction = min(max(shown, 0), 1)
+            ZStack(alignment: .leading) {
+                // 轨道：拖起来时加高加亮，让用户看清自己按到了什么。
+                Capsule()
+                    .fill(.white.opacity(isDragging ? 0.35 : 0.22))
+                    .frame(height: isDragging ? 5 : 2)
+                Capsule()
+                    .fill(.white.opacity(0.9))
+                    .frame(width: max(0, width * shownFraction), height: isDragging ? 5 : 2)
+                // 拖动时给一颗圆点，指头压着也能看出当前落到哪。
+                if isDragging {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 11, height: 11)
+                        .offset(x: max(0, width * shownFraction - 5.5))
+                }
+            }
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .animation(.easeOut(duration: 0.12), value: isDragging)
+            // ⛔ 热区：整个底部 22pt 都能接手势。
+            .contentShape(Rectangle().inset(by: -11))
+            // ⛔ 必须是 `highPriorityGesture` —— 进度条要**独占**这块触摸。
+            //
+            // 外层（画面区）也挂了一个拖动窗口的手势。若两边同级或外层优先，
+            // 用户拖进度条时窗口会跟着一起跑 —— 那正是用户报的
+            // 「进度条不好拖拽调整」。高优先级让这一层先吃掉手势，
+            // 落在 22pt 热区内的拖动**不会**再传到搬窗口那一层。
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !isDragging {
+                            isDragging = true
+                            dragFraction = task.fraction
+                        }
+                        guard task.session.duration > 0 else { return }
+                        dragFraction = min(max(value.location.x / max(width, 1), 0), 1)
+                    }
+                    .onEnded { value in
+                        let target = min(max(value.location.x / max(width, 1), 0), 1)
+                        task.session.seek(to: target * task.session.duration)
+                        isDragging = false
+                        // 松手后先保留一小会儿，等 seek 生效（下一拍 tick 会把它接过去）。
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(320))
+                            dragFraction = nil
+                        }
+                    }
+            )
+        }
+        .frame(height: 22)
+        .accessibilityLabel(Text("Progress"))
+        .accessibilityValue(Text("\(Int(shown * 100))%"))
+    }
+}
+
+/// 坞卡片的**倍速键**：点一下在常用档位之间循环，当前倍速直接写在键面上。
+///
+/// ⛔ 为什么是「循环」而不是弹菜单：坞卡片最小只有 ~120pt 宽，弹菜单会把它盖住，
+///    而且坞里常同时挂两三张，菜单不知道该贴哪一张。循环的代价是「找 1.5× 要点三下」，
+///    但每一次点击都有立即可见的反馈（键面数字变了），不会误操作。
+/// ⛔ 1.0 必须显示成「1×」而不是不显示 —— 用户要能确认「现在就是正常速度」。
+private struct DockSpeedButton: View {
+    let task: VideoTask
+
+    /// 与观看页倍速菜单同一组档位（`OneSkin.speeds`），避免两处不一致。
+    private static let speeds: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 3]
+
+    private var current: Float { task.session.speed }
+
+    /// 键面文字：0.75 → "0.75×"，1 → "1×"，1.5 → "1.5×"。
+    private var label: String {
+        let s = current
+        let text = s == s.rounded() ? String(format: "%.0f", s) : String(format: "%.2g", s)
+        return text + "×"
+    }
+
+    /// 非 1× 时高亮 —— 用户离开这一集很久再回来，要能一眼看出「怎么一直在快放」。
+    private var isBoosted: Bool { abs(current - 1) > 0.001 }
+
+    var body: some View {
+        Button {
+            let speeds = Self.speeds
+            // 找最近的一档再进一格；当前值不在表里（比如外部设成 1.75）时回到 1×。
+            let index = speeds.firstIndex { abs($0 - current) < 0.001 }
+            let next = index.map { speeds[($0 + 1) % speeds.count] } ?? 1
+            task.session.setSpeed(next)
+        } label: {
+            Text(label)
+                .font(.system(size: 10, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .frame(height: 28)
+                .padding(.horizontal, 7)
+                .background(isBoosted ? Color.accentColor.opacity(0.85) : .black.opacity(0.5), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("Playback Speed"))
+        .accessibilityValue(Text(label))
+    }
+}
+
 /// 图标反映**当前实际状态**（不是「设定值」）：静音就显示斜杠喇叭，
 /// 否则按音量显示三档之一。用户扫一眼就知道哪一张在出声。
 private struct DockVolumeButton: View {
@@ -1175,6 +1807,664 @@ private struct DockCloseButton: View {
 /// 为什么是「一列」而不是「叠成一摞」：坞里可以同时挂多个（要求 5），一列让用户一眼
 /// 看全「现在还有哪几个在看」。叠放会让上面那张的点击区盖住下面的，
 /// 而这一版的诉求正是「随时选择回到哪一个」。
+/// 坞的**管理入口**：只要有任务就常驻屏幕，与「卡片画不画」无关。
+///
+/// ## 为什么必须有它
+///
+/// 用户报「进入播放页迷你小窗就消失了，或者误触也没了」。
+///
+/// 进观看页时卡片**必须**让位（两层视频叠在一起会穿帮），这没错；
+/// 错在让位之后**屏幕上没有任何东西**能证明「这里还有几集在播」，
+/// 也没有任何入口把它们叫回来 —— 用户只能猜，猜不到就等于丢了。
+///
+/// 所以这颗常驻按钮承担三件事：
+///   · 点一下 = 收起 / 展开坞里的卡片（`collapsed`）
+///   · 长按 / 右键 = 打开坞管理器（悬浮列表，逐集操作）
+///   · 角标 = 当前几集在播；有内容被藏起来时图标变实心
+///
+/// ⛔ 它**不能**自己带 `DragGesture` 之外的命中拦截：
+///    坞在右下角，这颗按钮贴在同一角，任何全屏热区都会挡住下面的卡片。
+struct DockHandleButton: View {
+    @Environment(Store.self) private var store
+    /// 前台是否盖着（观看页/全屏播放器）。只用于决定图标与角标。
+    let coveredByForeground: Bool
+
+    private var center: VideoTaskCenter { store.videoTasks }
+
+    private var badge: String? { center.badge(coveredByForeground: coveredByForeground) }
+    private var hidden: Bool { center.handleShowsHiddenContent(coveredByForeground: coveredByForeground) }
+
+    /// 停靠到哪个角。持久化 —— 下次进来还在用户放开手的那个角。
+    @AppStorage("dockHandle.anchor") private var anchorRaw = DockHandleAnchor.bottomTrailing.rawValue
+    private var anchor: DockHandleAnchor {
+        DockHandleAnchor(rawValue: anchorRaw) ?? .bottomTrailing
+    }
+    /// 拖动中的自由位置（跟手用）。松手清空，回到吸附角。
+    @State private var dragPoint: CGPoint?
+    /// 刚刚拖动过 —— 用来吞掉紧随其后的那次点击。
+    ///
+    /// ⛔ 不加这一条就会「拖完顺手把坞收起/展开」：SwiftUI 里 `Button` 的单击
+    ///    与同时挂着的 `DragGesture` 会都收到这次触摸，拖动结束时 `Button`
+    ///    仍可能判定为一次 tap。用户只是想挪个位置，结果面板被收起来了。
+    @State private var justDragged = false
+
+    private static let buttonSide: CGFloat = 44
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let stopped = DockHandleAnchor.center(of: anchor, in: size,
+                                                  button: CGSize(width: Self.buttonSide, height: Self.buttonSide),
+                                                  inset: 12)
+            let spot = dragPoint.map {
+                DockHandleAnchor.clampedCenter($0, in: size,
+                                               button: CGSize(width: Self.buttonSide, height: Self.buttonSide),
+                                               inset: 12)
+            } ?? stopped
+            button
+                // 用 `position` 而不是 alignment：拖动时要能落在任意位置，
+                // 吸附是松手那一刻把点吸回角，不是换 alignment（那会跳一下）。
+                .position(x: spot.x, y: spot.y)
+                .gesture(
+                    DragGesture(minimumDistance: 12, coordinateSpace: .local)
+                        .onChanged { value in
+                            // 中心点跟手：`location` 是触点，按钮中心跟着触点走。
+                            dragPoint = value.location
+                        }
+                        .onEnded { value in
+                            // 松手吸附到最近的角，并落盘。
+                            let nearest = DockHandleAnchor.nearest(to: value.location, in: size)
+                            anchorRaw = nearest.rawValue
+                            dragPoint = nil
+                            // 吞掉这一次的点击，一口气之后再放开。
+                            justDragged = true
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .milliseconds(280))
+                                justDragged = false
+                            }
+                        }
+                )
+        }
+        // 容器本身不拦命中：只有那颗 44pt 按钮接手势。
+        .allowsHitTesting(true)
+    }
+
+    private var button: some View {
+        Button {
+            // 单击：收起/展开。这是最高频的动作。
+            // 刚拖过就不算点击（见 `justDragged` 的说明）。
+            guard !justDragged else { return }
+            center.toggleCollapsed()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: hidden ? "rectangle.inset.bottomright.filled"
+                                          : "rectangle.inset.bottomright")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(.black.opacity(0.55), in: Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.35), lineWidth: 0.5))
+                if let badge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.accentColor, in: Capsule())
+                        .offset(x: 4, y: -2)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Circle())
+        // 长按打开管理器：逐集看/切/关，比一格格点更省事。
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45).onEnded { _ in center.showsManager = true }
+        )
+        .contextMenu {
+            Button(L10n.text("Manage Mini Players"), systemImage: "list.bullet.rectangle") {
+                center.showsManager = true
+            }
+            Button(center.collapsed ? L10n.text("Show Mini Players") : L10n.text("Hide Mini Players"),
+                   systemImage: center.collapsed ? "eye" : "eye.slash") {
+                center.toggleCollapsed()
+            }
+        }
+        .accessibilityLabel(Text(L10n.text("Mini Players")))
+        .accessibilityValue(Text(badge ?? "0"))
+    }
+}
+
+/// 坞**管理器**：一个悬浮列表，逐集显示进度并提供切到前台 / 关闭。
+///
+/// ## 为什么是浮层而不是页面
+///
+/// 用户要求「要有一个独立的管理器，可以悬浮窗打开」。
+/// 做成页面会 push 走当前内容 —— 而坞的意义正是「不打断正在做的事」，
+/// 管理器也一样：看一眼、关掉一集、切一集，然后继续原来的页面。
+///
+/// ⛔ 用 `overlay` + `.transition`，不要用 `.sheet`：
+///    sheet 在 Duo 折叠/展开时会重建，且会盖掉坞本身的拖动上下文。
+struct DockManagerPanel: View {
+    @Environment(Store.self) private var store
+    /// 贴着哪一边。右上角入口打开时贴右上。
+    var alignment: Alignment = .topTrailing
+
+    private var center: VideoTaskCenter { store.videoTasks }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(L10n.text("Mini Players"))
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Text("\(center.tasks.count)")
+                    .font(.caption.weight(.medium)).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Button {
+                    center.showsManager = false
+                } label: {
+                    Image(systemName: "xmark").font(.footnote.weight(.semibold))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Close")))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+
+            // 工具栏：整体动作。原来这里只有「关闭」，用户要一个个点。
+            HStack(spacing: 14) {
+                Button {
+                    // 全部暂停 / 全部继续：按「当前是否还有在播的」决定方向。
+                    let anyPlaying = center.tasks.contains { $0.session.player.rate != 0 }
+                    for t in center.tasks {
+                        if anyPlaying { t.session.player.rate = 0 }
+                        else if !center.collapsed || true { t.session.togglePlayback() }
+                    }
+                } label: {
+                    Label(center.tasks.contains { $0.session.player.rate != 0 }
+                          ? L10n.text("Pause All") : L10n.text("Play All"),
+                          systemImage: center.tasks.contains { $0.session.player.rate != 0 }
+                          ? "pause.fill" : "play.fill")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Play All")))
+
+                // 「恢复上次窗口」：把上次退出前开着的小窗一键摆回来。
+                //
+                // 用户要求：「历史播放窗口 坐标 各个窗口进度，需要记忆住，
+                // 在下次重新进入 app 的时候可以一键恢复上次打开的所有迷你小窗」。
+                // 只在**有东西可恢复**时给这颗键 —— 按了没反应的键比没有更糟。
+                if !center.resumable.isEmpty {
+                    Button {
+                        Task { await center.restore(center.resumable, store: store) }
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(L10n.text("Restore Last Windows")))
+                }
+
+                // 「平铺」开关：把多窗排成网格，一键整理。
+                //
+                // 用户要求：「多个窗口需要支持平铺处理整理」。
+                // 图标随状态切换：散开时显示网格（点了会平铺），
+                // 已平铺时显示散开（点了回到自由摆放）—— 一颗键表达两个方向。
+                Button {
+                    center.toggleLayoutMode()
+                } label: {
+                    Image(systemName: center.layoutMode == .tiled
+                          ? "rectangle.3.group"
+                          : "square.grid.2x2")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(center.layoutMode == .tiled ? Color.accentColor : .primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text(center.layoutMode == .tiled
+                                                   ? "Free Arrange" : "Tile Windows")))
+
+                Button {
+                    // 一键归位：把被拖丢/缩太小的卡片全部拉回来。
+                    // 这是用户可执行的自救 —— 比任何边界算法都可靠。
+                    center.resetCardPlacement()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Reset Placement")))
+
+                // ⛔ 这里**不再提供「隐藏所有小窗」**。
+                //
+                // 用户报「管理器里面还是存在会将迷你小窗隐藏的情况，并且不能找回」。
+                // 管理器是**管理**的地方，不该有一个把全部窗口藏掉的键 ——
+                // 它和「关闭」在视觉上太像，误触就等于「小窗全没了」。
+                //
+                // 收起/展开留在右下角那颗常驻入口上（`DockHandleButton`），
+                // 那里语义明确、且收起来之后入口本身还在，永远找得回来。
+
+                Spacer(minLength: 0)
+
+                Button(role: .destructive) {
+                    center.removeAll()
+                    center.showsManager = false
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Close All")))
+
+                Button {
+                    center.showsManager = false
+                } label: {
+                    Image(systemName: "xmark").font(.footnote.weight(.semibold))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Close")))
+            }
+            .padding(.horizontal, 12).padding(.bottom, 10)
+
+            // 被挂起的说明：卡片多于解码预算时，后面几路是暂停的。
+            // 不明说的话，用户会以为「坏了」。
+            // 状态行：几路在播 / 几路被挂起。
+            //
+            // 2026-11-16 起 `decoding == dock`，挂起数恒为 0，所以平时显示的是
+            // 「N 路同时播放」—— 这是用户要的可观测证据：他要能确认「八个都真的在解」，
+            // 而不是只看卡片在那儿。若哪天把 `decoding` 调小，这一行会立刻变成
+            // 「x 路播放 · y 路已暂停」，不需要再改 UI。
+            let suspended = DockDecodingBudget.suspendedCount(order: center.tasks.map(\.id),
+                                                              budget: PlaybackCapacity.decoding)
+            let playing = center.tasks.filter { $0.session.player.rate != 0 }.count
+            HStack(spacing: 6) {
+                Text(suspended == 0
+                     ? L10n.text("%@ playing at once", String(playing))
+                     : L10n.text("%@ playing · %@ paused", String(playing), String(suspended)))
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.bottom, 8)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(center.tasks) { task in
+                        row(task)
+                        Divider().padding(.leading, 60)
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+        }
+        .frame(width: 300)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+    }
+
+    private func row(_ task: VideoTask) -> some View {
+        // ⛔ **整行不再是 Button**（原来是这样，于是「点一下就关掉」）。
+        //
+        // `take()` 的语义是「把这一集**从坞里摘走**、交回前台」。挂在整个行上之后，
+        // 用户在管理器里点标题、点海报、点进度，任何一下都会把窗口摘掉 ——
+        // 他并不是要切回前台，只是想看一眼或点个暂停。这就是用户报的
+        // 「点对应窗口直接关闭」。
+        //
+        // 现在：行本身只负责显示与选中；**只有「切到前台」那颗明确的键才 take**。
+        HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.black.opacity(0.35))
+                    // 走 `PosterImage`：源的海报常要 Referer，裸 `AsyncImage` 会 403。
+                    if let url = task.posterURL {
+                        PosterImage(url: url, headers: task.posterHeaders)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    } else {
+                        Image(systemName: "play.rectangle").foregroundStyle(.white.opacity(0.6))
+                    }
+                }
+                .frame(width: 44, height: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(task.title).font(.footnote.weight(.medium)).lineLimit(1)
+                    Text(task.subtitle.isEmpty ? "\(Int(task.fraction * 100))%"
+                                               : task.subtitle)
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+
+                // 「设为主选择」：只换主语（蓝框 / PiP / 音频），不摘除、不跳页。
+                //
+                // 用户要求「在管理器应该能进行这个切换，因为这个蓝框影响应用外小窗播放主体是谁」。
+                // 主选择决定三件事，全在 `activeTask` 上：
+                //   · 蓝框画在哪张卡（`isActive`）
+                //   · 应用外小窗（PiP）的 `contentSource` 交给谁
+                //   · 哪一路出声（`DockAudioPolicy`）
+                Button {
+                    center.activate(task.id)
+                } label: {
+                    Image(systemName: task.id == center.activeTaskID
+                          ? "largecircle.fill.circle" : "circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(task.id == center.activeTaskID ? Color.accentColor : .secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Make Active")))
+
+                // 「上移一层」：把这张卡提到更前（z-order 更高）。
+                //
+                // 用户要求：「不同迷你窗的图层前后显示顺序需要可以拖拽」。
+                // 在触摸屏上「直接拖着叠放的窗口换层」很容易误触（拖动本身在搬窗口），
+                // 所以这里给**逐层移动**的明确键：按一下前移一层，可预期、不会误操作。
+                // 数组首位 = 最上层，所以「前移」= index 减一。
+                Button {
+                    center.moveToLayer(task.id, max(0, center.tasks.firstIndex(where: { $0.id == task.id }).map { $0 - 1 } ?? 0))
+                } label: {
+                    Image(systemName: "square.2.layers.3d.top.filled")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .foregroundStyle(center.tasks.first?.id == task.id ? Color.secondary.opacity(0.35) : .primary)
+                }
+                .buttonStyle(.plain)
+                .disabled(center.tasks.first?.id == task.id)
+                .accessibilityLabel(Text(L10n.text("Bring Forward")))
+
+                // 「回到选集页」：把这集从坞里摘走，并把页面推到它的选集页。
+                //
+                // ⛔ 原来这里只调了 `take`，**没有设 `pendingTaskRoute`** ——
+                //    于是任务从坞里消失了，页面却原地不动。用户报的
+                //    「管理器能不能回到选集页面」就是这一条：
+                //    点一下，小窗没了，但什么也没发生，等于把窗口弄丢了。
+                //
+                // 现在与卡片双击走**同一条**路径（`open()` 的语义）：
+                // take → 拿到 video/client → 把 Route 交给 `pendingTaskRoute`。
+                Button {
+                    guard let target = center.take(task.id, store: store) else {
+                        center.showsManager = false
+                        return
+                    }
+                    center.showsManager = false
+                    store.pendingTaskRoute = Route {
+                        AnyView(VideoDetailView(video: target.video, client: target.client))
+                    }
+                } label: {
+                    Image(systemName: "list.bullet.rectangle.portrait")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Episode List")))
+
+                Button {
+                    task.session.togglePlayback()
+                } label: {
+                    Image(systemName: task.isPaused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(task.isPaused ? "Play" : "Pause"))
+
+                Button(role: .destructive) {
+                    center.remove(task.id)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text("Close")))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .contentShape(Rectangle())
+            // 选中这一路（高亮 + 让它进解码预算）。**不摘除**。
+            .onTapGesture { center.activate(task.id) }
+            // ★ 长按拖动 = 把这扇窗「拖出来」摆到松手的位置。
+            //
+            // ⛔ 用 `LongPressGesture` 起手再转 `DragGesture`，不要直接用 DragGesture：
+            //    这一行里还有四个按钮（设为主窗 / 选集页 / 暂停 / 关闭），
+            //    裸 DragGesture 会在手指一落下时就把点击吃掉，按钮全按不动。
+            //    长按 0.3s 起手是 iOS 上「把东西拎起来」的通行手势，不与点击冲突。
+            //
+            // ⛔ 落点用 `coordinateSpace: .global`（屏幕坐标），由坞换算成自己的相对坐标 ——
+            //    管理器是**浮层**，它的局部坐标与坞毫无关系，用 `.local` 会把窗口扔到屏幕外。
+            .gesture(
+                LongPressGesture(minimumDuration: 0.3)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                    .onEnded { value in
+                        guard case .second(true, let drag?) = value else { return }
+                        center.requestDrop(task.id, at: drag.location)
+                        center.showsManager = false
+                    }
+            )
+    }
+}
+
+/// 坞里**一张已摆放的卡片**：位移与拖动状态住在这一层。
+///
+/// ## 为什么单独拆出来（拖动卡顿的根因修法）
+///
+/// 位移原来写在坞的 `@State perCardOffset` 里。拖动时每帧改一次，**整个坞 body 重算**：
+/// 所有卡的 `DockPlayerLayer`（`UIViewRepresentable`）都会被 `updateUIView` 碰一遍 ——
+/// 重设 `videoGravity`、重跑 `pip.attach`、重新布局视频层。八张卡一起被这样折腾，
+/// 帧率就掉下来了，用户看到的是「拖起来一顿一顿」。
+///
+/// 现在位移是这一层自己的 `@State`，拖动只让这张卡的 body 失效。
+///
+/// ## 两级缓存，缺一不可
+///
+/// 1. **本层 `@State dragOffset`**：位移只影响自己。
+/// 2. **视频层 `DockVideoLayerBox` 等值短路**：拖动期间真正影响画面的值
+///    （player/gravity/pip/covered/尺寸）**一个字都没变**，所以 `updateUIView`
+///    不会被每帧调用 —— 那里面重设 `videoGravity`、重跑 `pip.attach`、
+///    重新布局 `AVPlayerLayer`，才是掉帧的直接原因。
+/// 「搬窗口」的命中区：**底部让开 `bottomInset`**，其余区域照常。
+///
+/// ⛔ 为什么需要自定义 Shape：`Rectangle().inset(by:)` 是**四边等距**内缩，
+///    会把左右和顶部也一起吃掉 —— 那会让贴近边缘的拖动失效。
+///    这里只缩底部一条，正好对应进度条的热区。
+struct DockDragShape: Shape {
+    var bottomInset: CGFloat
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(x: rect.minX, y: rect.minY,
+                    width: rect.width,
+                    height: max(0, rect.height - bottomInset)))
+    }
+}
+
+/// 拖动窗口的命中区要从底部让开多少（pt）。
+///
+/// ⛔ 必须盖住进度条的**实际命中区**，不是它的视觉高度：
+///    `DockProgressBar` 视觉 `.frame(height: 22)`，但 `.contentShape(Rectangle().inset(by: -11))`
+///    把热区上下各外扩 11pt ⇒ 实际命中区高 **44pt**。
+///    按 22 让开，仍会有 22pt 叠在一起抢触摸 —— 那就是「拖进度时窗口跟着动」。
+///
+/// 取 44 让开整个热区。代价是画面底部 44pt 不能拖窗口，
+/// 但那一段本来就该调进度（正是用户要的），不影响搬窗口的手感。
+let dockProgressHitHeight: CGFloat = 44
+
+private struct DockPlacedCard: View {
+    @Environment(Store.self) private var store
+    let task: VideoTask
+    let index: Int
+    let width: CGFloat
+    let gravity: AVLayerVideoGravity
+    let pip: PictureInPicture?
+    let isActive: Bool
+    let coveredByForeground: Bool
+    let ownScale: CGFloat
+    let onScaleChange: (CGFloat) -> Void
+    let containerSize: CGSize
+    let taskCount: Int
+    let resetRequest: Int
+    let slot: CGSize
+    /// 平铺模式下的位置。非空时**压倒** `dragOffset` 与 `slot`。
+    ///
+    /// 平铺是「把多窗整理好」，用户不该再手动微调某一格 ——
+    /// 位置完全由布局决定才叫平铺。
+    let tileOffset: CGSize?
+
+    /// 这张卡当前位置。`nil` 表示还在默认落点上。
+    ///
+    /// ⛔ 初值取自**上次存档的坐标**（`lastKnownOffset`）——
+    ///    这是「记住窗口坐标」在视图侧的落点。没存过才用默认错开排布。
+    @State private var dragOffset: CGSize?
+    /// 是否已把存档坐标接上。**用类实例，不用 `@State`。**
+    ///
+    /// ⛔ 这是「拖动一直飘」的第二个根因：
+    ///    守卫是 `@State` 时，视图**重建一次它就重置为 false**，
+    ///    于是 `onAppear` 又跑一遍 seed，把 `dragOffset` 拽回 `lastKnownOffset`。
+    ///    而 `lastKnownOffset` 刚在上一轮拖动结束时被写过 ——
+    ///    拖动中只要发生一次视图重建，位置就被拉回原位，表现为「一直飘」。
+    ///
+    ///    换成引用容器后，守卫不随视图重建重置，seed 真的只做一次。
+    private final class SeedFlag { var done = false }
+    @State private var seedFlag = SeedFlag()
+    /// 捏合时的瞬时倍率（松手才算进 `ownScale`）。
+    @State private var pinch: CGFloat = 1
+    /// 拖动起点（`DragGesture.translation` 是相对起手的累计量）。
+    /// 拖动基准。**用类实例，不用 `@State`。**
+    ///
+    /// ⛔ 这是「拖动一直跳动/一直飘」的根因：
+    ///    `onChanged` 里 `if dragStart == nil { dragStart = placed }` 这一句，
+    ///    在 `dragStart` 是 `@State` 时**会触发一次 body 重算**。
+    ///    重算会重建传给卡片的闭包 → 手势上下文被打断 → 下一帧 `translation`
+    ///    重新从 0 起算，而基准又刚被换过 ⇒ 位置在「基准 + 累计」之间来回跳。
+    ///
+    ///    改成引用容器后，读、写都不进 SwiftUI 的依赖图，
+    ///    拖动过程中只有 `dragOffset` 一处会让视图失效，闭环干净。
+    private final class DragAnchor { var value: CGSize? }
+    @State private var dragAnchor = DragAnchor()
+
+    private var placed: CGSize { tileOffset ?? dragOffset ?? slot }
+
+    var body: some View {
+        card
+            // ⛔ 位移必须**逐帧即时**，所以显式清掉动画。
+            //
+            // 祖先（坞的 ZStack）挂着一个 `.animation(.smooth(0.22), value: 卡片id序列)`，
+            // 那是给「卡片增删」用的。但它会向下渗透到子树的**所有**几何变化 ——
+            // 包括这里的 `.offset`。不清掉的话，手指拖动时画面被 0.22 秒动画追着走，
+            // 就是「不跟手、松手才显示」。
+            //
+            // 用 `transaction` 而不是在外面关掉整个动画，是为了**只**影响位移这一处：
+            // 增删过渡、缩放动效都还在。
+            //
+            // ⛔ 顺序：`transaction` 必须写在 `.offset` **之后**。
+            //    修饰符只作用于它之前已构建的视图链 —— 写在前面盖不住 `offset`，
+            //    等于白写（而且不会报错，只会「看起来没生效」）。
+            // `transition` 放在 `transaction` **外层**（更靠后）：增删过渡走祖先的
+            // `.animation(..., value: id 序列)`，不经过下面那个 `animation = nil`。
+            .offset(placed)
+            .transaction { $0.animation = nil }
+            // ⛔ 这里**不再挂拖动**。
+            //
+            // 拖动已经下移到 `VideoTaskCard.dragSurface`，只覆盖画面区 ——
+            // 那是用户的明确要求：「进度条部分 和下方白条标题栏 部分不应该拖动小窗位置」。
+            // 挂在整张卡上会让底部 22pt 的进度条热区和标题栏都变成「拖窗口」，
+            // 进度条就再也拖不动了。
+            //
+            // 捏合仍留在整卡：缩放窗口在哪个区域开始都合理（用户不会在标题栏上捏）。
+            .simultaneousGesture(pinchGesture)
+            // ★ 搬窗口的手势**挂在这一层**（摆放层），用 `@GestureState` 驱动。
+            //
+            // ⛔ 为什么必须在这里、而不是在卡片的 `dragSurface` 里：
+            //    卡片是通过**闭包参数**把拖动上报出来的。闭包每帧都是新对象，
+            //    SwiftUI 判定「入参不等」→ 卡片树（含 `DockVideoLayerBox`）每帧重建
+            //    → 位置在重建中抖动。这就是「一直跳、一直飘」。
+            //
+            //    现在手势只改卡片自己的 `livePan`（`@GestureState`），它不参与依赖重算，
+            //    拖动期间卡片树完全不动，只有布局用新值画偏移 —— 干净跟手。
+            //    松手时才把结果写进 `dragOffset`（`@State`），负责持久化与重钳。
+            // 搬窗口已下移到卡片画面区（见 `VideoTaskCard.dragSurface`）。
+            //
+            // ⛔ 这里**不能再挂拖动**。摆放层的 `.gesture` 会被卡片内 tap 的
+            //    `simultaneousGesture` 抢先（子层优先），表现为「松手才跳」；
+            //    换成 `simultaneousGesture` 又会覆盖进度条热区（拖进度时窗口也动）。
+            //    两个位置都试过，只有挂在卡片画面区内部才同时满足两边。
+
+            .transition(.scale(scale: 0.9).combined(with: .opacity))
+            // 首次出现时把存档坐标接上（只做一次，之后由用户拖动决定）。
+            .onAppear {
+                guard !seedFlag.done else { return }
+                seedFlag.done = true
+                if task.lastKnownOffset != .zero { dragOffset = task.lastKnownOffset }
+            }
+            // ⛔ 兜底：容器尺寸一变（折叠/展开、转屏）就重新钳一次。
+            //
+            // 用户在横屏把窗口摆在右侧，合上机身之后那块区域可能整块不存在了 ——
+            // 卡片就成了「有、但看不见、也点不到」。这正是用户说的
+            // 「不能找回不在屏幕内的小窗」。
+            //
+            // 不能只靠拖动时的 clamp：那只在**用户下一次拖**的时候生效。
+            .onChange(of: containerSize) { _, new in
+                guard let cur = dragOffset, new.width > 1, new.height > 1 else { return }
+                let cardH = width / max(task.aspectRatio, 0.2) + 34
+                let fixed = DockCardClamp.clamp(cur,
+                                                card: CGSize(width: width, height: cardH),
+                                                in: new)
+                if fixed != cur { dragOffset = fixed }
+            }
+            // 从管理器拖出来的落点：直接把自己摆过去。
+            .onChange(of: store.videoTasks.pendingDropOffset[task.id]) { _, landed in
+                guard let landed else { return }
+                dragOffset = landed
+                dragAnchor.value = nil
+                store.videoTasks.pendingDropOffset[task.id] = nil
+            }
+            // 一键归位：把自己回到默认落点。
+            .onChange(of: resetRequest) { _, _ in
+                dragOffset = nil
+                dragAnchor.value = nil
+                pinch = 1
+            }
+    }
+
+    /// 卡片本体。`Equatable` 短路：拖动期间入参不变，这里直接跳过重建。
+    private var card: some View {
+        VideoTaskCard(task: task, width: width, gravity: gravity,
+                      isActive: isActive, pip: pip,
+                      coveredByForeground: coveredByForeground,
+                      ownScale: ownScale, onScaleChange: onScaleChange,
+                      taskIndex: index, taskCount: taskCount,
+                      externalPinch: pinch,
+                      // ★ 松手才上报：拖动中的逐帧位移由卡片自己的
+                      //   `livePan` 承担，这里只负责「落定 + 存档」。
+                      onPanEnded: { translation in
+                          let base = dragOffset ?? slot
+                          let raw = CGSize(width: base.width + translation.width,
+                                           height: base.height + translation.height)
+                          let cardH = width / max(task.aspectRatio, 0.2) + 34
+                          let final = DockCardClamp.clamp(raw,
+                                                          card: CGSize(width: width, height: cardH),
+                                                          in: containerSize)
+                          dragOffset = final
+                          task.lastKnownOffset = final
+                          if let context = task.channel.historyContext {
+                              VideoTaskCenter.savePlacement(context.id + "|" + context.episodeID,
+                                                            scale: ownScale, offset: final)
+                          }
+                      })
+    }
+
+
+    private var pinchGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in pinch = value }
+            .onEnded { value in
+                onScaleChange(min(max(ownScale * value, 0.6), 2.2))
+                pinch = 1
+            }
+    }
+}
+
 struct VideoTaskDock: View {
     @Environment(Store.self) private var store
     let gravity: AVLayerVideoGravity
@@ -1184,18 +2474,66 @@ struct VideoTaskDock: View {
     /// **每张卡各自的缩放**（键是 `VideoTask.id`）。缺省 1。
     @State private var perCardScale: [UUID: CGFloat] = [:]
     /// **每张卡各自的位置**（相对右下角的偏移）。缺省 `.zero`。
-    ///
-    /// ⛔ 这是用户报的「拉着一个走，另外一个也走」的根因：
-    /// 原来 `offset` 是坞级一个 `@Binding`，挂在包住所有卡的 `VStack` 上，
-    /// 一拖就是整列一起动。现在位置按 `task.id` 分开存，每张卡只动自己。
-    @State private var perCardOffset: [UUID: CGSize] = [:]
-    /// 拖动中的累计量。`DragGesture.translation` 是**相对起手的累计**，
-    /// 直接当位置用会让卡片每帧累加、越拖越远；这里用差分量补正。
-    @State private var lastDrag: [UUID: CGSize] = [:]
     /// 坞整体的位置（没有卡片自己的偏移时作起点）。由 `RootView` 持有以便换形态重钳。
     @Binding var offset: CGSize
     /// 坞整体缩放（仅作**基础宽度**；单卡缩放另算，见 `perCardScale`）。
     @Binding var scale: CGFloat
+
+    /// 卡片钳位：判据与实现在 `TVCore/DockCardClamp`（那里能单测）。
+    /// 这里只做一次转调，避免两处各写一份边界公式。
+    static func clampCardOffset(_ offset: CGSize, card: CGSize, in container: CGSize) -> CGSize {
+        DockCardClamp.clamp(offset, card: card, in: container)
+    }
+
+    /// 把管理器的一次拖放落成卡片位置。
+    ///
+    /// 坐标系三层必须分清（这里是本类型最容易错的地方）：
+    ///   ① 管理器给的 `point` 是**屏幕（global）**坐标；
+    ///   ② 卡片偏移是**相对坞右下角**的偏移（往左/上为负）；
+    ///   ③ 容器尺寸是坞自己的 `geo.size`。
+    ///
+    /// 换算：坞内坐标 = 全局点 − 坞的全局原点 → 再转成相对右下角的偏移。
+    /// 平铺模式下每张卡的偏移（相对右下角）。自由模式返回空数组。
+    ///
+    /// ⛔ 平铺的位置由 `DockLayout` 统一算，**不读各卡自己存的位置** ——
+    ///    否则用户上次摆在左上角的窗会跑到网格外面去。
+    private func tiledOffsets(in container: CGSize, count: Int) -> [CGSize] {
+        guard store.videoTasks.layoutMode == .tiled else { return [] }
+        // 用第一张卡的宽高比作为整组的口径：平铺要的是「整齐」，
+        // 每张各自不同宽高比会让格子参差，反而更难看清。
+        let aspect = store.videoTasks.tasks.first.map { max($0.aspectRatio, 0.2) } ?? 0.5625
+        return DockLayout.tiles(count: count, in: container, aspect: aspect)
+            .map { DockLayout.offset(for: $0, in: container) }
+    }
+
+    /// 自由模式下的默认落点（错开堆叠）。
+    private func slotOffset(index: Int, width: CGFloat, container: CGSize) -> CGSize {
+        if store.videoTasks.layoutMode == .tiled {
+            // 平铺时 slot 不参与：位置由 `tileOffset` 给。给零，避免两套值打架。
+            return .zero
+        }
+        return CGSize(width: 0, height: -CGFloat(index) * (width * 0.78 + 12))
+    }
+
+    private func handleDrop(_ request: VideoTaskCenter.DropRequest,
+                            container geo: GeometryProxy,
+                            width: CGFloat) {
+        guard let point = request.point else { return }
+        let origin = geo.frame(in: .global).origin
+        let insideX = point.x - origin.x
+        let insideY = point.y - origin.y
+        // 卡片中心落到手指处：相对右下角 = 坞内点 − 容器右下角。
+        let raw = CGSize(width: insideX - geo.size.width,
+                         height: insideY - geo.size.height)
+        guard let task = store.videoTasks.tasks.first(where: { $0.id == request.id }) else { return }
+        let cardH = width / max(task.aspectRatio, 0.2) + 34
+        let clamped = DockCardClamp.clamp(raw,
+                                          card: CGSize(width: width, height: cardH),
+                                          in: geo.size)
+        task.lastKnownOffset = clamped
+        // 立刻反映到视图：把落点写进这张卡的状态。
+        store.videoTasks.pendingDropOffset = [request.id: clamped]
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -1220,36 +2558,89 @@ struct VideoTaskDock: View {
                 // 初次出现时给一个错开的默认落点（右下角往上排），之后完全由用户摆布。
                 ZStack(alignment: .bottomTrailing) {
                     ForEach(Array(store.videoTasks.tasks.enumerated()), id: \.element.id) { index, task in
-                        let slot = CGSize(width: 0, height: -CGFloat(index) * (width * 0.78 + 12))
-                        VideoTaskCard(task: task, width: width, gravity: gravity,
-                                      isActive: task.id == store.videoTasks.activeTaskID, pip: pip,
-                                      coveredByForeground: coveredByForeground,
-                                      ownScale: perCardScale[task.id] ?? 1,
-                                      onScaleChange: { perCardScale[task.id] = $0 },
-                                      taskIndex: index,
-                                      taskCount: store.videoTasks.tasks.count)
-                            .offset(perCardOffset[task.id] ?? slot)
-                            .gesture(
-                                // 只挪这一张。`translation` 是相对**起手点**的累计量，
-                                // 必须叠加到已有位置上，否则松手前一拖就跳回原点。
-                                DragGesture(minimumDistance: 2)
-                                    .onChanged { value in
-                                        let base = perCardOffset[task.id] ?? slot
-                                        perCardOffset[task.id] = CGSize(
-                                            width: base.width + value.translation.width - lastDrag[task.id, default: .zero].width,
-                                            height: base.height + value.translation.height - lastDrag[task.id, default: .zero].height
-                                        )
-                                        lastDrag[task.id] = value.translation
-                                    }
-                                    .onEnded { _ in lastDrag[task.id] = .zero }
-                            )
-                            .transition(.scale(scale: 0.9).combined(with: .opacity))
+                        // ★ 每张卡包一层 `DockPlacedCard`，**位移状态就住在这一层里**。
+                        //
+                        // ⛔ 这是「拖动时卡顿」的根因修法。
+                        //
+                        // 原来位移写在坞自己的 `@State perCardOffset` 上。拖动一帧改一次，
+                        // **整个坞 body 都要重算** —— 于是每帧都会重建所有卡的
+                        // `DockPlayerLayer`（`UIViewRepresentable`），`updateUIView` 里
+                        // 每次都在重设 `videoGravity`、重跑 `pip.attach`、重新布局视频层。
+                        // 8 张卡一起被这么折腾，帧率当然掉。
+                        //
+                        // 现在位移属于这一张卡自己的 `@State`：拖动只让**这一张**的 body 失效，
+                        // 兄弟卡片的 `DockPlayerLayer` 不会被 `updateUIView` 再碰一次。
+                        //
+                        // ⛔ 视频层另有 `DockVideoLayerBox` 做等值短路 —— 拖动时它拦住
+                        //    `DockPlayerLayer.updateUIView`，这才是掉帧的直接原因。
+                        // 参数先落到局部常量，再交给 `DockPlacedCard`。
+                        //
+                        // ⛔ 不这么写，编译器会报「unable to type-check in reasonable time」——
+                        //    这个 init 有 15 个参数，其中三个是内联的闭包/方法调用，
+                        //    一起塞进一个字面量就超出类型推导预算。
+                        let cardCount = store.videoTasks.tasks.count
+                        let tile = tiledOffsets(in: geo.size, count: cardCount)
+                        let thisTile: CGSize? = index < tile.count ? tile[index] : nil
+                        let slot = slotOffset(index: index, width: width, container: geo.size)
+                        let scale = perCardScale[task.id] ?? 1
+                        let active = task.id == store.videoTasks.activeTaskID
+                        let reset = store.videoTasks.resetRequest
+                        DockPlacedCard(
+                            task: task,
+                            index: index,
+                            width: width,
+                            gravity: gravity,
+                            pip: pip,
+                            isActive: active,
+                            coveredByForeground: coveredByForeground,
+                            ownScale: scale,
+                            onScaleChange: { perCardScale[task.id] = $0 },
+                            containerSize: geo.size,
+                            taskCount: cardCount,
+                            resetRequest: reset,
+                            slot: slot,
+                            tileOffset: thisTile)
+                    }
+                }
+                // 卡片**增删**的淡入淡出。只认 id 序列的变化，不认位移。
+                //
+                // ⛔ 这行本身没错，错在它以前**同时**管住了位移。它挂在 ZStack 上，
+                //    子树里任何变化都会被包进这 0.22 秒 —— 包括拖动时的 `.offset`。
+                //    于是手指每移一点，画面都被动画追 0.22 秒，表现就是
+                //    用户说的「拖动不跟手、没有实时跟、松手后才显示」。
+                //
+                // 现在两边分工明确：
+                //   · 这里 → 只负责「某张卡出现/消失」的过渡
+                //   · `DockPlacedCard` 里的位移 → 用 `.transaction { $0.animation = nil }`
+                //     显式关掉动画，逐帧即时跟手
+                // 管理器把某一扇窗「拖出来」：把它的位置改到松手处。
+                //
+                // ⛔ 换算必须用坞自己的全局原点：
+                //    管理器给的是**屏幕坐标**，而卡片位置存的是**相对坞右下角的偏移**。
+                //    直接用屏幕坐标当偏移，会把窗口扔到屏幕外（用户说的"拖出来就没了"）。
+                .onChange(of: store.videoTasks.dropRequest) { _, request in
+                    guard let request else { return }
+                    defer { store.videoTasks.consumeDrop() }
+                    handleDrop(request, container: geo, width: width)
+                }
+                // 坞里有什么变了就存一次快照（增删、换集）。
+                // 进度由 `saveSnapshot` 读取当下的 `session.position`，所以这里
+                // 只需要在**结构**变化时触发；进度靠退出前那一次兜底。
+                .onChange(of: store.videoTasks.tasks.map(\.id)) { _, _ in
+                    store.videoTasks.saveSnapshot()
+                    // 超过容量被逐出时告诉用户是哪一部。
+                    // ⛔ 静默消失与「自己弄丢了」在体感上没有区别 —— 必须说。
+                    if let gone = store.videoTasks.lastEvictedTitle {
+                        store.notice = L10n.text("Put away %@ — at most %@ at once",
+                                                 gone, String(PlaybackCapacity.dock))
+                        store.videoTasks.lastEvictedTitle = nil
                     }
                 }
                 .animation(.smooth(duration: 0.22), value: store.videoTasks.tasks.map(\.id))
                 .offset(offset)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
                 .padding(12)
+
             }
         }
     }

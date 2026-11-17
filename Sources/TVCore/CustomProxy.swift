@@ -100,6 +100,7 @@ public final class CustomProxyStore: @unchecked Sendable {
 
     private static let endpointsKey = "proxyEndpoints.v1"
     private static let routesKey = "proxyRoutes.v1"
+    private static let defaultKey = "proxyDefault.v1"
 
     private let lock = NSLock()
     private let defaults: UserDefaults
@@ -167,6 +168,38 @@ public final class CustomProxyStore: @unchecked Sendable {
     public func endpoint(origin: URL, sourceKey: String) -> CustomProxyEndpoint? {
         guard let id = route(origin: origin, sourceKey: sourceKey).proxyID else { return nil }
         return proxy(for: id)
+    }
+
+    // MARK: 默认出口
+    //
+    // 149 那台公共中继拆掉之后，一批源（`_route: 需代理`，见 route.json）在本机上直连不通、
+    // 经境外出口可读。它们此前能看，全靠那台服务器替它们出去 —— 现在要看观众的出口。
+    //
+    // 但按源一个个配代理是不现实的：源列表里有几百个，观众的耐心只有一次。所以这里给一个
+    // 「默认出口」的概念：显式指定优先；只配了一台代理时，那台就是出口（他配它就是为了出去）。
+
+    /// 观众指定的默认出口。nil = 没指定。
+    public var defaultProxyID: String? {
+        get { lock.withLock { defaults.string(forKey: Self.defaultKey) } }
+        set {
+            lock.withLock {
+                if let newValue, !newValue.isEmpty { defaults.set(newValue, forKey: Self.defaultKey) }
+                else { defaults.removeObject(forKey: Self.defaultKey) }
+            }
+        }
+    }
+
+    /// 直连不通时该从哪台代理出去。
+    ///
+    /// 两条规则，都刻意保守：
+    ///   · 显式指定了默认出口 → 用它；
+    ///   · 只配了一台代理 → 用它（让他为 90 个源逐个点代理，等于这个功能不存在）；
+    ///   · 配了两台以上又没指定 → **返回 nil**。替他挑一台等于替他决定请求从哪条腿出去，
+    ///     而这正是当初拆掉 149 的理由。
+    public var fallbackEndpoint: CustomProxyEndpoint? {
+        if let id = defaultProxyID, let chosen = proxy(for: id) { return chosen }
+        let all = endpoints
+        return all.count == 1 ? all[0] : nil
     }
 
     /// Every route as stored, for the full-backup and iCloud snapshots.

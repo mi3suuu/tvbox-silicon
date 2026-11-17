@@ -50,6 +50,9 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
     public var kilobytesPerSecond: Int?
     /// Height the source itself declares (1080, 720, …). `nil` when it does not say.
     public var resolutionHeight: Int?
+    /// 同一档声明的宽度。单独存是为了算**长边**：竖屏短剧 1080×1920 的高度是 1920、
+    /// 电影 1920×818 的高度只有 818，只按高度比较会把 720p 竖屏排到 1080p 电影前面。
+    public var resolutionWidth: Int?
     /// Short label for the picker: "1080P", or nil when unknown.
     public var resolutionLabel: String?
     /// 源声明的峰值码率，**kbps**（m3u8 的 `BANDWIDTH`，或 `AVERAGE-BANDWIDTH`）。
@@ -64,6 +67,13 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
     /// 单独一项而不折进分辨率：HDR 在 HDR 屏上更好、在 SDR 屏上反而更差，
     /// 所以它不能和分辨率合并成「越大越好」。
     public var colourRange: String?
+    /// 这条地址回的到底是什么：`hls` / `mp4` / `ts` / `mkv` / `html` / `json` / `other`。
+    ///
+    /// 为什么必须单独存：`reachability` 只回答「有没有字节回来」，而**一张网页也回 200 和几十 KB**。
+    /// 采集站把「云播 / 平台页」当播放地址返回是常态（`feifan` / `xlyun` / `youku` / `qiyi` …），
+    /// 只看 reachable 会把它们显示成绿色「120 ms」——用户点进去转圈到超时，
+    /// 而我们这边还认为这条线是好的。看剧AI 修过同一个洞（`lineAlive` → `mediaAlive`）。
+    public var mediaKind: String?
     public var measuredAt: Date
 
     public init(
@@ -71,10 +81,12 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
         latencyMilliseconds: Int? = nil,
         kilobytesPerSecond: Int? = nil,
         resolutionHeight: Int? = nil,
+        resolutionWidth: Int? = nil,
         resolutionLabel: String? = nil,
         declaredBitrateKbps: Int? = nil,
         fileSizeBytes: Int? = nil,
         colourRange: String? = nil,
+        mediaKind: String? = nil,
         measuredAt: Date = .distantPast,
         declaredConflicted: Bool? = nil,
         declared: Bool? = nil
@@ -83,10 +95,12 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
         self.latencyMilliseconds = latencyMilliseconds
         self.kilobytesPerSecond = kilobytesPerSecond
         self.resolutionHeight = resolutionHeight
+        self.resolutionWidth = resolutionWidth
         self.resolutionLabel = resolutionLabel
         self.declaredBitrateKbps = declaredBitrateKbps
         self.fileSizeBytes = fileSizeBytes
         self.colourRange = colourRange
+        self.mediaKind = mediaKind
         self.measuredAt = measuredAt
         self.declaredConflicted = declaredConflicted
         self.declared = declared
@@ -117,6 +131,18 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
         case .reachable, .slow: true
         case .unreachable, .unknown: false
         }
+    }
+
+    /// 回的是一张网页 / 一段 JSON，不是媒体。
+    ///
+    /// 与 `isUsable` 分开：`isUsable` 决定「这个源整体算不算能用」（会影响源排序与筛选口径，
+    /// 不能因为一条线是网页就把整源判死）；这里只回答「这条**线**要不要先解析」。
+    public var isPageOnly: Bool { mediaKind == "html" || mediaKind == "json" }
+
+    /// 画面长边。只按高度比会把竖屏和宽银幕判反（见 `resolutionWidth`）。
+    public var longEdge: Int? {
+        if let width = resolutionWidth, let height = resolutionHeight { return max(width, height) }
+        return resolutionHeight ?? resolutionWidth
     }
 
     public func isStale(now: Date = Date(), tolerance: TimeInterval = sourceProbeStaleness) -> Bool {
@@ -382,6 +408,8 @@ public struct SourceProbeResult: Codable, Hashable, Sendable {
     /// 声明高于能力时补一个 `~` 前缀（`~720p`），让「被压下来」这件事看得见 ——
     /// 不写 `~` 的话用户以为源只支持 720p，而实际是它声称 1080p 但喂不动。
     public func summary() -> String {
+        // 网页型线路先说实话：它不是慢、也不是通，是「播放器打不开」。
+        if isPageOnly { return L10n.text("Needs parsing") }
         var parts: [String] = []
         if let effective = effectiveResolutionHeight {
             let prefix = claimsMoreThanItCanDeliver ? "~" : ""
@@ -748,6 +776,22 @@ public final class SourceProbeStore {
 
     public func probe(sourceKey: String, videoID: String, lineFlag: String) -> SourceProbeResult? {
         probes[storageKey(sourceKey: sourceKey, videoID: videoID, lineFlag: lineFlag)]
+    }
+
+    /// 给「默认线路」用的一份画质读数：某个 flag 当前**可信**的长边，没有就 nil。
+    ///
+    /// 三条都要过：新鲜（不是几天前测的）、能用（不是不可达/没测出）、不是网页型
+    /// （网页型没有画质，把它算成 0 反而会把它排到最前）。
+    /// 返回值是闭包而不是字典，是因为 `LinePreference.choose` 只在需要时才问，
+    /// 而「需要」与否取决于有没有历史线路 —— 先算全表纯属浪费。
+    public func qualityReader(sourceKey: String, videoID: String,
+                              now: Date = Date()) -> (String) -> Int? {
+        { [weak self] flag in
+            guard let reading = self?.probe(sourceKey: sourceKey, videoID: videoID, lineFlag: flag),
+                  !reading.isStale(now: now), reading.isUsable, !reading.isPageOnly
+            else { return nil }
+            return reading.longEdge
+        }
     }
 
     /// The freshest reading for one source, whatever video or line it was measured on.
@@ -1199,10 +1243,12 @@ public enum SourceProbeRunner {
                 latencyMilliseconds: latency,
                 kilobytesPerSecond: kBps,
                 resolutionHeight: height,
+                resolutionWidth: declared.width,
                 resolutionLabel: height.map { "\($0)P" },
                 declaredBitrateKbps: declared.bitrateKbps,
                 fileSizeBytes: size,
                 colourRange: declared.colourRange,
+                mediaKind: Self.mediaKind(of: data),
                 measuredAt: Date()
             )
         } catch {
@@ -1213,6 +1259,23 @@ public enum SourceProbeRunner {
             }
             return SourceProbeResult(reachability: .unreachable, measuredAt: Date())
         }
+    }
+
+    /// 这段字节是什么。只看魔数与前缀，不做解码 —— 判「播放器能不能打开」不需要知道编码，
+    /// 需要的是分清**媒体**与**网页**。
+    ///
+    /// 与 `TVBoxProbe` 里那份同名实现同口径（那边用于线路审计）。
+    public static func mediaKind(of data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        let head = data.prefix(2_048)
+        let text = String(decoding: head, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("#EXTM3U") { return "hls" }
+        if text.hasPrefix("<") { return "html" }
+        if text.hasPrefix("{") || text.hasPrefix("[") { return "json" }
+        if data.count >= 8, data[4..<8] == Data("ftyp".utf8) { return "mp4" }
+        if data.count >= 376, data[0] == 0x47, data[188] == 0x47 { return "ts" }
+        if head.starts(with: [0x1A, 0x45, 0xDF, 0xA3]) { return "mkv" }
+        return "other"
     }
 
     /// 测一条虚拟流：按 `sampleBytes` 读一段字节，用与 HTTP 探针**相同的两段计时**算稳态速度。
@@ -1352,6 +1415,7 @@ public enum SourceProbeRunner {
     ///   · 色域：`VIDEO-RANGE=SDR|HLG|PQ`
     ///   · 分辨率退回文件名里的 `1080p` / `x1080`
     struct Declaration: Sendable {
+        var width: Int?
         var height: Int?
         var bitrateKbps: Int?
         var colourRange: String?
@@ -1373,19 +1437,23 @@ public enum SourceProbeRunner {
         // 现在遍历所有 `RESOLUTION=` 取高度最大者；码率同理取最大值（见下）。
         // 语义依据：「这一源的画质」指的是它**能给到的最好一档**，
         // 而不是播放器默认起播的那一档（起播档由播放器自己按带宽挑）。
-        var heights: [Int] = []
+        // 宽和高一起取：同一个 RESOLUTION 里的两个数属于同一档，分开解析会把
+        // 「最高档的高度」和「最低档的宽度」配成一对，长边算出来就是错的。
+        var sizes: [(width: Int, height: Int)] = []
         var searchStart = head.startIndex
-        while let range = head.range(of: #"RESOLUTION=\d+x(\d+)"#,
+        while let range = head.range(of: #"RESOLUTION=(\d+)x(\d+)"#,
                                      options: .regularExpression,
                                      range: searchStart..<head.endIndex) {
             let matched = String(head[range])
-            if let x = matched.lastIndex(of: "x"), let height = Int(matched[matched.index(after: x)...]) {
-                heights.append(height)
-            }
+            let numbers = matched.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+            if numbers.count >= 2 { sizes.append((numbers[0], numbers[1])) }
             searchStart = range.upperBound
             if searchStart >= head.endIndex { break }
         }
-        out.height = heights.max()
+        if let best = sizes.max(by: { $0.height < $1.height }) {
+            out.width = best.width
+            out.height = best.height
+        }
         if out.height == nil {
             let name = url.lastPathComponent.lowercased()
             for height in [2160, 1440, 1080, 720, 480, 360]

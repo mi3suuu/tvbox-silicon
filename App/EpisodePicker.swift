@@ -208,89 +208,6 @@ final class EpisodeProbeController {
 
 // MARK: - Picker
 
-/// 选集/线路面板的**尺寸档**：由「可用宽度」决定，不认机型、不碰方向枚举。
-///
-/// ⛔ 为什么需要它（2026-11-13 第 20 项）：
-/// 面板此前只有一个布尔 `compact`（`playerLayout == .inline`），它描述的是
-/// **播放器在页面里的位置**，不是**屏幕有多宽**。于是：
-///   · 外屏 466pt 与内屏竖持 669pt 拿到同一个 `compact=false`；
-///   · 内屏横持 951pt 也是 `false`；
-///   · 但 951pt 上列宽 92 的网格会铺出 10 列、封面 108pt 显得很小，
-///     线路 chip 横排挤在一行 —— 与外屏观感完全不同，用户看到的就是
-///     「只有外屏做了款式，内屏没做」。
-///
-/// 这里按**内容宽度**分三档（外屏 / 内屏竖持 / 内屏横持与全屏），
-/// 全部尺寸只从这一处取，面板内不再有裸字面量，各形态自然统一。
-enum PickerMetrics: Equatable {
-    /// 外屏（≈430–480pt），也就是此前唯一被认真调过的那一档。
-    case outer
-    /// 内屏竖持（≈640–700pt）：比外屏宽，但仍是单列观感。
-    case innerPortrait
-    /// 内屏横持 / 全屏（≥820pt）：横向空间充裕，允许更宽的封面与更多列。
-    case innerLandscape
-
-    /// 由可用宽度选档。阈值刻意留出余量，避免旋转动画中途反复跳档。
-    static func forWidth(_ width: CGFloat) -> PickerMetrics {
-        if width >= 820 { return .innerLandscape }
-        if width >= 600 { return .innerPortrait }
-        return .outer
-    }
-
-    /// 面板外边距与区块间距。
-    var panelPadding: CGFloat {
-        switch self {
-        case .outer, .innerPortrait: return Spacing.panel
-        case .innerLandscape: return Spacing.panel * 1.4
-        }
-    }
-
-    /// 区块之间的竖向间距。
-    var blockSpacing: CGFloat {
-        switch self {
-        case .outer: return Spacing.panel
-        case .innerPortrait: return Spacing.panel * 1.2
-        case .innerLandscape: return Spacing.panel * 1.2
-        }
-    }
-
-    /// 封面在网格单元里的显示尺寸（宽, 高）。
-    ///
-    /// 外屏沿用实测过的 108×162；内屏两档放大，否则在 951pt 宽上
-    /// 一排十来个 108pt 封面会碎成「贴纸墙」，与 One 的观感不符。
-    var coverSize: (CGFloat, CGFloat) {
-        switch self {
-        case .outer: return (108, 162)
-        case .innerPortrait: return (124, 186)
-        case .innerLandscape: return (144, 216)
-        }
-    }
-
-    /// 网格最小列宽。与 `coverSize.width` 成比例，保证每格只放得下一张封面。
-    var gridMinColumn: CGFloat {
-        switch self {
-        case .outer: return 92
-        case .innerPortrait: return 108
-        case .innerLandscape: return 128
-        }
-    }
-
-    /// 网格间距。
-    var gridSpacing: CGFloat {
-        switch self {
-        case .outer: return 8
-        case .innerPortrait: return 10
-        case .innerLandscape: return 12
-        }
-    }
-
-    /// 封面圆角。
-    var coverRadius: CGFloat {
-        switch self {
-        case .outer, .innerPortrait: return Radius.card
-        case .innerLandscape: return Radius.card * 1.15
-        }
-    }
-}
 
 struct EpisodePicker: View {
     let video: Video
@@ -334,9 +251,9 @@ struct EpisodePicker: View {
     /// 跨启动记忆反而不是用户要的（每次打开按最合适的那一种）。
     @State private var layout: PickerLayout = .grid
 
-    /// 面板可用宽度；由最外层 `GeometryReader` 写入。
+    /// 面板可用宽度；由 `body` 上的 `onGeometryChange` 写入（不参与布局）。
     ///
-    /// ⛔ 用 `@State` 存而不是每帧现算：`GeometryReader` 在旋转/折叠动画中
+    /// ⛔ 用 `@State` 存而不是每帧现算：量到的宽度在旋转/折叠动画中
     /// 每帧都报新宽度，直接拿它当布局输入会让网格列数逐帧跳变（与 OneSkin
     /// 「控件推移」同一类病）。这里只存**离散档位**，同一档内宽度变化不触发重排。
     @State private var availableWidth: CGFloat = 0
@@ -488,13 +405,24 @@ struct EpisodePicker: View {
     }
 
     var body: some View {
-        // 量一次宽度决定档位。放在最外层是因为 sheet 与 Duo 内嵌面板的
-        // 容器宽度差别很大（466 vs 951），内部的 `compact` 布尔看不出来。
-        GeometryReader { proxy in
-            content
-                .onAppear { availableWidth = proxy.size.width }
-                .onChange(of: proxy.size.width) { _, w in availableWidth = w }
-        }
+        // 量一次宽度决定档位。sheet 与 Duo 内嵌面板的容器宽度差别很大（466 vs 951），
+        // 内部的 `compact` 布尔看不出来，所以要真的量一次宽度。
+        //
+        // ⛔ 这里**不能用 `GeometryReader` 包**（第一版就是这么写的，闪退）：
+        //
+        // `GeometryReader` 会向父容器索取「能拿到的全部空间」，并**把它给的尺寸吃掉** ——
+        // 它自己不向子视图转发尺寸，子视图拿到的是一个由 GeometryReader 决定的框。
+        // 而这个面板是放进 `sheet` / Duo 内嵌面板里的，父级是**自适应尺寸**容器：
+        //   · 父级问「你要多大」→ GeometryReader 答「我要无限」→ 面板被撑爆或塌成 0；
+        //   · 面板里 `ScrollView` + `LazyVGrid` 在 0 宽/无限高的框里布局 → 崩。
+        // 症状就是「点资源/点搜索结果 → 闪退」，以及「显示没达到预期」。
+        //
+        // 正确做法是 `onGeometryChange`：它**不参与布局**（只读量、不改框），
+        // 与 `BiliPortraitPage` 里那处宽度测量同一范式。
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+                if abs(w - availableWidth) > 0.5 { availableWidth = w }
+            }
     }
 
     private var content: some View {
@@ -526,8 +454,10 @@ struct EpisodePicker: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                if !compact {
-                    ToolbarItem(placement: .cancellationAction) {
+                // 关闭键与「切成小窗」在 **sheet 形态**下都放导航栏。
+                // 关掉之后再看集数就太晚了 —— 用户要的是「我先把它缩下去，回头再挑」。
+                ToolbarItem(placement: .cancellationAction) {
+                    if !compact {
                         Button(L10n.text("Close")) {
                             // In a Duo's inline shape the picker is an in-picture panel with no sheet, so the
                             // store flag is what actually closes it; the dismiss covers the sheet shape.
@@ -535,6 +465,9 @@ struct EpisodePicker: View {
                             dismiss()
                         }
                     }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    if !compact { miniPlayerButton }
                 }
             }
             #if os(iOS)
@@ -560,7 +493,10 @@ struct EpisodePicker: View {
                 flags: flags,
                 picked: picked,
                 watched: resumeContext?.episodeFlag,
-                playableNow: { CloudDrive.preferredFlag([$0]) != nil }
+                playableNow: { CloudDrive.preferredFlag([$0]) != nil },
+                // 与播放页同一口径：面板高亮的那条必须就是会被播的那条。
+                quality: SourceProbeStore.shared.qualityReader(
+                    sourceKey: sourceKey, videoID: video.id)
             )
             if let resolved, resolved != activeLine {
                 autoResolvedLine = resolved
@@ -612,6 +548,7 @@ struct EpisodePicker: View {
         HStack(spacing: 8) {
             Text(video.name).font(.subheadline.weight(.semibold)).lineLimit(1)
             Spacer(minLength: 8)
+            miniPlayerButton
             Button {
                 store.showsEpisodes = false
             } label: {
@@ -626,6 +563,77 @@ struct EpisodePicker: View {
             .buttonStyle(.plain)
             .accessibilityLabel(L10n.text("Close"))
         }
+    }
+
+    /// 「切成小窗」：把正在播的这一幕收进坞，人退出选集页。
+    ///
+    /// ⛔ 这个键必须**在加载中也画出来**，不能等集数列表到齐才给。
+    ///
+    /// 用户报的正是这个窗口：点资源 → 面板打开了，但详情/线路还在解析，页面是空的，
+    /// 而 `compact` 下整条 navigationBar 被 `.toolbar(compact ? .hidden : .visible)`
+    /// 藏掉（连关闭键一起），于是**既没返回、也没小窗**，只能等 —— 等到慢源上就是「卡住了」。
+    /// 现在标题行常驻，两个键都在。
+    ///
+    /// ⛔ 没有东西在播时**不给**这颗键：`dockForeground()` 在没有 `playing` 时是空操作，
+    ///    按下去什么都不会发生 —— 一个按了没反应的键比没有更糟。
+    @ViewBuilder private var miniPlayerButton: some View {
+        // ⛔ 条件**不能**是 `store.playing != nil`（第一版就是这么写的，所以永远不出现）。
+        //
+        // 用户在选集页时大多**还没开始播**：`playing` 是 nil。
+        // 而「提前播放到小窗」这个需求本身就是「还没播，先扔进坞里播」——
+        // 拿「已经在播」当条件，恰好把唯一需要它的场景排除了。
+        //
+        // 现在无条件给出这颗键，按下时按两种情况走：
+        //   · 有前台在播 → `dockForeground()` 把它整集收进坞（不动其他卡片）
+        //   · 没有前台      → 用当前选中的那一集**新起**一个小窗（见 `sendToMiniPlayer`）
+        Button {
+            Task { await sendToMiniPlayer() }
+        } label: {
+                Image(systemName: "pip.enter").font(.footnote.weight(.semibold))
+                    .frame(width: 28, height: 28)
+                    #if os(tvOS)
+                    .background(Color.primary.opacity(0.06), in: Circle())
+                    #else
+                    .glassOrFill(.regular.interactive(), Color.primary.opacity(0.06), in: Circle())
+                    #endif
+            }
+        .buttonStyle(.plain)
+        .accessibilityLabel(L10n.text("Mini Player"))
+    }
+
+    /// 「提前播放到小窗」：不进入播放页，直接把这一集扔进坞里开始播。
+    ///
+    /// 两条路：
+    /// 1. 前台已经在播这一部剧 → `dockForeground()` 把它收进坞，**不重起流**
+    ///    （`playing = nil` 的 didSet 只清前台槽，坞里那一份继续播）。
+    /// 2. 还没播 → 起一个新的坞任务。`store.videoTasks.start(...)` 自己会取详情、
+    ///    选第一集并解析，所以这里只要把作品交出去。
+    ///
+    /// ⛔ 走 `start(video:client:store:)` 而不是 `selectEpisode`：
+    ///    `selectEpisode` 开头就有 `guard playing == channel`（Store.swift:2981），
+    ///    在「还没播」的场景下必然直接 return —— 那正是这条需求要解决的场景。
+    @MainActor private func sendToMiniPlayer() async {
+        if let channel = store.playing {
+            store.dockForeground()
+            store.showsEpisodes = false
+            return
+        }
+        // 拿不到 client 就没有源，按下去只会报错 —— 那就别假装成功。
+        //
+        // ⛔ 这里**不能**用 `store.catalogClient(for:)`：那个参数是 `FavoriteVideo`，
+        //    而选集页手上是 `Video` + `sourceKey` + `origin`。
+        //    按「源 + 地址」定位站点，是 `catalogClient(for:)` 内部的同一套比较。
+        guard let config = store.subscription,
+              let site = config.sites.first(where: {
+                  $0.origin(or: config.origin) == origin && $0.sourceKey == sourceKey
+              }) else {
+            store.notice = L10n.text("This title has no source to play from.")
+            return
+        }
+        let client = CatalogClient(site: store.resolvedSite(site, origin: config.origin),
+                                   origin: config.origin, jarURL: config.spiderURL)
+        await store.videoTasks.start(video: video, client: client, store: store)
+        store.showsEpisodes = false
     }
 
     // MARK: Header
@@ -798,6 +806,8 @@ struct EpisodePicker: View {
     }
 
     private func color(for reading: SourceProbeResult?) -> Color {
+        // 网页型线路先于可达性判：它回 200、耗时也正常，但播放器打不开 —— 显示成绿色就是在骗人。
+        if reading?.isPageOnly == true { return Brand.amber }
         switch reading?.reachability {
         case .reachable: return Brand.teal
         case .slow: return Brand.amber

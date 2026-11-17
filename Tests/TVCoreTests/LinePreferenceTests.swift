@@ -164,4 +164,50 @@ import Testing
         #expect(LinePreference.sanitized("线路9", in: flags) == nil)
         #expect(LinePreference.sanitized(nil, in: flags) == nil)
     }
+
+    // MARK: - 实测画质（2026-11-17）
+
+    /// 有实测读数时，默认线路取长边最大的那条 —— 而不是「第一条像直链的」。
+    ///
+    /// 真实形状：`Video.init` 把带 `.m3u8` 的分组排前面，源给的顺序里 720p 常排在 1080p 前。
+    /// 于是同一部剧、同一集，用户每次都被送上 720p —— 他说的「4K 源出来的不是 4K」
+    /// 与看剧AI 的 official→ordinary 静默降级是同一个病：默认值由形状决定，不由证据决定。
+    @Test func measuredQualityBeatsTheFirstLine() {
+        let edges = ["线路1": 1280, "线路2": 1920]
+        let chosen = LinePreference.choose(flags: flags, quality: { edges[$0] })
+        #expect(chosen == "线路2")
+    }
+
+    /// 一条读数都没有时不能猜：退回源给的第一条（老行为）。
+    @Test func noReadingsKeepTheFirstLine() {
+        #expect(LinePreference.choose(flags: flags, quality: { _ in nil }) == "线路1")
+    }
+
+    /// 历史线路明显更差（≥15%）时才被实测更好的线顶掉。
+    @Test func historyYieldsToAClearlyBetterLine() {
+        let edges = ["线路1": 1280, "线路2": 1920]
+        let chosen = LinePreference.choose(flags: flags, watched: "线路1", quality: { edges[$0] })
+        #expect(chosen == "线路2")
+    }
+
+    /// 同一档内的差异（1080 高度 vs 1920 长边）不足以推翻历史 —— 否则用户每次进来线路都在跳。
+    @Test func historySurvivesASmallQualityDifference() {
+        let edges = ["线路1": 1920, "线路2": 2160]
+        let chosen = LinePreference.choose(flags: flags, watched: "线路1", quality: { edges[$0] })
+        #expect(chosen == "线路1")
+    }
+
+    /// 画质只在「现在能播」的那几条里挑：要登录的网盘线再高也不能被选中。
+    @Test func qualityIsOnlyConsideredAmongPlayableLines() {
+        let edges = ["线路1": 1280, "线路2": 2160]
+        let chosen = LinePreference.choose(flags: flags, playableNow: { $0 != "线路2" }, quality: { edges[$0] })
+        #expect(chosen == "线路1")
+    }
+
+    /// 用户亲手选的那条不被画质推翻 —— 他选 720p 就是想要 720p（省流量/更稳）。
+    @Test func anExplicitPickOutranksQuality() {
+        let edges = ["线路1": 1920, "线路3": 720]
+        let chosen = LinePreference.choose(flags: flags, picked: "线路3", quality: { edges[$0] })
+        #expect(chosen == "线路3")
+    }
 }

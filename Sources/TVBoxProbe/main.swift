@@ -530,6 +530,264 @@ import TVCore
         FileHandle.standardError.write(Data("SUMMARY total=\(work.count) \(summary)\n".utf8))
     }
 
+    // MARK: - 线路级审计
+
+    /// 一条线路的读数。
+    ///
+    /// 与 `probeTick` 里那份「源级」读数的区别：这里一条线一行，**不给整个源一个笼统结论**。
+    /// 用户报的「4K 源出来的不是 4K」「要切到第二集再切回来」都发生在**线**上，
+    /// 源级一行只会把它们平均掉。
+    struct LineReading: Encodable {
+        var flag: String
+        var episodes: Int
+        /// 线路名自己声明的画质（4K / 1080 / 720 …），没写就是 nil。
+        var claim: String?
+        var claimHeight: Int?
+        /// 解析出来是网页地址，要靠 App 的 WebView 嗅探；命令行测不了，单列一档，不算死。
+        var needsWeb = false
+        var ok = false
+        /// 一共试了几次「取地址 → 解析」（1 = 一次就成）。
+        var tries = 0
+        /// 第一次是否成功。
+        var firstOk = false
+        /// 第一次失败、第二次成功 —— 正是「切到第二集再切回来就好了」的那一类。
+        var retryHelped = false
+        /// 解析出来的地址到底是不是媒体：`hls` / `mp4` / `ts` / `html` / `json` / `other`。
+        ///
+        /// 必须有这一项。`SourceProbeRunner` 只判「有没有字节回来」，
+        /// 而**一个 HTML 网页也回 200 和几百 KB** —— 采集站把整套网页地址当播放地址返回
+        /// 是常态（`xlyun` 这类「云播」线就是），只看 reachable 会把它们当成能播。
+        var kind: String?
+        var width: Int?
+        var height: Int?
+        var kbps: Int?
+        var latency: Int?
+        var elapsedMs: Int?
+        var error: String?
+        var address: String?
+    }
+
+    /// 一个源里挑一部「线路最多」的剧做的全线路读数。
+    struct SourceReading: Encodable {
+        var sub: String
+        var key: String
+        var name: String
+        var type: Int
+        var title: String?
+        var flagCount = 0
+        var elapsedMs: Int?
+        var error: String?
+        var lines: [LineReading] = []
+    }
+
+    /// 线路名里写的画质。只认**强声明**：`4K`/`2160`、`1080`/`蓝光`/`超清`、`720`、`480`。
+    ///
+    /// 不把「高清」「HD」「原画」算进来：这几个词在采集站里几乎等于「随便」，当不了证据。
+    static func claimedQuality(_ flag: String) -> (label: String?, height: Int?) {
+        let text = flag.lowercased()
+        if text.contains("4k") || text.contains("2160") { return ("4K", 2160) }
+        if text.contains("1080") || text.contains("蓝光") || text.contains("超清") { return ("1080", 1080) }
+        if text.contains("720") { return ("720", 720) }
+        if text.contains("480") { return ("480", 480) }
+        return (nil, nil)
+    }
+
+    /// 这段字节是什么。
+    ///
+    /// 只看魔数与前缀，不做解码：判断「播放器能不能开」不需要知道编码，
+    /// 需要的是分清**媒体**与**网页**。分不清就会出现「测出来 reachable、点开转圈」。
+    /// 主清单里声明的画面尺寸。
+    ///
+    /// 只记高度会判错竖屏片：一条 720×1280 的竖屏短剧高度是 1280，
+    /// 一条 1920×818 的电影高度只有 818 —— 按高度比较会把竖屏 720p 当成「比电影 1080p 更好」。
+    /// 判画质必须拿**长边**，所以宽和高都得留。
+    static func declaredSize(in text: String) -> (width: Int, height: Int)? {
+        guard let range = text.range(of: "RESOLUTION=") else { return nil }
+        let tail = text[range.upperBound...].prefix(20)
+        let numbers = tail.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+        guard numbers.count >= 2 else { return nil }
+        return (numbers[0], numbers[1])
+    }
+
+    static func mediaKind(_ data: Data) -> String {
+        let head = data.prefix(2_048)
+        let text = String(decoding: head, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("#EXTM3U") { return "hls" }
+        if text.hasPrefix("<") { return "html" }
+        if text.hasPrefix("{") || text.hasPrefix("[") { return "json" }
+        if data.count >= 8, data[4..<8] == Data("ftyp".utf8) { return "mp4" }
+        if data.count >= 376, data[0] == 0x47, data[188] == 0x47 { return "ts" }
+        if head.starts(with: [0x1A, 0x45, 0xDF, 0xA3]) { return "mkv" }
+        return "other"
+    }
+
+    /// 一个源：首页 → 挑线路最多的那部 → 每条线各取第一集 → 解析 → 真读一段字节。
+    ///
+    /// 为什么挑「线路最多」而不是第一条：第一条常常是单线的短剧或预告，
+    /// 拿它测出来的「这个源只有一条线」是选样造成的，不是源造成的。
+    static func auditLines(site: Site, sub: String, origin: URL, jar: URL?, maxVideos: Int = 3) async -> SourceReading {
+        let started = Date()
+        var record = SourceReading(sub: sub, key: site.key, name: site.name, type: site.type)
+        let client = CatalogClient(site: site, origin: origin, jarURL: jar)
+        var pool: [Video] = []
+        do {
+            let home = try await client.home()
+            pool = home.videos
+            if pool.isEmpty, let category = home.categories.first {
+                pool = try await client.list(category: category.id, query: "", page: 1).videos
+            }
+        } catch {
+            record.error = error.localizedDescription
+            record.elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+            return record
+        }
+        guard !pool.isEmpty else {
+            record.error = "no videos on the home page"
+            record.elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+            return record
+        }
+        var best: Video?
+        var bestFlags: [String] = []
+        for video in pool.prefix(maxVideos) {
+            guard let full = try? await client.detail(video.id) else { continue }
+            var seen = Set<String>()
+            let flags = full.episodes.compactMap { seen.insert($0.flag).inserted ? $0.flag : nil }
+            if flags.count > bestFlags.count { best = full; bestFlags = flags }
+            // 已经三条线以上就不必再换样本了，够回答「哪条线是真 4K」。
+            if bestFlags.count >= 3 { break }
+        }
+        guard let full = best, !bestFlags.isEmpty else {
+            record.error = "no episodes in the first \(maxVideos) videos"
+            record.elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+            return record
+        }
+        record.title = full.name
+        record.flagCount = bestFlags.count
+        for flag in bestFlags {
+            var line = LineReading(flag: flag, episodes: full.episodes.filter { $0.flag == flag }.count)
+            let claim = claimedQuality(flag)
+            line.claim = claim.label
+            line.claimHeight = claim.height
+            guard let episode = full.episodes.first(where: { $0.flag == flag }) else { continue }
+            let lineStart = Date()
+            var channel: Channel?
+            var plan: PlaybackPlan?
+            for attempt in 1...2 {
+                line.tries = attempt
+                do {
+                    // 每次重试都重新取一次地址：签名地址可能带时间戳，复用旧地址测不出「重试为什么能好」。
+                    let next = try await client.preparePlayback(episode)
+                    plan = next
+                    guard let choice = next.choices.first else { throw TVError.unsupported("no playback choice") }
+                    channel = try await client.resolvePlayback(next, choice: choice)
+                    if attempt == 1 { line.firstOk = true } else { line.retryHelped = true }
+                    break
+                } catch {
+                    line.error = error.localizedDescription
+                    if attempt == 1 { try? await Task.sleep(for: .milliseconds(300)) }
+                }
+            }
+            if let channel {
+                line.ok = true
+                line.error = nil
+                line.address = channel.url.absoluteString
+                if plan?.requiresWebDetection == true { line.needsWeb = true }
+                let scheme = channel.url.scheme?.lowercased() ?? ""
+                if scheme == "http" || scheme == "https" {
+                    let reading = await SourceProbeRunner.probe(url: channel.url, headers: channel.headers)
+                    line.height = reading.resolutionHeight
+                    line.kbps = reading.kilobytesPerSecond
+                    line.latency = reading.latencyMilliseconds
+                    // 解析成功但一个字节都读不到：这是「能出地址、播不出来」，仍算失败。
+                    if !reading.isUsable {
+                        line.ok = false
+                        line.error = "resolved but no media bytes"
+                    } else if let head = await fetchHead(channel.url, headers: channel.headers, bytes: 16_384) {
+                        // 回字节 ≠ 是媒体。判一次真实内容类型，HTML 单列一档 —— 它在这条链路上
+                        // 就是「播放器拿不到流、转圈到超时」的那个根因。
+                        let kind = mediaKind(head.data)
+                        line.kind = kind
+                        if kind == "html" || kind == "json" {
+                            line.ok = false
+                            line.error = "address is a \(kind) page, not media — the player has nothing to open"
+                        } else if let size = declaredSize(in: String(decoding: head.data.prefix(8_192), as: UTF8.self)) {
+                            line.width = size.width
+                            line.height = size.height
+                        }
+                    }
+                } else {
+                    // tvbox-cloud / tvbox-hongguo / tvbox-dash 由 App 内的加载器回答，命令行测不了。
+                    line.needsWeb = true
+                }
+            }
+            line.elapsedMs = Int(Date().timeIntervalSince(lineStart) * 1000)
+            record.lines.append(line)
+        }
+        record.elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+        return record
+    }
+
+    static func lineAudit(_ args: [String]) async throws {
+        setvbuf(stdout, nil, _IONBF, 0)
+        var address = ""
+        var jobs = 6
+        var deadline = 150.0
+        var maxVideos = 3
+        var filters: [String] = []
+        var index = 0
+        while index < args.count {
+            switch args[index] {
+            case "--jobs": index += 1; jobs = max(1, Int(args[index]) ?? jobs)
+            case "--deadline": index += 1; deadline = Double(args[index]) ?? deadline
+            case "--videos": index += 1; maxVideos = max(1, Int(args[index]) ?? maxVideos)
+            default:
+                if address.isEmpty { address = args[index] } else { filters.append(args[index]) }
+            }
+            index += 1
+        }
+        let data: Data
+        if address.hasPrefix("http://") || address.hasPrefix("https://") {
+            data = try await HTTPClient().get(try WebAddress.resolve(address)).0
+        } else {
+            data = try Data(contentsOf: URL(fileURLWithPath: address))
+        }
+        let bundle = try JSONDecoder().decode(ConfigBundle.self, from: data)
+        var work: [(String, Subscription, Site)] = []
+        for item in bundle.subscriptions {
+            guard let document = item.document, item.entry.enabled else { continue }
+            for site in document.sites
+            where filters.isEmpty || filters.contains(where: { site.name.contains($0) || site.key.contains($0) || item.entry.name.contains($0) }) {
+                work.append((item.entry.name, document, site))
+            }
+        }
+        FileHandle.standardError.write(Data("auditing \(work.count) sources, \(jobs) at a time\n".utf8))
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let limit = deadline, videos = maxVideos
+        for start in stride(from: 0, to: work.count, by: jobs) {
+            let slice = work[start..<min(start + jobs, work.count)]
+            await withTaskGroup(of: SourceReading.self) { group in
+                for (sub, document, site) in slice {
+                    group.addTask {
+                        do {
+                            return try await withDeadline(limit) {
+                                await auditLines(site: site, sub: sub, origin: document.origin,
+                                                 jar: document.spiderURL, maxVideos: videos)
+                            }
+                        } catch {
+                            var record = SourceReading(sub: sub, key: site.key, name: site.name, type: site.type)
+                            record.error = "timeout: \(error.localizedDescription)"
+                            return record
+                        }
+                    }
+                }
+                for await record in group {
+                    print(String(decoding: (try? encoder.encode(record)) ?? Data(), as: UTF8.self))
+                }
+            }
+        }
+        FileHandle.standardError.write(Data("DONE\n".utf8))
+    }
+
     static func main() async throws {
         let args = CommandLine.arguments
         // Yingxia's own sources and live platforms come from its subscription.
@@ -584,6 +842,12 @@ import TVCore
             // --play-probe <config package> [--jobs N] [--deadline S] [source filters]: every source's
             // home → detail → play, then a byte-level reading of the address it handed back.
             try await playProbe(Array(args.dropFirst(2)))
+            return
+        }
+        if args[1] == "--line-audit", args.count >= 3 {
+            // --line-audit <config package | 本地 json> [--jobs N] [--deadline S] [filters]:
+            // 每个源挑线路最多的一部，逐条线取第一集、解析、真读一段字节。
+            try await lineAudit(Array(args.dropFirst(2)))
             return
         }
         if args[1] == "--manga", args.count >= 3 {
@@ -996,7 +1260,16 @@ import TVCore
                     stage = "play"
                     let plan = try await client.preparePlayback(episode)
                     passed += 1
-                    print("OK   \(site.name)  [\(site.compatibility)]  \(home.categories.count) categories, play \(plan.choices[0].address.prefix(90))")
+                    // 首页的「条数 / 有封面的条数 / 总页数」是这一版最容易被悄悄破坏的三件事：
+                    // 用错 `ac=` 时首页仍有 20 条但一张图都没有，分类页则只剩 1 条。
+                    let posters = home.videos.filter { $0.poster != nil }.count
+                    // 分类页单独再走一遍：这是「翻不动」最容易出问题的地方 —— 有些采集站不认
+                    // `t=`，那时应当退回全量列表（条数会是满页），而不是只回一条。
+                    var categoryNote = "cat[-]"
+                    if let first = home.categories.first, let page = try? await client.list(category: first.id, query: "", page: 1) {
+                        categoryNote = "cat[\(first.name)] \(page.videos.count)/\(page.pageCount)p"
+                    }
+                    print("OK   \(site.name)  [\(site.compatibility)]  \(home.videos.count) home / \(posters) posters / \(home.pageCount) pages, \(home.categories.count) categories, \(categoryNote), play \(plan.choices[0].address.prefix(60))")
                 } catch {
                     print("FAIL \(site.name)  [\(site.compatibility)]  [\(stage)] \(error.localizedDescription)")
                 }

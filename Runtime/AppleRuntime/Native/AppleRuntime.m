@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <jni.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -11,6 +12,41 @@
 // Called from the app's plugin worker threads (several at once for searches), never the UI thread.
 // Only VM startup needs a lock; each later call attaches its own thread.
 static pthread_mutex_t startLock = PTHREAD_MUTEX_INITIALIZER;
+
+// MARK: - 崩溃隔离（JVM 崩了不带走 App）
+//
+// 内嵌 JVM 是 OpenJDK 的 **Zero** 端口（`--with-jvm-variants=zero`，见 `Scripts/build-apple-jvm.sh`）。
+// Zero 没有 `os::Posix::ucontext_get_pc`（`os_cpu/bsd_zero/os_bsd_zero.cpp:91` 直接
+// `ShouldNotCall()`），于是它对任何被接管的信号都只能 abort；再加上自举期
+// （`System.<clinit>` → `ZeroInterpreter::main_loop` 的空指针）会直接 `os::abort()`，
+// 而 `abortHook` 又把 abort 转成真的 `abort()` —— 进程当场消失，用户看到的就是**闪退**。
+//
+// 能做的不是「不崩」（那是运行库的事，2026-11-16 试过 4 次都没修好），
+// 而是**崩了只让这一次请求失败**：把 JVM 的创建/调用整段包在 `sigsetjmp` 里，
+// abortHook 不走 `abort()` 而是 `siglongjmp` 回这里，App 继续活着，
+// 并把这条源标记为「运行时起不来」，下次不再拿用户的点击去撞它。
+//
+// ⛔ 隔离只在**插件工作线程**上做（本文件顶部注释已写明调用方从不上主线程）：
+// `siglongjmp` 跨线程是未定义行为，所以下面用 TLS 记「本线程有没有装过跳点」。
+// ⛔ 跳回去之后 JVM 内部已经是坏状态，**不能再用**；`runtimeBroken` 一旦为真，
+//    后续请求一律直接返回错误，不再碰 VM。
+static __thread sigjmp_buf *tlsAbortJump = NULL;
+static BOOL runtimeBroken = NO;
+
+/// JVM 要 abort 时：有跳点就跳回去（隔离），没有才真的 abort（保持原有崩溃可见性）。
+static void abortIsolated(void) {
+    if (tlsAbortJump) siglongjmp(*tlsAbortJump, 1);
+    abort();
+}
+
+/// `SIGABRT` 的兜底：Zero 有些路径绕开 abortHook 直接 raise，也必须被接住。
+static void abortSignalHandler(int signo) {
+    (void)signo;
+    if (tlsAbortJump) siglongjmp(*tlsAbortJump, 2);
+    // 没装跳点：还原默认行为，让崩溃照常被系统记录。
+    signal(SIGABRT, SIG_DFL);
+    raise(SIGABRT);
+}
 static JavaVM *runtimeVM;
 static jclass bootstrap;
 static jmethodID requestMethod;
@@ -99,11 +135,11 @@ static NSString *heapLimit(void) {
 // The JVM log (embedded-jvm.log) has the fatal error's message.
 static void abortHook(void) {
     fprintf(stderr, "The Java runtime hit a fatal error\n");
-    abort();
+    abortIsolated();
 }
 static void exitHook(jint code) {
     fprintf(stderr, "Java code called exit(%d)\n", (int)code);
-    abort();
+    abortIsolated();
 }
 // Native code linked with the runtime can call exit() too: Unicorn did when it could not reserve its
 // translation buffer on a 3 GB iPad (issue #563), and the app vanished without a report. iOS and tvOS apps
@@ -129,9 +165,20 @@ static void watchMemoryPressure(const char *resourcePath) {
     dispatch_resume(source);
 }
 
-char *TVAppleRuntimeRequest(const char *resourcePath, const char *requestJSON) {
+/// 真正的实现。调用前必须已经装好跳点（见下面的 `TVAppleRuntimeRequest`）。
+static char *requestInRuntime(const char *resourcePath, const char *requestJSON) {
     @autoreleasepool {
+        if (runtimeBroken) return failure("The plugin runtime stopped working on this device. Restart the app to retry.");
         if (failed) return failure("The plugin runtime failed. Restart the app to retry.");
+        // 这两个信号要在**创建 VM 之前**忽略。
+        //
+        // Zero 端口没有 `os::Posix::ucontext_get_pc`（os_cpu/bsd_zero/os_bsd_zero.cpp:91 就是
+        // `ShouldNotCall()`），而 JVM 的信号入口第一件事是取 pc。于是任何被它接管的信号都会从
+        // 「一个信号」升级成「一个 abort」，崩溃现场连带丢掉（hs_err 只剩 ShouldNotCall）。
+        // 原来这两行写在创建成功之后，正好把创建那一段窗口露在外面。
+        // 不是 2026-11-16 那次闪退的原因（那次是自举阶段的空指针，见 `JarRuntimeHealth`），
+        // 但先忽略仍然是对的：下一次真出问题时 hs_err 才读得懂。
+        signal(SIGPIPE, SIG_IGN); signal(SIGXFSZ, SIG_IGN);
         JNIEnv *env = NULL;
         pthread_mutex_lock(&startLock);
         if (!runtimeVM) {
@@ -202,3 +249,34 @@ char *TVAppleRuntimeRequest(const char *resourcePath, const char *requestJSON) {
         return result;
     }
 }
+
+// MARK: - 入口（崩溃隔离包装）
+
+char *TVAppleRuntimeRequest(const char *resourcePath, const char *requestJSON) {
+    // SIGABRT 兜底只需要装一次；装成本线程的跳点之前它不会改变任何行为
+    // （handler 里 `tlsAbortJump == NULL` 时还原默认并重新 raise）。
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        signal(SIGABRT, abortSignalHandler);
+    });
+
+    sigjmp_buf jump;
+    sigjmp_buf *previous = tlsAbortJump;
+    tlsAbortJump = &jump;
+    int jumped = sigsetjmp(jump, 1);
+    if (jumped != 0) {
+        // 从 JVM 的 abort 里跳回来了。VM 内部已经不可信：
+        // 标记坏掉，让后续请求立刻短路，别再一次次拿用户的点击去撞它。
+        tlsAbortJump = previous;
+        runtimeBroken = YES;
+        failed = YES;
+        fprintf(stderr, "The Java runtime aborted (jump %d); marking it broken for this launch.\n", jumped);
+        return failure("The plugin runtime crashed on this device. Sources that need it are unavailable until the app restarts.");
+    }
+    char *result = requestInRuntime(resourcePath, requestJSON);
+    tlsAbortJump = previous;
+    return result;
+}
+
+/// 供 Swift 侧查询「运行时这一版能不能用」。`JarRuntimeHealth` 用它决定闸位。
+BOOL TVAppleRuntimeIsBroken(void) { return runtimeBroken; }

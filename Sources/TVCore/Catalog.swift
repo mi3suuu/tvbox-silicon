@@ -427,7 +427,7 @@ public struct CatalogClient: Sendable {
                 throw crashed
             }
         }
-        let (data, _) = try await http.get(requestURL(params), headers: site.raw["header"]?.object?.compactMapValues(\.string) ?? [:])
+        let data = try await fetchCMS(requestURL(params))
         do { return try JSONDecoder().decode([String: JSONValue].self, from: data) }
         catch {
             // Dead or bot-protected sites answer with a web page; say that rather than a decoding error.
@@ -438,12 +438,84 @@ public struct CatalogClient: Sendable {
             throw error
         }
     }
+
+    /// 采集站的一次 GET：带来源页与 Accept，https 不通时退 http。
+    ///
+    /// 这两件事此前只在已经拆掉的公共中继里做（`/opt/cmsrelay/cmsrelay.py` 的 `_fetch`），
+    /// 映匣本体直接发裸请求，于是：
+    ///   · **少一个 Referer** —— 采集站普遍校验来源页，缺了它一批站回 403 或空列表，
+    ///     而同一个站在浏览器里是好的，看上去就像「源坏了」；
+    ///   · **https 失败不回落** —— 有的站只在一侧证书完整，https 握手被中间设备打断、
+    ///     http 却正常，于是这台设备上永远是 TLS 错误。
+    ///
+    /// 退到 http 是明文：采集站不带账号与凭证，这里换的是「能不能拿到公开的片单」，
+    /// 不是隐私。源自己定义的 `header` 一律优先，自带的 Referer/Accept 不会被覆盖。
+    private func fetchCMS(_ url: URL) async throws -> Data {
+        let headers = cmsRequestHeaders()
+        do {
+            return try await http.get(url, headers: headers).0
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            // 服务器已经明确回过一个状态码（403/404/5xx）时不再换协议：那不会因为 http 而变好，
+            // 只是白花一次请求。要回退的是「连接都没建立」的那些。
+            if let tv = error as? TVError, case .http = tv { throw error }
+            guard url.scheme?.lowercased() == "https",
+                  var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw error }
+            parts.scheme = "http"
+            guard let fallback = parts.url else { throw error }
+            Diagnostics.shared.record(.info, "catalog",
+                "\(reportContext) https refused (\(error.localizedDescription)); retrying over http")
+            return try await http.get(fallback, headers: headers).0
+        }
+    }
+
+    /// 采集站请求的头：源自己的优先，缺的补 Referer / Accept。
+    private func cmsRequestHeaders() -> [String: String] {
+        var headers = site.raw["header"]?.object?.compactMapValues(\.string) ?? [:]
+        func has(_ name: String) -> Bool {
+            headers.keys.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        if !has("Referer") {
+            // 与 `_fetch` 同一个取值：源站自身的根地址。`api` 是合并后的绝对地址时优先用它，
+            // 因为 `origin` 可能是另一个 feed 的（`Subscription.merge` 只保留第一份）。
+            if let api = URL(string: site.api), let scheme = api.scheme, let host = api.host() {
+                headers["Referer"] = "\(scheme)://\(host)/"
+            } else if let scheme = origin.scheme, let host = origin.host() {
+                headers["Referer"] = "\(scheme)://\(host)/"
+            }
+        }
+        if !has("Accept") { headers["Accept"] = "application/json, text/plain, */*" }
+        return headers
+    }
     public func home() async throws -> CatalogPage {
         CatalogPage(json: try await homeJSON(), origin: origin)
     }
-    /// The source's home answer. A CMS API (type 1) answers its plain home call like `ac=list`: names and remarks
-    /// but no `vod_pic`. As other TVBox clients do, the posters then come from one `ac=detail` call for those ids.
+    /// The source's home answer.
+    ///
+    /// **采集站要 `ac=videolist`。** 不带 `ac` 时（旧实现的写法）服务器按 `ac=list` 回答：
+    /// 有名字和备注，但**没有 `vod_pic`、没有 `vod_play_url`** —— 海报于是要再补一次
+    /// `ac=detail&ids=…`，而那次补图只要有一台站不支持批量 ids 就整页没图。
+    /// `ac=videolist` 一条请求就把封面、线路、`pagecount`、`total` 全带回来
+    /// （实测 `ffzy1.tv`：`ac=list` 20 条 0 张图 / `ac=videolist` 20 条 20 张图）。
+    ///
+    /// 老站不认 `videolist` 时回落到原来的两步走，行为不变。
     private func homeJSON() async throws -> [String: JSONValue] {
+        if site.type == 1 {
+            // 两条并行：`videolist` 给内容和封面，`list` 给分类栏（`class`）。
+            // 采集站的 `videolist` 常常不带 `class` —— 只发它，首页就变成「有片没有分类」。
+            // 并行发是划算的：`list` 的响应只有名字，体量是 `videolist` 的几十分之一。
+            async let library = try? request(["ac": "videolist", "pg": "1"])
+            async let taxonomy = try? request(["ac": "list", "pg": "1"])
+            let (primary, meta) = await (library, taxonomy)
+            if var json = primary, json["list"]?.array?.isEmpty == false {
+                if json["class"]?.array?.isEmpty != false,
+                   let classes = meta?["class"], classes.array?.isEmpty == false {
+                    json["class"] = classes
+                }
+                return json
+            }
+            if Task.isCancelled { throw CancellationError() }
+        }
         let json = try await request(site.type == 4 ? ["filter": "true"] : [:])
         guard site.type == 1, let list = json["list"]?.array else { return json }
         let ids = Self.idsMissingPosters(list)
@@ -491,14 +563,55 @@ public struct CatalogClient: Sendable {
         return (items, CatalogPage(json: json, origin: origin).categories)
     }
     /// A search (`query`) or one page of a category, narrowed by the category's filter `choices` (key to value).
+    ///
+    /// ⛔ **分类列表不能用 `ac=detail&t=…`。** 那是「按 id 取详情」的写法：新一代采集站照字面
+    /// 执行，把 `t` 当 `vod_id`，于是分类页只剩 **1 条**（实测 `pagecount=1 total=1`），
+    /// 翻页无从谈起、海报与线路也一起没了 —— 观感就是「这个源只有一部片」。
+    /// 分类页的正确写法是 `ac=videolist&t=<type_id>&pg=<n>`（与 TVBox 一致）。
+    ///
+    /// 遇到不认 `t` 的站（返回「按 id 查到的那一条」）时**退回全量列表**：分类不精确，
+    /// 总好过一页一条。判定看的是「有效」，不是「空」—— 空列表也可能是一个真的空分类。
     public func list(category: String?, query: String, page: Int, filters choices: [String: String] = [:]) async throws -> CatalogPage {
         var params = ["pg": String(page)]
         if !query.isEmpty { params["wd"] = query; params["quick"] = "false" }
-        else {
+        else if site.type == 1 {
+            var strict = params
+            strict["ac"] = "videolist"
+            if let category { strict["t"] = category }
+            strict.merge(Self.filterParameters(choices, siteType: 1)) { _, new in new }
+            if let asked = try? await cmsPage(strict), Self.looksLikeACategory(asked) { return asked }
+            // `try?` 会把取消一起吞掉：被取消时不该继续发第二条请求。
+            if Task.isCancelled { throw CancellationError() }
+            var loose = params
+            loose["ac"] = "videolist"
+            loose.merge(Self.filterParameters(choices, siteType: 1)) { _, new in new }
+            do { return try await cmsPage(loose) }
+            catch {
+                if error is CancellationError || Task.isCancelled { throw CancellationError() }
+                // `videolist` 整个不认的老站：退回原来的 `ac=detail&t=`，它在那类站上是列表。
+                var legacy = params
+                legacy["ac"] = "detail"
+                if let category { legacy["t"] = category }
+                legacy.merge(Self.filterParameters(choices, siteType: 1)) { _, new in new }
+                return try await cmsPage(legacy)
+            }
+        } else {
             params["ac"] = "detail"; params["t"] = category
             params.merge(Self.filterParameters(choices, siteType: site.type)) { _, new in new }
         }
-        return CatalogPage(json: try await request(params), origin: origin)
+        return try await cmsPage(params)
+    }
+
+    private func cmsPage(_ params: [String: String]) async throws -> CatalogPage {
+        CatalogPage(json: try await request(params), origin: origin)
+    }
+
+    /// 这一页像是「某一分类的一页」，而不是「按 id 查到的一条」。
+    ///
+    /// 采集站把 `t` 当 id 时会同时给出 `pagecount=1 / total=1 / list.count=1` —— 三个一起成立
+    /// 才判失败。只判 `count == 1` 会误伤真的只有一个条目的分类。
+    static func looksLikeACategory(_ page: CatalogPage) -> Bool {
+        page.pageCount > 1 || page.videos.count > 1
     }
 
     /// A category's filter choices as the source reads them, leaving out empty ("全部") values: as other TVBox clients
@@ -662,7 +775,12 @@ public struct CatalogClient: Sendable {
         if site.isCloudFiles, let url = URL(string: choice.address), url.scheme == CloudStreams.scheme {
             return Channel(name: choice.name, group: plan.group, url: url, headers: [:])
         }
-        if !plan.requiresWebDetection || Self.isDirectMedia(choice.address) {
+        // 一条线**自己**像是网页时也要走嗅探，即使这个源整体没声明 `playUrl`。
+        //
+        // 内置包 `parses` 与 `playUrl` 都是 0 条，而 26 条线的地址就是云播页/平台页
+        // （`feifan` / `xlyun` / `youku` / `qiyi` …）。以前它们被当成直链交给 AVPlayer，
+        // 结果是「转圈到超时」；现在它们走同一条网页嗅探链路 —— 那是这些页面本来的打开方式。
+        if !(plan.requiresWebDetection || choice.looksLikePage) || Self.isDirectMedia(choice.address) {
             return try await playResolved(plan, choice: choice)
         }
         let playURL = plan.webPlayURL

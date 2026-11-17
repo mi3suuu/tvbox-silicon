@@ -216,13 +216,21 @@ function call(path, options) {
 /// 十分钟：这个数字只影响「要不要白撞一次解票」和简介里的提示，而多读一次就是多一个
 /// 往返 —— 每次打开详情都读，等于把详情页的等待翻倍。解票成功时本地先减一（见
 /// `resolveOfficial`），所以显示不会因为这个 TTL 变得离谱。
+///
+/// ⛔ `allowCreate` 是 2026-11-17 加的，修的是「打开详情就要等五秒」：
+///    详情页只要一行「官方额度余 N 集」的提示，而 `ensureSession()` 在没身份时会去
+///    **建号**（`POST /v1/users/anonymous`）——实测这条链路 5.0 秒后 SSL 中断，
+///    于是每打开一部剧，用户先在简介页干等五秒，紧接着点播放又要等签名。
+///    现在详情页只读**已有**身份，没有就说不知道（不显示这行提示），建号留给真要花额度的路径。
 let remainCache = null, remainAt = 0;
-function remainingEpisodes(refresh) {
+function remainingEpisodes(refresh, allowCreate) {
     const now = Date.now();
     if (!refresh && remainCache !== null && now - remainAt < 600000) return remainCache;
-    // 额度只有带身份才读得到（无 cookie 是 401 "User session is required."），
-    // 所以到这里才建号——这也是懒建号的落点：谁真要额度，谁才付这一次往返。
-    if (!ensureSession()) return null;
+    // 额度只有带身份才读得到（无 cookie 是 401 "User session is required."）。
+    if (!authCookie && !storedCookie()) {
+        if (allowCreate === false) return null;
+        if (!ensureSession()) return null;
+    }
     const data = call('/v1/users/me/quota', { timeout: 6000 });
     if (!data || data.remaining_tokens == null) return null;
     remainCache = Math.floor(Number(data.remaining_tokens) / 30000);
@@ -248,7 +256,7 @@ function ensureSession(force) {
     // 否则后面连额度都读不到，等于把"换号失败"放大成"连原有身份也没了"。
     const previous = authCookie || storedCookie();
     if (force) { authCookie = ''; saveCookie(''); }
-    const answer = callWithStatus('/v1/users/anonymous', { method: 'POST', body: {}, timeout: 8000 });
+    const answer = callWithStatus('/v1/users/anonymous', { method: 'POST', body: {}, timeout: 5000 });
     if (answer.code === 429) {
         // 退避 10 分钟：这段时间内不再建号，播放照走普通线。
         createCooldownUntil = Date.now() + 600000;
@@ -256,6 +264,11 @@ function ensureSession(force) {
         return false;
     }
     if (!authCookie && previous) saveCookie(previous);
+    if (!authCookie) {
+        // 建号失败（TLS 被断、超时、接口变了）也要退避。
+        // 不退避的代价是**每一次**详情页/播放都重新等一遍这 5 秒 —— 实测就是这样。
+        createCooldownUntil = Date.now() + 300000;
+    }
     return !!authCookie;
 }
 
@@ -389,6 +402,9 @@ const is4K = line => /4k/i.test(String(line.provider_id) + ' ' + String(line.pro
 /// 实测一集要连撞三条线（bytevod-lv2、official-v 都给图），三次签名就是三个往返，
 /// 用户眼里的「首次播放要等很久」正是这一段。
 let goodProvider = { p: '', 4: '' };
+/// 普通档最近一次实测真能出分片的那家。**单独一只**，不能塞进 `goodProvider`：
+/// 那只对象是「官方 1080 / 官方 4K」两档的记忆，混进普通线的 id 只会让两档互相盖掉。
+let goodOrdinary = '';
 /// 最近解不出来的厂：失败一次压一档，成功就清零。按片维度不知道，但同一条线连续失败的
 /// 片子往往就是那几部，压下去比每次重撞三次合算。
 const badProvider = {};
@@ -397,9 +413,19 @@ function readGoodProviders() {
     try {
         goodProvider.p = String(local.get('kanju', 'good1080') || '');
         goodProvider['4'] = String(local.get('kanju', 'good4k') || '');
+        goodOrdinary = String(local.get('kanju', 'goodOrdinary') || '');
     } catch (e) {}
 }
 readGoodProviders();
+
+/// 普通档的排序分。与官方的 `providerScore` 分开：普通线是采集站，官方线是站方签名，
+/// 两边的"上次成功"互不相干。
+function ordinaryScore(line) {
+    const id = String(line.provider_id || '');
+    const good = id && id === goodOrdinary;
+    const bad = Math.min(badProvider[id] || 0, 4);
+    return (good ? 1e6 : 0) + (line.preference_weight || 0) - bad * 400;
+}
 
 function providerScore(id, weight, want4K) {
     const good = id === (want4K ? goodProvider['4'] : goodProvider.p);
@@ -459,7 +485,14 @@ function markBad(pid) {
 
 function markGood(pid) {
     if (!pid) return;
-    goodProvider = pid;
+    // ⛔ 这里原来写的是 `goodProvider = pid` —— 把一个 `{p, 4}` 对象换成了字符串。
+    // 之后某一条官方线解成功、`noteGood` 走到 `goodProvider['4'] = id` 时，
+    // 在模块（严格模式）里给字符串原语加属性会直接抛 TypeError，整次播放变成 JS 报错；
+    // 就算不抛，"上次成功的那家"这条记忆也已经丢了。
+    if (goodOrdinary !== pid) {
+        goodOrdinary = pid;
+        try { local.set('kanju', 'goodOrdinary', pid); } catch (e) {}
+    }
     try {
         const map = badMap();
         if (map[pid] != null) { delete map[pid]; local.set('kanju', 'bad', JSON.stringify(map)); }
@@ -467,25 +500,54 @@ function markGood(pid) {
 }
 
 /// 一条普通线到底能不能播。三种结论要分开，不能都算"死"：
-///   'ok'      拿到 #EXTM3U（master 或 media 都算；实测 master 只有 97–134 字节却完全正常）
-///   'dead'    服务器明确答复了但它不是 playlist（4xx/5xx 或 200 却不是 #EXTM3U）——这类记黑名单
+///   'ok'      拿到了 playlist（master 或 media 都算）**并且第一个分片真能出字节**，
+///             或者它本来就是 mp4 这类直链
+///   'dead'    服务器明确答复了但它不是媒体（4xx/5xx、HTML 错误页）——这类记黑名单
 ///   'unknown' 超时/连接中断/没拿到答复——**不记黑名单**：实测 360 资源要 7.5s 才出分片，
 ///             把它当死线记 30 分钟，等于因为一次慢就废掉一条能播的线。
+///
+/// ⛔ 以前只判 `#EXTM3U`，于是「播放列表秒回、分片一个字节都没有」的线全算能播
+///    （实测 hn.bfvvs.com：m3u8 179ms，第一个分片 25.5 秒仍未出字节）。
+///    播放器在那条线上转到天荒地老，用户看到的就是「点了没反应」。现在多探一次分片头。
 function lineAlive(url) {
+    const address = String(url);
+    const lower = address.toLowerCase().split('?')[0];
+    const byExtension = /\.(mp4|m4v|mkv|ts|m3u8)$/.test(lower);
     let r;
     try {
-        r = globalThis.req(String(url), {
+        r = globalThis.req(address, {
             method: 'GET',
-            headers: { 'User-Agent': UA, 'Range': 'bytes=0-4095' },
-            timeout: 9000
+            headers: { 'User-Agent': UA, 'Referer': HOST + '/', 'Range': 'bytes=0-4095' },
+            timeout: 4500
         });
     } catch (e) { return 'unknown'; }
     if (!r) return 'unknown';
     const text = String(r.content || '');
-    if (text.indexOf('#EXTM3U') >= 0) return 'ok';
-    // code 0 = 连接失败/超时（prelude 在 failed 时不给 4xx），答复都没拿到就不知道它活不活。
-    if (!r.code) return 'unknown';
-    return 'dead';
+    if (text.indexOf('#EXTM3U') < 0) {
+        // code 0 = 连接失败/超时（prelude 在 failed 时不给 4xx），答复都没拿到就不知道它活不活。
+        if (!r.code) return 'unknown';
+        // 不是 playlist 也可能是 mp4 直链：只要服务器给了 200/206 且地址本来就像媒体，就算能播。
+        if (r.code < 400 && (byExtension || r.code === 206)) return 'ok';
+        return 'dead';
+    }
+    // master：变体由播放器自己挑，不再往下探。
+    if (text.indexOf('#EXT-X-STREAM-INF') >= 0) return 'ok';
+    const first = text.split('\n')
+        .map(line => line.trim())
+        .filter(line => line && line.charAt(0) !== '#')[0];
+    if (!first) return 'unknown';
+    const target = first.charAt(0) === 'h' ? first : joinUrl(address, first);
+    let reply;
+    try {
+        reply = globalThis.req(target, {
+            method: 'GET',
+            headers: { 'User-Agent': UA, 'Referer': HOST + '/', 'Range': 'bytes=0-1' },
+            timeout: 3000
+        });
+    } catch (e) { return 'unknown'; }
+    if (!reply) return 'unknown';
+    if (!reply.code) return 'unknown';
+    return reply.code < 400 ? 'ok' : 'dead';
 }
 
 // 官方线路的 ticket 在 url 里（resolve://<ticket>），个别版本放在 resolve_ticket
@@ -506,10 +568,51 @@ function looksLikeMedia(url) {
     return true;
 }
 
+/// 解票拿到的地址到底还能不能用。
+///
+/// 只挡一种真实情形：解票 201 了，但那台 CDN 在这个网络上连不上（TLS 被断、403 过期）。
+/// 实测「4K海外-官方C」签名成功却 SSL 中断 —— 把它交给播放器就是一段黑屏，
+/// 而同一集里「专享4K-Y」是好的（3840×2160）。所以要能换下一条，而不是撞上就完。
+///
+/// 按 host 记 5 分钟：一集里同一台 CDN 会出现好几次，别每条线各探一次。
+const hostVerdict = {};
+function mediaAlive(url) {
+    const address = String(url);
+    let host = '';
+    try { host = new URL(address).host || ''; } catch (e) { host = ''; }
+    // prelude 的 URL 是原生实现的薄封装，取不到 `host` 时退回正则 —— 缓存是优化，不该因此失效。
+    if (!host) {
+        const matched = /^https?:\/\/([^/?#]+)/i.exec(address);
+        host = matched ? matched[1] : '';
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const memo = host && hostVerdict[host];
+    if (memo && memo.until > now) return memo.verdict;
+    let r;
+    try {
+        r = globalThis.req(address, {
+            method: 'GET',
+            headers: { 'User-Agent': UA, 'Referer': HOST + '/', 'Range': 'bytes=0-1' },
+            timeout: 6000
+        });
+    } catch (e) { return 'unknown'; }
+    if (!r) return 'unknown';
+    // code 0 = 没拿到答复（连接被断/超时）：可能只是慢，不判死，也别记。
+    if (!r.code) return 'unknown';
+    const verdict = r.code < 400 ? 'ok' : 'dead';
+    if (host) hostVerdict[host] = { verdict: verdict, until: now + 300 };
+    return verdict;
+}
+
+/// 最近一次「这家给出的地址真的出了字节」的时刻（毫秒）。只在内存里：
+/// 冷启动后的第一次仍然实测一次，之后同一家就不用每集再拉一遍 —— 见 `resolveOfficial`。
+const goodAt = {};
+
 /// 这一次解成了，下一集先试这家（写进 local，重启也记得）。
 function noteGood(line, want4K) {
     const id = String(line.provider_id || '');
     if (!id) return;
+    goodAt[id] = Date.now();
     badProvider[id] = 0;
     const key = want4K ? '4' : 'p';
     if (goodProvider[key] === id) return;
@@ -525,6 +628,17 @@ function noteBad(line) {
     if (id) badProvider[id] = (badProvider[id] || 0) + 1;
 }
 
+/// 解不出来时同时写进**持久的**黑名单（30 分钟）。
+///
+/// 只压内存里那一档只够当前进程：冷启动后 bytevod-lv2（给图片）与 bytedance（403）
+/// 又排在最前，第一部剧照旧多等两三个往返 —— 用户感受到的就是「每次开 App 第一次播放都特别慢」。
+/// 官方额度不足不走这里：那是身份的问题，不是这条线坏了。
+function noteDead(line) {
+    noteBad(line);
+    const id = String(line.provider_id || '');
+    if (id) markBad(id);
+}
+
 /// 解一条官方票。返回 { url } 成功，或 { reason } 说明为什么没成——
 /// reason 分两类，处理方式完全不同：
 ///   'quota'  额度不足：换身份再来，**不能**把这条线记成坏的（它本身没坏）
@@ -532,8 +646,10 @@ function noteBad(line) {
 function resolveOfficial(line, want4K) {
     const ticket = ticketOf(line);
     if (!ticket) { noteBad(line); return { reason: 'line' }; }
+    // 7 秒而不是 12：实测单次签名 0.8–3.3 秒，12 秒只会在「这条线彻底不回」时
+    // 把整次首播拖成十几秒（最多撞两条 = 24 秒）。宁可早判失败换下一条。
     const answer = callWithStatus('/v1/playback/resolve-line', {
-        method: 'POST', body: { ticket: ticket }, timeout: 12000
+        method: 'POST', body: { ticket: ticket }, timeout: 7000
     });
     const fresh = answer.json && answer.json.line;
     if (!fresh) {
@@ -542,15 +658,30 @@ function resolveOfficial(line, want4K) {
         if (answer.code === 402 || /insufficient|not_enough|token_exhaust|词元不足|额度不足/i.test(text)) {
             return { reason: 'quota' };
         }
-        noteBad(line);
+        noteDead(line);
         return { reason: 'line' };
     }
     const url = String(fresh.url || '');
-    if (!/^https?:/i.test(url) || !looksLikeMedia(url)) { noteBad(line); return { reason: 'line' }; }
+    if (!/^https?:/i.test(url) || !looksLikeMedia(url)) { noteDead(line); return { reason: 'line' }; }
+    // 签名成功不等于能播：CDN 那台机连不上（或签名已过期）时换下一条，
+    // 别把死地址交给播放器 —— 那一段是黑屏，用户只会以为「这个源播不了」。
+    // 探不出结论（超时/被断）的不直接丢：标成 `alive: false` 交回调用方，
+    // 它会先试下一条，全都不行时再用这条兜底。
+    // 同一家刚刚（6 分钟内）真的出过字节：不再为这一集多拉一次。
+    //
+    // ⛔ 这一步是「每集都要多等两秒」的来源：媒体验证是**第三个**串行往返
+    //    （线路表 → 解签名 → 探字节，实测各 1–3 秒）。而这部片的官方线每集都是同一家，
+    //    CDN 主机却每集换一个（lf9 → lf6 …），按 host 缓存命中不了。
+    //    已经验证过的那家，把信任窗口按 **provider** 记 6 分钟；
+    //    超时或冷启动时照旧实测 —— 只有「刚成功过」这一种情况省这一次。
+    const pid = String(line.provider_id || '');
+    const trusted = pid && goodAt[pid] && Date.now() - goodAt[pid] < 360000;
+    const alive = trusted ? 'ok' : mediaAlive(url);
+    if (alive === 'dead') { noteDead(line); return { reason: 'dead' }; }
     noteGood(line, want4K);
     // 解票扣词元：本地先减一，免得为了显示「还剩几集」再问一次服务端。
     if (remainCache != null && remainCache > 0) remainCache -= 1;
-    return { url: url };
+    return { url: url, alive: alive !== 'unknown' };
 }
 
 // 签名地址自带 x-expires（约 1 小时）。缓存到过期前 3 分钟，重播/来回切线路就不用再解一次票
@@ -585,7 +716,7 @@ function pickOrdinary(lines) {
     const pool = lines
         .filter(l => l.resolve_mode === 'direct' && /^https?:/i.test(String(l.url || '')))
         .slice()
-        .sort((a, b) => rankScore(b, false) - rankScore(a, false));
+        .sort((a, b) => ordinaryScore(b) - ordinaryScore(a));
     let tried = 0;
     let firstUnknown = null;
     for (const line of pool) {
@@ -595,7 +726,6 @@ function pickOrdinary(lines) {
         tried++;
         const verdict = lineAlive(line.url);
         if (verdict === 'ok') { markGood(line.provider_id); return line; }
-        // 只把"服务器明确说它不是 playlist"记坏；超时的不记，但也不再排在前面试。
         if (verdict === 'dead') markBad(line.provider_id);
         else if (!firstUnknown) firstUnknown = line;
     }
@@ -616,8 +746,16 @@ const LINE_TTL = 600000;
 function linesOf(episodeToken) {
     const hit = lineCache[episodeToken];
     if (hit && hit.until > Date.now()) return hit.lines;
-    const data = call('/v1/playback/resolve/' + enc(episodeToken), { timeout: 10000 });
-    const lines = (data && data.line_options) || [];
+    // 问两次。
+    //
+    // 这张表偶尔会回一个 200、但 `line_options` 是空的（片源那边这一集还没排好），
+    // 以前直接当「这集没有线路」返回 → 点播放一片黑；用户切到第二集再切回来又好了，
+    // 因为那时第二次请求成功了。既然如此，把那一次重试放到这里，省掉用户自己那次跨集跳转。
+    let lines = [];
+    for (let attempt = 0; attempt < 2 && !lines.length; attempt++) {
+        const data = call('/v1/playback/resolve/' + enc(episodeToken), { timeout: attempt === 0 ? 9000 : 6000 });
+        lines = (data && data.line_options) || [];
+    }
     if (!lines.length) return [];
     lineCache[episodeToken] = { lines: lines, until: Date.now() + LINE_TTL };
     lineOrder.push(episodeToken);
@@ -633,20 +771,39 @@ function tokenOf(id) {
     return cut > 0 ? raw.slice(cut + 1) : raw;
 }
 
+/// 官方线一次最多撞几条。
+///
+/// 一部剧有 8–10 条官方线。全撞一遍在失败时是 10 次往返（实测单次 0.7–4 秒），
+/// 用户看到的是几十秒转圈。
+///
+/// ⛔ 2026-11-17：曾想把 3 降到 2「省一秒」，实测**当场否掉** ——
+///    第一部剧的前两条恰好是 bytevod-lv2（给图片）和 bytedance（403），
+///    第三条 0.8 秒才成；降到 2 就等于这部剧永远解不出来。
+///    真正该省的是「重复踩同两个坑」：失败按 provider 持久记黑名单（30 分钟），
+///    并把上一集成功那家排到最前（`goodProvider` 已持久化）。这样稳态只发一次请求。
+const OFFICIAL_TRIES = 3;
+
+/// 挑一条地址。返回 `{ url }` 或 `{ error }` —— **两种结果都必须有话说**。
+///
+/// ⛔ 以前「官方档全解不出来」时这里**悄悄退回普通线路**（`pickOrdinary`）。
+///    用户点的是「官方4K」、屏幕上写着官方4K，放出来的却是采集站那条（常常 720p）；
+///    每一部没有 4K 线的剧、每一次额度用尽，都是这样静默降级的 ——
+///    「用 4K 源出来的不是真 4K」就是这么来的。现在宁可失败得明白：
+///    说清是没 4K、没额度、还是这家的地址不可用，让他自己决定换哪条线。
 function playAddress(mode, episodeToken) {
     const key = mode + '|' + episodeToken;
     const hit = cachedAddress(key);
-    if (hit) return hit;
+    if (hit) return { url: hit };
 
     const lines = linesOf(episodeToken);
-    if (!lines.length) return '';
+    if (!lines.length) {
+        return { error: '这一集的线路表没取到（片源那边还没准备好）。再点一次播放；还不行就换一集。' };
+    }
 
     if (mode === 'o') {
         const normal = pickOrdinary(lines);
-        if (normal) return rememberAddress(key, String(normal.url));
-        const fallback = rankOfficial(lines, false)[0];
-        const out = fallback ? resolveOfficial(fallback, false) : { reason: 'line' };
-        return out.url ? rememberAddress(key, out.url) : '';
+        if (normal) return { url: rememberAddress(key, String(normal.url)) };
+        return { error: '这一集没有能出字节的普通线路。换「官方1080」，或用别的源看。' };
     }
     // 一条解不出来就换下一条：权重最高的那条在某些集次会给图片或空地址，不能就此放弃整个官方档。
     const want4K = mode === '4';
@@ -661,30 +818,63 @@ function playAddress(mode, episodeToken) {
         if (resetGuest()) {
             remainCache = null; remainAt = 0;
         } else {
-            const spent = pickOrdinary(lines);
-            return spent ? rememberAddress(key, String(spent.url)) : '';
+            return { error: '官方额度今天用完了（这部片的官方线按集计费）。换「普通」线路能继续看，明天再来。' };
         }
     }
-    const ranked = rankOfficial(lines, want4K).filter(l => !isBad(l.provider_id));
+    const official = rankOfficial(lines, want4K);
+    // 黑名单只用来**换顺序**，不用来宣布「这条档不存在」。
+    // ⛔ 上一版直接 `filter(!isBad)` 后就判空，于是「这两家刚失败过」被说成
+    //    「这一集片源没给 4K 线路」——两个意思完全不同，后者还会让用户去换档。
+    //    全在黑名单里就照原顺序再试一遍：最坏是再等一次，最好是把这集看下去。
+    const ranked = official.filter(l => !isBad(l.provider_id));
+    if (!official.length) {
+        return {
+            error: want4K
+                ? '这一集片源没给 4K 线路（只给了 1080）。换「官方1080」或「普通」。'
+                : '这一集没有可用的官方线路。换「普通」线路。'
+        };
+    }
+    if (!ranked.length) ranked.push(...official);
     let quotaHits = 0;
+    let sawQuota = false;
+    let tried = 0;
+    // 解出来了、但探不出到底活不活（连接超时/被断）的地址先留着：它比"没有"强，
+    // 但要让位给后面某条**确认能出字节**的线。以前是拿到就用，于是撞上那台连不上的
+    // CDN 就是一段黑屏。
+    let pending = '';
     for (const line of ranked) {
+        if (tried >= OFFICIAL_TRIES) break;
+        tried++;
         let out = resolveOfficial(line, want4K);
         // 额度不足：换身份后再试**同一条**。只换一次，避免一次播放里连开多个号。
-        if (out.reason === 'quota' && quotaHits === 0) {
-            quotaHits++;
-            if (resetGuest()) {
-                remainCache = null; remainAt = 0;
-                out = resolveOfficial(line, want4K);
+        if (out.reason === 'quota') {
+            sawQuota = true;
+            if (quotaHits === 0) {
+                quotaHits++;
+                if (resetGuest()) {
+                    remainCache = null; remainAt = 0;
+                    out = resolveOfficial(line, want4K);
+                }
             }
         }
-        if (out.url) return rememberAddress(key, out.url);
+        if (out.url) {
+            if (out.alive !== false) return { url: rememberAddress(key, out.url) };
+            pending = out.url;
+        }
         // 额度不足不是这条线的错，别压档（noteBad 已在 resolveOfficial 里只对 'line' 调）。
         // 解不出来就记一笔：这条线的名字与它给的票，是下次换线的依据（也方便排查「点开是黑的」）。
         console.log('kanju: line failed ' + String(line.provider_id || '') + ' ' + String(line.provider_name || ''));
     }
-    // 词元不够 / 官方解析全部失败：退回普通线路，别让用户点开就是黑的
-    const normal = pickOrdinary(lines);
-    return normal ? rememberAddress(key, String(normal.url)) : '';
+    if (pending) return { url: rememberAddress(key, pending) };
+    // 全是额度问题就别再说「地址不可用」——读者要的是"为什么"，不是"再试一次"。
+    if (sawQuota) {
+        return { error: '官方额度今天用完了（这部片的官方线按集计费）。换「普通」线路能继续看，明天再来。' };
+    }
+    return {
+        error: want4K
+            ? '官方4K 线路这次都没解出来（片源给的地址不可用）。再点一次，或换「官方1080」。'
+            : '官方1080 线路这次都没解出来（片源给的地址不可用）。再点一次，或换「普通」。'
+    };
 }
 
 // ---- 偏好（ext） ------------------------------------------------------------------
@@ -785,7 +975,7 @@ export default {
         vod.vod_play_url = urls.join('$$$');
         // 把这张身份的官方余额写在简介末尾，用户点开就知道还能看几集，不用等弹窗。
         if (extPreference !== 'ordinary') {
-            const left = remainingEpisodes(false);
+            const left = remainingEpisodes(false, false);
             if (left != null) {
                 const note = left > 0 ? '官方额度余 ' + left + ' 集' : '官方额度已用尽，本片走普通线路';
                 vod.vod_remarks = (vod.vod_remarks ? vod.vod_remarks + ' · ' : '') + note;
@@ -810,8 +1000,13 @@ export default {
         const cut = raw.indexOf('|');
         const mode = cut > 0 ? raw.slice(0, cut) : 'o';
         const token = tokenOf(raw);
-        const url = playAddress(mode, token);
-        if (!url) return { parse: 1, url: HOST + '/', header: { 'User-Agent': UA } };
-        return { parse: 0, url: url, header: { 'User-Agent': UA, 'Referer': HOST + '/' } };
+        const out = playAddress(mode, token);
+        if (!out.url) {
+            // ⛔ 原来这里返回 `{ parse: 1, url: HOST + '/' }`：把站点首页交给「网页嗅探」。
+            // 于是失败的那一次会先安静地等嗅探器那 15 秒，再报一句「找不到可播放地址」——
+            // 用户看到的就是「点了要等很久，最后还没播」。失败要当场说，不要拖。
+            return { errMsg: out.error || '这条线路暂时播不了，再点一次或换一条线。' };
+        }
+        return { parse: 0, url: out.url, header: { 'User-Agent': UA, 'Referer': HOST + '/' } };
     }
 };

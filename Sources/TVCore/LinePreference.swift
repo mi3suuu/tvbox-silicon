@@ -74,20 +74,55 @@ public enum LinePreference {
         flags: [String],
         picked: String? = nil,
         watched: String? = nil,
-        playableNow: ((String) -> Bool)? = nil
+        playableNow: ((String) -> Bool)? = nil,
+        quality: ((String) -> Int?)? = nil
     ) -> String? {
         guard !flags.isEmpty else { return nil }
 
         // ① 用户这次亲自选的 —— 最高优先级。
         if let picked = sanitized(picked, in: flags) { return picked }
 
-        // ② 上次看这部剧用的那条。
-        if let watched = sanitized(watched, in: flags) { return watched }
+        // 能播的那几条；一条都不认时退回全部（与第四级兜底同理）。
+        let pool = playableNow.map { predicate in flags.filter(predicate) } ?? flags
+        let usable = pool.isEmpty ? flags : pool
 
-        // ③ 第一条现在就能播的。
-        if let playableNow, let first = flags.first(where: playableNow) { return first }
+        // ② 上次看这部剧用的那条 —— 但「实测明显更好的线」可以把历史顶掉。
+        //
+        // ⛔ 这条是 2026-11-17 加的。此前历史无条件胜出，于是出现：
+        //    用户上次在一部剧里点到了 720p 的线，之后每次进来都从这条 720p 起播，
+        //    而同一集里明明有一条 1080p。用户的原话是「4K 源出来的不是 4K」——
+        //    机制与看剧AI 的 official→ordinary 静默降级同型：默认值由**旧记录**决定，
+        //    不由**当下的证据**决定。
+        //
+        // 判据用长边（宽高取大），且要「明显」更好才改判（≥15%），避免 818 与 1080
+        // 这种同一档内的差异把历史反复打翻。没有实测读数时一律尊重历史。
+        if let watched = sanitized(watched, in: flags) {
+            guard let quality else { return watched }
+            let best = bestMeasured(in: usable, quality: quality)
+            guard let best, best != watched,
+                  let bestEdge = quality(best), let watchedEdge = quality(watched),
+                  Double(bestEdge) >= Double(watchedEdge) * 1.15
+            else { return watched }
+            return best
+        }
 
-        // ④ 第一条。
+        // ③ 有实测画质时取最好的一条（并列时保持源给的顺序）。
+        if let quality, let best = bestMeasured(in: usable, quality: quality) { return best }
+
+        // ④ 第一条现在就能播的。
+        if let first = usable.first { return first }
+
+        // ⑤ 第一条。
         return flags.first
+    }
+
+    /// 这一组里实测画质最高的那条；一条读数都没有时返回 nil（不猜）。
+    ///
+    /// 平局保持 `flags` 的原始顺序 —— `max(by:)` 在两值相等时返回先出现的那条，
+    /// 这正是「源把 1080 放前面就先用它」的意思。
+    static func bestMeasured(in lines: [String], quality: (String) -> Int?) -> String? {
+        let measured = lines.compactMap { flag in quality(flag).map { (flag, $0) } }
+        guard let top = measured.map(\.1).max() else { return nil }
+        return measured.first { $0.1 == top }?.0
     }
 }

@@ -160,6 +160,10 @@ public enum SourceConnectivity {
         case "直连": return .playable
         case "失效", "不通", "失败": return .dead
         case "慢": return .slow
+        // 「需代理」= 本机直连被阻断（实测 TLS 握手中断 / 空回复），经境外出口可读。
+        // 判 `.untested` 而不是 `.dead`：配了出口代理的观众那里它是能用的，包内无权替他把话说死；
+        // 真不通的话，他自己测一遍就落到 `.dead`，那才是这台设备上的事实。
+        case "需代理": return .untested
         default: return .untested
         }
     }

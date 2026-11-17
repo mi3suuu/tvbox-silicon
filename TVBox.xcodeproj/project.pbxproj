@@ -176,6 +176,7 @@
 		4861B86C4B02394CE7FF3DC0 /* PythonHost in Resources */ = {isa = PBXBuildFile; fileRef = 0558AED26E6028C2881DD044 /* PythonHost */; };
 		49FAE12E9DA2ED063E9C4754 /* PlaybackHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 334B106CCFB47B5E27376A16 /* PlaybackHistoryView.swift */; };
 		4A2E4EB80B03CA4167BB49A5 /* BiliFullScreenPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F45B6BE0F99561560B33A26E /* BiliFullScreenPage.swift */; };
+		4B77E96A2C8F7A185E1EC538 /* BiliControlSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9860D2DF37978003C09C308 /* BiliControlSupport.swift */; };
 		4BAEDB63C6C2CC6BCD928C0E /* SpeechSubtitleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15B7D1A21A13195E6399AF37 /* SpeechSubtitleView.swift */; };
 		4C65106175D517040E98330B /* Store.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D1010816125FBC3792AF838 /* Store.swift */; };
 		4D6916642C86D353983CE383 /* SubtitleCues+Mi3s.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */; };
@@ -188,6 +189,7 @@
 		50102A4B110B0F850CADC14B /* OneSkinWindowGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CCA04D780FE430D05EE1529 /* OneSkinWindowGeometry.swift */; };
 		506C80AA2C72A2886DE09A8E /* WebCastSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD7A0AABA43477E9E02D2D67 /* WebCastSettingsView.swift */; };
 		515742AFC2C7655B651B744A /* TMDBViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F714C204B589F33E2806EDF8 /* TMDBViews.swift */; };
+		515A983CBF662FDCD2200BE5 /* BiliControlSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9860D2DF37978003C09C308 /* BiliControlSupport.swift */; };
 		51E4D236D0D94E65A7881D6C /* EpisodeSkipSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B451E5612B33CF005EEAAE08 /* EpisodeSkipSettingsView.swift */; };
 		522603702A50B36D66B9470E /* Keystone-GPL2.txt in Resources */ = {isa = PBXBuildFile; fileRef = 084C8344E2997DB3ED8FE974 /* Keystone-GPL2.txt */; };
 		525911655642125513C947A1 /* DiscoverCalendarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6941C03B313E9FC30883FFE /* DiscoverCalendarView.swift */; };
@@ -469,6 +471,7 @@
 		CA220FE90112CA22B964F339 /* DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B784080CDE6CF171AEA5E7 /* DiscoverView.swift */; };
 		CAA8462079A5E90B5AF54480 /* TMDBViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F714C204B589F33E2806EDF8 /* TMDBViews.swift */; };
 		CB40EB8463342F91C50AF39E /* libffi.txt in Resources */ = {isa = PBXBuildFile; fileRef = 06D9469858E5C5A118DED875 /* libffi.txt */; };
+		CC9C32A2CFBC4D4DE2D622ED /* BiliControlSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9860D2DF37978003C09C308 /* BiliControlSupport.swift */; };
 		CCD7DB0DD5837E751E7D268A /* SettingsPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A69C65DB9F24A27E28C819 /* SettingsPlayback.swift */; };
 		CDC78CAFF04C2753B881F19A /* MacUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ACBC18014BA7190EBA2EDD7 /* MacUpdater.swift */; };
 		CE3E1F922165FCF5E1581158 /* OneSkinPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECF6D39EBFC8C88069EC50D4 /* OneSkinPreview.swift */; };
@@ -732,6 +735,7 @@
 		B6941C03B313E9FC30883FFE /* DiscoverCalendarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverCalendarView.swift; sourceTree = "<group>"; };
 		B70E10B1B4ED09D544D6F679 /* WatchNowPhone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchNowPhone.swift; sourceTree = "<group>"; };
 		B9098502DF807ADE4698AA88 /* EpisodePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodePicker.swift; sourceTree = "<group>"; };
+		B9860D2DF37978003C09C308 /* BiliControlSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiliControlSupport.swift; sourceTree = "<group>"; };
 		BB24E05B7991A6EC8248BB34 /* ScriptHost */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ScriptHost; path = build/ScriptHost; sourceTree = SOURCE_ROOT; };
 		BB66FB7D520F445FF983F9E1 /* CloudBackupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBackupView.swift; sourceTree = "<group>"; };
 		BB6865D0CB32C248A5D1A344 /* States.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = States.swift; sourceTree = "<group>"; };
@@ -886,6 +890,7 @@
 				D7B1CEF969E4F3D3301A8D61 /* BilibiliCastController.swift */,
 				E0A2914C1B5B5ABA5F4B25A7 /* BilibiliMark.swift */,
 				57363D217E83F0E69B2DF678 /* BilibiliViews.swift */,
+				B9860D2DF37978003C09C308 /* BiliControlSupport.swift */,
 				F45B6BE0F99561560B33A26E /* BiliFullScreenPage.swift */,
 				C3116224111F0FDA4BC83D96 /* BiliLandscapePage.swift */,
 				9B27722FF5624C4E7C68AF2A /* BiliMenuCustomization.swift */,
@@ -1533,6 +1538,7 @@
 				37867F6007C8994335E2C558 /* ArtworkLanguageView.swift in Sources */,
 				613778D94A4264CE9DDCDA27 /* AsyncView.swift in Sources */,
 				27F590A5828CB2C50E03B432 /* Badge.swift in Sources */,
+				4B77E96A2C8F7A185E1EC538 /* BiliControlSupport.swift in Sources */,
 				4A2E4EB80B03CA4167BB49A5 /* BiliFullScreenPage.swift in Sources */,
 				F6DF1B7FDC3878482B3E4FF8 /* BiliLandscapePage.swift in Sources */,
 				C447AB2C8E6CF3B72B973638 /* BiliMenuCustomization.swift in Sources */,
@@ -1709,6 +1715,7 @@
 				452280EFF985A9357EAAD738 /* ArtworkLanguageView.swift in Sources */,
 				C868FA361E3AFD4CD42B3146 /* AsyncView.swift in Sources */,
 				47C6F3FA59EE9BEFCEF21626 /* Badge.swift in Sources */,
+				CC9C32A2CFBC4D4DE2D622ED /* BiliControlSupport.swift in Sources */,
 				4F7EF2A4B97B1DC33D285776 /* BiliFullScreenPage.swift in Sources */,
 				F368DE85BC59C7F2AD20AAD4 /* BiliLandscapePage.swift in Sources */,
 				B07EDBF9A37547670CE6DF70 /* BiliMenuCustomization.swift in Sources */,
@@ -1887,6 +1894,7 @@
 				6B045E043F6A87F8875366ED /* ArtworkLanguageView.swift in Sources */,
 				58E3370C0CFE04C6316D2C0E /* AsyncView.swift in Sources */,
 				64DEA0C58899F9FD370E1446 /* Badge.swift in Sources */,
+				515A983CBF662FDCD2200BE5 /* BiliControlSupport.swift in Sources */,
 				B508B952E71DE67AC3166768 /* BiliFullScreenPage.swift in Sources */,
 				BC8E1FE8F53F57464DC4C22C /* BiliLandscapePage.swift in Sources */,
 				025AF309AF6F38EF4E34F4C2 /* BiliMenuCustomization.swift in Sources */,
@@ -2103,7 +2111,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1160;
+				CURRENT_PROJECT_VERSION = 1280;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -2128,7 +2136,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.16.0;
+				MARKETING_VERSION = 1.28.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -2287,7 +2295,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1160;
+				CURRENT_PROJECT_VERSION = 1280;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -2306,7 +2314,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.16.0;
+				MARKETING_VERSION = 1.28.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
