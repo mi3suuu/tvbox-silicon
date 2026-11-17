@@ -2789,6 +2789,23 @@ struct VideoTaskDock: View {
     /// 坞整体缩放（仅作**基础宽度**；单卡缩放另算，见 `perCardScale`）。
     @Binding var scale: CGFloat
 
+    /// **伪全屏**：双击某张卡把它铺满容器并置顶，再双击还原（用户 2026-11-17）。
+    ///
+    /// ## 为什么只存 id，不存尺寸
+    ///
+    /// ⛔ 尺寸**不能**存成常量。伪全屏宽度必须每帧从 `containerSize` 反算 ——
+    ///    转屏 / 折叠 / 展开都会改容器，存常量就会重演用户报过的
+    ///    「窗口溢出屏幕太多」。所以这里只记「是哪一张」，尺寸见 `pseudoFullscreenWidth`。
+    ///
+    /// ## 为什么不需要保存「原位置」
+    ///
+    /// 伪全屏**只改宽度、不动位置**：卡片的 `.offset` 始终走 `placed`
+    /// （`tileOffset ?? dragOffset ?? slot`），伪全屏期间这个值一个字节都没变。
+    /// 所以还原时不需要回写任何位置 —— 只需把 id 清掉。
+    /// （这一条是 t12 设计与 captain 推演的差别：风险③担心「placed 是计算属性没处存」，
+    ///   但既然不改它，就没有「存不回去」的问题。）
+    @State private var pseudoFullscreenID: UUID?
+
     /// 卡片钳位：判据与实现在 `TVCore/DockCardClamp`（那里能单测）。
     /// 这里只做一次转调，避免两处各写一份边界公式。
     static func clampCardOffset(_ offset: CGSize, card: CGSize, in container: CGSize) -> CGSize {
@@ -2801,6 +2818,23 @@ struct VideoTaskDock: View {
     ///    每张卡都比自己的格子高一截，上下两排就会叠在一起 ——
     ///    用户说的「整理完图层互相折叠了」有一半来自这里。
     static let chromeHeight: CGFloat = 34
+
+    /// 伪全屏宽度：**每帧从容器双向反算**（不是常量）。
+    ///
+    /// 公式：高度上限 = 容器高 − 标题栏；按片源比例反算宽度；再与容器宽取小。
+    /// 这样宽、高**都不超容器**，转屏/折叠后自动跟上。
+    ///
+    /// ⛔ 不能只给 `containerSize.width`：`renderWidth` 只钳宽度，
+    ///    高度是 `width / aspect + chromeHeight` —— 竖屏片源（aspect ≈ 0.56）
+    ///    直接给满宽会算出远超容器的**高度**，正是「溢出」的成因。
+    private func pseudoFullscreenWidth(for task: VideoTaskCenter.Task, in container: CGSize) -> CGFloat? {
+        guard container.width > 1, container.height > 1 else { return nil }
+        let aspect = max(task.aspectRatio, 0.2)
+        let maxPictureHeight = container.height - Self.chromeHeight
+        guard maxPictureHeight > 1 else { return nil }
+        let byHeight = maxPictureHeight * aspect
+        return min(container.width, byHeight)
+    }
 
     /// 整理（单次整理 / 锁定整理）用的格子。
     ///

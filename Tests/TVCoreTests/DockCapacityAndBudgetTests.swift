@@ -190,9 +190,14 @@ struct EnhancementBudgetTests {
         #expect(!decide(hasSurface: false).isOn)
     }
 
-    /// 坞里有别的路在解码时让路：这是真机 OOM 的组合（前台增强 + 小窗解码）。
+    /// 坞里有别的路在解码时让路：这是真机 OOM 的组合（前台增强 + 一堆小窗解码）。
+    ///
+    /// 但不是「开一个窗就让路」—— 那条会变成「增强好像坏了」。上限是
+    /// `EnhancementBudget.otherDecodingCeiling`（2 路）。
     @Test func otherDecodingWindowsMakeEnhancementYield() {
-        let decision = decide(otherDecoding: 3)
+        #expect(decide(otherDecoding: 1) == .on)
+        #expect(decide(otherDecoding: EnhancementBudget.otherDecodingCeiling) == .on)
+        let decision = decide(otherDecoding: EnhancementBudget.otherDecodingCeiling + 1)
         #expect(!decision.isOn)
         #expect(decision.reason.contains("decoding"))
     }
