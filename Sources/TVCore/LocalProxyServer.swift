@@ -210,6 +210,23 @@ public final class LocalProxyServer: @unchecked Sendable {
         let fields = requestLine.split(separator: " ")
         guard fields.count >= 2 else { connection.cancel(); return }
         guard let parsed = parse(String(fields[1])) else { connection.cancel(); return }
+        // ⛔ 目标指向本机（回环）一律拒绝。
+        //
+        // 这个目标串由**请求方**给出，而请求方包括清单正文（远端 m3u8 写什么都算）。
+        // 允许它等于把中继变成「本机任意端口的转发器」—— 包括转发到它自己（自环）。
+        // 正常播放路径不会走到这里：remux / 插件代理的地址在 `EgressRouter` 那层就按直连处理了。
+        // ⛔ 只挡「回环 + 本机监听端口」这一种，不能一刀切挡掉所有回环。
+        //
+        // 中继只绑 127.0.0.1，能打到它的本来就只有本机进程；拦别的回环端口没有安全收益，
+        // 反而会挡住合法用途（`LocalProxyRelayTests` 就是拿 `127.0.0.1:<origin.port>` 当源站验隧道的）。
+        // 真正要防的是「中继把自己的端口当目标去拨」—— 自环，一条请求变无限连接。
+        if EgressRouter.isLoopbackHost(parsed.host),
+           let own = LocalProxyServer.shared.baseSync?.port, Int(parsed.port) == own {
+            Diagnostics.shared.record(.warning, "proxy",
+                "refusing to relay our own listener \(parsed.host):\(parsed.port)")
+            connection.cancel()
+            return
+        }
 
         // Rewrite to origin-form for the upstream and force it to close when done: this server
         // answers one request per local connection, and a keep-alive upstream would leave the local
@@ -783,6 +800,15 @@ public final class LocalProxyServer: @unchecked Sendable {
             bodyBytes = decoded
         }
         let body = String(decoding: bodyBytes, as: UTF8.self)
+        // ⛔ 只有**真正的清单**才改写。
+        //
+        // `.m3u8` 这个后缀也可能是错误页、验证页、或源站返回的 HTML（那正是「解析出来是网页」
+        // 那一类源）。按行改写的逻辑会把正文里每一行都当成相对地址解析 —— 一段
+        // "hello-through-relay" 会被换成 `http://host/dir/hello-through-relay`，
+        // 网页里的文字同理，整段正文被改成地址表。这类响应原样放行才对。
+        guard body.contains("#EXTM3U") || body.contains("#EXTINF") || body.contains("#EXT-X-") else {
+            return data
+        }
         guard let asset = URL(string: "\(state.scheme)://\(state.host):\(state.port)\(state.path)") else { return data }
         // 相对路径要相对清单所在目录解析，不是站点根。
         let directory = asset.deletingLastPathComponent()
@@ -869,9 +895,19 @@ public final class LocalProxyServer: @unchecked Sendable {
         guard let base = LocalProxyServer.shared.baseSync else { return nil }
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host, !host.isEmpty else { return nil }
+        // ⛔ 回环目标原样返回，不包进中继。
+        //
+        // 这条路径只读**清单正文**，不读 asset、不读出口表 —— 远端 m3u8 里出现
+        // `http://127.0.0.1:<relayPort>/…` 时，包一层就等于中继把自己的端口当目标去拨；
+        // 更糟的是它等价于「转发到本机任意端口」。正常 CDN 不会这么写，但清单正文可控。
+        guard !EgressRouter.isLoopback(url) else { return nil }
         let port = url.port ?? (scheme == "https" ? 443 : 80)
-        let path = url.path.isEmpty ? "/" : url.path
-        let query = url.query.map { "?\($0)" } ?? ""
+        // 与 `encode` 同一条规则：`url.path` 是解码过的，签名里的 `%2F` 会变回 `/`，
+        // 中继按斜杠切分就多一层、签名也失效 —— 只修主路径、漏掉清单改写这条路，
+        // 症状同样是「连上了但没内容」。
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let path = (components?.percentEncodedPath).flatMap { $0.isEmpty ? nil : $0 } ?? "/"
+        let query = components?.percentEncodedQuery.map { "?\($0)" } ?? ""
         let prefix = state.proxyInUse.map { "p/\($0)" } ?? "d"
         // 走代理时，子清单里的域名可能与主清单不同（CDN 跳域名），这里保留它自己的 host，
         // 由代理腿统一决定出口，而不是强行塞回主清单的 host。

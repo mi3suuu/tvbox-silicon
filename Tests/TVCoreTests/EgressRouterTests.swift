@@ -107,6 +107,28 @@ import Testing
         #expect(!EgressRouter.isLoopback(URL(string: "https://cdn.example.com/a.m3u8")!))
     }
 
+    /// 回环判定只认**地址**，不认前缀。
+    ///
+    /// `127.net` 是真实 CDN 域；`127.0.0.1.cdn.example.com` 由源站控制、可指向任何服务器。
+    /// 前缀匹配会让这些 host 的代理腿被静默抹掉（日志里连一行都没有）。
+    @Test func aHostnameStartingWith127IsNotLoopback() {
+        #expect(!EgressRouter.isLoopbackHost("127.net"))
+        #expect(!EgressRouter.isLoopbackHost("127.0.0.1.cdn.example.com"))
+        #expect(!EgressRouter.isLoopbackHost("example.com"))
+        #expect(EgressRouter.isLoopbackHost("127.0.0.55"))
+        #expect(EgressRouter.isLoopbackHost("127.1"))
+        #expect(EgressRouter.isLoopbackHost("[::1]"))
+        #expect(EgressRouter.isLoopbackHost("LOCALHOST"))
+        #expect(EgressRouter.isLoopbackHost("[::ffff:127.0.0.1]"))
+        // 下面三条是**刻意不覆盖**，写进测试是为了别让后人来「补 bug」：
+        // 通配 DNS（解析到 127.0.0.1）与整数/十六进制写法必须靠「解析后判 127/8」才挡得住，
+        // 那是拨号层的职责。把字符串判据当成安全边界，越补越像安全边界。
+        // 本方法的定位是「避免误判 127.net 这类真域名 + 避免中继自连」。
+        #expect(!EgressRouter.isLoopbackHost("127.0.0.1.nip.io"))
+        #expect(!EgressRouter.isLoopbackHost("127.0.0.1."))
+        #expect(!EgressRouter.isLoopbackHost("0x7f000001"))
+    }
+
     // MARK: 语义
 
     @Test func directOnlyNeverAsksForAProxyLeg() {

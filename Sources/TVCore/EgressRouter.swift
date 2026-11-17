@@ -401,10 +401,33 @@ public final class EgressRouter: @unchecked Sendable {
     }
 
     /// 本机上正在监听的地址（remux / 插件代理 / 中继自身）。
+    ///
+    /// ⚠ 这不是安全边界，只是「避免误引用本机地址」的卫生判据：
+    /// 远端清单写 `127.0.0.1.nip.io`（通配 DNS，解析到 127.0.0.1）就能绕过任何字符串判据。
+    /// 已知不覆盖的写法：`2130706433`、`0x7f000001`。真要防"中继变回环代理"，得在拨号层按
+    /// 解析后的地址判，那不在本方法的职责里。
     static func isLoopback(_ url: URL) -> Bool {
-        guard let host = url.host()?.lowercased() else { return false }
-        return host == "127.0.0.1" || host == "localhost" || host == "::1"
-            || host.hasPrefix("127.") || host == "[::1]"
+        url.host().map(isLoopbackHost) ?? false
+    }
+
+    static func isLoopbackHost(_ host: String) -> Bool {
+        let name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if name == "localhost" || name == "::1" || name == "::ffff:127.0.0.1" { return true }
+        // ⛔ 必须**解析成地址**再判，不能 `hasPrefix("127.")`。
+        //
+        // `127.net`（国内源常见的 CDN 域）与 `127.0.0.1.cdn.example.com` 都是合法主机名，
+        // 前缀匹配会把它们当成回环 —— 后果不是降级，是**这台 host 的代理能力被整体抹掉**：
+        // `routed` 直接返回原地址、`prepare` 早退、`data` 只走直连，而且 `egress` 日志一行都不会有。
+        // 更糟的是这由远端源列表决定：源可以单方面让本机对某个 host 永久放弃代理腿。
+        // ⛔ 不能用 `inet_pton` 了事：它只收严格点分十进制，`127.1`（TCP 层就是 127.0.0.1）
+        //    会被判成「不是回环」—— 于是 `route()` 的自身端口守卫可以被远端清单里的
+        //    `http://127.1:<relayPort>/…` 绕过，正是我们要防的「中继打自己」。
+        //    按标签判：2–4 段、首段 127、其余全是 ASCII 数字。
+        let labels = name.split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...4).contains(labels.count), labels[0] == "127" else { return false }
+        return labels.allSatisfy { label in
+            !label.isEmpty && label.allSatisfy { $0.isASCII && $0.isNumber }
+        }
     }
 
     private func key(_ url: URL, _ purpose: EgressPurpose) -> String { Self.key(url, purpose) }
