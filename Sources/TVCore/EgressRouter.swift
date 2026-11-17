@@ -204,13 +204,25 @@ public final class EgressRouter: @unchecked Sendable {
 
     init(session: URLSession? = nil) {
         if let session { self.session = session; return }
-        // ⛔ 用 `URLSession.shared`，不用 `ephemeral`。
+        // 独立 `.default` 实例：Cookie 与 `URLSession.shared` 落在同一个
+        // `HTTPCookieStorage.shared`，所以采集站下发的会话 Cookie 照拿；同时四条约束都能留住。
         //
-        // 采集站的接口会下发会话 Cookie，个别站没有它就回空列表；原来 `HTTPClient`
-        // 走的是 shared，换成 ephemeral 等于把 Cookie 罐悄悄丢了 —— 症状是「有些源
-        // 直连能看、改走这条路之后列表空了」，而且日志里什么都不会说。
-        // 每条请求的超时由 `URLRequest.timeoutInterval` 单独给，不需要另建会话。
-        self.session = .shared
+        // 为什么不用 `.shared`：它不可配置，会顺带丢三件事 ——
+        //   · `timeoutIntervalForResource` 默认 7 天：`URLRequest.timeoutInterval` 只管
+        //     「两次收包之间的空闲」，遇上「每几秒滴一个字节」的响应，`data(for:)` 能挂到天荒地老，
+        //     而这正是本轮要治的「转圈很久」，只是成因换成了慢滴；
+        //   · `connectionProxyDictionary` 不可设：`nil` 的语义是**跟随系统代理**，
+        //     于是「直连腿」在配了 Wi-Fi 手动代理的环境里也会过代理，赛跑失去意义，
+        //     `directOnly` 也不再字面成立。空字典 `[:]` 才是「明确不用」；
+        //   · 响应会写进共享 `URLCache`：出口决策不该有这种副作用。
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 30
+        configuration.httpShouldUsePipelining = false
+        configuration.waitsForConnectivity = false
+        configuration.urlCache = nil
+        configuration.connectionProxyDictionary = [:]
+        self.session = URLSession(configuration: configuration)
     }
 
     // MARK: 对外
