@@ -52,6 +52,9 @@ import TVCore
         LocalProxyServer.shared.ensureStarted()
         // 给 Loon 拉订阅用的规则服务：绑所有网卡，局域网地址与回环都能连。
         RulesHost.shared.start()
+        // 内存压力监听：20 个小窗 + 画质增强那条路的降级依据（见 `PlaybackLoad`）。
+        // 不装它就是「等系统先杀进程，我们连让路的机会都没有」。
+        PlaybackLoad.shared.startMemoryPressureMonitor()
         Task.detached { LoonConfigProbe.logOnce() }
     }
     var body: some Scene {

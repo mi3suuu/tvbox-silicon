@@ -543,6 +543,7 @@
 "Waiting" = "Waiting";
 "Finishing…" = "Finishing…";
 "Paused" = "Paused";
+"Parked" = "Parked";
 "Download failed" = "Download failed";
 "1 episode" = "1 episode";
 "%lld episodes" = "%lld episodes";

@@ -89,7 +89,47 @@ private protocol EnhancementEngine: AnyObject, Sendable {
     private(set) var status = VideoEnhancementStatus()
     /// A line for logs and QA: the processors running, frame counts and timing.
     private(set) var summary = "off"
-    @ObservationIgnored let layer = AVSampleBufferDisplayLayer()
+
+    /// 当前这次 `refresh()` 是否**由 `layoutSubviews` 触发**。
+    ///
+    /// ⛔ 存在的理由（真机 7 份崩溃报告里 6 份都是它）：
+    ///   `SurfaceView.layoutSubviews` → `setDisplaySize` → `refresh()`
+    ///   → `report()` → `apply()` 写 `@Observable status`
+    ///   → SwiftUI 观察追踪重算 body → 重新布局 → 又进 `layoutSubviews` …… 闭环。
+    ///
+    ///   上一版把 `refresh()` 改成 `Task { @MainActor in … }`，只是把
+    ///   **同步闭环变成异步闭环**；`apply()` 里 `self.status = status` 照旧写，
+    ///   所以 `0x8BADF00D` 仍在（实测 6/7 份，CPU 96%、5s 跑不完一次布局）。
+    ///   根因不是「在事务里写」，而是**在布局驱动的路径上写可观察状态**。
+    @ObservationIgnored private var layoutDrivenRefresh = false
+    /// 宿主 `SurfaceView` 注入的 backing layer（`layerClass` 范式）。
+    ///
+    /// ⛔ 2026-11-17 结构改造（a2 审计定案）：原来这里是
+    ///    `@ObservationIgnored let layer = AVSampleBufferDisplayLayer()` —— 手工建层，
+    ///    由 `SurfaceView.init` `addSublayer` 塞进宿主，再在 `layoutSubviews` 里
+    ///    `layer.frame = bounds`。真机 `TVBox-iOS-2026-11-17-170140.ips`（build 1283）帧 0–8：
+    ///
+    ///      layoutSubviews → -[CALayer setFrame:] → -[AVSampleBufferDisplayLayer setBounds:]
+    ///      → CA::Layer::set_bounds → CA::Layer::property_did_change
+    ///      → -[CALayer setNeedsLayout] → CA::Layer::set_needs_update_   ← 闭环点
+    ///
+    ///    即「给**子层**赋 frame 会让该子层被标 needsLayout，而它正在父级布局链上
+    ///    （帧 15 `layoutBelowIfNeeded` → 帧 12 `layoutSublayers`）→ CA 再排一轮 → 重入」。
+    ///
+    ///    改为 `layerClass` 后，宿主 view 的 backing layer **就是**这条视频层，
+    ///    UIKit 在布局末尾自动同步 bounds —— **不存在「给子层赋 frame」这个动作**，
+    ///    环在结构上消失（不是被压制）。项目内 4 处不崩的播放器全是这个范式：
+    ///    `ExternalDisplay.swift:249` / `MobilePlayer.swift:2479` / `VideoTasks.swift:1155`
+    ///    / `BiliSkin.swift:309`。
+    @ObservationIgnored private var attachedLayer: AVSampleBufferDisplayLayer?
+    /// 还没有宿主时的占位层。
+    ///
+    /// 存在的理由：`refresh()` 与 `apply()` 会碰 `layer.*`（timebase / flush / isHidden /
+    /// videoGravity），而它们可能在 `SurfaceView` 注入之前就被调用（`init` 里的
+    /// `itemObservation` 回调、250ms 定时器首拍）。给一个真实对象比处处判 nil 安全。
+    @ObservationIgnored private let placeholderLayer = AVSampleBufferDisplayLayer()
+    /// 当前生效的那条视频层。**全文件所有 `layer.` 用法都必须走它。**
+    @ObservationIgnored var currentLayer: AVSampleBufferDisplayLayer { attachedLayer ?? placeholderLayer }
     @ObservationIgnored private weak var player: AVPlayer?
     @ObservationIgnored private var engine: (any EnhancementEngine)?
     @ObservationIgnored private var item: AVPlayerItem?
@@ -98,6 +138,77 @@ private protocol EnhancementEngine: AnyObject, Sendable {
     @ObservationIgnored private var jumpObserver: NSObjectProtocol?
     @ObservationIgnored private var options = VideoEnhancementOptions()
     @ObservationIgnored private var displaySize = CGSize.zero
+    /// 宿主实例号（仅用于 `ATTACH-*` 日志区分是谁）。
+    private let attachID: Int = VideoEnhancer.nextAttachID()
+    private static var attachIDCounter = 0
+    private static func nextAttachID() -> Int { attachIDCounter += 1; return attachIDCounter }
+
+    /// 宿主 `SurfaceView` 把自己的 backing layer 交给 enhancer。
+    ///
+    /// ## 先到先得，**拒绝抢占**（captain 2026-11-17 裁定采纳）
+    ///
+    /// 不用 `claimAndBind` 那套「新宿主抢走旧的」：那是「同一个 player 只需一条渲染层、
+    /// 新宿主理应赢」的语义；这里 `engine` 已经用 `currentLayer.sampleBufferRenderer`
+    /// **绑定了那条层的渲染器**（见 `makeEngineIfNeeded`），换层 = 重建引擎 =
+    /// 打断正在播放的渲染。所以第二个宿主必须**被拒绝**，而不是抢。
+    ///
+    /// - Returns: 是否拿到（`false` = 已被别的宿主持有，调用方应自行降级/重试）
+    @discardableResult
+    func attach(displayLayer: AVSampleBufferDisplayLayer) -> Bool {
+        if let existing = attachedLayer {
+            if existing === displayLayer {
+                // ⛔ **幂等命中不打日志**。
+                //
+                // `retryAttachIfNeeded` 挂在 `updateUIView`/`updateNSView` 上，
+                // 那两个是 SwiftUI 每次 body 变化都走的路径（转屏时每帧一次）。
+                // 而 `oneSkinLog` 无节流无去重（`OneSkin.swift:47` 直接落盘），
+                // 在这里打日志会把 `Documents/oneskin.log` 刷爆 ——
+                // 后果不是性能，是**验收被毁**：`ATTACH-REJECT` / `ATTACH-TAKEOVER`
+                // 这两个关键信号会被淹没，无法判断宿主换代竞态是否真修好。
+                //
+                // 首次接管（下面那条 ATTACH-OK）才打一次，异常路径（REJECT/TAKEOVER）照打。
+                return true
+            }
+            // ── A（兜底接管）──────────────────────────────────────
+            // 旧层**已经离开图层树**（`superlayer == nil`）说明那个宿主真的被拆了，
+            // 只是它的同步释放点没走到我们这儿。此时接管新层是安全的：
+            // 旧层已不参与渲染，不会出现「两条层同时驱动」。
+            //
+            // ⛔ 只做 A 不够：旧层 `superlayer != nil` 时（新宿主先 init、旧宿主还没拆）
+            //    接管条件不成立，必须靠 B（`dismantleUIView` 同步释放点）先把旧的放掉。
+            if existing.superlayer == nil {
+                oneSkinLog("enhancer ATTACH-TAKEOVER enhancer=\(attachID) from=\(UInt(bitPattern: ObjectIdentifier(existing).hashValue) % 100000) why=stale-superlayer-nil")
+                attachedLayer = nil
+                existing.controlTimebase = nil
+                engine = nil
+                // 落到下面正常接管
+            } else {
+                oneSkinLog("enhancer ATTACH-REJECT enhancer=\(attachID) holder=\(UInt(bitPattern: ObjectIdentifier(existing).hashValue) % 100000) why=already-held")
+                return false
+            }
+        }
+        attachedLayer = displayLayer
+        displayLayer.videoGravity = .resizeAspect
+        displayLayer.isHidden = true
+        displayLayer.backgroundColor = nil
+        // 换成新层后，渲染器/时间表都要重建到这条层上。
+        engine = nil
+        oneSkinLog("enhancer ATTACH-OK enhancer=\(attachID) layer=\(UInt(bitPattern: ObjectIdentifier(displayLayer).hashValue) % 100000)")
+        return true
+    }
+
+    /// 宿主被拆解时归还。只有**当前持有者**归还才生效，避免把新宿主误清。
+    func detach(displayLayer: AVSampleBufferDisplayLayer) {
+        guard attachedLayer === displayLayer else { return }
+        attachedLayer = nil
+        engine = nil
+        displayLayer.controlTimebase = nil
+        displayLayer.flush()
+        oneSkinLog("enhancer DETACH enhancer=\(attachID) layer=\(UInt(bitPattern: ObjectIdentifier(displayLayer).hashValue) % 100000)")
+    }
+
+    /// 只读曝光给 `SurfaceView.layoutSubviews` 做「值没变就别往下传」的闸。
+    var displayPixelSize: CGSize { displaySize }
     /// The frames' format, for asking the TV for a display mode.
     @ObservationIgnored private var format: CMFormatDescription?
     @ObservationIgnored private var announced: String?
@@ -122,9 +233,9 @@ private protocol EnhancementEngine: AnyObject, Sendable {
 
     init(player: AVPlayer) {
         self.player = player
-        layer.videoGravity = .resizeAspect
-        layer.isHidden = true
-        layer.backgroundColor = nil
+        currentLayer.videoGravity = .resizeAspect
+        currentLayer.isHidden = true
+        currentLayer.backgroundColor = nil
         // ⛔ 这里**不再** `guard VideoEnhancement.enabled else { return }`。
         //
         // 原来那样写有三个连锁后果（用户可感知）：
@@ -162,13 +273,34 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         // otherwise layout -> refresh -> report -> observed state -> layout loops forever.
         guard abs(size.width - displaySize.width) > 0.5 || abs(size.height - displaySize.height) > 0.5 else { return }
         displaySize = size
-        // This runs inside `layoutSubviews` — a CoreAnimation layout transaction. Calling `refresh()`
-        // synchronously here reads `displayRequest` (which touches the @Observable `status`) and, via the
-        // pipeline's report, can write observed state again, so SwiftUI's observation tracking flags a
-        // layout feedback loop and the watchdog kills the app (0x8BADF00D, "点开视频/切横屏闪退").
-        // Defer it out of the transaction so layout settles first; the 250 ms refresh timer below covers
-        // any missed pass, and the next size change re-arms this one.
-        Task { @MainActor [weak self] in self?.refresh() }
+        // ⛔⛔ 这里**不许每帧建 `Task`**（真机 2026-11-17 18:45 崩溃，build 1300）：
+        //
+        //   VideoEnhancer.setDisplaySize(_:)
+        //     → Task<>.init(name:priority:operation:)
+        //       → swift_task_create_commonImpl → malloc / _Block_copy → 崩溃
+        //
+        // 上一版为了「把 refresh 挪出 CA 布局事务」写了
+        // `Task { @MainActor in refresh() }`，**那是把同步问题换成了每帧堆分配问题**：
+        // `layoutSubviews` 在转屏/开合期间被高频调用，`displaySize` 每次真变都会走到这行
+        // （0.5pt 阈值挡不住真实尺寸变化），于是每帧 malloc 一个 Task 对象 + _Block_copy
+        // 一块闭包 —— 堆压力直接顶满，配合 CA 布局事务就是 0x8BADF00D / 崩溃。
+        //
+        // ⛔ 2026-11-17：**不再在这里排任何 refresh**（原「合并式延迟」已删）。
+        //
+        // 为什么删（a2 审计结论，captain 采纳）：上一版写的是
+        //   `if !refreshScheduled { refreshScheduled = true;
+        //     DispatchQueue.main.async { refreshScheduled = false; refresh() } }`
+        // 但 `DispatchQueue.main.async` 的块在**同一 runloop 周期末尾**就执行，
+        // 首行又把 flag 复位成 false ⇒ 下一帧进来时 flag 已是 false
+        // ⇒ **每帧仍排一个新任务，合并等于没做**。
+        // 代价很实：每帧一次 `refresh()` 全流程（2 次 `UserDefaults.bool(forKey:)`
+        // 同步 IPC + 选项构造 + `allowed()` 判 externalPlayback），
+        // 正好对应真机实测 CPU 37–50%（在做实际工作，不是空转）。
+        //
+        // 现在：**尺寸只记下来，refresh 交给 250ms 定时器统一驱动**。
+        // 定时器本来就在跑（`init` 的 `while !Task.isCancelled { refresh(); sleep(250ms) }`），
+        // 它会读到最新 `displaySize`。这样 layout 路径上**一次 refresh 都不排**，
+        // 且总频率被钉在 4Hz。
     }
 
     /// 按需创建增强管线。
@@ -191,7 +323,7 @@ private protocol EnhancementEngine: AnyObject, Sendable {
             NotificationCenter.default.removeObserver(observer)
             jumpObserver = nil
         }
-        layer.controlTimebase = nil
+        currentLayer.controlTimebase = nil
         output = nil
         item = nil
     }
@@ -207,7 +339,7 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         if !VideoEnhancement.enabled {
             if engine != nil {
                 engine = nil
-                layer.flush()
+                currentLayer.flush()
                 // ⛔ 必须**自己拆干净**，不能只置 nil 就 return。
                 //
                 // `refresh()` 主体（下方 `if current !== item ...` 那段）是原来唯一做
@@ -223,19 +355,67 @@ private protocol EnhancementEngine: AnyObject, Sendable {
             }
             return
         }
+        // ⛔⛔ **准入闸**（2026-11-17，20 小窗那一轮）。
+        //
+        // `PlaybackSession` 每一路都持有一个 `VideoEnhancer`（坞里 20 个窗 = 20 个），
+        // 而增强开关是全局的。原写法只判「开关开着」就建管线 ⇒ 20 个窗各建一条
+        // Metal + VideoToolbox 超分管线，每条按**全尺寸**吃显存与中间缓冲。
+        // 真机 OOM（2700 MB）就是这个形态，而且坞卡片只有 320 pt 宽 —— 超分过去毫无意义。
+        //
+        // 判据见 `EnhancementBudget`：有画面层（只有屏上的播放页会 attach）、
+        // 没有别的路在解码、系统没给内存压力。任一条不满足就**把管线还给系统**，
+        // 不是「先留着不用」—— 留着就是真机崩的那个 2700 MB。
+        let load = PlaybackLoad.shared
+        let decision = EnhancementBudget.decide(
+            hasSurface: attachedLayer != nil,
+            otherDecoding: load.dockDecodingCount,
+            memoryPressure: load.memoryPressure,
+            constrained: isConstrained,
+            externalPlayback: player?.isExternalPlaybackActive ?? false)
+        guard decision.isOn else {
+            if engine != nil {
+                engine = nil
+                currentLayer.flush()
+                detachOutput()
+                Diagnostics.shared.record(.debug, "enhance",
+                    "pipeline released (\(decision.reason)) enhancer=\(attachID)")
+            }
+            return
+        }
         guard engine == nil else { return }
         #if !targetEnvironment(simulator)
         if #available(macOS 26, iOS 26, tvOS 26, *) {
-            engine = EnhancementPipeline(renderer: layer.sampleBufferRenderer) { [weak self] status, summary, note, format in
+            engine = EnhancementPipeline(renderer: currentLayer.sampleBufferRenderer) { [weak self] status, summary, note, format in
                 Task { @MainActor [weak self] in self?.apply(status, summary: summary, note: note, format: format) }
             }
         }
         #endif
     }
 
-    private func refresh() {
+    /// 发热严重或处于低电量模式 —— 这时不该再让 GPU 多做功。
+    private var isConstrained: Bool {
+        if ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue {
+            return true
+        }
+        #if !os(tvOS)
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return true }
+        #endif
+        return false
+    }
+
+    private func refresh(fromLayout: Bool = false) {
+        // 这一路根本没有画面层（坞里的 20 张卡片都不会 attach）：**什么也不必算**。
+        //
+        // ⛔ 加这一行不是为了省一点点 CPU，是为了别让 20 个窗各自每 250 ms 读两次
+        //    `UserDefaults`（跨进程 IPC）+ 构造选项 + 判 AirPlay。20 路时那是每秒 160 次
+        //    无意义同步，卡的不是网络，是主线程。
+        guard attachedLayer != nil else { return }
         // 开关可能是在播放中途打开的（设置页 / 播放器内开关），所以每次刷新都先补建管线。
         makeEngineIfNeeded()
+
+        // layout 驱动的那一次：只同步内部渲染参数，**不许写 @Observable 状态**。
+        // 标记在 `apply` 里消费。
+        layoutDrivenRefresh = fromLayout
         guard let engine, let player else { return }
         let defaults = UserDefaults.standard
         var next = VideoEnhancementOptions(upscale: VideoEnhancement.canUpscale && defaults.bool(forKey: VideoEnhancement.upscaleKey),
@@ -268,8 +448,8 @@ private protocol EnhancementEngine: AnyObject, Sendable {
             engine.setOutput(output)
         }
         // Frames wait for their time on the item's own clock; until it exists they would show at once.
-        if let item, layer.controlTimebase == nil, let timebase = item.timebase {
-            layer.controlTimebase = timebase
+        if let item, currentLayer.controlTimebase == nil, let timebase = item.timebase {
+            currentLayer.controlTimebase = timebase
             engine.setTimebaseReady(true)
         }
         #if os(tvOS)
@@ -310,15 +490,26 @@ private protocol EnhancementEngine: AnyObject, Sendable {
         // Nothing changed in what the view observes: return before touching any @Observable state, so a
         // report fired from layout (layoutSubviews -> setDisplaySize -> refresh -> report) cannot mutate
         // observed state inside a layout pass and start a SwiftUI feedback loop (watchdog 0x8BADF00D).
+        // ⛔ layout 驱动的那次 refresh **一律不写可观察状态** —— 闭环在此断开。
+        //
+        // 只写 `status` 会让 SwiftUI 观察追踪把它算成依赖变化 → 重算 body
+        // → 重新布局 → `layoutSubviews` → 再来一遍。转屏时 status 里的
+        // 分辨率/帧率字段必然变化，所以下面那句 `guard status != self.status`
+        // **拦不住它** —— 那正是「每次转屏都卡死」的机制。
+        // 内部渲染参数已由 setDisplaySize/refresh 自己同步好，诊断数字留给 250ms 定时器。
+        if layoutDrivenRefresh {
+            layoutDrivenRefresh = false
+            return
+        }
         guard status != self.status else { return }
         #if DEBUG
-        let frame = layer.frame, host = layer.superlayer
-        self.summary = summary + " · layer \(Int(frame.width))x\(Int(frame.height)) hidden \(layer.isHidden) hosted \(host != nil) timebase \(layer.controlTimebase != nil) · grid \(options.outputRate) \(displayState) request \(displayRequest.map { "\($0.rate)" } ?? "none")"
+        let frame = currentLayer.frame, host = currentLayer.superlayer
+        self.summary = summary + " · layer \(Int(frame.width))x\(Int(frame.height)) hidden \(currentLayer.isHidden) hosted \(host != nil) timebase \(currentLayer.controlTimebase != nil) · grid \(options.outputRate) \(displayState) request \(displayRequest.map { "\($0.rate)" } ?? "none")"
         #else
         self.summary = summary
         #endif
         self.status = status
-        layer.isHidden = !status.active
+        currentLayer.isHidden = !status.active
         announceDisplay()
     }
 }
@@ -404,35 +595,93 @@ struct EnhancedVideoSurface: View {
         let gravity: AVLayerVideoGravity
         func makeNSView(context: Context) -> SurfaceView { SurfaceView(enhancer: enhancer) }
         func updateNSView(_ view: SurfaceView, context: Context) {
-            enhancer.layer.videoGravity = gravity
+            view.displayLayer?.videoGravity = gravity
+            // **重试接管**（补齐「attach 只在 init 调一次、拒绝后无重试」这条残留路径）。
+            //
+            // `init` 里那次 attach 若被 REJECT（旧宿主还挂着），这条 view 会一直画不出东西。
+            // `updateNSView` 是 SwiftUI 每次 body 变化都会走的幂等钩子：这里再试一次，
+            // 一旦旧宿主被拆（槽位空 / 旧层 superlayer==nil），立刻接管。
+            // `attach` 自身幂等（同层 repeated 直接返回 true，**不打日志**，
+            // 见 attach 里那段注释），所以这里每帧调也不会刷爆日志。
+            if let layer = view.displayLayer { view.retryAttachIfNeeded(layer) }
+        }
+        /// **同步**释放点（B）。
+        ///
+        /// 这里是 SwiftUI 给 representable 的**唯一同步拆解回调**（`deinit` 不是它，
+        /// `deinit` 只保证对象终结，不保证时机）。把释放放这里，是为了让「旧宿主放手」
+        /// 与「新宿主 attach」处在**同一个同步序列**里 —— 而 `deinit` + `Task { @MainActor }`
+        /// 必然把释放排到后面的 runloop 轮次，与新宿主的同步 `attach` 竞争。
+        ///
+        /// ⚠️ 我不声称 dismantle 一定早于新宿主的 `makeNSView`（那是框架实现细节，
+        /// 静态无法证明）。**两种顺序都被下面两条一起覆盖**：
+        /// - 若 dismantle 先到 → 槽位已空 → 新宿主 `attach` 直接 OK；
+        /// - 若 make 先到（旧的还没拆）→ 走 `attach` 里的 **A 兜底**：旧层
+        ///   `superlayer == nil`（view 已离层级）时接管；仍非 nil 时才 REJECT。
+        /// ⇒ 只有「旧宿主还挂在图层树上且已被替换」这一种才会 REJECT，
+        /// 而那正是**不该**接管的情况（两条层同时驱动会抢帧）。
+        static func dismantleNSView(_ view: SurfaceView, coordinator: ()) {
+            view.releaseLayerSynchronously()
         }
     }
 
+    /// macOS 分支：同 iOS 一样改成 **backing layer 就是视频层**。
+    ///
+    /// 原来这里是 `layer?.addSublayer(enhancer.layer)` + `place()` 里
+    /// `enhancer.layer.frame = bounds` —— 与 iOS 完全同型的环
+    /// （给子层赋 frame → 子层 setNeedsLayout → 重入）。
+    /// 现在 `makeBackingLayer()` 直接返回 `AVSampleBufferDisplayLayer`，
+    /// 它成为 view 的 backing layer，`NSView` 在布局末尾自动同步 bounds，
+    /// **不再有「给子层赋 frame」这个动作**，`place()` 整个删除。
     final class SurfaceView: NSView {
         private let enhancer: VideoEnhancer
+        private(set) var displayLayer: AVSampleBufferDisplayLayer?
         init(enhancer: VideoEnhancer) {
             self.enhancer = enhancer
             super.init(frame: .zero)
             wantsLayer = true
-            layer?.addSublayer(enhancer.layer)
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func makeBackingLayer() -> CALayer {
+            // 先建层并注入给 enhancer；被别的宿主持有时 attach 返回 false，
+            // 我们仍然返回这条层（它只是这次没人用），并打 ATTACH-REJECT。
+            let video = AVSampleBufferDisplayLayer()
+            displayLayer = video
+            enhancer.attach(displayLayer: video)
+            return video
+        }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func layout() {
             super.layout()
-            place()
+            // ⛔ 只做「尺寸通知」，不碰任何 layer 几何。
+            let scale = window?.backingScaleFactor ?? 2
+            let px = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            if enhancer.displayPixelSize != px { enhancer.setDisplaySize(px) }
         }
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
-            place()
-        }
-        private func place() {
-            if enhancer.layer.superlayer !== layer { layer?.addSublayer(enhancer.layer) }
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            enhancer.layer.frame = bounds
-            CATransaction.commit()
             let scale = window?.backingScaleFactor ?? 2
-            enhancer.setDisplaySize(CGSize(width: bounds.width * scale, height: bounds.height * scale))
+            let px = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            if enhancer.displayPixelSize != px { enhancer.setDisplaySize(px) }
+        }
+        /// **同步**归还层（B）。
+        ///
+        /// 由 `Host.dismantleNSView` 调用 —— 那是 SwiftUI 给的唯一同步拆解回调，
+        /// 早于下一个宿主的创建。不能再靠 `deinit` + `Task`：那会把释放排到后面的
+        /// runloop 轮次，与新宿主的同步 attach 竞争。
+        func releaseLayerSynchronously() {
+            guard let layer = displayLayer else { return }
+            enhancer.detach(displayLayer: layer)
+            displayLayer = nil
+        }
+
+        /// 幂等重试接管。
+        ///
+        /// 直接调 `attach`：它内部对「同层 repeated」是 O(1) 判等后**静默**返回 true
+        /// （不打日志，避免挂在 `update` 路径上把 oneskin.log 刷爆）；
+        /// 对「别层持有」也不会改绑。这里**不重复加判**——加了反而容易与
+        /// `attach` 的判定分叉（两处判据不同步是本项目反复踩过的坑）。
+        func retryAttachIfNeeded(_ layer: AVSampleBufferDisplayLayer) {
+            enhancer.attach(displayLayer: layer)
         }
     }
     #else
@@ -441,28 +690,87 @@ struct EnhancedVideoSurface: View {
         let gravity: AVLayerVideoGravity
         func makeUIView(context: Context) -> SurfaceView { SurfaceView(enhancer: enhancer) }
         func updateUIView(_ view: SurfaceView, context: Context) {
-            enhancer.layer.videoGravity = gravity
+            view.displayLayer.videoGravity = gravity
+            // **重试接管** —— 理由见 macOS 分支同名处的注释，完全相同。
+            view.retryAttachIfNeeded(view.displayLayer)
+        }
+        /// **同步**释放点（B）—— 见 macOS 分支同名方法的注释，理由完全相同。
+        static func dismantleUIView(_ view: SurfaceView, coordinator: ()) {
+            view.releaseLayerSynchronously()
         }
     }
 
+    /// iOS 分支：**backing layer 就是视频层**（`layerClass` 范式）。
+    ///
+    /// ## 这一改断的是什么环（真机 `TVBox-iOS-2026-11-17-170140.ips`，build 1283，帧 0–8）
+    ///
+    /// 改前：
+    /// ```
+    /// SurfaceView.layoutSubviews()                    ← 我们自己写的方法
+    ///  → -[CALayer setFrame:]                          ← enhancer.layer.frame = bounds
+    ///    → -[AVSampleBufferDisplayLayer setBounds:]
+    ///      → -[CALayer setBounds:] → CA::Layer::set_bounds
+    ///        → CA::Layer::property_did_change
+    ///          → -[CALayer setNeedsLayout]
+    ///            → CA::Layer::set_needs_update_       ← 闭环点
+    /// ```
+    /// 即「在父视图的布局方法里给**子层**赋 frame，会让这个子层自己被标 needsLayout，
+    /// 而它正在父级布局链上（帧 15 `layoutBelowIfNeeded` → 帧 12 `layoutSublayers`）」
+    /// ⇒ CA 再排一轮 ⇒ 重入。
+    ///
+    /// 改后：`view.layer` **就是** `AVSampleBufferDisplayLayer`，UIKit 在布局末尾
+    /// 自动把 `view.layer.bounds` 同步成 view 的 bounds。**代码里不存在
+    /// "给子层赋 frame" 这个动作**，因此上面那条链的第一环就没有了 ——
+    /// 环是**结构性消失**，不是被压制或延迟。
+    ///
+    /// 也没有 `addSublayer`：不再有「remove + insert → mark_visible」，
+    /// 因此也不会因抢层而反复触发可见性回调。
+    ///
+    /// ## 为什么可以省掉 `isHidden` / `videoGravity` 的每次设置
+    ///
+    /// 它们在 `VideoEnhancer.attach(displayLayer:)` 里设一次；`updateUIView` 只改 gravity。
     final class SurfaceView: UIView {
+        override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+        /// 强类型取用 backing layer；`layerClass` 已保证类型。
+        var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+
         private let enhancer: VideoEnhancer
         init(enhancer: VideoEnhancer) {
             self.enhancer = enhancer
             super.init(frame: .zero)
             isUserInteractionEnabled = false
             backgroundColor = .clear
-            layer.addSublayer(enhancer.layer)
+            // 把 backing layer 交给 enhancer（先到先得，被占用时 enhancer 打 ATTACH-REJECT）。
+            enhancer.attach(displayLayer: displayLayer)
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
         override func layoutSubviews() {
             super.layoutSubviews()
-            if enhancer.layer.superlayer !== layer { layer.addSublayer(enhancer.layer) }
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            enhancer.layer.frame = bounds
-            CATransaction.commit()
+            // ⛔ 只做「尺寸通知」，**不碰任何 layer 几何**。
+            //    没有 addSublayer、没有 frame/bounds 赋值 —— 环的入口不存在。
             let scale = traitCollection.displayScale
-            enhancer.setDisplaySize(CGSize(width: bounds.width * scale, height: bounds.height * scale))
+            let px = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            if enhancer.displayPixelSize != px { enhancer.setDisplaySize(px) }
+        }
+
+        /// **同步**归还层（B）。
+        ///
+        /// 由 `Host.dismantleUIView` 调用。`SurfaceView` 的 backing layer 不能被换掉，
+        /// 所以这里只把**所有权**还给 enhancer（`attachedLayer = nil` + 停 timebase），
+        /// 层对象本身随 view 一起释放。
+        ///
+        /// ⛔ 不要改回 `deinit` + `Task { @MainActor }`：
+        ///     ① 竞态——排队晚于新宿主的同步 `attach`，新宿主被 REJECT 后画面回落占位层；
+        ///     ② 同源——本项目 `setDisplaySize` 的注释已记着「每帧建 Task → malloc/_Block_copy → 崩溃」
+        ///       （`N-184520.ips` 就是这么崩的），低频不代表可以留。
+        func releaseLayerSynchronously() {
+            enhancer.detach(displayLayer: displayLayer)
+        }
+
+        /// 幂等重试接管 —— 理由见 macOS 同名方法（不重复加判，静默幂等）。
+        func retryAttachIfNeeded(_ layer: AVSampleBufferDisplayLayer) {
+            enhancer.attach(displayLayer: layer)
         }
     }
     #endif

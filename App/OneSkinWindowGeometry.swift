@@ -226,7 +226,42 @@ final class OneSkinFixedPlayerView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// **进程内向播放器的唯一持有者**（F1）。
+    ///
+    /// ⛔ 为什么必须有这一层：`dismantleUIView` 确实被调用了（日志有 `detached` 行），
+    ///    但 SwiftUI 的销毁是**异步**的 —— 转屏/切集期间新旧宿主共存，实测
+    ///    「单次启动内最大并发在世宿主 = 3」，且相邻两条 `verdict=GOOD` 同时成立
+    ///    （`t3-crash-evidence-recheck.md` seg1/seg3/seg4/seg7 各 3）。
+    ///    `.id(...)` 只能固定它自己那一层的身份，**挡不住父级换整棵子树**
+    ///    （`pictureColumn` 在 6 处不同父容器被调用，且外面还套着
+    ///    `if let err … else { OneSkinFixedPicture }`）。
+    ///
+    ///    ⇒ 赌注改成：**重建了也必须只有一个 holder**。
+    ///    一条 `AVPlayer` 同时只允许驱动一条 `AVPlayerLayer`；两个宿主同时持有，
+    ///    第二条拿不到帧（黑），或在渲染线程上重复取帧而崩溃（用户报的闪退）。
+    ///
+    /// 新宿主 attach 时**先**把上一个持有者的 player 摘掉，再绑自己 ——
+    /// 于是任何时刻最多一个 `playerLayer.player != nil`，与 SwiftUI 什么时候
+    /// 销毁旧宿主无关。
+    private static weak var currentHolder: OneSkinFixedPlayerView?
+
     func attach(player: AVPlayer, gravity: AVLayerVideoGravity) {
+        claimAndBind(player: player, gravity: gravity)
+    }
+
+    /// 唯一绑定点：**先抢占有权，再绑 player**。
+    ///
+    /// ⛔ `attach` 与 `update` 都必须走这里。只堵 `attach` 不够 ——
+    ///    SwiftUI 对**已被抢走的旧宿主**仍会调 `updateUIView`，
+    ///    若 `update` 能自由 `playerLayer.player = player`，旧宿主就能把
+    ///    player 再绑回去，F1 形同不存在（两个宿主各持一次，回到原病）。
+    private func claimAndBind(player: AVPlayer, gravity: AVLayerVideoGravity) {
+        let prev = Self.currentHolder
+        if prev !== self {
+            // 先让上一个宿主彻底放手（它可能还在转场动画里可见，但不再渲染）。
+            prev?.detach(reason: "taken-over")
+            Self.currentHolder = self
+        }
         playerLayer.player = player
         playerLayer.videoGravity = gravity
     }
@@ -236,16 +271,31 @@ final class OneSkinFixedPlayerView: UIView {
     /// 由 `OneSkinFixedPlayerLayer.dismantleUIView` 调用。调用后这个宿主不再
     /// 占用 player，新宿主可以独占输出；旧宿主即使还在动画里露脸，也只是
     /// 一张空图层（透明），不会再画出第二份视频。
-    func detach() {
+    /// - Parameter reason: `swiftui`（SwiftUI 拆解）/ `taken-over`（新宿主抢走了 player）。
+    ///   两种要分开：`swiftui` 说明生命周期回调走到位了，`taken-over` 说明是 F1 兜住的。
+    func detach(reason: String = "swiftui") {
+        // 记「解绑前这条 layer 上到底有没有 player」——`dismantleUIView` 是否
+        // 真的让旧宿主放手，只能靠这一位判断（F2）。缺了它，`detached` 行
+        // 只能证明「回调跑了」，不能证明「player 真解绑」。
+        let wasBound = playerLayer.player != nil
         playerLayer.player = nil
+        // 只有当前持有者被拆掉时才清槽位，避免把「新 holder」误清成 nil。
+        if Self.currentHolder === self { Self.currentHolder = nil }
         #if DEBUG
-        oneSkinLog("fixedView INSTANCE #\(instanceID) detached")
+        oneSkinLog("fixedView INSTANCE #\(instanceID) detached bound=\(wasBound ? 1 : 0) why=\(reason)")
         #endif
     }
 
     func update(player: AVPlayer?, gravity: AVLayerVideoGravity) {
-        if playerLayer.player !== player { playerLayer.player = player }
-        playerLayer.videoGravity = gravity
+        if let player {
+            // 「要渲染」= 必须持所有权，走同一条抢占地路径。
+            claimAndBind(player: player, gravity: gravity)
+        } else {
+            // 只是解绑（PiP 在跑 / 闸不放行）：保持所有权槽位不变，
+            // 免得另一个更旧的宿主趁这个空档把 player 抢回去。
+            if playerLayer.player != nil { playerLayer.player = nil }
+            playerLayer.videoGravity = gravity
+        }
         setNeedsLayout()
     }
 

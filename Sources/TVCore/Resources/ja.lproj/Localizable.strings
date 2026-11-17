@@ -542,6 +542,7 @@
 "Waiting" = "待機中";
 "Finishing…" = "仕上げ中…";
 "Paused" = "一時停止中";
+"Parked" = "待機中";
 "Download failed" = "ダウンロードに失敗しました";
 "1 episode" = "1 エピソード";
 "%lld episodes" = "%lld エピソード";

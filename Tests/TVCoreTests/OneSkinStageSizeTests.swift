@@ -159,53 +159,69 @@ private let phone = CGSize(width: 678, height: 466)   // Fig-clone 实测屏幕
     #expect(!OneSkinStageSize.isLayoutChange(from: CGSize(width: 669, height: 951), to: .zero))
 }
 
-// MARK: - 形态与容器方向的和解
+// MARK: - 形态判据（唯一真源 · 纯函数）
 
-/// **Duo 内屏竖持**：`interfaceOrientation` 报 landscape，但窗口是 669×780（竖）。
-/// 不校正 → 排版基准算成 951×669，三栏铺到 669 宽上横向溢出 282pt。
-@Test func anUprightInnerDisplayIsNotLandscapeWhateverTheInterfaceSays() {
-    let upright = CGSize(width: 669, height: 780)
-    #expect(!OneSkinShapeResolver.isLandscape(declaredIsLandscape: true,
-                                              containerSize: upright,
-                                              wasPortrait: nil,
-                                              isLargeScreen: true),
-            "内屏竖持（780/669=1.166）被判成横屏")
+/// **正向判据**：`w > h` → 横，`h > w` → 竖。这是防回归的唯一机器判据。
+///
+/// 这两条是「判据只剩一次比较」的直接断言 —— 任何未来改动若重新引入
+/// 阈值 / 宽高比 / 滞回带 / 分档，真机上 669×950 这类尺寸就会翻错，
+/// 而这两个用例会先红。
+@Test func widerThanTallIsLandscape() {
+    #expect(OneSkinAxis.isLandscape(containerSize: CGSize(width: 951, height: 669)))
+    #expect(OneSkinAxis.isLandscape(containerSize: CGSize(width: 678, height: 466)))
 }
 
-/// 内屏**横持**必须仍然是横屏：951×547（比例 0.575）。
-@Test func aSidewaysInnerDisplayStaysLandscape() {
-    #expect(OneSkinShapeResolver.isLandscape(declaredIsLandscape: true,
-                                             containerSize: CGSize(width: 951, height: 547),
-                                             wasPortrait: nil,
-                                             isLargeScreen: true))
+@Test func tallerThanWideIsPortrait() {
+    #expect(!OneSkinAxis.isLandscape(containerSize: CGSize(width: 669, height: 951)))
+    #expect(!OneSkinAxis.isLandscape(containerSize: CGSize(width: 466, height: 678)))
 }
 
-/// 滞回：竖持结论已成立后，要回到比例 < 1.05 才翻回横屏，
-/// 避免动画扫过临界点时形态反复翻转（那就是「控件疯狂推移」）。
-@Test func theHysteresisBandDoesNotFlipFlop() {
-    // 1.166 进竖；退到 1.10（仍在带内）不该翻。
-    #expect(!OneSkinShapeResolver.isLandscape(declaredIsLandscape: true,
-                                              containerSize: CGSize(width: 600, height: 660),
-                                              wasPortrait: true,
-                                              isLargeScreen: true))
-    // 退到 1.00 才翻回横屏。
-    #expect(OneSkinShapeResolver.isLandscape(declaredIsLandscape: true,
-                                             containerSize: CGSize(width: 660, height: 660),
-                                             wasPortrait: true,
-                                             isLargeScreen: true))
+/// **边界**：`w == h` 归竖（`.column`）。正方形没有「更宽」这个事实。
+///
+/// ⛔ 这条必须显式钉住：`w == h` 是唯一的翻转点。若哪天有人把判据改成
+/// `w >= h`，正方形会变横、双列在等宽容器里对半分（两列都窄），
+/// 而这条断言会先红。
+///
+/// 注：`810×810` 只用来钉「正方形边界」这一条，**它不是滞回灰带里的点**
+/// （旧灰带是 `h/w ∈ (1.05, 1.15]`，`810×810` 的 `h/w = 1.0` 不在其中）。
+@Test func squareContainerIsPortrait() {
+    #expect(!OneSkinAxis.isLandscape(containerSize: CGSize(width: 810, height: 810)))
 }
 
-/// 非大屏（外屏 466×678、iPhone 393×852）**一律不改写**声明值，
-/// 保证这个校正永远碰不到外屏与普通手机的既有行为。
-@Test func theCorrectionNeverTouchesTheOuterOrNormalPhone() {
-    for size in [CGSize(width: 466, height: 678), CGSize(width: 393, height: 852)] {
-        #expect(!OneSkinShapeResolver.isLandscape(declaredIsLandscape: false,
-                                                  containerSize: size,
-                                                  wasPortrait: nil,
-                                                  isLargeScreen: false))
-        #expect(OneSkinShapeResolver.isLandscape(declaredIsLandscape: true,
-                                                 containerSize: size,
-                                                 wasPortrait: nil,
-                                                 isLargeScreen: false))
+/// **纯函数性**：同一尺寸反复求值必须恒同答案（无隐藏状态）。
+///
+/// 这是「无滞回」的结构性断言 —— 旧的 `OneSkinShapeResolver.isLandscape` 带
+/// `wasPortrait` 入参，同一个尺寸在灰带内有两个合法答案，取哪个由历史决定。
+/// 现在换成纯函数，这条用例把「无历史依赖」钉死：
+/// 用一转屏序列（竖 → 中点 → 横 → 中点 → 竖）逐帧求值，每个尺寸两次求值必须相同。
+@Test func theSameSizeAlwaysGivesTheSameAnswer() {
+    let sequence = [
+        CGSize(width: 669, height: 951),   // 内屏竖持
+        CGSize(width: 810, height: 810),   // 转屏中点
+        CGSize(width: 951, height: 669),   // 内屏横持
+        CGSize(width: 810, height: 810),   // 反向转屏中点（与上面同尺寸！）
+        CGSize(width: 669, height: 951),   // 回到竖持
+    ]
+    var seen: [String: Bool] = [:]
+    for size in sequence {
+        let key = "\(size.width)x\(size.height)"
+        let now = OneSkinAxis.isLandscape(containerSize: size)
+        if let prev = seen[key] {
+            #expect(prev == now, "同尺寸 \(key) 两次求值给出了不同答案")
+        }
+        seen[key] = now
     }
+    // 中点那两帧必须同答案，且必须是竖（w == h 归竖）。
+    #expect(seen["810.0x810.0"] == false)
+}
+
+/// **退化帧**：0 宽 / 0 高不构成「横」的方向事实。
+///
+/// 真机首帧实测 `geo.size = 0x88`（`oneskin-device-1655.log` 9 帧），
+/// 那时读不到任何方向；必须判竖而不是判横，否则首帧会按双列排版、
+/// 而容器宽度是 0 → 整页零宽（同一份日志的 `box=0x54` 黑屏帧）。
+@Test func degenerateFramesAreNotLandscape() {
+    #expect(!OneSkinAxis.isLandscape(containerSize: CGSize(width: 0, height: 88)))
+    #expect(!OneSkinAxis.isLandscape(containerSize: CGSize(width: 88, height: 0)))
+    #expect(!OneSkinAxis.isLandscape(containerSize: .zero))
 }

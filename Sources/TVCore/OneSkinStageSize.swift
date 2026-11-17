@@ -137,60 +137,57 @@ public enum OneSkinCanvasWidth {
     }
 }
 
-// MARK: - 形态与实际容器方向的和解（Duo 内屏竖持）
+// MARK: - 形态判据（唯一真源）
 
-/// 声明的形态是「展开横屏」，但容器其实是竖的 —— 这时必须以容器为准。
+/// 横竖的**唯一**判据：容器宽 > 高，一次比较。
 ///
-/// ## 为什么 `interfaceOrientation` 在 Duo 内屏不可信
+/// ## 为什么这里只有一次比较
 ///
-/// 实测（Duo 内屏，真机 + 模拟器 hinge）：内屏**竖持**时
-/// `UIWindowScene.interfaceOrientation` 仍报 `.landscapeLeft/.right`，
-/// 于是 `sideways = duoExpanded && landscapeScreen` 被算成 true，
-/// 页面按「展开横屏」分成左右双列。
+/// 对齐 One 1.7.1 原身语义（`__pageSize: State<CGSize>` → `width > height`）：
+/// 没有阈值、没有宽高比、没有滞回带、没有分档。
+/// 证据：`Docs/duo/evidence-2026-11-11/One-1.7.1.interface.swift:1630/3271`；
+/// `LargeCanvas` 只有两个 `Environment<UserInterfaceSizeClass?>`，无任何像素字段，
+/// 所以它只决定大屏/小屏**档位**，不参与横竖判定。
 ///
-/// 而同一时刻 SwiftUI 根部 `GeometryReader` 拿到的容器是 **669×780**（竖的）。
-/// 两者的分歧直接变成用户看到的错位：
-///   · 排版用的 `box` 是 951×669（按横屏摆的静态矩形）；
-///   · 实际可用空间只有 669 宽；
-///   · 结果三栏按 951 分（左列 507 + 间隙 + 右栏 427）铺到 669 上 ——
-///     横向溢出 282pt，右栏被推出屏幕，看起来「整页往左推移、右边被切掉」。
+/// ## 为什么曾经用过滞回，以及为什么必须删掉
 ///
-/// ## 为什么不能直接每帧用 `proxy.size`
+/// 旧实现在这里放了 `portraitEnter = 1.15` / `portraitExit = 1.05` 两个阈值，
+/// 并把「上一次是竖是横」(`wasPortrait`) 当入参 —— 判定因此从
+/// `f(size)` 退化成 `f(size, 历史)`，同一个尺寸会有**两个合法答案**，
+/// 取哪个由历史决定。后果是可复现的转屏滞留：
 ///
-/// 容器尺寸在折叠/转屏动画期间**连续变化**，每帧据此改形态会在临界点反复翻转
-/// （项目历史上「控件疯狂推移」的根因）。所以这里用**滞回**：
-/// 竖的判据与横的判据不是同一个阈值，中间留出一段「不改变决定」的带宽，
-/// 动画扫过临界点时形态不会跟着抖，稳定后一次到位。
-public enum OneSkinShapeResolver {
-    /// 进入竖持的宽高比阈值（高/宽）。
+/// - 灰带 = `h/w ∈ (1.05, 1.15]`；
+/// - 内屏竖持实测 `669×780` 的 `h/w = 1.1659`，**距 1.15 仅 1.4%** ——
+///   高度掉到 769（`h/w = 1.1495`）就翻成横，8pt 分桶也救不回（769→768 得 1.1480）；
+/// - 带内每帧答案都可能翻，翻一次就要写一次 `@State`；
+/// - 写入源 `keyWindow.bounds` 既是**连续量**（动画每帧都变，`onChange` 每帧触发）
+///   又是**不可靠的方向信号**（Duo 内屏竖持仍可能报横值）；
+/// - 写错之后纠正需要「更极端」的尺寸，而动画已结束、尺寸不再变化 ⇒
+///   **错误跨帧永久保留** —— 用户报的「转屏后形态回不来」。
+///
+/// 一次比较没有这个结构：
+/// - **无记忆**：同帧两次求值必得同值，不存在两个自洽态互相锁定；
+/// - **翻转点是单点**（`w == h`，测度为零），不是有宽度的区间，几何抖动无处驻留；
+/// - **穿界必然且只穿一次**：转屏时宽高交换，`w/h` 单调扫过 1.0；
+/// - **不依赖任何事件**：`geo.size` 一变，下一次求值立刻给新答案，
+///   与 `onChange` / `keyWindow` / 屏幕方向 / size class 全部解耦；
+/// - **错只持续一帧**：一帧读到的还是旧方向，排出来的版式自洽、装得下、不闪，
+///   下一帧自动纠正，不跨帧累积。
+///
+/// ## 边界语义
+///
+/// `w == h` 归**竖**（`.column`）：正方形没有「更宽」这个事实，
+/// 而竖持单列是唯一对两种方向都装得下的版式（双列在等宽容器里对半分，两列都窄）。
+public enum OneSkinAxis {
+    /// 容器是否横持。**纯函数**：同输入恒同输出，无任何历史入参。
     ///
-    /// 1.15 ≈ 8.4° 的倾斜余量：正常竖持的内屏是 780/669 = 1.166，刚过线；
-    /// 而横持是 547/951 = 0.575，离得很远，两者不会互相干扰。
-    public static let portraitEnter: CGFloat = 1.15
-    /// 退回横持的阈值。必须**小于** `portraitEnter`，这段差就是滞回带。
-    public static let portraitExit: CGFloat = 1.05
-
-    /// 一次判定。
-    ///
-    /// - Parameters:
-    ///   - declaredIsLandscape: 调用方按 `interfaceOrientation` 等信号给出的形态。
-    ///   - containerSize: 这一帧容器真实尺寸（根部 `GeometryReader` 的 proxy）。
-    ///   - wasPortrait: 上一次判定结果，用来实现滞回。首次判定传 nil。
-    ///   - isLargeScreen: 只有大屏（摊开的内屏 / iPad）才做这个校正。
-    ///     普通手机横持时容器是 678×466（比例 0.69），本来就远离阈值；
-    ///     但明确加上这道门，可以保证这个校正永远不会改写手机的行为。
-    public static func isLandscape(declaredIsLandscape: Bool,
-                                  containerSize: CGSize,
-                                  wasPortrait: Bool?,
-                                  isLargeScreen: Bool) -> Bool {
-        guard isLargeScreen, declaredIsLandscape else { return declaredIsLandscape }
-        guard containerSize.width > 1, containerSize.height > 1 else { return declaredIsLandscape }
-        let ratio = containerSize.height / containerSize.width
-        // 已经有结论时用更松的退出阈值，避免在临界点来回翻。
-        if wasPortrait == true {
-            return ratio < portraitExit
-        }
-        return ratio <= portraitEnter
+    /// - Parameter containerSize: 根部 `GeometryReader` 的 `geo.size`，或
+    ///   与之同源的容器尺寸。**不得**传 `fixedScreenSize()` / `keyWindow.bounds` /
+    ///   `liveGeometry.box` —— 那三条在 Duo 上不是「本视图拿到的容器」，会与渲染不同源。
+    public static func isLandscape(containerSize: CGSize) -> Bool {
+        // 退化帧（首帧 proxy 可能是 0）不算横：0×88 之类没有任何方向事实。
+        // 这不是阈值，是「方向未知」与「横」的区分。
+        guard containerSize.width > 1, containerSize.height > 1 else { return false }
+        return containerSize.width > containerSize.height
     }
-
 }

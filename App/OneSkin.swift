@@ -190,28 +190,6 @@ enum OneSkin {
     /// 但布局的自洽性依赖于「同一个来源」——混用不同来源会让
     /// 列宽基准与渲染坐标打架（试过 nativeBounds / UIScreen.bounds / 硬编码常量，
     /// 三者都会把双列布局打散成 45 个元素、窗口跑到 x1879）。
-    /// 设备当前是否横屏。以 `UIWindowScene.interfaceOrientation` 为准 ——
-    /// window bounds 在虚拟设备上可能给出旋转前的尺寸（实测横屏报 466×678）。
-    @MainActor static func screenIsLandscape() -> Bool {
-        for scene in UIApplication.shared.connectedScenes {
-            guard let ws = scene as? UIWindowScene, ws.activationState == .foregroundActive
-            else { continue }
-            // ⚠️ `interfaceOrientation` 在 tvOS 不存在（已 appletvos swiftc 实证），
-            //    电视只有一块固定朝向的屏，没有"握持方向"。tvOS 用 bounds 的长短边判定。
-            #if os(tvOS)
-            let b = ws.coordinateSpace.bounds
-            return b.width > b.height
-            #else
-            switch ws.interfaceOrientation {
-            case .landscapeLeft, .landscapeRight: return true
-            case .portrait, .portraitUpsideDown: return false
-            default: break
-            }
-            #endif
-        }
-        let b = UIScreen.main.bounds
-        return b.width > b.height
-    }
 
     /// 这次布局真正可用的尺寸：保留 proxy 的横竖，只在它被父容器撑大时**等比**缩回。
     ///
@@ -238,6 +216,63 @@ enum OneSkin {
             ?? UIApplication.shared.appWindowScene?.windows.first
         let ins = win?.safeAreaInsets ?? .zero
         return EdgeInsets(top: ins.top, leading: ins.left, bottom: ins.bottom, trailing: ins.right)
+    }
+
+    // MARK: - 形态判据（全仓唯一）
+
+    /// 本帧形态。**纯函数**，全仓唯一的形态定义。
+    ///
+    /// ## 契约（对齐 One 原身语义，勿再推翻）
+    ///
+    /// - **横竖** = `containerSize.width > containerSize.height`，一次比较。
+    ///   无阈值、无宽高比、无滞回带、无分档。实现见 `OneSkinAxis.isLandscape`。
+    /// - **半折** = 折缝/铰链决定，不看宽高比。优先级：铰链（权威）→ 竖折缝偏移 → 横折缝。
+    /// - **size class 不参与**任何分支（它只管字号与排布密度档位）。
+    ///
+    /// ## 为什么必须是一个函数
+    ///
+    /// 此前有两份：`VideoDetailView.oneSkinShape`（读 `keyWindow.bounds`，用 `ratio >= 1.15`）
+    /// 与 `OneSkinStage.geoShape`（读 `geo.size`，用 `w>h*1.15` + 灰带回落 page）。
+    /// 两份入参不同源、阈值形式不同，且 axis 在灰带把裁决权交还 page ⇒
+    /// 真机日志实测同帧出现 `page=column axis=split`（22 次）与
+    /// `page=split axis=full…`（15 次），随后几秒闪退。
+    /// 现在两份都调这一个函数，数值恒等由结构保证。
+    ///
+    /// - Parameters:
+    ///   - containerSize: 唯一合法来源是根部 `GeometryReader` 的 `geo.size`。
+    ///     非版式消费端（只用于「选哪个分支 / 往哪转」）可传 `layoutSize`，见调用处注释。
+    ///   - foldGap: 竖折缝（`FoldGap?`）。`isVertical` 为真 = 有竖向折缝。
+    ///   - hingePartiallyOpen: 铰链状态（`DeviceHinge`）。`nil` = 系统没报。
+    ///   - qaOverride: QA 强制形态。给了就原样返回（无人值守验收用）。
+    static func geoShape(containerSize: CGSize,
+                         foldGap: FoldGap?,
+                         hingePartiallyOpen: Bool?,
+                         qaOverride: OneSkinShape? = nil) -> OneSkinShape {
+        // ① QA 强制优先（必须原样尊重，不能被几何推翻）。
+        if let qaOverride { return qaOverride }
+
+        let w = containerSize.width
+
+        // ② 半折：铰链是**权威**信号。
+        //
+        // 折缝**位置**不是判据 —— 摊开态实测中心比有 0.600/0.554/0.507 三种
+        // （斜着拿、手挡住一部分都会变），用它反推会把摊开误判成半折。
+        if let hingePartiallyOpen {
+            return hingePartiallyOpen ? .halfFold : (OneSkinAxis.isLandscape(containerSize: containerSize) ? .split : .column)
+        }
+        // ③ 铰链不可用 → 竖折缝几何兜底（阈值 0.15，宁可漏判半折也不误判摊开）。
+        if let foldGap, foldGap.isVertical, w > 1 {
+            let foldCenterRatio = foldGap.centerX / w
+            if abs(foldCenterRatio - 0.5) > 0.15 { return .halfFold }
+        }
+        // ④ 横竖：一次比较。
+        //
+        // ⛔ 横折痕（书本/帐篷趴着）**不在这里判**。它是 `FoldGap.HorizontalBand`，
+        //    由调用方通过 `hingePartiallyOpen` 报进来（`DeviceHinge` 权威）；
+        //    几何兜底的 `horizontalFold.splitsContainer(h)` 在 `OneSkinStage` 侧
+        //    与 `halfFoldSplitY` 同源处理，不在本函数里引第二套阈值 ——
+        //    两套阈值并存正是 `page=column axis=split` 那类同帧矛盾的来源。
+        return OneSkinAxis.isLandscape(containerSize: containerSize) ? .split : .column
     }
 
     @MainActor static func fixedScreenSize() -> CGSize {
@@ -360,6 +395,23 @@ enum OneSkin {
     /// 规则：非全屏时，若容器宽度塌到 240pt 以下而上一次还在 240pt 以上，
     /// 沿用上一次的尺寸 —— 这一帧不重排，等下一帧正常值到来。
     /// 只丢弃中间帧，不影响任何真实形态（466 / 951 / 382 全部 > 240）。
+    ///
+    /// ## 定位（2026-11-17 审查结论，勿误读）
+    ///
+    /// **这是纯几何闸，不是形态判据。** 它不决定 `.column` / `.split` / `.halfFold`
+    /// —— 形态由 `OneSkin.geoShape` 独占判定。它只决定「这一帧要不要沿用上一帧
+    /// 的可用尺寸」。所以 RULES §一 的「判据必须纯函数」对它不构成要求。
+    ///
+    /// **真机命中 0 次。** 三份真机日志（11-13 16:55 / 11-13 17:25 / 11-15 11:45，
+    /// 合计 23,957 行）`grep -c COLLAPSE` 全为 0；`GEOSRC geo` 的宽度去重为
+    /// `951 / 669 / 466 / 678 / 0`，**没有任何 < 240 的真实帧**。
+    /// 也就是说：`lastLaidOut` 这条跨帧记忆在现有真机上从未生效过。
+    ///
+    /// **待真机取证项**：Duo 开合过渡里是否存在 `size.width < 240` 的中间帧。
+    /// 取证方式：装包后从 `Documents/oneskin.log` `grep COLLAPSE`（`#if DEBUG` 下
+    /// 仅在宽度被改写时打印），出现 `raw=… → keep=…` 即为命中。
+    /// 若确认存在，再评估是否把 `lastLaidOut` 从 static 改为「仅当帧」。
+    /// **在此之前不动代码** —— 改动它会直接改变 `avail` / `useAvail` 的取值。
     @MainActor static func guardCollapse(_ size: CGSize, fullScreen: Bool) -> CGSize {
         guard size.width > 1, size.height > 1 else { return size }
         let prev = lastLaidOut
@@ -486,37 +538,7 @@ enum OneSkin {
         return quantize(clamped)
     }
 
-    /// 用**真实容器**给盒子做上限（16.8）。
-    ///
-    /// 场景：Split View / Slide Over / PiP / 侧栏把内容区砍掉一大块，
-    /// 而几何只读 `keyWindow`（窗口 951），系统实际只给 475 —— 内容溢出 476pt。
-    ///
-    /// 三条防成环的护栏（缺一条就会把「容器测量」重新拉回成布局输入）：
-    ///   ① 容器尺寸必须是 **8pt 桶**（`commitLiveContainer` 已量化）；
-    ///   ② 只在容器**明显更小**（>16pt）时才夹 —— 正常态容器 = 盒子，
-    ///      相差的只有底部安全区取整那几 pt，绝不能参与运算；
-    ///   ③ 容器与盒子**方向必须一致** —— 转屏瞬间 `cachedLiveContainer` 还是上一方向，
-    ///      拿它夹会把横屏宽 951 夹成竖屏的 669。
-    @MainActor static func cappedToContainer(_ box: CGSize, container: CGSize?) -> CGSize {
-        guard let c = container, c.width > 1, c.height > 1 else { return box }
-        guard (c.width > c.height) == (box.width > box.height) else { return box }
-        let w = c.width < box.width - 16 ? c.width : box.width
-        let h = c.height < box.height - 16 ? c.height : box.height
-        guard w != box.width || h != box.height else { return box }
-        return stableBucket(CGSize(width: w, height: h), step: 8)
-    }
 
-    @MainActor static func windowSize() -> CGSize {
-        for scene in UIApplication.shared.connectedScenes {
-            guard let ws = scene as? UIWindowScene, ws.activationState == .foregroundActive
-            else { continue }
-            let sizes = ws.windows.map(\.bounds.size).filter { $0.width > 1 && $0.height > 1 }
-            if let biggest = sizes.max(by: { $0.width * $0.height < $1.width * $1.height }) {
-                return biggest
-            }
-        }
-        return UIScreen.main.bounds.size
-    }
 
     static let defaultSpeed: Float = 1
     /// One 那行给出的是 1x，倍速档位按常见投屏器惯例给齐。
@@ -874,9 +896,11 @@ private extension View {
 ///    于是「展开宽屏」和「展开横屏」来回落进同一个分支，窗口 winX/winY
 ///    和整层控件坐标每帧重算 —— 就是用户报的「界面控件坐标一直漂移」。
 ///
-/// 判据在 `VideoDetailView.oneSkinShape` 里由三个**离散**信号合成：
-/// `duoExpanded`(size class) / `sideways`(interfaceOrientation) / `landscapePage`(size class)。
-/// 本文件内 `OneSkinStage.effectiveShape` 是这之后唯一的读取点。
+/// 判据**只有一个函数**：`OneSkin.geoShape(containerSize:foldGap:hingePartiallyOpen:qaOverride:)`。
+/// 横竖 = `containerSize.width > containerSize.height` 一次比较（`OneSkinAxis`）；
+/// 半折 = 折缝 / 铰链（`foldGap` / `hingePartiallyOpen`）；
+/// size class **不参与**本枚举的任何分支，它只管字号与排布密度档位。
+/// `OneSkinStage.geoShape` 是唯一的读取点。
 enum OneSkinShape: Equatable {
     /// 折叠态 / 立式手机：单列，画面在上，详情在下。
     case column
@@ -1064,8 +1088,26 @@ struct OneSkinStage: View {
         }
         nonmutating set { fitModeRaw = newValue.rawValue; legacyFill = false }
     }
-    /// 三态之一，由调用方按上游 `splitsWatchPage` / `portraitExpanded` 算好传进来。
-    var shape: OneSkinShape = .column
+    /// **QA 强制形态**，仅此用途。`nil` = 没有强制，形态由 `geo` 现算。
+    ///
+    /// ⛔ 它不再是「页面层算好的形态」。此前 `VideoDetailView.oneSkinShape` 用
+    ///    `keyWindow.bounds` + `ratio >= 1.15` 算一份传进来，与 `body` 里按
+    ///    `geo.size` 算的那份不同源 —— 真机同帧出现 `page=column axis=split`。
+    ///    现在页面层只透传 QA 覆盖（无覆盖传 `nil`），形态唯一来源是
+    ///    `OneSkin.geoShape`。
+    var shape: OneSkinShape? = nil
+
+    /// 页面层已算好的本帧形态（`VideoDetailView.oneSkinShapeResolved`）。
+    ///
+    /// ⛔ 它**不是第二套判据** —— 与 `body` 里那个 `geoShape` 调的是同一个
+    ///    `OneSkin.geoShape`，只是入参是 `layoutSize` 而不是 `geo.size`。
+    ///    存在的唯一理由：`liveGeometry` / `proxySize` 在 **`GeometryReader` 之外**
+    ///    求值（`body` 的第一段），那时还没有 `geo.size`，只能用它。
+    ///
+    /// ⛔ 版式分支一律读 `body` 里的 `geoShape`，不读这个。
+    ///    取值恒等性（四条真机尺寸，两个入参给同一答案）：
+    ///    951×669→split、669×951→column、466×678→column、678×466→split。
+    var resolvedShape: OneSkinShape = .column
 
     /// 会话三档诊断串（仅 DEBUG 探针用，空串表示调用方没提供）。
     ///
@@ -1242,6 +1284,13 @@ struct OneSkinStage: View {
     /// 只用于告诉几何层折叠态跨档了（B 站 `hingeObserver` 的模式）。
     var hingePartiallyOpen: Bool? = nil
 
+    /// 竖折缝（`FoldGap`）。`nil` = 系统没报或非折叠设备。
+    ///
+    /// ★ 归属：**折缝是「单栏 / 双栏」的唯一判据**（RULES §一 第二信号）。
+    /// 形态函数 `OneSkin.geoShape` 用它判半折；横竖仍只看 `geo.size` 的 `w > h`。
+    /// 位置必须紧跟 `hingePartiallyOpen`（成员位置即参数位置）。
+    var foldGap: FoldGap? = nil
+
     /// 片源比例**只影响窗口内部怎么留黑边**（`videoGravity`），不影响窗口尺寸。
     /// 原先每 400ms 轮询 presentationSize 改这个 state，既没有消费者，
     /// 又会让整页在开播后反复重绘 —— 一并删除（见 OneSkinWindowGeometry）。
@@ -1350,6 +1399,13 @@ struct OneSkinStage: View {
     /// 哔哩哔哩架构的几何驱动：布局只吃它吐出的离散枚举 + 缓存值。
     /// 见 `OneSkinGeometryDriver.swift` 顶部的实测依据。
     @StateObject private var geoDriver = OneSkinGeometryDriver(shape: .column)
+    /// 最近一帧由 `geo.size` 现算出来的形态。
+    ///
+    /// ⛔ 只用于两件事：①无 QA 强制时 `shape()` 的返回值；②`geoDriver` 的形态
+    ///    通知源。**不参与任何坐标/尺寸计算** —— 版式一律由 `body` 里那个
+    ///    局部 `geoShape` 同帧直接传给 `stage`，没有「下一帧才生效」的窗口。
+    ///    写成 @State 是因为 `onChange` 需要一个可比较的值，且它只在
+    ///    `GeometryReader` 内部由 `onChange(of:)` 写入（不是 body 求值期间写）。
     /// 安全区：直接读窗口，不测量容器（哔哩哔哩架构）。
     /// 见 `body` 里关于「几何基准只用窗口」的说明。
     private var measuredSafeArea: EdgeInsets {
@@ -1430,30 +1486,41 @@ struct OneSkinStage: View {
     /// `liveShape`。两者在「`screen` 已翻向、`geo` 还没跟上」的帧会不一致
     /// （实测 split vs fullBleed），导致画面按 fullBleed 排、用户等不到双栏。
     /// 现在统一到这一个值，**同一帧内只有一个形态**。
+    /// 本帧形态：`QA 强制 ??` 由调用方给的值。
+    ///
+    /// ⛔ **这里不再自己算形态**。真源是 `OneSkin.geoShape`（横竖 = `geo.size` 的
+    ///    `w > h` 一次比较；半折 = 折缝/铰链）。本函数只回答一个问题：
+    ///    「QA 参数有没有强制指定？」
+    ///
+    ///    - 有 → 返回 QA 值（无人值守验收必须原样尊重，不能被几何推翻）；
+    ///    - 没有 → 返回调用方给的 `shape`，**它就是 `body` 里算出来的 `geoShape`**
+    ///      （`stage(... liveShape: geoShape)` 传下来的同一个值）。
+    ///
+    /// 历史：这里曾经自己读 `portraitNow` 参与形态，与父视图那一份不同源，
+    /// 造成「同帧里 ROOT 行 shape=fullBleed、stage 行 shape=split」。已删。
+    /// 也删过 `shapeNow` 镜像 @State —— 它会带来「外部已变 → 先写 State →
+    /// 下一帧才生效」的必有一帧旧形态。
     private func shape(_ override: OneSkinShape? = nil) -> OneSkinShape {
         if let override { return override }
-        // ★ QA 强制必须覆盖**全部五态**（之前只认 portrait/landscape，
-        // 于是 halfFold / fullBleed 在任何 QA 参数下都到不了，
-        // 这正是「每种形态都不对」里半折、宽屏两态完全不可达的原因）。
+        if let qa = qaShapeOverride() { return qa }
+        // 无 QA 强制：用页面层算好的本帧形态。它与 `body` 里的 `geoShape`
+        // 调的是同一个函数，只在入参来源上不同（见 `resolvedShape` 的注释）。
+        return resolvedShape
+    }
+
+    /// QA 强制形态（`-qaOneSkinColumn/Landscape/Wide/HalfFold`、`-qaOneShape`）。
+    ///
+    /// 全部五态都要覆盖 —— 曾经只认 column/split，导致 halfFold / fullBleed
+    /// 在任何 QA 参数下都不可达（「每种形态都不对」的一部分）。返回 `nil` 表示
+    /// 「没有任何 QA 强制」，形态由几何决定。
+    private func qaShapeOverride() -> OneSkinShape? {
         if UserDefaults.standard.bool(forKey: "qaOneSkinColumn") { return .column }
         if UserDefaults.standard.bool(forKey: "qaOneSkinLandscape") { return .split }
         if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
         if UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold") { return .halfFold }
-        // ⛔ 删掉 `portraitNow` 对形态的干预。
-        //
-        // 它是「屏幕上是否是竖持」的独立判断，与 `shape` 参数（父视图按容器宽高比
-        // 算出的形态）**不同源**。两者打架时，stage 用一套、控件用另一套，
-        // 就是「同帧里 ROOT 行 shape=fullBleed、stage 行 shape=split」的来源。
-        // 形态只信 `shape` 一个来源（它在 VideoDetailView 里已按容器宽高比算好）。
-        // ★ 直接读**传入参数** `shape`，不读镜像出来的 `shapeNow`。
-        //
-        // `shapeNow` 是 `onChange(of: shape)` 里写进来的 @State，读它意味着
-        // 「外部已变 → 先写 State → 下一次重排才生效」，**中间必然有一帧用旧形态排版**。
-        // 用户看到的「旋转后控件滞后一拍再跳过去」就是这个：几何已经承诺了新尺寸，
-        // 版面却还按旧形态排。
-        // `shape` 是 `let` 参数，随父视图传入即刻可见，没有这个时间差。
-        // `shapeNow` 只用于 QA 循环等必须覆盖外部值的场景（由 effectiveShape 之前的分支处理）。
-        return shape
+        // `-qaPage one-preview -qaOneShape <shape>` 也属于强制（由 QAHost 传进 `shape`）。
+        if UserDefaults.standard.string(forKey: "qaOneShape") != nil { return self.shape ?? .column }
+        return nil
     }
     /// 是否走横向双列。fullBleed（展开宽屏）是**竖持**，必须返回 false。
     ///
@@ -1462,18 +1529,37 @@ struct OneSkinStage: View {
     ///   按竖持给 669×951 会宽少 282、高多 282（16.4）。
     ///   所以这一支跟 `OneSkinGeometry.layoutLandscape` 用**同一个判据**：
     ///   屏幕实测宽 > 高。
-    /// 屏幕方向（1=横 / 0=竖 / -1=未知），由 `.onChange(of: OneSkin.fixedScreenSize())`
-    /// 维护。它**只用于触发重算**：转屏时 `geo.size` 要等 UIKit 动画结束（实测 520~840ms）
-    /// 才更新，而 `screen.bounds` 在动画**开始时**就变了。有了这个状态，
-    /// body 会在转屏当帧重跑，`geoShape` 里的「screen 预判」分支才来得及生效。
-    @State private var screenIsLandscapeNow: Bool?
-
-    private var stageIsLandscape: Bool {
+    /// 是否按「横」去取几何量。**不是形态判据**，只有两个消费点：
+    /// ① `stableBucket` 的分档开关（横持跳过 8pt 量化）；
+    /// ② `pictureColumn(landscape:)` 的入参。
+    ///
+    /// 非半折时直接等于形态（`fullBleed` / `column` 都是竖，`split` 才是横）。
+    ///
+    /// 半折是例外：它不是「横屏版式」（没有左右双列），但这里问的是
+    /// 「屏幕现在哪条边长」—— 机器转 90° 后半折，容器变 951×669，按竖持给
+    /// 669×951 会宽少 282、高多 282。
+    ///
+    /// ⛔ 半折分支的尺寸源必须是**本帧容器**（调用方传 `geo.size` / `box`），
+    ///    不是 `fixedScreenSize()`。后者读 `keyWindow.bounds`，在 Duo 上可能是
+    ///    物理屏值（678×466），而真实容器是 669×951 —— 判「哪条边长」会得到反的答案。
+    ///    原先这里写的正是 `OneSkin.fixedScreenSize()`，已按 RULES §二 改掉。
+    ///
+    /// ⚠️ 改成**接受参数**而不是读成员状态：读状态就得在 `body` 里写 `@State`，
+    ///    那是反馈环入口。现在每次求值都从入参现算，无状态、无环。
+    /// - Parameter containerSize: 本帧容器尺寸。**能拿到 `geo.size` 就传它**；
+    ///   `GeometryReader` 之外（`body` 第一段求值时还没有 `geo`）传 `nil`，
+    ///   此时回落到 `resolvedShape.isLandscape` —— 它的入参是 `layoutSize`
+    ///   （= `keyWindow.bounds`），与原实现读的 `fixedScreenSize()` **同源**，
+    ///   所以半折场景下取值不变（横持两种来源都报横、竖持都报竖）。
+    private func stageIsLandscape(_ containerSize: CGSize? = nil) -> Bool {
         let sh = shape()
         guard sh == .halfFold else { return sh.isLandscape }
-        let s = OneSkin.fixedScreenSize()
-        guard s.width > 1, s.height > 1 else { return false }
-        return s.width > s.height
+        // 半折才需要问「屏幕哪条边长」。拿不到本帧容器就问 `resolvedShape`
+        // （同源回落），退化帧（0 宽/0 高）也走回落 —— 它不构成方向事实。
+        guard let s = containerSize, s.width > 1, s.height > 1 else {
+            return resolvedShape.isLandscape
+        }
+        return OneSkinAxis.isLandscape(containerSize: s)
     }
 
     /// 本帧真正采用的几何快照。
@@ -1680,10 +1766,25 @@ struct OneSkinStage: View {
         // ★ 几何 = driver 缓存的离散快照（哔哩哔哩架构）。
         // 它只在「形态 / 折叠态 / 遮挡 / 屏幕尺寸」跨档时重算一次，
         // 且过三道幂等门；body 重算时**读的是缓存，不重新推导**。
-        // ⚠️ `proxy` 只用于 body 里少数读 `proxy.safeAreaInsets` 的地方；
-        // 真正参与排版的尺寸是 `stage(useAvail)` 的 `useAvail`（来自 GeometryReader）。
-        // 2026-11-12：`liveGeometry.box` 与 `geo.size` 实测会不一致
-        // （594x432 vs 678x466），所以 body 层不再用它做任何几何决策。
+        // ⚠️ 这个 `proxy` 的作用被**限定为两件**，别扩大：
+        //   ① 承载 `safeAreaInsets`（body 里少数读它的地方）；
+        //   ② 作为 `availableSize(proxy:screen:)` 的**钳制输入**，产出 `avail`，
+        //      而 `avail` 只出现在 `.frame` 的上限里（`min(…, avail.width/height)`）。
+        //
+        // ⛔ 2026-11-17 注释订正（原先这里写的是假的）：
+        //    旧注释说「2026-11-12：`liveGeometry.box` 与 `geo.size` 实测会不一致
+        //    （594x432 vs 678x466），所以 body 层不再用它做任何几何决策」。
+        //    这句与代码矛盾 —— `avail` **就是** `liveGeometry.box` 经
+        //    `availableSize` + `stableBucket` 的产物，并且确实参与了 `.frame` 上限。
+        //    实测同帧 `ROOT proxy=951x635 screen=951x669` 与
+        //    `SLOT content=951x669` 并存，两个数值不同，说明两条链不同源。
+        //
+        //    为什么不把它换成 `useAvail`（那样能顺带清掉一处禁用尺寸源）：
+        //    `avail` 与 `useAvail` 的**输入不同源**（前者=按形态整形的物理屏，
+        //    后者=本视图拿到的 `geo.size`，还额外过 `guardCollapse` + 8pt 桶 +
+        //    扣 `safeArea.bottom`），换成 `useAvail` 会改变 `.frame` 上限的取值，
+        //    也就是**改像素**。用户明令「不要改变现有的坐标和布局」，
+        //    所以此处保留原状，仅订正注释。列为已知偏离，下一轮单独立项。
         let proxySize = liveGeometry.box
         let proxy = OneSkinStageProxy(size: proxySize, safeAreaInsets: measuredSafeArea)
         // ★ 用**真实屏幕**而不是父容器。
@@ -1761,7 +1862,20 @@ struct OneSkinStage: View {
         //   geoDriver 已是离散缓存、横持无逐帧回灌边（A3 ①），去掉横持量化
         //   不会重引入自激环；竖持/外屏仍保留 8pt 桶吸抖。
         //   ⚠ 需真机复验「横切竖」瞬间是否有 3.79pt 台阶跳变。
-        let avail = stageIsLandscape ? rawAvail : OneSkin.stableBucket(rawAvail, step: 8)
+        // ⚠️ 已知偏离（2026-11-17 审查，本轮**不修**）：「要不要量化」由形态开关决定，
+        //    等于「横竖判定反向污染几何」，与 RULES §一「三信号各司其职」互为镜像的违规。
+        //
+        //    两条修法都会**改像素**，故均不采用：
+        //    ① 统一开桶 → 横持 951 floor 到 944，右栏凭空少 7pt（正立帧三段
+        //       467.667+55.333+428=951.000 被压成 944）；
+        //    ② 统一不桶 → 竖持 664/464 回到 669/466，且失去吸抖，
+        //       正是历史上「控件疯狂推移」的入口。
+        //
+        //    用户明令「不要改变现有的坐标和布局」，故保留原状，记为已知偏离，
+        //    下一轮单独立项（届时须真机验「横切竖 3.79pt 台阶」）。
+        // ⚠️ 此处**在 `GeometryReader` 之外**，`geo` 不可见（编译期会报
+        //    cannot find 'geo' in scope）。传 nil 走同源回落，见 `stageIsLandscape` 的注释。
+        let avail = stageIsLandscape() ? rawAvail : OneSkin.stableBucket(rawAvail, step: 8)
         // ⛔ 不要在这里「冻结尺寸」。
         //
         // 试过 `StableStageSize`：在 body 里读 `proxy.size`，喂给它，
@@ -1785,7 +1899,7 @@ struct OneSkinStage: View {
             let dt = ROOTRecomputeProbe.last > 0 ? Int((now - ROOTRecomputeProbe.last) * 1000) : -1
             ROOTRecomputeProbe.last = now
             // ★ 决定性探针：直接打印入参 shape（镜像 @State 已删）。
-            oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) shape=\(shape.logName) folded=\(foldedNow) portrait=\(portraitNow)")
+            oneSkinLog("ROOT #\(ROOTRecomputeProbe.n) dt=\(dt)ms proxy=\(Int(proxy.size.width))x\(Int(proxy.size.height)) screen=\(Int(screen.width))x\(Int(screen.height)) use=\(Int(avail.width))x\(Int(avail.height)) fs=\(fullScreenNow) qaShape=\(shape.map { $0.logName } ?? "nil") folded=\(foldedNow) portrait=\(portraitNow)")
         }()
         #endif
         // ★ 整页底色必须**单独一层、不跟着内容内缩**。
@@ -1827,132 +1941,40 @@ struct OneSkinStage: View {
         // 即它按**整屏 466** 排版（播放器满宽到状态栏），不扣安全区。
         // 我方按 379 排 ⇒ 视频只有 376 宽、x=0。
         GeometryReader { geo in
-            // ★★★ 2026-11-12 需求3：**形态判定下沉到这一层**，与渲染同源。
+            // ★★★ 形态判定的**唯一执行点**，与渲染同源。
             //
-            // 问题：上层 `VideoDetailView.oneSkinShape` 用 `layoutSize`(=keyWindow.bounds)
-            // 做判定，而真正排版用的是这里的 `geo.size`。Duo 内屏竖持时
-            // keyWindow 可能仍报横值（951×669），于是 ratio≥1.15 → 判成 split，
-            // 「展开竖屏」与「展开横屏」合并成同一形态 —— 用户报的正是这个。
+            // `geo.size` 就是这一帧系统真正分给本视图的空间，按它排出来的版式
+            // 一定装得下。形态由 `OneSkin.geoShape` 一次算出，`stage` 同帧使用，
+            // 不经任何 `@State` 中转（那会多等一轮，且可能出现「状态没变化」）。
             //
-            // 现在用 `geo.size`（这一帧真实容器）重新判一次，只覆盖**方向类**
-            // 判定（split / fullBleed / column）；halfFold 由折缝决定，不在此处推翻。
+            // 页面层（`VideoDetailView`）不再自己算形态，只透传 QA 覆盖。
             let _t0 = Date().timeIntervalSince1970
-            let geoShape: OneSkinShape = {
-                // ① QA 强制优先（无人值守验收用，必须原样尊重，不能被几何推翻）
-                if UserDefaults.standard.bool(forKey: "qaOneSkinColumn") { return .column }
-                if UserDefaults.standard.bool(forKey: "qaOneSkinLandscape") { return .split }
-                if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
-                if UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold") { return .halfFold }
-                // `-qaPage one-preview -qaOneShape <shape>` 也属于强制，
-                // 由 QAHost 直接传进 `shape`；此时**不要再按尺寸改判**。
-                if UserDefaults.standard.string(forKey: "qaOneShape") != nil { return shape }
-                // ② 半折由折缝决定，不按宽高比推翻
-                if shape == .halfFold { return .halfFold }
-                // ⛔⛔ **已删除「screen 预判」分支（2026-11-13，第二次推翻）。**
-                //
-                // 原逻辑：`screen.bounds` 在转屏动画开始时先变、`geo.size` 要等动画结束
-                // 才变，于是「两者方向不一致 ⇒ 以 screen 为准」，想让转屏当帧就切版式。
-                //
-                // 在 Duo 上这个前提是**错的**，而且后果是灾难性的：
-                // 真机日志（2026-11-13 12:2x，内屏横持、用户手上就是横的）
-                //   `GEOSRC geo=951x669 screen=669x951`   ← 容器横、screen 报竖
-                //   → 预判把形态翻成 `.fullBleed`（竖排版式）
-                //   → `stage size=944x664` 但 `pictureColumn shape=fullBleed`
-                //     （竖版的 664×944 版面塞进 951×669 的横容器）
-                //   → 内容比槽位高，整页被 SwiftUI 挤出屏幕，只剩海报底色
-                // 也就是说：**在 Duo 上 screen 与 geo 长期不一致，不是过渡帧。**
-                // `fixedScreenSize()` 读 keyWindow.bounds，折叠屏横持时它可能报
-                // 竖持尺寸（物理屏不随方向交换），这条信号根本不能当方向真源。
-                //
-                // 形态只信 **`geo.size`**：它就是要渲染的那个容器的真实尺寸，
-                // 按它排出来的版式一定装得下。代价是转屏晚一帧换版式 ——
-                // 一帧的延迟用户看不见，排错版式却是整页消失。
-                //
-                // ⛔ 不要再用 `screenIsLandscapeNow` 参与判定；它只用于
-                //    `.onChange(of: fixedScreenSize())` 触发一次重算。
-                let _ = screenIsLandscapeNow
-                // ③ 真实运行：按 One 的原始判据 —— **`w > h` 一次比较**。
-                //
-                // 依据（RULES.md §一，勿再推翻）：
-                //   One 的 `VideoDetailPage` 只有 `__pageSize: State<CGSize>` 一个尺寸源，
-                //   横竖 = `width > height`；没有阈值、没有宽高比、没有滞回。
-                //   证据：`One-1.7.1.interface.swift:1630/3271`，`LargeCanvas` 无像素字段。
-                //
-                // 下方「竖持再分 fullBleed / column」是**我方对 Duo 的扩展**
-                //   （One 没有「外屏 vs 内屏竖持」的区分，它靠 __division 判折缝）。
-                //   这里按短边分档，因为外屏 466 与内屏 669 的竖持版式确实不同。
-                // ★★★ 2026-11-13（红果案）：`w > h` 一次比较改成**带滞回的轴**。
-                //
-                // 为什么不是「一次比较」：
-                //   `geo.size` 是**本视图拿到的提议尺寸**。只要它有一帧被内容反推
-                //   （父级给 nil 提议 / 分支切换 / 推场动画），`w > h` 就会把整页
-                //   翻成竖版；竖版内容又是 669×951，于是**下一帧量到的还是竖**——
-                //   两个自洽状态，落进哪个就锁死在哪个。这正是「竖持正常、横持
-                //   出不来双栏」的形状（11-11 的证据图 2/3 逐像素相同就是它）。
-                //   源相关只是**触发概率**不同：红果 item 恒 noItem、`st=-1`，
-                //   页面长期停在不稳定重排态，更容易掉进竖版那个吸引子。
-                //
-                // 现在：明确横（宽 > 高 15%）与明确竖（高 > 宽 15%）各走各的，
-                // 中间 15% 的灰带才交给页面级离散判据（`shape`，来自 size class /
-                // 折痕 / 铰链，与 One 的 `LargeCanvas` 同源）。
-                // 灰带内**不可能**因为亚点尺寸差翻转 —— 断了「差 1pt 就换版式」的环。
-                let w = max(geo.size.width, 1)
-                let h = max(geo.size.height, 1)
-                // ★ 2026-11-13 第四轮：「打满」—— 不再只打输入，还要打**命中哪个分支**。
-                //   之前 SHAPEPICK 只给出 geo 尺寸，日志里看不出到底进了 w>h 还是灰带，
-                //   排查时只能靠人肉重算阈值。现在 via= 直接给出生效条件。
-                let picked: OneSkinShape
-                let via: String
-                let ratio = w / h
-                // ⛔ 塌陷帧（Duo 开合过渡里实测 84pt 宽）不许参与轴判定。
-                //
-                // 那一帧 `h > w*1.15` 必然成立，会把整页判成竖版单列，
-                // 与 stage 侧（被 `guardCollapse` 沿用成 951）直接错配 ——
-                // 正是「双栏帧按单列排」那类错配的老坑。
-                // 这种宽度在物理上不存在（最窄合拢外屏 466），
-                // 轴一律交回页面级离散判据。
-                if w < 240 {
-                    let _ = oneSkinLog("SHAPEPICK geo=\(Int(w))x\(Int(h)) 塌陷帧 → 用页面级 \(shape.logName)")
-                    return shape
-                }
-                if w > h * 1.15 {
-                    picked = .split
-                    via = "wide(\(String(format: "%.3f", ratio))≥1.15)"
-                } else if h > w * 1.15 {
-                    // ⛔ 竖持**一律单列**，不再按宽度分 `fullBleed`。
-                    //
-                    // 原来这里是 `w >= 500 ? .fullBleed : .column`，于是内屏竖持
-                    // （669 宽）走 `.fullBleed`：画面列按 664×0.5637 固定 374 高，
-                    // 而播放器窗口按 1.819 只有 271 高、居中在 y=103 ——
-                    // 外面 374 的海报虚化底 + 里面 271 的视频窗口，
-                    // 用户看到的就是「大的里面叠了一个小的」。
-                    //
-                    // One 的 `fullBleed` 本意是「展开宽屏出血」，那是给
-                    // **平板/更宽容器**的版式；Duo 内屏竖持 669 并不宽，
-                    // 用单列（画面在上、详情在下）才是手机竖持该有的样子。
-                    //
-                    // 实测日志（本机 941KB oneskin.log）：
-                    //   geo=669x951 → fullBleed  col=664x374 win=664x271 at=(0,103)
-                    //   geo=951x669 → split     （横持双栏，正确）
-                    //   geo=466x678 → column    （外屏，正确）
-                    picked = .column
-                    via = "tall(\(String(format: "%.3f", ratio))≤0.870)→column"
-                } else {
-                    picked = shape == .split ? .split : .column
-                    via = "gray(\(String(format: "%.3f", ratio)))page=\(shape.logName)"
-                }
-                if OneSkinProbeGate.allow("SHAPEPICK", value: "\(Int(w))x\(Int(h))\(via)") {
-                    let _ = oneSkinLog("SHAPEPICK geo=\(Int(w))x\(Int(h)) ratio=\(String(format: "%.3f", ratio)) "
-                        + "page=\(shape.logName) → \(picked.logName) via=\(via) "
-                        + "qa=[col=\(UserDefaults.standard.bool(forKey: "qaOneSkinColumn")) "
-                        + "land=\(UserDefaults.standard.bool(forKey: "qaOneSkinLandscape")) "
-                        + "wide=\(UserDefaults.standard.bool(forKey: "qaOneSkinWide")) "
-                        + "half=\(UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold")) "
-                        + "shape=\(UserDefaults.standard.string(forKey: "qaOneShape") ?? "-")]")
-                }
-                return picked
-            }()
-            let _ = oneSkinLog("BUILDMARK v20261113-1410-axis-hysteresis")
+            // ★★★ 形态 = 唯一函数 `OneSkin.geoShape`，本处只负责取入参。
+            //
+            // 判据收敛前后（2026-11-17）：
+            //   · 前：本处自带 `w > h*1.15` / `h > w*1.15` 双阈值 + 灰带回落 `shape`；
+            //         上层 `VideoDetailView.oneSkinShape` 另有一份 `ratio >= 1.15`。
+            //         两份入参不同源、阈值形式不同 → 真机同帧出现 `page=column axis=split`。
+            //   · 后：横竖 = `geo.size` 的 `w > h` 一次比较；半折 = 折缝/铰链；
+            //         页面层不再自己算形态（只透传 QA 覆盖）。
+            //
+            // QA 覆盖（`qaOneSkinColumn/Landscape/Wide/HalfFold`、`qaOneShape`）
+            // 全部在 `qaShapeOverride()` 里收口，不在这里散落。
+            let geoShape = OneSkin.geoShape(
+                containerSize: geo.size,
+                foldGap: foldGap,
+                hingePartiallyOpen: hingePartiallyOpen,
+                qaOverride: qaShapeOverride()
+            )
+            #if DEBUG
+            if OneSkinProbeGate.allow("SHAPEPICK", value: "\(Int(geo.size.width))x\(Int(geo.size.height))|\(geoShape.logName)") {
+                let _ = oneSkinLog("SHAPEPICK geo=\(Int(geo.size.width))x\(Int(geo.size.height)) "
+                    + "→ \(geoShape.logName) via=w>h "
+                    + "fold=\(foldGap.map { $0.isVertical ? "vertical" : "horizontal" } ?? "nil") "
+                    + "hinge=\(hingePartiallyOpen.map { $0 ? "halfOpen" : "flat" } ?? "-")")
+            }
+            #endif
+            let _ = oneSkinLog("BUILDMARK v20261117-rotation-purge")
             // ★★★ 轴判决单行摘要（红果案的决定性证据）。
             //
             // 一行同时给出：容器尺寸、页面级形态、本帧实际形态、全屏/折叠、
@@ -1963,7 +1985,7 @@ struct OneSkinStage: View {
             //   · `fs=true` 或 `folded=true` → 走的是「只画画面」分支，与源无关
             //   · `geo` 本身就是竖的 → 容器被页面方向锁按住了，不在几何层
             let _ = oneSkinLog("AXIS geo=\(Int(geo.size.width))x\(Int(geo.size.height)) "
-                + "page=\(shape.logName) axis=\(geoShape.logName) fs=\(fullScreenNow) "
+                + "page=\(shape.map { $0.logName } ?? "nil") axis=\(geoShape.logName) fs=\(fullScreenNow) "
                 + "folded=\(foldedNow) sess=\(session == nil ? "nil" : "ok") "
                 + "detail=\(detail == nil ? "nil" : "ok") eps=\(episodes.count)")
             // 探针：进到 stage 的 aspectRatio 到底是多少，以及 session 侧的现值。
@@ -1995,8 +2017,27 @@ struct OneSkinStage: View {
                     if let t = vts.first {
                         let n = t.naturalSize
                         var code = "?"
-                        if let fd = t.formatDescriptions.first {
-                            let sub = CMFormatDescriptionGetMediaSubType(fd as! CMFormatDescription)
+                        // ⛔ 先验类型再转，**不让 `as!` 面对未知类型**。
+                        //
+                        // `AVAssetTrack.formatDescriptions` 在 ObjC 头里是裸 `NSArray *`
+                        // （`AVAssetTrack.h:53`，无泛型），Swift 映射为 `[Any]`，
+                        // 元素**静态类型是 `Any`**。若某个源给出的元素不是
+                        // `CMFormatDescription`（少见但非不可能），对它做**强制转换**
+                        // 就是运行时 trap = `EXC_BREAKPOINT` / SIGTRAP ——
+                        // 与三份断言类崩溃的 signal 吻合。（改前那一行即此写法，已删。）
+                        //
+                        // 这是**探针代码**（VIDSRC 日志用），失败时只需退化成 "?"，
+                        // 没有任何理由让它有权把整个进程干掉。
+                        //
+                        // 写法说明：`CMFormatDescription` 是 CoreFoundation 类型，
+                        // Swift 不允许对它做 `as?`（编译报「conditional downcast to
+                        // CoreFoundation type will always succeed」）。CF 类型的标准
+                        // 做法是**先比 `CFGetTypeID`，再用 `unsafeBitCast`** ——
+                        // 类型 ID 已验明，转换在这个分支内是安全的。
+                        if let fd = t.formatDescriptions.first,
+                           CFGetTypeID(fd as CFTypeRef) == CMFormatDescriptionGetTypeID() {
+                            let desc = unsafeBitCast(fd as CFTypeRef, to: CMFormatDescription.self)
+                            let sub = CMFormatDescriptionGetMediaSubType(desc)
                             let b: [UInt8] = [UInt8((sub >> 24) & 0xFF), UInt8((sub >> 16) & 0xFF),
                                               UInt8((sub >> 8) & 0xFF), UInt8(sub & 0xFF)]
                             code = String(bytes: b, encoding: .ascii) ?? "?"
@@ -2043,7 +2084,8 @@ struct OneSkinStage: View {
                     + "→ keep=\(Int(guarded.width))x\(Int(guarded.height))")
             }
             #endif
-            let bucketed = stageIsLandscape ? guarded : OneSkin.stableBucket(guarded, step: 8)
+            // ⚠️ 同上：形态开关决定是否量化，属已知偏离，本轮不修（见 body 里那一处的说明）。
+            let bucketed = stageIsLandscape(geo.size) ? guarded : OneSkin.stableBucket(guarded, step: 8)
             // ★★ 根治（2026-11-13 第三轮）：`useAvail.height` 必须 = **槽位高**，
             //    不再用整屏高 669。真机铁证（fig-oneskin4.log 同一进程 origin 乱跳）：
             //      HSPLIT-C origin=0,0 / 0,673 / 0,266 / 0,491 / -475,-334
@@ -2059,13 +2101,55 @@ struct OneSkinStage: View {
             //    而 driver 的 `safeInsets` 读的是 `windows.first`（Duo 上拿到
             //    一个没有安全区的系统窗口，bottom 恒 0），所以 `box` 也恒等于整屏。
             //    这里直接用本视图量到的 `measuredSafeArea`（真机 = 34）。
+            // ⛔ R3-b：**高度也必须过退化帧闸**。原来只给宽度加了 `geo.size.width > 1`
+            //    保护，高度直接 `min(bucketed.height, geo.size.height)` —— 真机
+            //    `geo = 0x88` 时得 `min(910, 88) = 88`，再减去 safeArea 34 = **54**，
+            //    于是 `box = 0x54`（宽 0 × 高 54），双栏 HStack 拿到零宽容器 →
+            //    整页纯黑。日志实证 9 次 `useAvail=0x54`（`1290` 真机）。
+            //
+            //    同一帧里 `liveAvail` 已是正确的 951x669，说明尺寸本身没丢，
+            //    只是被这个 `min` 用退化帧的 88 压掉了 —— 所以退化帧必须退回
+            //    `bucketed`（上一级可信值），与宽度那条闸完全同口径。
+            // ⛔ R3-c：**`geo.size` 与 `bucketed` 差一个量级时，`geo` 不是「容器更矮」，
+            //    而是「还没量到」** —— 必须退回 `bucketed`。
+            //
+            // 真机实证（1292 探针 `SZCHAIN`，156 条）：
+            //   geo=0x40  guarded=466x678 bucketed=464x672  slotH=6   useAvail=464x6
+            //   geo=0x88  guarded=951x669 bucketed=951x669  slotH=54  useAvail=951x54
+            // `guarded`/`bucketed` 全对，只有 `slotH` 被 `geo` 压成了 6 / 54。
+            //
+            // 我上一版只挡了 `geo.size.height > 1`，而 88 > 1 成立 ⇒ 闸没拦住。
+            // 真实语义是：`geo` 报 88 而 `bucketed` 是 669，差的不是「容器矮了」
+            // （不可能一秒内从 669 塌到 88 还稳定渲染），而是**首帧容器还没布局**。
+            //
+            // 判据不能写绝对阈值（88 / 240 都只是这台设备的偶然值），
+            // 用**比例**：`geo` 小于 `bucketed` 的一半 ⇒ 认作未量到。
+            // 这样真机上任何形态（466 / 669 / 951）都适用，且不会误伤
+            // 「用户真的把窗口缩到一半」的正常路径（那也不可能缩到 0.5 以下还正常用）。
+            let geoCredibleW = geo.size.width > 1 && geo.size.width >= bucketed.width * 0.5
+            let geoCredibleH = geo.size.height > 1 && geo.size.height >= bucketed.height * 0.5
             let slotH = fullScreenNow
-                ? min(bucketed.height, geo.size.height)
-                : max(min(bucketed.height, geo.size.height) - max(measuredSafeArea.bottom, 0), 1)
-            let useAvail = CGSize(width: min(bucketed.width, geo.size.width),
+                ? (geoCredibleH ? min(bucketed.height, geo.size.height) : bucketed.height)
+                : max((geoCredibleH ? min(bucketed.height, geo.size.height) : bucketed.height)
+                      - max(measuredSafeArea.bottom, 0), 1)
+            // ⛔ R3：`geo.size.width` 为 0 时不能用它做上限。
+            //
+            // 真机首帧实测 `geo.size = 0x88`（`oneskin-device-1655.log` 共 9 帧），
+            // 此时 `min(bucketed.width=944, 0) = 0` → `box=0x54` → **整页零宽**，
+            // 用户看到的就是「进页面黑一下」。
+            // 退化帧不构成「容器更窄」这个事实，退回上一级可信值（`bucketed`），
+            // 与 `availableSize` 里已有的 `proxy.width > 1` 闸同一口径 ——
+            // 这不是新阈值，是把既有一致性补齐。
+            let useAvail = CGSize(width: geoCredibleW ? min(bucketed.width, geo.size.width)
+                                                      : bucketed.width,
                                   height: slotH)
             let _ = oneSkinLog("SLOT content=\(Int(min(bucketed.width, geo.size.width)))x\(Int(min(bucketed.height, geo.size.height))) slot=\(Int(min(useAvail.width, avail.width)))x\(Int(slotH)) safeB=\(Int(measuredSafeArea.bottom))")
             let _ = oneSkinLog("GEOSRC liveAvail=\(Int(liveAvail.width))x\(Int(liveAvail.height)) useAvail=\(Int(useAvail.width))x\(Int(useAvail.height)) geoShape=\(geoShape.logName)")
+            // ⛔ 临时探针（R3-c）：把 `guarded` / `bucketed` / `geo.size` / `slotH`
+            //    全部打出来。1291 上 `useAvail=0x54` 仍是 9 次，说明我上一版只修
+            //    `slotH` 没解决宽度那一维 —— 宽度到底来自 `bucketed` 还是 `geo.size`，
+            //    必须看数值，不能再读代码推断。
+            let _ = oneSkinLog("SZCHAIN geo=\(Int(geo.size.width))x\(Int(geo.size.height)) guarded=\(Int(guarded.width))x\(Int(guarded.height)) bucketed=\(Int(bucketed.width))x\(Int(bucketed.height)) slotH=\(Int(slotH)) useAvail=\(Int(useAvail.width))x\(Int(useAvail.height))")
             // ⛔ `ZStack` 必须**自己撑到 geo.size**，否则当它对 SwiftUI 报出
             // 「我不需要空间」（子视图全是绝对定位/忽略父级）时，父级会把本层
             // 压成 0×0，然后把一个 951×669 的内容**居中溢出**到屏幕外。
@@ -2426,9 +2510,11 @@ struct OneSkinStage: View {
         // 用 `fixedScreenSize()`（keyWindow.bounds，系统所有、静态量）而不是
         // 视图测量值：后者会被内容撑大，喂回去就是自激环。
         .onChange(of: OneSkin.fixedScreenSize()) { old, new in
-            // 转屏当帧就写入，驱动 body 重算（geo.size 此时还是旧值）。
-            let isLand = new.width > new.height
-            if screenIsLandscapeNow != isLand { screenIsLandscapeNow = isLand }
+            // ⛔ 原先这里还写 `screenIsLandscapeNow`，理由是「转屏当帧驱动 body 重算，
+            //    让 geoShape 的 screen 预判分支生效」。那个分支早已删除（screen 与 geo
+            //    在 Duo 上长期不一致，不是过渡帧），这个状态因此**写而不读**，
+            //    唯一效果是转屏时多跑一轮 body、而那一轮读到的 `geo.size` 还是旧值
+            //    （本行注释自己承认）—— 正是「转屏晚一帧/闪一下」的制造者。已删。
             guard OneSkinStageSize.isLayoutChange(from: old, to: new) else { return }
             geoDriver.screenDidChange()
             oneSkinLog("SCREEN -> \(Int(new.width))x\(Int(new.height))")
@@ -2792,7 +2878,7 @@ struct OneSkinStage: View {
                 let bottomH = max(box.height - topH, 1)
                 VStack(alignment: .center, spacing: 0) {
                     pictureColumn(CGSize(width: box.width, height: topH),
-                                  landscape: stageIsLandscape, edgeToEdge: true, ratioBase: ratio,
+                                  landscape: stageIsLandscape(size), edgeToEdge: true, ratioBase: ratio,
                                   fitMode: fitMode, shapeOverride: liveShape)
                         .frame(width: box.width, height: topH)
                     HalfFoldConsoleView(session: session,
@@ -2910,6 +2996,18 @@ struct OneSkinStage: View {
                             .onChange(of: p.size) { _, _ in let _ = oneSkinLog("HSPLIT-C \(desc)") }
                     }
                 )
+                // ★ 形态切换 = **视图树被替换**，不是同视图属性变化（t10）。
+                //
+                // 横持 HStack 与竖持 VStack 是**不同容器类型**、分处不同分支 ⇒
+                // SwiftUI 视图身份改变 ⇒ 旧树销毁、新树重建。
+                // `.animation(value:)` 只能补间同一视图的属性，对这种替换**结构性无效**
+                // —— 这正是 t9 那两行（pictureColumn/detailColumn 上的
+                // `.animation(.smooth(duration: 0.2), value: landscape)`）装完仍「跳一下」的原因。
+                //
+                // `transition` 才是为「插入/移除」设计的：旧树淡出、新树淡入，
+                // 把两套布局的位置差异用透明度遮住 —— 用户要的是「看不出跳」，
+                // 不是「看出在变」。
+                .transition(.opacity)
             } else {
                 // 竖屏单列：画面在上、详情在下。
                 // 详情列拿的是**剩余高度**，不是整屏高 ——
@@ -2940,8 +3038,24 @@ struct OneSkinStage: View {
                         .frame(width: box.width, height: max(box.height - picH, 1))
                 }
                 .background(childFrameProbe("column", picH: picH, detailH: max(box.height - picH, 1)))
+                // ★ 同横持分支：`transition` 而不是 `animation`（理由见横持那处长注释）。
+                .transition(.opacity)
             }
         }
+        // ★ 驱动点：挂在**包裹整条 if/else 链的那一层**（即 `Group` 之后），
+        //   这样分支切换时事务里带着动画，两个分支的 `.transition(.opacity)` 才会跑。
+        //
+        // `value:` 必须是 **`landscapeNow`**（`:2646` 的 `let`，`liveShape.isLandscape`，
+        // 只在形态真翻转时变一次），**不能**用 `shape()` / `effectiveShape` /
+        // `resolvedShape` —— 那些是计算属性，每次 body 求值都产出新值参与比较
+        // ⇒ 动画反复重启，正是 `:2341` 记录那次失败（dt 28–40ms → 9–14ms、
+        // 每秒 296 次 ROOT）的成因。
+        //
+        // ⚠️ `Group` 的 modifier 是**逐子视图**应用的（见下面 `.oneSkinOverlayOnce`
+        //    上方那段注释）。这里正是我们要的：每个子视图 = 一个分支，
+        //    各自带上「按 landscapeNow 起动画」的事务。切换时被移除的那个跑 removal、
+        //    被插入的那个跑 insertion。
+        .animation(.easeInOut(duration: 0.22), value: landscapeNow)
         // 底部胶囊条：必须在 stage **之上**单独一层。
         // 之前它写在 pictureColumn 的 ZStack 里，与 PlaybackView(UIViewRepresentable)
         // 同层且更早绘制 → UIKit 图层把它盖住，AX 树抓不到、点击全部落空。

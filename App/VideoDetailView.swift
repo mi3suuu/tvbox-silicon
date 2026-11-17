@@ -62,15 +62,6 @@ struct VideoDetailView: View {
     /// 用「偏离正中多少」反推必然把摊开误判成半折（P0-1）。
     /// `nil` = 系统没报；此时才退回几何判据。
     @State private var hingePartiallyOpen: Bool?
-    /// 上一次 `landscapeScreen` 判定出的**竖向态**（`true` = 上一次是竖持）。
-    /// 传给 `OneSkinShapeResolver.isLandscape(wasPortrait:)` 做滞回：
-    /// 保证 `portraitExit` 那个松阈值真的能被走到，转屏动画扫过临界点时形态不抖。
-    /// `nil` = 尚无上次结论（首次判定）。
-    ///
-    /// ⛔ 只在 `commitLandscapeHysteresis()` 里写，**绝不在 body 求值期间写**。
-    ///    （写法见 `resolvedLandscapeScreen()` 的注释：在计算属性里回写 @State
-    ///    就是「Modifying state during view update」，会让形状判据多跑一轮、来回翻。）
-    @State private var lastPortraitByRatio: Bool? = nil
     /// 详情页的选集抽屉开关。
     ///
     /// ⛔ **不能用 `store.showsEpisodes`**：那个键是上游全屏播放器
@@ -501,23 +492,6 @@ struct VideoDetailView: View {
         }
         #endif
         .safeAreaInset(edge: .bottom) { if !isWatchPage { loadingCard } }
-        // ★ 滞回状态的**唯一写入点**（P1-5）。
-        //
-        // `landscapeScreen` 原来是「计算属性里顺手回写 @State」，而它被
-        // `sideways` → `duoExpanded` → `oneSkinShape` 在**同一次 body 求值里**
-        // 反复调用，等于每次刷新都写状态：多余一轮 pass，滞回值还可能在
-        // 「读到旧值 → 写入新值」之间来回翻。
-        //
-        // 现在把写挪到 `onChange`：body 只读，事件到了才写。
-        // `layoutSize` 是 keyWindow.bounds（UIKit 所有），旋转/折叠时由系统
-        // **离散地**改一次（动画期间会连续经过若干中间值，`onChange` 每次都写，
-        // 但每次都是幂等判断 + 一次赋值，且形态判定本身有滞回带兜着）。
-        // `initial: true` 让页面第一次出现时也落一次，避免首帧没有历史值。
-        #if os(iOS)
-        .onChange(of: layoutSize, initial: true) { _, _ in
-            commitLandscapeHysteresis()
-        }
-        #endif
         .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
             #if os(iOS)
             // ★ iOS：**只读，绝不写状态**。布局尺寸由 `layoutSize` 纯派生，
@@ -530,7 +504,7 @@ struct VideoDetailView: View {
                       String(describing: sizeClass), String(describing: verticalSizeClass),
                       String(describing: duoExpanded), String(describing: landscapeScreen),
                       String(describing: portraitExpanded), sb.width, sb.height,
-                      String(describing: oneSkinShape))
+                      String(describing: oneSkinShapeResolved))
             }
             #endif
             // ⛔ 不再写 `liveContainerSize`。它会构成 frame→形态→frame 闭环。
@@ -541,12 +515,14 @@ struct VideoDetailView: View {
             // 建立 6 形态 × 全屏/非全屏 的实测矩阵，之后据此一次定案判据表。
             //
             // ★ 2026-11-13 第四轮：「打满」—— 不再需要 `qaLogPosture` 开关。
-            //   这一行是**形态判定的唯一入口证据**（页面级 `oneSkinShape` 就是
-            //   在这里被算出来的）；旧版要显式传 `-qaLogPosture 1` 才有输出，
+            //   这一行是**页面级形态的入口证据**（`oneSkinShapeResolved` 就是
+            //   在这里被求值的）；真正的版式形态在 `OneSkinStage` 内按 `geo.size`
+            //   现算（同帧），两者应当一致 —— 不一致就是本行最好的诊断线索。
+            //   旧版要显式传 `-qaLogPosture 1` 才有输出，
             //   而真机上用户只装包、不会带启动参数 —— 等于这行日志永远不存在。
             //   现在 DEBUG 下无条件打，用 gate 限流防刷爆。
             do {
-                let shapeName = oneSkinShape.logName
+                let shapeName = oneSkinShapeResolved.logName
                 if OneSkinProbeGate.allow(
                     "POSTURE",
                     value: "\(shapeName)|\(Int(size.width))x\(Int(size.height))"
@@ -758,6 +734,22 @@ struct VideoDetailView: View {
         }
         .onChange(of: choosingQuality) { _, open in if !open && !busy { loadingEpisode = nil } }
         #if os(iOS)
+        // ★ 从坞（迷你小窗）回到本页时，**必须复位全屏态**（2026-11-17）。
+        //
+        // 根因（③返回键 + ④左滑 同一个根因）：
+        //   `fullScreen` 是 `@AppStorage("watchFullScreen")` —— **持久化**的（见 :44 注释，
+        //   当初为了让状态跨页面身份重建存活才这么写）。于是「上次是全屏退出的」这件事
+        //   会跨会话留到下一次进页面：
+        //     · `watchPageExitButton`（:4280）的判据是 `if !fullScreen, oneSkinActive`
+        //        → 全屏残留时**返回键根本不画**（用户：「没有退出再返回的按钮」）；
+        //     · `SwipeBack.blocked = on`（下面那行）→ **左滑被禁**（用户：「进入后也要能左滑返回」）。
+        //
+        // 从坞点回来，用户的语义是「回到选集页继续看」，不是「恢复上次的全屏」。
+        // 所以进页即复位为 `false`，并把 `SwipeBack.blocked` 交给下面那条
+        // `onChange(initial: true)` 跟着归零。
+        //
+        // 只动 `fullScreen` 这一个布尔，**不碰任何坐标与版式常量**。
+        .onAppear { if fullScreen { fullScreen = false } }
         // 全屏时把**全局**左滑返回关掉。
         //
         // 全屏是沉浸态：左滑该由播放器自己解释（拖进度 / 手势），而不是把整页弹走。
@@ -1914,81 +1906,42 @@ struct VideoDetailView: View {
     /// full-bleed layout. The interface orientation is discrete and cannot sit at the width:height
     /// critical point during the unfold/rotate animation, so it is the stable signal that keeps the
     /// two unfolded shapes — landscape column vs portrait full-bleed — independent.
-    /// 是否横持（纯读，**不写任何状态**）。
+    /// 屏幕是否横持。**纯读 `interfaceOrientation`**，无阈值、无滞回、无历史。
     ///
-    /// ⛔ 原来这里是「计算属性里顺手回写 `lastPortraitByRatio`」的写法：
-    ///    `body` → `biliSkinBody` / `oneSkinTabReserve` / `splitsWatchPage`
-    ///    → `sideways` → 本属性 ⇒ **每次 body 求值都写一次 @State**。
-    ///    SwiftUI 下那是「Modifying state during view update」：额外一轮 pass，
-    ///    状态还可能被丢弃；而 `oneSkinShape` 在同一次 body 里要被求值好几次，
-    ///    于是滞回值来回翻 —— 转屏时形态抖、控件跳的其中一个来源。
+    /// ## 与 `OneSkin.geoShape` 的分工（别再把两者混成一件事）
     ///
-    /// 现在拆成两半：
-    ///   · 本函数（及 `landscapeScreen`）**只读**：窗口 + 界面方向 + 上一次结论；
-    ///   · 回写落在 `commitLandscapeHysteresis()`，只由**离散事件**
-    ///     （窗口尺寸变化 / 页面出现）调用，见 `body` 上的 `.onChange(of: layoutSize)`。
-    private func resolvedLandscapeScreen() -> Bool {
-        // ⛔ `interfaceOrientation` 在 **Duo 内屏竖持**时不可靠：实测报 `.landscapeLeft`，
-        //    而同一时刻窗口实际是 669×780（竖的）。
-        //
-        // 这个假值往下游传染得很远：
-        //   · `sideways = duoExpanded && landscapeScreen` → 展开竖持被判成「展开横屏」；
-        //   · `layoutSize` 按它交换宽高 → 排版基准算成 951×669；
-        //   · 三栏按 951 分（左列 507 + 间隙 + 右栏 427）铺到 669 宽上 → **横向溢出 282pt**，
-        //     右栏被推出屏幕 —— 用户报的「展开竖屏时整页推移、右边被切掉」。
-        //     （实测日志：`ROOT proxy=669x780` 与 `stage box=951x669` 同时出现。）
-        //
-        // 修法：方向信号与**窗口实际比例**不一致时，以窗口为准。
-        //
-        // ⛔ 这里读的是 `window.bounds`，**不是** SwiftUI 的 `proxy.size`：
-        //    后者是本视图布局的输出，拿它回写布局基准就构成自反馈环
-        //    （`layoutSize` 的注释里记的那次「右侧浅色列不断往左推进」）。
-        //    `window.bounds` 归 UIKit 所有，只随系统的旋转/折叠变化，不会被我们的重排带着走。
-        let declared: Bool = {
-            switch UIApplication.shared.appWindowScene?.interfaceOrientation {
-            case .landscapeLeft, .landscapeRight: return true
-            default: return false
-            }
-        }()
-        // 只有「摊开的大屏」才做这个校正 —— 手机横持与外屏行为原样不动。
-        //
-        // ⛔ 这里**不能**用 `duoExpanded` 当门：它读 `containerWidth`，
-        //    而 `containerWidth` ← `layoutSize` ← `landscapeScreen` ← 本函数 —— 构成计算环。
-        //    改判「窗口短边是否够大」：Duo 内屏 669、iPad 744+，都远大于阈值；
-        //    外屏 466、iPhone 393 都小于它。这个量只来自 UIKit 的窗口，与我们的布局无关。
-        let window = UIApplication.shared.appWindowScene?.keyWindow?.bounds.size
-            ?? UIApplication.shared.appScreenBounds.size
-        // ⛔ 判「大屏」用**长边**，不是短边。
-        //
-        // 原代码 `min(w,h) > 600` 在真机 Duo 上恒为 false：
-        //   keyWindow.bounds = 678×466（物理屏）→ min = 466 < 600
-        //   ⇒ guard 直接 return declared，`OneSkinShapeResolver` **从未执行**，
-        //     滞回完全失效，形态只能靠 interfaceOrientation（内屏不可靠）——
-        //     这就是「双页判不出来、永远单页」的最后一环。
-        //
-        // 内屏容器实测 672×492 / 594×688，短边 492/594 也 < 600，
-        // 所以无论用物理屏还是容器，短边阈值都不成立。改用**长边**：
-        //   内屏 678/688 > 600 ✓   外屏 466/492 < 600 ✗   iPhone 852 > 600 ✓
-        // 手机 iPhone 竖持长边 852 也会进这个分支，但 `isLargeScreen` 只是
-        // 「允许做容器校正」的开关，普通手机容器宽高比远离阈值，不会被改写。
-        let isLargeScreen = max(window.width, window.height) > 600
-        guard isLargeScreen else { return declared }
-        return OneSkinShapeResolver.isLandscape(declaredIsLandscape: declared,
-                                                containerSize: window,
-                                                wasPortrait: lastPortraitByRatio,
-                                                isLargeScreen: true)
-    }
-
-    private var landscapeScreen: Bool { resolvedLandscapeScreen() }
-
-    /// 把这次判定结果落进滞回状态，供**下一次**判定用。
+    /// - **本属性答的是「屏幕声明朝哪」**，只服务三件事：
+    ///   ① `sideways`（决定控制栏摆右侧竖排还是底部）；
+    ///   ② 转屏键往哪个方向反（`onRotate`）；
+    ///   ③ 让位量选竖/横那一条。
+    ///   **它不决定版式。** 版式一律由 `OneSkin.geoShape(geo.size)` 在同帧算出。
     ///
-    /// 只由离散事件调用（窗口尺寸变化 / 页面出现），不在 body 求值里跑。
-    /// 幂等：值没变就不写，不会自激。
-    private func commitLandscapeHysteresis() {
-        let nextPortrait = !resolvedLandscapeScreen()
-        guard lastPortraitByRatio != nextPortrait else { return }
-        lastPortraitByRatio = nextPortrait
+    /// - **`geoShape` 答的是「这一帧容器是什么形状」**，那才是横竖的唯一判据。
+    ///
+    /// ## 为什么删掉了「大屏校正 + 滞回」
+    ///
+    /// 旧实现在这里做了 `isLargeScreen = max(w,h) > 600` 门 + 调
+    /// `OneSkinShapeResolver.isLandscape(wasPortrait:)`，用
+    /// `portraitEnter=1.15` / `portraitExit=1.05` 两个阈值做滞回。
+    /// 三层问题叠在一起：
+    ///
+    /// 1. **阈值替代了一次比较** —— 判据从 `w > h` 变成 `h/w` 与两个常数比较；
+    /// 2. **`wasPortrait` 让判定带记忆** —— 同一尺寸有两个合法答案，取哪个由历史决定；
+    /// 3. **写入源是 `keyWindow.bounds`** —— 既是连续量（动画每帧都变，
+    ///    `onChange` 每帧触发），又是不可靠的方向信号（Duo 内屏竖持仍可能报横值），
+    ///    写错之后纠正需要「更极端」的尺寸，而动画已结束 ⇒ **错误跨帧永久保留**。
+    ///
+    /// 现在只留 `interfaceOrientation` 这一个离散信号：它不会停在临界点上，
+    /// 也不会把「上一帧的结论」掺进来。
+    ///
+    /// ⛔ `interfaceOrientation` 在 Duo 内屏竖持时**确实可能报 `.landscapeLeft`**。
+    ///    这不影响正确性，因为**它不再决定版式** —— 版式由 `geo.size` 判。
+    ///    它只影响控制栏摆哪条边，而那种情况下的观感代价远小于「整页按错误形态重排」。
+    private var landscapeScreen: Bool {
+        switch UIApplication.shared.appWindowScene?.interfaceOrientation {
+        case .landscapeLeft, .landscapeRight: return true
+        default: return false
+        }
     }
     /// [mi3s] 二开：Duo 摊开后默认**留在竖屏**（单列：画面在上、详情与选集在下）。
     /// 想看双列就把设备转横 —— 不再一展开就强制横屏。
@@ -2246,104 +2199,75 @@ struct VideoDetailView: View {
     /// 分不开、控件坐标每帧漂移。`sideways` 只看 `interfaceOrientation`
     /// （离散）、`duoExpanded` / `landscapePage` 只看 size class（离散），
     /// 形态一旦定下就不会因亚点尺寸变化而抖动。
-    private var oneSkinShape: OneSkinShape {
+    /// **QA 强制形态覆盖**。`nil` = 没有任何覆盖，形态由 `OneSkin.geoShape` 决定。
+    ///
+    /// ## 这个属性为什么不再「算形态」
+    ///
+    /// 它原先是**页面级形态判据**：读 `layoutSize`（= `keyWindow.bounds`），
+    /// 用 `ratio >= 1.15` 判横竖，再叠 `duoExpanded` / `hingePartiallyOpen` /
+    /// `foldGap` 判半折。而 `OneSkinStage` 的 `body` 里还有一份按 `geo.size`
+    /// 算的 `geoShape`（用 `w > h*1.15` / `h > w*1.15` + 灰带回落）。两份并存时：
+    ///
+    /// - **入参不同源**：`keyWindow.bounds` 在 Duo 上可能是物理屏值（678×466），
+    ///   而真实容器是 669×951；
+    /// - **阈值形式不同**：一个 `ratio >= 1.15`，一个双阈值 + 灰带交还；
+    /// - **裁决权不唯一**：axis 在灰带把形态交还 page ⇒ `f(size)` 退化成
+    ///   `f(size, page)`，正是滞留的结构。
+    ///
+    /// 真机日志实测同帧出现 `page=column axis=split`（22 次）、
+    /// `page=split axis=fullBleed/column`（15 + 12 次），随后几秒闪退。
+    ///
+    /// ## 现在的契约（A′）
+    ///
+    /// 形态**唯一真源** = `OneSkin.geoShape(containerSize: geo.size, …)`，
+    /// 在 `OneSkinStage.body` 里同帧算出并直接传给 `stage`。
+    /// 本属性只回答「QA 参数有没有强制指定」，无覆盖一律返回 `nil`。
+    ///
+    /// ⛔ 不要在这里重新引入任何 `ratio` / `w > h` 判断 ——
+    ///    那会立刻恢复「两份判据」。要读取形态的调用点请调
+    ///    `OneSkin.geoShape(...)` 或读 `oneSkinShapeResolved`。
+    private var oneSkinShape: OneSkinShape? {
         #if DEBUG
-        // QA 覆盖：强制指定形态，用于无人值守验收。
-        // ★ 这里必须覆盖**全部五态** —— 之前只认 wide/sideways，
-        // 而 `effectiveShape` 又只认 column/split，导致 halfFold/fullBleed
-        // 这两态在任何 QA 参数下都无法抵达（「每种形态都不对」的一部分）。
         if UserDefaults.standard.bool(forKey: "qaOneSkinWide") { return .fullBleed }
         if UserDefaults.standard.bool(forKey: "qaOneSkinSideways") { return .split }
+        if UserDefaults.standard.bool(forKey: "qaOneSkinLandscape") { return .split }
         if UserDefaults.standard.bool(forKey: "qaOneSkinHalfFold") { return .halfFold }
         if UserDefaults.standard.bool(forKey: "qaOneSkinColumn") { return .column }
-        #endif
-        // ★ 半折优先：横向折痕落在容器中部 = 书本 / 帐篷，是第五态。
-        //
-        // 判据来自系统给的 division 矩形（`FoldGap.horizontalBand`）：
-        // 横带中心落在容器 25%–75% 之间才算半折 —— 贴顶/贴底的横带
-        // 是状态栏或手势条，不是折痕，不能误判。
-        // 这一支必须排在 duoExpanded 之前：半折时 size class 仍报 regular，
-        // 若先走 duoExpanded 会被当成「摊开竖持」，画面铺满整屏而控制台丢失。
-        // ★ 判据单一来源：**容器宽高比**（离散比例分桶）。
-        //
-        // 之前用 sizeClass + containerWidth>600 + interfaceOrientation 三路推断，
-        // 其中两路在 Duo 上不可靠：
-        //   · Duo 内屏横持实际报 `regular × regular`（sizeClass 不翻转）；
-        //   · `interfaceOrientation` 在内屏恒报 landscape（假值）。
-        // 容器宽高比是**这一帧真正可用的几何事实**，无需任何设备信号推断，
-        // 也不会因为 size class 抖动而翻转（配合 8pt 分桶）。
-        let w = max(layoutSize.width, 1)
-        let h = max(layoutSize.height, 1)
-        let ratio = w / h
-
-        // 半折：折缝把容器分成两半。**两种方向都要认**。
-        //
-        // ★★ P0-1：判据顺序必须是「铰链状态 → 几何」。
-        //
-        // 铰链状态（`DeviceHinge.status`，iOS 27.1+）是**权威**的：
-        //   closed / partiallyOpen / fullyOpen 三档，
-        //   半折 ⟺ partiallyOpen，摊开 ⟺ fullyOpen。没有中间解释空间。
-        //
-        // 而折缝**位置**不是判据：代码自己记录的摊开态实测中心比就有
-        //   0.600 / 0.554 / 0.507 三种（斜着拿、手挡住一部分都会变）。
-        // 原来写 `abs(centerRatio - 0.5) > 0.06` 判半折 —— 0.554 和 0.600
-        // 都 > 0.06，于是**摊开竖屏被直接判成半折**：上下两个物理半屏，
-        // 详情和选集整块消失，胶囊条还按另一套假设落位。这是单点影响最大的一个。
-        //
-        // 现在：铰链报了就用铰链；铰链没报（旧系统 / 非折叠设备）才退回几何，
-        // 而且退回时阈值放到 15% —— 宁可把「极端的半折」漏成双列，
-        // 也不能把「正常的摊开」误判成半折（后者会让整页内容消失）。
-        if let hingePartiallyOpen {
-            if hingePartiallyOpen { return .halfFold }
-            // fullyOpen / closed：明确不是半折，跳过下面所有折缝偏移猜测。
-        } else {
-            // 铰链不可用 → 几何兜底（阈值 0.15，理由见上）。
-            if let foldGap, foldGap.width > 0 {
-                let foldCenterRatio = foldGap.centerX / max(w, 1)
-                if abs(foldCenterRatio - 0.5) > 0.15 { return .halfFold }
+        if let s = UserDefaults.standard.string(forKey: "qaOneShape") {
+            switch s {
+            case "split": return .split
+            case "fullBleed": return .fullBleed
+            case "halfFold": return .halfFold
+            default: return .column
             }
         }
-        // 横折缝（书本/帐篷趴着）：折缝确实是**横穿中部**的带。
-        // 这条只在铰链不可用时才算数 —— 铰链明确说 fullyOpen 就别再猜了。
-        if hingePartiallyOpen == nil,
-           let horizontalFold, horizontalFold.splitsContainer(h) {
-            return .halfFold
-        }
+        #endif
+        return nil
+    }
 
-        // 宽高比 ≥ 1.15 → 横向容器：左右双列。
-        // 不区分「Duo 摊开」还是「手机横持」—— 对排版来说二者只需不同列数，
-        // 差异（内屏要不要右让位）交给几何层的 `shape.isLandscape` 处理。
-        // ★ 判据改严：双页横屏 vs 单页竖屏必须靠**宽高比 + 绝对宽**双条件分开。
-        //
-        // 实测（真机 Duo）：
-        //   双页横屏态 container = 672×492  ratio 1.37  → split
-        //   单页竖屏态 container = 594×688  ratio 0.86  → 非 split
-        // ratio 1.15 这条线本身够用；真正丢判据的是下面那条「w>=500 → fullBleed」，
-        // 它把「内屏竖持」和「外屏竖持」混成同一个 fullBleed，
-        // 于是双页/单页两态看起来一样。改为按**容器宽**区分三档。
-        if ratio >= 1.15 { return .split }
-
-        // 竖持分支：按容器宽度分两档，不再混成一档。
-        //   · 内屏竖持：容器宽 ≈ 594（≥500）→ 宽屏变体，画面全出血 + 详情抽屉
-        //   · 外屏/手机竖持：容器宽 ≈ 466（<500）→ 标准单列
-        if ratio < 1.15 {
-            // ⛔ 竖持一律单列，**不再按宽度分 fullBleed**。
-            //
-            // 这一行必须与 `OneSkin.geoShape` 里的同名判据**完全一致** ——
-            // 两处各写一份是历史遗留，改一处不改另一处会让「页面级形态」与
-            // 「本帧实际形态」打架：
-            //   · 页面级说 fullBleed（内屏竖持 669 宽），
-            //   · geoShape 说 column（已改），
-            //   两者不同 → stage 按 column 排、控件按 fullBleed 定位，
-            //   每帧重排且几何互相矛盾（真机日志实测 `page=column axis=split`
-            //   同时出现，随后几秒闪退）。
-            //
-            // 用户要求：「竖持播放正常、横持转竖持要回到单栏」。
-            // `fullBleed`（全出血 + 抽屉）只保留给 QA 与真正的宽容器。
-            return .column
-        }
-
-        return .column
+    /// 本帧形态，**供非版式消费端**（选分支 / 往哪转 / 让位量选哪条）读取。
+    ///
+    /// 版式本身不读它 —— `OneSkinStage` 内部用自己的 `geo.size` 现算，同帧生效。
+    ///
+    /// ## §二 的例外（captain 裁定 R1）
+    ///
+    /// 入参用 `layoutSize`（= `keyWindow.bounds`），因为本视图**拿不到 `geo.size`**
+    /// （那是 `OneSkinStage` 内部 `GeometryReader` 的）。RULES §二 禁止把
+    /// `keyWindow.bounds` 用于**版式**判定；此处只做三件事，都不是版式：
+    ///
+    /// 1. 选哪个渲染分支（`splitsWatchPage` / `biliSkinBody`）；
+    /// 2. 转屏键往哪个方向反（`onRotate`）；
+    /// 3. 让位量选竖/横那一条（`oneSkinTabReserve`）。
+    ///
+    /// ⛔ 不得据此计算任何坐标或尺寸。版式一律由 `OneSkinStage` 内的 `geo.size` 决定。
+    ///
+    /// ⛔ 也**不得**把它回调写成 `@State` 再喂回去 —— 那正是「量到值写 State」
+    ///    的反馈环形态（本项目历史上「控件疯狂推移」的根因）。
+    private var oneSkinShapeResolved: OneSkinShape {
+        OneSkin.geoShape(containerSize: layoutSize,
+                         foldGap: foldGap,
+                         hingePartiallyOpen: hingePartiallyOpen,
+                         qaOverride: oneSkinShape)
     }
 
     @AppStorage(OneSkin.enabledKey) private var oneSkinEnabled = true  // [临时验证] 默认开，QA 参数传不进 Fig-clone
@@ -3490,7 +3414,7 @@ struct VideoDetailView: View {
                 // 哔哩哔哩皮肤自己的 PiP 实例：画面层据此登记内容源。
                 pip: biliPip
             )
-        } else if oneSkinShape == .split {
+        } else if oneSkinShapeResolved == .split {
             BiliLandscapePage(
                 video: video,
                 session: oneSkinStageSession,
@@ -3653,7 +3577,13 @@ struct VideoDetailView: View {
                 sourceRatio: oneSkinLiveAspect ?? playerAspectRatio
             ),
             // 探针由 OneSkinStage 内部读 aspectRatio 打，见 ASPECTDBG。
+            // ⛔ A′：只承接 **QA 覆盖**，无覆盖传 nil。
+            //    形态由 `OneSkinStage.body` 用 `geo.size` 现算，同帧生效。
             shape: oneSkinShape,
+            // 页面层预算的形态：只给 `GeometryReader` 之外那几处
+            // （`liveGeometry` / `proxySize`）用，版式分支不读它。
+            // 与 Stage 内的 `geoShape` 调同一个函数，四条真机尺寸恒等。
+            resolvedShape: oneSkinShapeResolved,
             stageDiag: oneSkinStageDiag,
             // 遮挡（四边）：唯一消费端是几何层（`box` 扣边），见 16.1。
             // 位置必须紧跟 `shape`（声明次序），否则 memberwise init 参数错位。
@@ -3809,9 +3739,11 @@ struct VideoDetailView: View {
                 //    外屏是普通 iPhone 语义，那条路上这个信号是对的 —— 所以这个 bug
                 //    只在展开后出现，很难联想到这里。
                 //
-                // 现在：横竖只认 `oneSkinShape`（`.split` 即横持，其余为竖持），
-                // 与版面、控制栏配置用的是**同一个**形态真源。
-                let nowLandscape = (oneSkinShape == .split)
+                // 现在：横竖只认 `oneSkinShapeResolved`（`.split` 即横持）。
+                // 它就是 `OneSkin.geoShape` 的输出，与 `OneSkinStage` 内部
+                // 版式用的是**同一个函数**（入参不同源，见该属性的 R1 注释）。
+                // 此处只决定「往哪转」，不参与任何坐标计算。
+                let nowLandscape = (oneSkinShapeResolved == .split)
                 PlayerOrientation.set(landscape: !nowLandscape)
             },
             onMiniPlayer: {

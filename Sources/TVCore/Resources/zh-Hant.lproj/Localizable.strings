@@ -542,6 +542,7 @@
 "Waiting" = "等待中";
 "Finishing…" = "正在完成…";
 "Paused" = "已暫停";
+"Parked" = "已掛起";
 "Download failed" = "下載失敗";
 "1 episode" = "1 集";
 "%lld episodes" = "%lld 集";

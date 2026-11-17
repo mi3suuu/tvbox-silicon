@@ -164,6 +164,14 @@ import TVCore
     /// 但存档时必须知道，否则「记住坐标」无从谈起。
     var lastKnownOffset: CGSize = .zero
 
+    /// 它是**因为超出解码预算**被暂停的，而不是用户按的暂停。
+    ///
+    /// ⛔ 没有这一笔，20 个窗就是「点一下切过去，停在一帧上」：
+    ///    `applyMuting` 把超预算的 `rate = 0`，用户再点回来时它在预算内了，
+    ///    但**没有人会替他把播放续上**（他并没按过暂停，可 `rate` 已经是 0）。
+    ///    有了它，回到预算内就续播；用户自己按的暂停不会被误续。
+    var parkedWhilePlaying = false
+
     /// 海报地址（管理器列表的缩略图）。云文件/直播没有作品，返回 nil 由调用方兜底。
     var posterURL: URL? { video?.poster }
     var posterHeaders: [String: String] { video?.posterHeaders ?? [:] }
@@ -606,20 +614,33 @@ import TVCore
     func applyMuting() {
         let policy = DockAudioPolicy.current
         let count = tasks.count
-        // 解码预算：`decoding == dock` 时全部同时解码（用户 2026-11-16 明确要求）。
+        // 解码预算：`PlaybackCapacity.decoding`（按机型 4–8 路），其余**挂起**。
         //
-        // 预算仍留在这里而不是删掉，是为了保留一个**可下调的旋钮**：
-        // 真机上 8 路同时解码若出现整体卡顿，把 `PlaybackCapacity.decoding` 调小即可
-        // 回到「超出预算的那几路暂停」，不需要动这条链路。
+        // ⛔ 2026-11-17：卡片上限涨到 20，但「解码 = 卡片」在 20 时**做不到** ——
+        //    iOS 同时能开的视频解码会话有硬上限，超了不是卡，是有些窗永远黑屏。
+        //    所以 20 张卡里只有最近点过的那 `decoding` 路在解，其余：
+        //      · `rate = 0`（不再解码，省解码器与带宽）；
+        //      · 画面层让出 `AVPlayer`（`DockPlayerLayer` 按 `suspended` 置 nil），
+        //        卡片下露出海报 + 「已挂起」角标 —— 用户看到的是一部挂着的剧，不是黑玻璃。
         //
         // ⛔ 只暂停**正在播**的，不动本来就已经暂停的：
         //    用户手动暂停的那一路不该被我们「恢复」成播放。
+        //    所以挂起时记一笔「它本来在播」，回到预算内再替用户续上。
         let decoding = DockDecodingBudget.decodeSet(order: tasks.map(\.id),
                                                     budget: PlaybackCapacity.decoding)
+        // 前台增强要靠这个数决定让不让路（见 `EnhancementBudget`）。
+        PlaybackLoad.shared.setDockDecoding(decoding.count)
         for (index, task) in tasks.enumerated() {
             let overBudget = !decoding.contains(task.id)
-            if overBudget, task.session.player.rate != 0 {
-                task.session.player.rate = 0
+            if overBudget {
+                if task.session.player.rate != 0 {
+                    task.parkedWhilePlaying = true
+                    task.session.player.rate = 0
+                }
+            } else if task.parkedWhilePlaying {
+                // 回到预算内：用户刚点了它，就该接着放（而不是停在一帧上等他自己按播放）。
+                task.parkedWhilePlaying = false
+                task.session.player.play()
             }
             let output = policy.output(isActive: task.id == activeTaskID,
                                        taskIndex: index, taskCount: count,
@@ -1124,22 +1145,29 @@ private struct DockVideoLayerBox: View, Equatable {
     let gravity: AVLayerVideoGravity
     let pip: PictureInPicture?
     let coveredByForeground: Bool
+    /// 超出解码预算被挂起：画面层必须**让出** `AVPlayer`。
+    ///
+    /// 这不只是省解码器：`AVPlayerLayer` 一旦持续绑着一个被 `rate = 0` 的 player，
+    /// 它会把最后一帧冻在那儿 —— 20 个窗就是 20 块冻住的画面，
+    /// 用户分不清「挂起」和「卡死」。让出去之后露出下面的海报，语义就对了。
+    let suspended: Bool
     let width: CGFloat
     let height: CGFloat
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        // 只比较影响画面的四项 + 尺寸。`player` 是引用，比对象身份即可。
+        // 只比较影响画面的五项 + 尺寸。`player` 是引用，比对象身份即可。
         lhs.player === rhs.player
             && lhs.gravity == rhs.gravity
             && lhs.pip === rhs.pip
             && lhs.coveredByForeground == rhs.coveredByForeground
+            && lhs.suspended == rhs.suspended
             && lhs.width == rhs.width
             && lhs.height == rhs.height
     }
 
     var body: some View {
         DockPlayerLayer(player: player, gravity: gravity, pip: pip,
-                        coveredByForeground: coveredByForeground)
+                        coveredByForeground: coveredByForeground, suspended: suspended)
     }
 }
 
@@ -1150,6 +1178,8 @@ private struct DockPlayerLayer: UIViewRepresentable {
     let pip: PictureInPicture?
     /// 前台观看页（或全屏播放器）正在演 —— 这时坞里的画面必须完全让出 player。
     var coveredByForeground: Bool = false
+    /// 超出解码预算被挂起 —— 同上，必须让出。
+    var suspended: Bool = false
 
     final class LayerView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -1185,7 +1215,7 @@ private struct DockPlayerLayer: UIViewRepresentable {
         //      这时坞里挂着但看不见，绑着 player 只会抢画面。
         let yieldsToPiP = !(pip?.shouldRender(view.playerLayer) ?? true)
         let yieldsToForeground = coveredByForeground
-        let target: AVPlayer? = (yieldsToPiP || yieldsToForeground) ? nil : player
+        let target: AVPlayer? = (yieldsToPiP || yieldsToForeground || suspended) ? nil : player
         if view.playerLayer.player !== target { view.playerLayer.player = target }
     }
 }
@@ -1220,6 +1250,15 @@ struct VideoTaskCard: View {
     /// **图标说的和听到的不是一回事**，因为两处口径分叉。
     var taskIndex: Int = 0
     var taskCount: Int = 1
+
+    /// 这一张是否**超出解码预算被挂起**。
+    ///
+    /// 判据只在 `DockDecodingBudget` 一处（`isSuspended(index:budget:)`）：
+    /// 卡片位置与 `tasks` 同序，`applyMuting` 用的也是同一个预算，
+    /// 所以「卡片显示挂起」与「player 真的被 rate=0」不会分叉。
+    private var isSuspended: Bool {
+        DockDecodingBudget.isSuspended(index: taskIndex, budget: PlaybackCapacity.decoding)
+    }
 
     /// 画面区容器。拖动已上移到摆放层（`DockPlacedCard`），这里只负责命中形状。
     @ViewBuilder private func dragSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -1417,6 +1456,7 @@ struct VideoTaskCard: View {
                               gravity: gravity,
                               pip: isActive ? pip : nil,
                               coveredByForeground: coveredByForeground,
+                              suspended: isSuspended,
                               width: scaledWidth, height: height)
                 .equatable()
                 .frame(width: scaledWidth, height: height)
@@ -1425,6 +1465,33 @@ struct VideoTaskCard: View {
                     // 加载中：黑底 + 转圈，别让用户对着一张纯黑卡片判断「是不是卡死了」。
                     if task.isLoading {
                         ZStack { Color.black; ProgressView().tint(.white) }
+                    }
+                }
+                .overlay {
+                    // 超出解码预算被挂起：画面层已让出 player，这里补一张海报 + 角标。
+                    //
+                    // ⛔ 为什么必须补海报：20 个窗里只有 8 路在解，其余 12 路如果只有
+                    //    一块 `Color.black`，用户看到的是「12 个窗全废了」——
+                    //    而真实状态是「挂着的剧，点一下就接上」。差别全在这张图上。
+                    if isSuspended {
+                        ZStack {
+                            if let url = task.posterURL {
+                                PosterImage(url: url, headers: task.posterHeaders)
+                                    .opacity(0.55)
+                            } else {
+                                Color.black
+                            }
+                            VStack(spacing: 6) {
+                                Image(systemName: "pause.circle")
+                                    .font(.system(size: 18, weight: .semibold))
+                                Text(L10n.text("Parked"))
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(.black.opacity(0.45), in: Capsule())
+                        }
+                        .allowsHitTesting(false)
                     }
                 }
                 .overlay(alignment: .topLeading) {
@@ -1590,6 +1657,26 @@ struct VideoTaskCard: View {
         //
         // ⛔ 用 `simultaneousGesture` 而不是 `gesture`：子层**不能独占**触摸。
         //    父层的拖动要用同一串触摸的坐标，独占会让它一帧都收不到。
+        // ★ 单击 = 提到最前；**双击 = 回到那一集的选集页**（2026-11-17 加回）。
+        //
+        // 用户：「双击迷你小窗没有办法返回选集播放页」。双击曾被移除（见上一条注释），
+        // 现在按用户要求加回，但**不能恢复 `.exclusively(before:)`** ——
+        // 那会让每次单击都等双击超时（≈0.3s）才生效，正是历史上「单击不响应」的成因。
+        //
+        // 两条识别器**并行**挂：单击不等双击、双击不等单击。
+        // 双击时单击也会触发一次 `activate` —— **无害**：
+        // `open()` 第一句就是 `activate(task.id)`（见 `open()` 的实现），
+        // 重复调用是幂等的（已置顶的再置顶一次）。
+        //
+        // ⛔ 顺序有讲究：**双击写在单击之前**。两个 `simultaneousGesture` 都会收到
+        //    同一次轻点序列，双击那份只在第二下抬起时触发 `open()`；若把单击写在前面，
+        //    `open()` 里 `take()` 已经把这张卡从坞里摘掉，随后那次 `activate` 的
+        //    `guard let index = tasks.firstIndex(...)` 找不到 id 直接返回 ——
+        //    声音会停在坞里另一张卡上（`open()` 内那段注释记的正是这个坑）。
+        //    现在双击先跑，`open()` 内部自己先 `activate` 再 `take`，顺序天然正确。
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded { open() }
+        )
         .simultaneousGesture(
             TapGesture().onEnded {
                 // `activate` 内部就把这张卡挪到数组首位 —— 数组顺序 = 图层顺序，
