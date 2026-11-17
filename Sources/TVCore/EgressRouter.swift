@@ -221,7 +221,12 @@ public final class EgressRouter: @unchecked Sendable {
         configuration.httpShouldUsePipelining = false
         configuration.waitsForConnectivity = false
         configuration.urlCache = nil
-        configuration.connectionProxyDictionary = [:]
+        // ⛔ 不要设 `connectionProxyDictionary = [:]`。
+        //
+        // 空字典的语义是「明确不用系统代理」。而观看者的 Loon 有两种工作方式：
+        // TUN 模式（系统代理设置里没有东西）与**本机 HTTP 代理**（Wi-Fi 代理指向 127.0.0.1）。
+        // 后者一旦被这一行摘掉，所有站的「直连腿」都变成真的裸连 —— 表现是接口与海报
+        // 一起打不开，而且和「源站被墙」长得一模一样。跟随系统（不设）才等于原来的直连。
         self.session = URLSession(configuration: configuration)
     }
 
@@ -416,9 +421,21 @@ public final class EgressRouter: @unchecked Sendable {
 
     private func proxyLeg(for policy: EgressPolicy) -> EgressLeg? {
         if case .directOnly = policy { return nil }
-        guard let id = policy.proxyID,
-              CustomProxyStore.shared.endpoints.contains(where: { $0.id == id }) else { return nil }
-        return .proxy(id)
+        if let id = policy.proxyID,
+           CustomProxyStore.shared.endpoints.contains(where: { $0.id == id }) {
+            return .proxy(id)
+        }
+        // ⛔ 标了「代理」却解析不出端点时，绝不能静默当成「直连」。
+        //
+        // 观众在源上点「代理」、界面也显示代理，实际却一条代理请求都不发 —— 这是最难查的一类：
+        // 界面对、日志空、行为错。多台代理又没指定「默认出口」时 `fallbackEndpoint` 正是 nil。
+        // 这里退到「任意一台可用端点」，仍然没有才算真的没配。
+        guard let fallback = CustomProxyStore.shared.bestEndpointID() else {
+            Diagnostics.shared.record(.warning, "egress",
+                "route wants a proxy but no endpoint is configured; this request goes direct")
+            return nil
+        }
+        return .proxy(fallback)
     }
 
     /// 本机上正在监听的地址（remux / 插件代理 / 中继自身）。
@@ -544,17 +561,44 @@ public final class EgressRouter: @unchecked Sendable {
 
     private func attempt(_ url: URL, headers: [String: String], purpose: EgressPurpose,
                          leg: EgressLeg, range: String? = nil) async throws -> (Data, URL) {
-        let address = routed(url, leg: leg)
-        // 代理腿拿不到中继地址（监听器没起来）：这不是「源站不通」，交给调用方换腿。
-        if leg.isProxy, address == url {
-            throw URLError(.cannotConnectToHost)
+        // 代理腿要的中继地址可能是「还没起来」，不是「没有」。
+        //
+        // 中继在 `TVBoxApp` 启动时异步拉起；冷启动后的第一批请求会正好撞上这段窗口。
+        // 旧写法靠 `relayBase == nil` 提前把源判成直连，改按 host 决策后那条兜底不存在了 ——
+        // 于是表现成「刚进 App 什么都打不开，退出重进就好」。这里等它最多 1.5 秒。
+        if leg.isProxy, let id = leg.proxyID {
+            var base = LocalProxyServer.shared.baseSync
+            if base == nil {
+                _ = LocalProxyServer.shared.ensureStarted()
+                for _ in 0..<15 {
+                    if let ready = LocalProxyServer.shared.baseSync { base = ready; break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }
+            guard let base else {
+                Diagnostics.shared.record(.warning, "egress",
+                    "relay listener is not up yet; this request cannot use the proxy leg")
+                throw URLError(.cannotConnectToHost)
+            }
+            var request = URLRequest(url: LocalProxyServer.proxyURL(base: base, url: url, proxyID: id),
+                                     cachePolicy: .reloadIgnoringLocalCacheData,
+                                     timeoutInterval: purpose.timeout)
+            request.setValue(HTTPClient.userAgent, forHTTPHeaderField: "User-Agent")
+            for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+            if let range { request.setValue(range, forHTTPHeaderField: "Range") }
+            return try await send(request, original: url)
         }
+        let address = routed(url, leg: leg)
         var request = URLRequest(url: address,
                                  cachePolicy: .reloadIgnoringLocalCacheData,
                                  timeoutInterval: purpose.timeout)
         request.setValue(HTTPClient.userAgent, forHTTPHeaderField: "User-Agent")
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         if let range { request.setValue(range, forHTTPHeaderField: "Range") }
+        return try await send(request, original: url)
+    }
+
+    private func send(_ request: URLRequest, original url: URL) async throws -> (Data, URL) {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw TVError.invalidConfiguration }
         // 206/200 都算通；其余按状态码处理，并把「服务器答了但拒绝」也当成这条腿不可用

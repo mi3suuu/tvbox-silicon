@@ -132,6 +132,30 @@ import Testing
         #expect(!EgressRouter.isLoopbackHost("127.0.0."))
     }
 
+    // MARK: 端点解析
+
+    /// 标了「代理」但解析不出端点时，绝不能静默当成直连。
+    ///
+    /// 观众在两台代理、又没指定「默认出口」时点「代理」，`fallbackEndpoint` 会返回 nil
+    /// （它刻意「不替观众选」）。若出口逻辑照搬这个 nil，界面显示代理、实际一条代理请求
+    /// 都不发 —— 界面对、日志空、行为错，是最难查的一类。
+    @Test func aMarkedProxySourceStillFindsAnEndpointWhenNoDefaultIsChosen() {
+        let defaults = UserDefaults(suiteName: "egress-tests-\(UUID().uuidString)")!
+        let store = CustomProxyStore(defaults: defaults)
+        let a = CustomProxyEndpoint(name: "loon", scheme: .http, host: "127.0.0.1", port: 7221)
+        let b = CustomProxyEndpoint(name: "other", scheme: .socks5, host: "127.0.0.1", port: 7891)
+        store.upsert(a); store.upsert(b)
+
+        // 两台且没指定：这里刻意返回 nil。
+        #expect(store.fallbackEndpoint == nil)
+        // 但「已经决定要走代理」时必须还能选出一台。
+        #expect(store.bestEndpointID() != nil)
+        #expect([a.id, b.id].contains(store.bestEndpointID()!))
+
+        store.defaultProxyID = b.id
+        #expect(store.bestEndpointID() == b.id)
+    }
+
     // MARK: 语义
 
     @Test func directOnlyNeverAsksForAProxyLeg() {

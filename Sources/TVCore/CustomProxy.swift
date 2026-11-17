@@ -282,6 +282,16 @@ public final class CustomProxyStore: @unchecked Sendable {
     ///   · 只配了一台代理 → 用它（让他为 90 个源逐个点代理，等于这个功能不存在）；
     ///   · 配了两台以上又没指定 → **返回 nil**。替他挑一台等于替他决定请求从哪条腿出去，
     ///     而这正是当初拆掉 149 的理由。
+    /// 「没有明确指定时该用哪台」。优先默认出口，其次唯一那台，最后取第一台。
+    ///
+    /// 与 `fallbackEndpoint` 的差别只在最后一步：那个在「多台又没指定」时返回 nil，
+    /// 用来表达「别替观众选」；而出入口在**已经决定要走代理**时不能因为这句话就放弃，
+    /// 否则界面显示代理、实际直连。
+    public func bestEndpointID() -> String? {
+        if let id = fallbackEndpoint?.id { return id }
+        return endpoints.first?.id
+    }
+
     public var fallbackEndpoint: CustomProxyEndpoint? {
         if let id = defaultProxyID, let chosen = proxy(for: id) { return chosen }
         let all = endpoints

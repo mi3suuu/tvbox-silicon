@@ -828,7 +828,7 @@ private actor PosterLoader {
         // ⛔ 旧写法是「直连失败 → 再经中继取一次」的**串行**两步：
         //    直连那步在真机上要挂满整个超时（十几秒），一页 20 张封面就是 20 次挂满。
         //    现在两条腿并行，坏 host 的代价压到几百毫秒；好 host 的代理腿根本不起跑。
-        let policy = EgressPolicy.automatic(proxyID: CustomProxyStore.shared.fallbackEndpoint?.id)
+        let policy = EgressPolicy.automatic(proxyID: CustomProxyStore.shared.bestEndpointID())
         return try await EgressRouter.shared.data(for: resource.url, headers: resource.headers,
                                                   purpose: .image, policy: policy).0
     }

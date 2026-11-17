@@ -1990,6 +1990,14 @@ import TVCore
         }
         subscription = config.with(sites: sites)
         RelayRouteRegistry.shared.replace(relayed)
+        // 每次重算把「观众到底配了什么」写一行日志。
+        //
+        // 「界面显示代理、实际直连」这类问题只能靠这一行定位：它同时给出源的数量、
+        // 标了代理的源有几个、端点表里有几台、以及此刻会选哪一台。
+        Diagnostics.shared.record(.info, "egress",
+            "routing rebuild sources=\(sites.count) markedProxy=\(relayed.values.filter { $0.mode == .proxy }.count)"
+            + " endpoints=\(CustomProxyStore.shared.endpoints.count)"
+            + " chosen=\(CustomProxyStore.shared.bestEndpointID() ?? "-")")
     }
 
     /// 冷启动时为「中继还没绑上端口」最多排几次重排。

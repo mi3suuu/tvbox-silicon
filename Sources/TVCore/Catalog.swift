@@ -455,7 +455,8 @@ public struct CatalogClient: Sendable {
     /// 代理 = 两条同时起跑（谁先给出内容用谁，所以标成代理也不会更慢）。
     private var egressPolicy: EgressPolicy {
         let route = RelayRouteRegistry.shared.route(origin: origin, sourceKey: site.sourceKey)
-        let proxyID = route?.proxyID ?? CustomProxyStore.shared.fallbackEndpoint?.id
+        // 用 `bestEndpointID`：标了代理就必须找到一台，多台没指定默认出口时也不能缩回直连。
+        let proxyID = route?.proxyID ?? CustomProxyStore.shared.bestEndpointID()
         switch route?.mode ?? .auto {
         case .direct: return .directOnly
         case .proxy: return proxyID.map { EgressPolicy.preferProxy(proxyID: $0) } ?? .automatic(proxyID: nil)
