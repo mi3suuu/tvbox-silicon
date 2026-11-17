@@ -243,7 +243,7 @@ public final class LocalProxyServer: @unchecked Sendable {
         let directNow = endpoint != nil && ProxyCircuit.isOpen(host: parsed.host)
         let state = TunnelState(connection: connection, head: rewrittenHead, leftover: leftover,
                                 scheme: parsed.scheme, host: parsed.host, port: parsed.port,
-                                endpoint: endpoint, queue: queue)
+                                path: parsed.path, endpoint: endpoint, queue: queue)
         Self.open(state, dialHost: directNow ? nil : endpoint.map { ProxyDialHost.primary(for: $0) },
                   forceDirect: directNow)
     }
@@ -293,22 +293,26 @@ public final class LocalProxyServer: @unchecked Sendable {
         let scheme: String
         let host: String
         let port: UInt16
+        /// 原始 path + query，系统栈兜底要用它重新拼 URL。
+        let path: String
         let endpoint: CustomProxyEndpoint?
         let queue: DispatchQueue
         private let lock = NSLock()
         private var retried = false
         private var rebinds = 0
         private var directFallback = false
+        private var systemFallback = false
         private var retrying = false
 
         init(connection: NWConnection, head: String, leftover: Data, scheme: String,
-             host: String, port: UInt16, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
+             host: String, port: UInt16, path: String, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
             self.connection = connection
             self.head = head
             self.leftover = leftover
             self.scheme = scheme
             self.host = host
             self.port = port
+            self.path = path
             self.endpoint = endpoint
             self.queue = queue
         }
@@ -364,6 +368,21 @@ public final class LocalProxyServer: @unchecked Sendable {
         var isRetrying: Bool { lock.withLock { retrying } }
 
         func finishedRetrying() { lock.withLock { retrying = false } }
+
+        /// 最后一条腿：整个请求交给系统网络栈（`URLSession`）。
+        ///
+        /// 真机上有一类目标，中继自己建 TLS 时必然被对端关会话（`NWError -9816`），
+        /// 而同一个地址走系统栈（也就是用户手动「直连 + Loon 全局」时那条路）是通的。
+        /// 差别在 TLS 客户端实现，不在网络路径 —— 所以最后一步干脆换成系统栈再发一次：
+        /// 能出内容比「坚持用我们自己的连接」重要。
+        func claimSystemFallback() -> Bool {
+            lock.withLock {
+                guard !systemFallback else { return false }
+                systemFallback = true
+                retrying = true
+                return true
+            }
+        }
     }
 
     private static func open(_ state: TunnelState, dialHost: String?, bindSourcePort: Bool = true,
@@ -381,6 +400,9 @@ public final class LocalProxyServer: @unchecked Sendable {
         // and on cancellation as well as on a clean close, or a long session would drain the range.
         let sourcePort = built.sourcePort
         upstream.stateUpdateHandler = { connectionState in
+            // 日志必须标清是哪条腿：`state.endpoint` 在 forceDirect 后仍然非 nil，
+            // 用它打标签会让「直连腿失败」看起来像「代理腿失败」。
+            let leg = endpoint?.name ?? (forceDirect ? "direct(after proxy failed)" : "direct")
             switch connectionState {
             case .ready:
                 state.finishedRetrying()
@@ -409,7 +431,7 @@ public final class LocalProxyServer: @unchecked Sendable {
                         open(state, dialHost: dialHost, bindSourcePort: false, forceDirect: forceDirect)
                     case .giveUp:
                         Diagnostics.shared.failure("proxy",
-                            "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(state.endpoint?.name ?? "direct") (source port)", error)
+                            "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(leg) (source port)", error)
                         state.connection.cancel()
                     }
                     return
@@ -438,8 +460,18 @@ public final class LocalProxyServer: @unchecked Sendable {
                     open(state, dialHost: nil, bindSourcePort: bindSourcePort, forceDirect: true)
                     return
                 }
+                // 两条腿都不通：最后一次交给系统栈（URLSession）。这一步会丢掉源端口控制，
+                // 但它复制的是用户验证过 100% 能播的那条路径。
+                if state.claimSystemFallback() {
+                    Diagnostics.shared.record(.warning, "proxy",
+                        "relay legs failed for \(state.host):\(state.port); retrying through the system stack")
+                    if let sourcePort { SRCPortPool.shared.release(sourcePort) }
+                    upstream.cancel()
+                    relayThroughSystemStack(state)
+                    return
+                }
                 Diagnostics.shared.failure("proxy",
-                    "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(state.endpoint?.name ?? "direct")",
+                    "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(leg)",
                     error)
                 if let sourcePort { SRCPortPool.shared.release(sourcePort) }
                 state.connection.cancel(); upstream.cancel()
@@ -458,6 +490,73 @@ public final class LocalProxyServer: @unchecked Sendable {
         guard let nw = error as? NWError else { return false }
         if case .posix(let code) = nw { return code == .EADDRINUSE }
         return false
+    }
+
+    /// 用系统栈（`URLSession`）把同一条请求再发一次，把结果写回本地连接。
+    ///
+    /// 为什么需要这条腿：中继自己用 `NWConnection` 建 TLS，对某些站点必然被对端关会话
+    /// （真机 `NWError -9816`，`send` 都没来得及发生）。而同一个地址用系统栈是通的 ——
+    /// 用户手动「直连 + Loon 全局」能播的就是这条路。差别在 TLS 客户端实现，
+    /// 所以最后一步不再坚持自己的连接，交给系统。
+    ///
+    /// 代价是这一步没有源端口控制（`URLSession` 不能 bind 源端口），所以它只做最后兜底，
+    /// 前面两条腿都失败时才走。只重放幂等方法（GET / HEAD）。
+    private static func relayThroughSystemStack(_ state: TunnelState) {
+        let method = state.head.components(separatedBy: "\r\n").first?
+            .split(separator: " ").first.map(String.init)?.uppercased() ?? "GET"
+        guard method == "GET" || method == "HEAD",
+              let url = URL(string: "\(state.scheme)://\(state.host):\(state.port)\(state.path)") else {
+            state.connection.cancel()
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 25
+        for line in state.head.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            let lower = name.lowercased()
+            if name.isEmpty || lower == "host" || lower == "connection" { continue }
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.timeoutIntervalForRequest = 25
+        config.httpMaximumConnectionsPerHost = 6
+        let session = URLSession(configuration: config)
+        session.dataTask(with: request) { data, response, error in
+            state.queue.async {
+                if let error {
+                    Diagnostics.shared.failure("proxy",
+                        "system stack failed \(state.scheme)://\(state.host):\(state.port)", error)
+                    state.connection.cancel()
+                    session.finishTasksAndInvalidate()
+                    return
+                }
+                let http = response as? HTTPURLResponse
+                let status = http?.statusCode ?? 502
+                var head = "HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n"
+                if let http {
+                    for (key, value) in http.allHeaderFields {
+                        let name = "\(key)"
+                        let lower = name.lowercased()
+                        if lower == "transfer-encoding" || lower == "content-length" || lower == "connection" { continue }
+                        head += "\(name): \(value)\r\n"
+                    }
+                }
+                let body = method == "HEAD" ? Data() : (data ?? Data())
+                head += "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+                let payload = Data(head.utf8) + body
+                state.connection.send(content: payload, isComplete: true,
+                                      completion: .contentProcessed { _ in
+                    state.connection.cancel()
+                    session.finishTasksAndInvalidate()
+                })
+                Diagnostics.shared.record(.debug, "proxy",
+                    "served via system stack \(state.scheme)://\(state.host):\(state.port) status=\(status) bytes=\(body.count)")
+            }
+        }.resume()
     }
 
     /// TCP, plus TLS when the target needs it, plus the viewer's proxy when one is assigned.
@@ -492,6 +591,10 @@ public final class LocalProxyServer: @unchecked Sendable {
             let tls = NWProtocolTLS.Options()
             if let sec = tls.securityProtocolOptions as sec_protocol_options_t? {
                 serverName.withCString { sec_protocol_options_set_tls_server_name(sec, $0) }
+                // 必须显式声明只用 HTTP/1.1：中继只会说 HTTP/1.1，而有些源站在没有 ALPN 时
+                // 会直接关掉会话（真机 `NWError -9816`，`send` 都没发生）。声明了它，
+                // 服务端才知道能按 h1 回话。
+                "http/1.1".withCString { sec_protocol_options_add_tls_application_protocol(sec, $0) }
                 // Deliberately lenient: a media CDN with a stale chain, or a MITM proxy (Loon and
                 // its kin) answering with its own root, is exactly the case this relay exists for.
                 sec_protocol_options_set_verify_block(sec, { _, _, complete in
