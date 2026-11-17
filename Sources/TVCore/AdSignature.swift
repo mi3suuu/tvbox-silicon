@@ -62,6 +62,37 @@ public enum AdHash {
         return hash
     }
 
+    /// 一张 9×8 灰度图的**亮度极差**（最大值 − 最小值）。
+    ///
+    /// 用来判定这一帧有没有足够的画面细节，能不能拿来当指纹。
+    ///
+    /// ⛔ dHash 在**纯色帧上完全退化**：dHash 只比较相邻像素谁更亮，
+    ///    整张图亮度一致时比较结果恒为「不大于」，于是
+    ///    纯黑 / 纯白 / 纯灰 / 深灰 / 近黑 算出来**全是 0x0000000000000000**，
+    ///    彼此汉明距离 **0 bit**（实测五种灰度全部互距 0）。
+    ///
+    ///    后果不是"稍微不准"，而是灾难性的：
+    ///      · 广告开头有 1 秒黑场、正片某处也有 1 秒黑场 → 两张 hash 都是 0，
+    ///        距离 0 ≤ 阈值 8 → 判定「命中广告」→ 正片被误跳；
+    ///      · 一支广告整段是纯色滚动字幕 → 它和任何其它纯色段都无法区分。
+    ///    调阈值救不回来：黑 vs 随机是 30 bit，纯色 vs 纯色是 0 bit，
+    ///    中间没有可用的分离带。
+    ///
+    ///    唯一的修法是**在采样阶段就把纯色帧剔掉**，见 `isUsableFrame`。
+    public static func contrast(gray: [UInt8]) -> Int {
+        guard let low = gray.min(), let high = gray.max() else { return 0 }
+        return Int(high) - Int(low)
+    }
+
+    /// 这一帧够不够有细节，可以用来算指纹。
+    ///
+    /// 阈值取 12（8 位灰度下）：实测正常影视画面远高于它，
+    /// 而纯色/近乎纯色的帧（黑场、白场、渐变底、单色字幕板）都低于它。
+    /// 判掉这些帧只是**少采几帧**，不影响识别正常画面。
+    public static func isUsableFrame(gray: [UInt8], minimumContrast: Int = 12) -> Bool {
+        contrast(gray: gray) >= minimumContrast
+    }
+
     /// 两个哈希差了几个 bit。
     public static func hamming(_ a: UInt64, _ b: UInt64) -> Int {
         (a ^ b).nonzeroBitCount

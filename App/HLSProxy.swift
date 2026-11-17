@@ -123,7 +123,7 @@ actor HLSProxy {
                 if AdSkip.enabled {
                     if let prefixed = AdPrefix.strip(playlist, origin: response.url ?? url) {
                         Diagnostics.shared.record(.info, "player",
-                            "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) path=\(prefixed.path)")
+                            "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath) groups=\(prefixed.droppedGroups)")
                         text = prefixed.text
                     }
                     if let cleaned = AdSkip.clean(text, origin: response.url ?? url) {

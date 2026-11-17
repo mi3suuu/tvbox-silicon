@@ -317,3 +317,45 @@ private func unrelated(_ base: UInt64, _ step: Int) -> UInt64 { (base ^ 0xFFFF_0
         #expect(matcher.feed(unrelated(0x0123_4567_89AB_CDEF, step), library: library) == nil)
     }
 }
+
+// MARK: - 纯色帧退化（dHash 的致命盲区）
+
+/// 复刻 `AdHash.dHash` 的位运算（测试要能独立验算，不依赖实现）。
+private func bitHash(_ gray: [UInt8]) -> UInt64 {
+    var v: UInt64 = 0; var bit = 0
+    for y in 0..<8 {
+        for x in 0..<8 {
+            if gray[y * 9 + x] > gray[y * 9 + x + 1] { v |= 1 << UInt64(bit) }
+            bit += 1
+        }
+    }
+    return v
+}
+
+@Test func aFlatFrameProducesADegenerateHashWhichIsWhyItMustBeFiltered() {
+    // ⛔ 这是 dHash 的盲区，不是调阈值能救的：
+    //    纯黑 / 纯白 / 纯灰 / 深灰 算出来**全是 0**，彼此距离 0 bit。
+    //    若不剔掉，广告里的黑场和正片里的黑场会被判成"同一支广告"，
+    //    距离 0 ≤ 阈值 8 → 正片被误跳。
+    for level in [UInt8(0), 20, 128, 255] {
+        let flat = [UInt8](repeating: level, count: 72)
+        #expect(bitHash(flat) == 0, "灰度 \(level) 的纯色帧应退化为 0")
+        #expect(!AdHash.isUsableFrame(gray: flat), "灰度 \(level) 的纯色帧必须被过滤")
+    }
+}
+
+@Test func aFrameWithRealDetailIsUsable() {
+    // 有真正亮度变化的帧必须放行，否则会把正常画面也丢掉。
+    var frame = [UInt8](repeating: 0, count: 72)
+    for i in 0..<72 { frame[i] = UInt8((i * 37) % 256) }
+    #expect(AdHash.contrast(gray: frame) >= 12)
+    #expect(AdHash.isUsableFrame(gray: frame))
+    #expect(bitHash(frame) != 0)
+}
+
+@Test func aNearlyFlatFrameIsAlsoFiltered() {
+    // 近乎纯色（亮度只差几个级）在压缩噪声下也会抖成随机位，同样不能当指纹。
+    var frame = [UInt8](repeating: 100, count: 72)
+    frame[0] = 104
+    #expect(!AdHash.isUsableFrame(gray: frame), "极差 \(AdHash.contrast(gray: frame)) 太小，应过滤")
+}

@@ -53,7 +53,7 @@ public enum LiveRepair {
             // 与 HLSProxy 同一个顺序：先剥**结构上的固定前缀**（免学习），再剔中段广告。
             if let prefixed = AdPrefix.strip(text, origin: origin) {
                 Diagnostics.shared.record(.info, "player",
-                    "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) path=\(prefixed.path)")
+                    "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath) groups=\(prefixed.droppedGroups)")
                 text = prefixed.text
             }
             if let cleaned = AdSkip.clean(text, origin: origin) {

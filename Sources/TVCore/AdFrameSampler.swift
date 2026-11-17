@@ -142,6 +142,10 @@ public final class AdFrameSampler {
     ///
     /// 改动只影响**新标注**的指纹。旧库里用旧实现算出来的哈希距离会略微变大，
     /// 仍落在阈值内可用（实测旧库 85%），不需要强制清库。
+    /// 纯色帧不入库（见 `AdHash.contrast` 的说明）。
+    ///
+    /// 返回 nil 表示「这一帧没有可用细节，跳过」——与「解码失败」同样处理，
+    /// 调用方本来就会跳过 nil。区别只在日志含义。
     public nonisolated static func dHash(from image: CGImage) -> UInt64? {
         let base = CIImage(cgImage: image)
         guard base.extent.width > 0, base.extent.height > 0 else { return nil }
@@ -151,6 +155,8 @@ public final class AdFrameSampler {
         ciContext.render(scaled, toBitmap: &pixels, rowBytes: 9,
                          bounds: CGRect(x: 0, y: 0, width: 9, height: 8),
                          format: .L8, colorSpace: CGColorSpaceCreateDeviceGray())
+        // 纯色帧不入库：dHash 对纯色恒为 0，跨帧距离 0，会造成误命中断言。
+        guard AdHash.isUsableFrame(gray: pixels) else { return nil }
         return AdHash.dHash(gray: pixels)
     }
 
@@ -170,6 +176,8 @@ public final class AdFrameSampler {
         ciContext.render(scaled, toBitmap: &pixels, rowBytes: 9,
                          bounds: CGRect(x: 0, y: 0, width: 9, height: 8),
                          format: .L8, colorSpace: colorSpace)
+        // 同上：纯色帧（黑场/白场/单色板）直接丢弃，不进匹配也不入库。
+        guard AdHash.isUsableFrame(gray: pixels) else { return nil }
         return AdHash.dHash(gray: pixels)
     }
 }
