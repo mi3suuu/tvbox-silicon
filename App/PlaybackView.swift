@@ -254,14 +254,8 @@ import TVCore
         Diagnostics.shared.record(.info, "ads",
             "skip ad \(hit.title.isEmpty ? hit.id.uuidString.prefix(8).description : hit.title) from=\(Int(seconds)) to=\(Int(finalTarget))")
         seekingSegment = true
-        let activeGeneration = generation
-        player.seek(to: CMTime(seconds: finalTarget, preferredTimescale: 600),
-                    toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.generation == activeGeneration else { return }
-                self.seekingSegment = false
-                self.skipHit = nil
-            }
+        seekGuarded(to: finalTarget, label: "ad") { [weak self] in
+            self?.skipHit = nil
         }
     }
 
@@ -411,14 +405,8 @@ import TVCore
         }
         skipPass = pass
         seekingSegment = true
-        let activeGeneration = generation
         Diagnostics.shared.record(.info, "player", "skip segment from=\(Int(time)) to=\(Int(target))")
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.generation == activeGeneration else { return }
-                self.seekingSegment = false
-            }
-        }
+        seekGuarded(to: target, label: "segment")
     }
 
     var error: String?
@@ -577,6 +565,73 @@ import TVCore
         guard target.isFinite else { return }
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// 带**超时兜底**的 seek。
+    ///
+    /// ⛔ 原来 `seekingSegment = true` 之后只靠 seek 的 completion 回调复位：
+    ///    `player.seek { ... }` 在某些情况下**根本不会回调**
+    ///    （item 被替换、请求被后来的 seek 顶掉、播放卡在 buffering、
+    ///    或目标落在未缓冲区间）。一旦不回调，`seekingSegment` 永久为 true，
+    ///    而它是三道闸的共同前置条件：
+    ///      · `handleAdHash`（广告采样）
+    ///      · `updateSkipping` 的片头片尾跳转
+    ///      · 下面那段 seek 自身
+    ///    ⇒ 整条跳转链彻底停摆。用户看到的就是「显示跳过广告之后卡着不动」。
+    ///
+    /// 这里加 2 秒兜底：超时强制复位标志并记一条诊断，宁可漏一次跳转，
+    /// 也不让播放器进入"再也不跳且没有任何报错"的静默死状态。
+    private func seekGuarded(to seconds: Double, tolerance: CMTime = .zero,
+                             label: String,
+                             completion: (@MainActor () -> Void)? = nil) {
+        guard let item = player.currentItem else { seekingSegment = false; return }
+        let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
+        guard !ranges.isEmpty else { seekingSegment = false; return }
+        let activeGeneration = generation
+        // 幂等：完成回调 + 超时兜底只有第一个生效。
+        var settled = false
+        let settle: @MainActor (String) -> Void = { [weak self] reason in
+            guard let self, !settled, self.generation == activeGeneration else { return }
+            settled = true
+            if reason != "done" {
+                Diagnostics.shared.record(.info, "player",
+                    "seek \(reason) label=\(label) to=\(Int(seconds))")
+            }
+            self.seekingSegment = false
+            completion?()
+        }
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
+                    toleranceBefore: tolerance, toleranceAfter: tolerance) { _ in
+            Task { @MainActor in settle("done") }
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            settle("timeout")
+        }
+    }
+
+    /// 拖动预览用的 seek：**大容差**，只要"跳到附近"。
+    ///
+    /// ⛔ 拖手柄/拖进度条时不能复用 `seek(to:)` —— 那是
+    /// `toleranceBefore: .zero, toleranceAfter: .zero` 的**精确 seek**：
+    /// 解码器必须从前面最近的关键帧起逐帧解到目标帧才能出画。
+    /// 拖动时手指每秒移动几十次、每次都发一次精确 seek，请求在
+    /// AVPlayer 里排队积压，画面就"完全不跟手"（用户报的就是这个）。
+    ///
+    /// 预览阶段用 1 秒前后容差：解码器直接拿最近的关键帧出画，代价极低。
+    /// 松手后再调用精确的 `seek(to:)` 落定。
+    func previewSeek(to seconds: Double) {
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
+        guard seconds.isFinite else { return }
+        let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
+        guard let range = ranges.first(where: { CMTimeRangeContainsTime($0, time: player.currentTime()) }) ?? ranges.last else { return }
+        let target = min(max(seconds, range.start.seconds), range.end.seconds)
+        guard target.isFinite else { return }
+        // 取消尚未完成的旧 seek，否则拖动时会一串排队。
+        player.currentItem?.cancelPendingSeeks()
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: CMTime(seconds: 1, preferredTimescale: 600),
+                    toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600))
     }
 
     func skip(_ seconds: Double) {
@@ -1762,6 +1817,30 @@ extension PlaybackSession {
             prepared.adapter = adapter
         }
         #endif
+
+        // 广告清单改写：把 m3u8 地址套上 `LiveRepair` 的自定义 scheme，
+        // 让 `AVAssetResourceLoader` 在**取清单时**改写它（剥掉固定前缀广告）。
+        //
+        // ⛔ 这是 iOS 上唯一能改清单的地方，此前**根本没接**：
+        //    · `HLSProxy` 只在 `#if os(macOS)` 分支里创建 → iOS 上不存在；
+        //    · `LiveRepair.asset(for:)` 要求 scheme 是 `tvbox-repair` / `tvbox-ad-skip`，
+        //      但没有任何地方把播放地址转成那个 scheme；
+        //    · `AdSkip.route` 全仓 0 调用点。
+        //    ⇒ 广告拦截在 iOS 上从来没有真正跑过。用户报的
+        //      「B 视频有同样的广告但没法自动跳过」不是判据不准，是这条链压根没接上。
+        //
+        // 顺序放在加速之前：先决定"要不要改写清单"，再决定"怎么把字节拉快"。
+        // 只对 m3u8 生效；直链 mp4、云盘、下载回放、插件代理都不碰。
+        if AdSkip.enabled,
+           prepared.url.pathExtension.lowercased() == "m3u8",
+           ["http", "https"].contains(prepared.url.scheme ?? ""),
+           !prepared.pluginProxy,
+           prepared.url.scheme != CloudStreams.scheme,
+           prepared.url.scheme != DownloadLibrary.scheme {
+            prepared.url = LiveRepair.adSkippingAddress(prepared.url, headers: channel.headers)
+            Diagnostics.shared.record(.info, "player",
+                "ad skip armed host=\(URLComponents(url: prepared.url, resolvingAgainstBaseURL: false)?.host ?? "-")")
+        }
 
         // 在线播放加速：多连接并发拉、单连接顺序喂给 AVPlayer。
         //
