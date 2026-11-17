@@ -445,6 +445,7 @@ struct GlobalSearchView: View {
                 }
                 Spacer(minLength: 0)
                 Text(SourceLabel(item.site.name).text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                SourceRouteBadge(site: item.site)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

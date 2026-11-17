@@ -391,7 +391,7 @@ struct PrivacyVaultView: View {
         ForEach(sites) { site in
             Toggle(isOn: sourceBinding(site, origin: feed.origin)) {
                 FormLabel(symbol: "square.stack.3d.up.fill", tint: .purple, title: site.name,
-                          subtitle: site.sourceKey)
+                          subtitle: "\(store.effectiveRoute(site).title) · \(site.sourceKey)")
             }
             .settingsSwitch()
             // A hidden feed hides all of its sources at once; the rows inside would only disagree

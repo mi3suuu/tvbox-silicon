@@ -456,7 +456,7 @@ import Testing
     /// 清单里每个地址都要换成本中继地址，否则播放器会去 `127.0.0.1:<port>/2026/…`
     /// 这种没有 `/d` `/p` 前缀的路径 —— 中继解析不出来只能断开，播放器报 -1005。
     /// 真机表现就是「海报页能进、点进去播不了」，而同一个源直连能播。
-    @Test func aPlaylistIsRewrittenSoEveryChildURLComesBackThroughTheRelay() async throws {
+    @Test func aPlaylistKeepsItsChildPlaylistsOnTheRelayAndSendsSegmentsDirect() async throws {
         let body = """
         #EXTM3U
         #EXT-X-KEY:METHOD=AES-128,URI="key.key"
@@ -479,12 +479,15 @@ import Testing
         #expect(!text.contains("\n/2026/hls/index.m3u8"), "绝对路径的子清单没被改写")
         #expect(text.contains("\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/hls/index.m3u8"),
                 "子清单应当被包装成中继地址，实际：\(text)")
-        #expect(text.contains("\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/main/seg001.ts"),
-                "相对路径分片没有按清单目录解析，实际：\(text)")
-        #expect(text.contains("\(prefix)d/https/cdn.example.com/443/seg002.ts"),
-                "绝对地址分片没有被包装，实际：\(text)")
-        #expect(text.contains("URI=\"\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/main/key.key\""),
-                "EXT-X-KEY 的 URI 没有改写，实际：\(text)")
+        // 分片反过来：必须成为绝对地址、不经中继 —— 经中继的单片速度撑不住码率，
+        // 播放器会一直卡在 Media file not received。
+        #expect(text.contains("http://\(Self.lanHost):\(spy.port)/2026/main/seg001.ts"),
+                "相对路径分片没有解析成绝对地址，实际：\(text)")
+        #expect(!text.contains("\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/main/seg001.ts"),
+                "分片仍然被包装进了中继，实际：\(text)")
+        #expect(text.contains("https://cdn.example.com/seg002.ts"), "绝对地址分片被改写了，实际：\(text)")
+        #expect(text.contains("URI=\"http://\(Self.lanHost):\(spy.port)/2026/main/key.key\""),
+                "EXT-X-KEY 的 URI 没有解析成绝对地址，实际：\(text)")
     }
 
     /// 一个「收下连接就断」的坏代理：模拟真机上 Loon 交出去之后目标侧直接关会话

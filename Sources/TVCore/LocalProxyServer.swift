@@ -777,7 +777,15 @@ public final class LocalProxyServer: @unchecked Sendable {
                 continue
             }
             if let absolute = URL(string: trimmed, relativeTo: directory)?.absoluteURL {
-                lines.append(wrap(absolute, state: state) ?? line)
+                // 只把**子清单**接回中继；分片一律改成绝对地址，交给播放器自己请求。
+                //
+                // 实测（真机 17:03-17:04）：分片也走中继时，每片都要新建一条 TLS 到节点，
+                // 速度只有 140–190 KB/s，而 1280x726 需要 190 KB/s —— 播放器一直在
+                // `Media file not received in 8s` / `-15628` 之间打转，永远进不了画面。
+                // 分片直连时播放器走系统栈（也就是 Loon 那条路），速度回到正常，
+                // 出口仍然由 Loon 的规则决定。
+                lines.append(isPlaylistURL(absolute) ? (wrap(absolute, state: state) ?? absolute.absoluteString)
+                                                     : absolute.absoluteString)
             } else {
                 lines.append(line)
             }
@@ -823,9 +831,18 @@ public final class LocalProxyServer: @unchecked Sendable {
         let rest = line[start.upperBound...]
         guard let end = rest.firstIndex(of: "\"") else { return line }
         let uri = String(rest[..<end])
-        guard let absolute = URL(string: uri, relativeTo: base)?.absoluteURL,
-              let wrapped = wrap(absolute, state: state) else { return line }
+        guard let absolute = URL(string: uri, relativeTo: base)?.absoluteURL else { return line }
+        // 密钥同样直连取：它跟分片是同一个 CDN，走中继只会把首播拖死。
+        guard isPlaylistURL(absolute), let wrapped = wrap(absolute, state: state) else {
+            return line.replacingCharacters(in: start.upperBound..<end, with: absolute.absoluteString)
+        }
         return line.replacingCharacters(in: start.upperBound..<end, with: wrapped)
+    }
+
+    /// 这是不是一个播放清单（只有清单需要接回中继；分片与密钥一律直连）。
+    private static func isPlaylistURL(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        return path.hasSuffix(".m3u8") || path.hasSuffix(".m3u")
     }
 
     /// 一个原始地址 → 中继地址（沿用这条隧道当前实际走的那条腿）。

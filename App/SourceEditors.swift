@@ -339,6 +339,7 @@ private struct HiddenSourceRow: View {
             SourceIcon(site: site, label: label, size: 32).opacity(shown ? 1 : 0.45)
             Text(label.parts[0]).font(.body.weight(.medium)).lineLimit(1)
                 .foregroundStyle(shown ? Color.primary : Color.secondary)
+            SourceRouteBadge(site: site)
             Spacer(minLength: 8)
             if !shown { Text(L10n.text("Hidden")).font(.caption).foregroundStyle(.secondary) }
         }
