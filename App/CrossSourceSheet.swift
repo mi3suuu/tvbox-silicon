@@ -80,10 +80,13 @@ struct CrossSourceSheet: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(catalog.video.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                        Text([catalog.video.year, catalog.client.site.name]
-                                .compactMap { $0?.isEmpty == false ? $0 : nil }
-                                .joined(separator: " · "))
-                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text([catalog.video.year, catalog.client.site.name]
+                                    .compactMap { $0?.isEmpty == false ? $0 : nil }
+                                    .joined(separator: " · "))
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            SourceRouteBadge(site: catalog.client.site)
+                        }
                     }
                     Spacer(minLength: 0)
                 }

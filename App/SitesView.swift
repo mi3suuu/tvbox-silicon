@@ -1453,7 +1453,7 @@ struct SiteCard: View {
                         .foregroundStyle(focused ? Color.black : runs ? Color.primary : Color.secondary)
                     if runs { SourceHealthDot(status: store.health(of: site)) }
                     if dimmed { Text(L10n.text("Hidden")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-                    if customized { Text(L10n.text("Customized")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                    if customized { SourceRouteBadge(site: site, fallback: L10n.text("Customized")) }
                 }
                 if !detail.isEmpty {
                     Text(detail).font(.subheadline).lineLimit(1)
@@ -3279,5 +3279,53 @@ private struct RenameAlerts: ViewModifier {
             } message: {
                 Text(L10n.text("This removes the source from this subscription for good. Refreshing the subscription will not bring it back, and it cannot be undone."))
             }
+    }
+}
+
+// MARK: - 源出口标注
+
+/// 一条源当前的出口：**代理 / 直连 / 自动**。
+///
+/// 之前源列表里只有一个笼统的「Customized」徽标，观众看得出「改过」，却看不出改成什么；
+/// 详情页、播放页、搜索结果干脆什么都不显示。源出现在哪个面板都要能一眼看出它会从哪条腿出去。
+///
+/// `fallback` 是「没有显式路由、但源被改名/改地址」时显示的文字 —— 那种情况仍然要提示，
+/// 只是不该再说成「自定义」而不给出口。
+struct SourceRouteBadge: View {
+    @Environment(Store.self) private var store
+    let site: Site
+    var fallback: String? = nil
+
+    var body: some View {
+        if site.native, !site.api.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let explicit = store.subscription.flatMap {
+                store.sourceRouting.route(site, origin: $0.origin)
+            }
+            if let route = explicit {
+                Text(route.title)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .foregroundStyle(route.badgeTint)
+                    .background(route.badgeTint.opacity(0.16), in: Capsule())
+                    .accessibilityLabel(L10n.text("Route: %@", route.title))
+            } else if let fallback {
+                Text(fallback).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        } else if let fallback {
+            Text(fallback).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
+    }
+}
+
+extension SourceRoute {
+    /// 三种出口的固定色：代理偏靛、直连偏绿、自动走次要色。
+    var badgeTint: Color {
+        switch self {
+        case .proxy: return Brand.indigo
+        case .direct: return Color(red: 0.20, green: 0.60, blue: 0.36)
+        case .auto: return .secondary
+        }
     }
 }

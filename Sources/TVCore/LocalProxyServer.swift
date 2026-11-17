@@ -708,18 +708,23 @@ public final class LocalProxyServer: @unchecked Sendable {
     /// 重写把每个子清单 / 分片 / KEY-URI 都换成同一条腿的中继地址，
     /// 于是播放全程走同一个出口（用户要的「播放也走我选的节点」），而不是掉回直连。
     private static func relayResponse(from upstream: NWConnection, to client: NWConnection,
-                                      state: TunnelState, buffer: Data = Data()) {
+                                      state: TunnelState, buffer: Data = Data(),
+                                      deadline: Date? = nil) {
+        // 清单很小，但如果上游用 keep-alive 不肯关，缓冲会一直等下去 —— 播放器那边就是
+        // 「一直 waiting、received=0」。所以给一个硬上限：到点就把手上的字节重写发出去。
+        let deadline = deadline ?? Date().addingTimeInterval(5)
         upstream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
             var bytes = buffer
             if let data { bytes.append(data) }
             if isPlaylist(state: state, head: bytes) {
-                if complete || error != nil || bytes.count > 8 << 20 {
+                let timedOut = Date() >= deadline
+                if complete || error != nil || timedOut || bytes.count > 8 << 20 {
                     let rewritten = rewritePlaylist(bytes, state: state)
                     client.send(content: rewritten, isComplete: true,
                                 completion: .contentProcessed { _ in client.cancel() })
                     upstream.cancel()
                 } else {
-                    relayResponse(from: upstream, to: client, state: state, buffer: bytes)
+                    relayResponse(from: upstream, to: client, state: state, buffer: bytes, deadline: deadline)
                 }
                 return
             }
@@ -747,7 +752,18 @@ public final class LocalProxyServer: @unchecked Sendable {
     private static func rewritePlaylist(_ data: Data, state: TunnelState) -> Data {
         guard let headerEnd = data.range(of: Data("\r\n\r\n".utf8)) else { return data }
         let headText = String(decoding: data[..<headerEnd.lowerBound], as: UTF8.self)
-        let body = String(decoding: data[headerEnd.upperBound...], as: UTF8.self)
+        // 只重写正常的 200。206（Range）之类原样放行 —— 改写分块内容会让 Content-Range
+        // 对不上，播放器直接判损坏。
+        guard headText.hasPrefix("HTTP/1."), headText.contains(" 200 ") else { return data }
+        // ⛔ 上游常常用 chunked 传输。把 chunked 帧当成正文按行重写，会把长度行写进清单里
+        //    （`1a2` 之类），播放器解析不了 —— 真机上表现为「点播放一直 waiting」。
+        var bodyBytes = Data(data[headerEnd.upperBound...])
+        if headText.lowercased().contains("transfer-encoding:"),
+           headText.lowercased().contains("chunked"),
+           let decoded = decodeChunked(bodyBytes) {
+            bodyBytes = decoded
+        }
+        let body = String(decoding: bodyBytes, as: UTF8.self)
         guard let asset = URL(string: "\(state.scheme)://\(state.host):\(state.port)\(state.path)") else { return data }
         // 相对路径要相对清单所在目录解析，不是站点根。
         let directory = asset.deletingLastPathComponent()
@@ -777,6 +793,28 @@ public final class LocalProxyServer: @unchecked Sendable {
         headers.append("Content-Length: \(rewrittenBody.utf8.count)")
         headers.append("Connection: close")
         return Data((headers.joined(separator: "\r\n") + "\r\n\r\n" + rewrittenBody).utf8)
+    }
+
+    /// 解掉 `Transfer-Encoding: chunked` 的帧，拿真正的正文。
+    private static func decodeChunked(_ body: Data) -> Data? {
+        var out = Data()
+        var index = body.startIndex
+        while index < body.endIndex {
+            guard let lineEnd = body[index...].firstIndex(of: 0x0A) else { return nil }
+            let line = String(decoding: body[index..<lineEnd], as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let sizeField = line.split(separator: ";").first.map(String.init) ?? ""
+            guard let size = Int(sizeField.trimmingCharacters(in: .whitespaces), radix: 16) else { return nil }
+            var cursor = body.index(after: lineEnd)
+            if size == 0 { return out }
+            guard let end = body.index(cursor, offsetBy: size, limitedBy: body.endIndex) else { return nil }
+            out.append(body[cursor..<end])
+            cursor = end
+            if cursor < body.endIndex, body[cursor] == 0x0D { cursor = body.index(after: cursor) }
+            if cursor < body.endIndex, body[cursor] == 0x0A { cursor = body.index(after: cursor) }
+            index = cursor
+        }
+        return out
     }
 
     /// 标签行里的 `URI="…"`（`#EXT-X-KEY:METHOD=AES-128,URI="key.key"`）。

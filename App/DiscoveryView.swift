@@ -542,7 +542,11 @@ struct GlobalSearchView: View {
                 ForEach(model.failures) { result in
                     VStack(alignment: .leading, spacing: 6) {
                         let health = store.health(of: result.site)
-                        HStack(spacing: 6) { Text(result.site.name).font(.headline); SourceHealthDot(status: health) }
+                        HStack(spacing: 6) {
+                            Text(result.site.name).font(.headline)
+                            SourceHealthDot(status: health)
+                            SourceRouteBadge(site: result.site)
+                        }
                         Text(result.error ?? "").font(.caption).foregroundStyle(.secondary)
                         if health == .failing { Text(health.summary).font(.caption).foregroundStyle(Brand.rose) }
                     }
@@ -550,7 +554,11 @@ struct GlobalSearchView: View {
                 // Sources this search left out for failing; the retry below asks them too.
                 ForEach(model.paused) { site in
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) { Text(site.name).font(.headline); SourceHealthDot(status: .failing) }
+                        HStack(spacing: 6) {
+                            Text(site.name).font(.headline)
+                            SourceHealthDot(status: .failing)
+                            SourceRouteBadge(site: site)
+                        }
                         Text(pauseNote(site)).font(.caption).foregroundStyle(Brand.rose)
                     }
                 }

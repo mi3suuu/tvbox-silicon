@@ -4657,8 +4657,11 @@ struct VideoDetailView: View {
                     Text(facts).font(.subheadline.weight(.medium)).lineLimit(2).transition(.opacity)
                 }
                 let meta = [currentVideo().remarks, currentVideo().year ?? "", SourceLabel(client.site.name).text].filter { !$0.isEmpty }
-                if !meta.isEmpty {
-                    Text(meta.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                HStack(spacing: 6) {
+                    if !meta.isEmpty {
+                        Text(meta.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    SourceRouteBadge(site: client.site)
                 }
             }
             if let genres = tmdb.details?.genres, !genres.isEmpty {
