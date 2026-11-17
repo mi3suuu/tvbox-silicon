@@ -134,8 +134,22 @@ public enum AdSkip {
                   let next = await fetch(address) else { return nil }
             (text, origin) = next
         }
-        guard let result = clean(text, origin: origin) else { return nil }
-        Diagnostics.shared.record(.info, "player", "ads found runs=\(result.runs) seconds=\(Int(result.seconds)) host=\(result.host)")
-        return LiveRepair.address(url, headers: headers, skipsAds: true)
+        // 中段广告（host/family 判据）命中 → 走中继改写。
+        if let result = clean(text, origin: origin) {
+            Diagnostics.shared.record(.info, "player", "ads found runs=\(result.runs) seconds=\(Int(result.seconds)) host=\(result.host)")
+            return LiveRepair.address(url, headers: headers, skipsAds: true)
+        }
+        // 源级固定前缀（目录占少数判据）命中 → 同样要走中继，否则直连时改不了清单。
+        //
+        // ⛔ 这一段是必需的：`AdPrefix` 只在 `LiveRepair.rewrite` 里被调用，
+        //    而那条改写的入口（`adScheme`）**只有本函数返回地址时才会被用上**。
+        //    不加这一条，番茄这类「广告只是换目录」的源永远进不了改写，
+        //    前面所有前缀剥除逻辑在直连播放路径上等于没接 —— 就是「假护栏」。
+        if let prefixed = AdPrefix.strip(text, origin: origin) {
+            Diagnostics.shared.record(.info, "player",
+                "ad prefix found segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath)")
+            return LiveRepair.address(url, headers: headers, skipsAds: true)
+        }
+        return nil
     }
 }
