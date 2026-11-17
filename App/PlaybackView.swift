@@ -509,6 +509,8 @@ import TVCore
     /// How often the episode opened again after its connection dropped (`resumeAfterDrop`), and whether it did yet.
     private var dropRecovery = PlaybackDropRecovery()
     private var reopenedAfterDrop = false
+    /// 已经因为「直连播不动」而翻到代理的 host。每台只翻一次：翻了还不行就是这条源真不行。
+    private var egressFlipped: Set<String> = []
     /// Whether AVPlayer shows the picture of the file it just opened is being checked; the saved position waits.
     private var checkingPicture = false
     /// The item whose HLS stream is being watched for sound without a picture (`checkSegmentedPicture`).
@@ -712,6 +714,44 @@ import TVCore
             if self.automatic == url { self.automatic = fresh }
             self.configure(channel, url: fresh, generation: active)
         }
+        return true
+    }
+
+    /// 直连这条腿播不动：把这台 host 的结论翻到代理，重开一次。
+    ///
+    /// 补的是旧链路里**没有**的那一格：`resumeAfterDrop` 要求 `hasTimeline || reopenedAfterDrop`，
+    /// 而首次起播就失败时两者都是 false —— 于是「一上来就播不了」根本没有重试，只能报错。
+    /// 观众看到的就是「改成代理也播不了、改成直连又撞墙」。
+    ///
+    /// 每台 host 只翻一次：翻了还不行就是这条源真的不行，别在两条腿之间来回弹。
+    private func retryEgress(_ failure: Error?, channel: Channel, url: URL, generation active: UUID) -> Bool {
+        guard !isLive, !savedDownload, !url.isFileURL,
+              let host = url.host(), !host.isEmpty else { return false }
+        // 这条 item 真的经中继播过吗？看 asset 地址，而不是看结论表 ——
+        // 中继可能刚在中途把自己降级成直连腿，表里写着代理、实际早就是直连了。
+        let viaRelay = (item?.asset as? AVURLAsset).map {
+            ["127.0.0.1", "localhost"].contains($0.url.host() ?? "")
+        } ?? false
+        guard !viaRelay else {
+            // 代理腿自己也没播动：记一笔。连续两次之后结论会退回直连，不再无脑绕远路。
+            EgressRouter.shared.notePlaybackFailure(url, purpose: .media)
+            return false
+        }
+        guard !egressFlipped.contains(host) else { return false }
+        let policy = egressPolicy(for: channel)
+        guard policy.allowsProxy, let proxyID = policy.proxyID else { return false }
+        egressFlipped.insert(host)
+        EgressRouter.shared.forceProxy(url, purpose: .media, proxyID: proxyID)
+        // ⛔ 位置必须自己接回来。`configure` 会换一个新的 `AVPlayerItem`，
+        //    而 `resumeAfterDrop` 那条路的「断流重开」正好被这一格抢先吃掉 ——
+        //    不接位置，中段一断流就跳回 0 秒，观众看到的是「重头开始」。
+        let current = player.currentTime().seconds
+        let position = pendingResume ?? (current.isFinite ? current : 0)
+        Diagnostics.shared.record(.warning, "egress",
+            "direct playback failed on \(host) at=\(Int(position))s (\(failure.map(Self.describe) ?? "no media in 8s")); retrying via proxy")
+        if position > 1 { pendingResume = position }
+        detachItem(); observation = nil; loading = true
+        configure(channel, url: url, generation: active)
         return true
     }
 
@@ -947,6 +987,17 @@ import TVCore
                 self.error = L10n.text("This video is an MKV file, which Apple devices can't play."); self.loading = false; return
             }
             let address = prepared.url
+            // 先把这条播放地址的出口定下来：直连能通就别绕中继，不通就换代理。
+            //
+            // 只发一个 Range 很小（1 KB）的请求，几百毫秒；省掉的是「播放器拿着错的地址
+            // 先失败一次」—— 那一次在真机上是十几秒的黑屏加一个错误。
+            // 已经有结论（10/30 分钟内见过这台 host）时直接跳过，零开销。
+            if !address.isFileURL, !EgressRouter.shared.isProven(address, purpose: .media) {
+                await EgressRouter.shared.prepare(address, purpose: .media,
+                                                  policy: self.egressPolicy(for: channel),
+                                                  headers: channel.headers)
+                guard self.generation == activeGeneration, !Task.isCancelled else { return }
+            }
             self.configure(channel, url: address, generation: activeGeneration)
             self.playing = channel; self.automatic = address
             self.qualities = liveQualities.isEmpty ? DashStreams.qualities(for: address) : liveQualities
@@ -1001,9 +1052,27 @@ import TVCore
         #endif
     }
 
+    /// 这条线路允许走哪条腿：行级指定 > 源级指定 > 默认出口，语义与 `CatalogClient.egressPolicy` 一致。
+    ///
+    /// `.direct` 是硬约束（观众明确要求不过代理）；`.proxy` 与 `.auto` 的差别只在**起跑顺序**，
+    /// 不在「能不能用直连」—— 直连明明通的时候，标成代理也不该绕出国去变慢。
+    private func egressPolicy(for channel: Channel) -> EgressPolicy {
+        guard let context = channel.historyContext else {
+            return .automatic(proxyID: CustomProxyStore.shared.fallbackEndpoint?.id)
+        }
+        let route = RelayRouteRegistry.shared.route(origin: context.origin, sourceKey: context.sourceKey)
+        let lineProxy = LineSettings.shared.route(origin: context.origin, sourceKey: context.sourceKey,
+                                                 flag: context.episodeFlag)?.proxyID
+        let proxyID = lineProxy ?? route?.proxyID ?? CustomProxyStore.shared.fallbackEndpoint?.id
+        switch route?.mode ?? .auto {
+        case .direct: return .directOnly
+        case .proxy: return proxyID.map { EgressPolicy.preferProxy(proxyID: $0) } ?? .automatic(proxyID: nil)
+        case .auto: return .automatic(proxyID: proxyID)
+        }
+    }
+
     /// The item for a prepared stream, with the request headers and buffer its source needs.
-    private func makeItem(_ channel: Channel, url: URL) -> AVPlayerItem {
-        // Some providers require request headers. AVURLAsset's HTTP-header option is
+    private func makeItem(_ channel: Channel, url: URL) -> AVPlayerItem {        // Some providers require request headers. AVURLAsset's HTTP-header option is
         // best-effort and is not a guarantee for every redirected HLS segment.
         //
         // When the viewer assigned this source (or this line) a custom HTTP/HTTPS/SOCKS5 proxy, the
@@ -1026,21 +1095,19 @@ import TVCore
         // `relay upstream` / `relay done` 各 0 次 —— relay 起来了，但一次请求都没收到。
         //
         // 因此改成：代理生效时先看 relay。
+        // 走哪条腿由 `EgressRouter` 按 **host 的实测结论** 决定，不再按「源被标成什么」一刀切：
+        //
+        //   · 直连能通 → 源地址原样交给 AVPlayer（零中继、零额外 TLS，也就是观众验证过能播的
+        //     「直连 + Loon」那条路）；
+        //   · 直连被掐 → 换成回环中继 + 代理。
+        //
+        // ⛔ 旧写法是「这个源设了代理 ⇒ 视频也经中继」，于是标成代理的源必然比直连慢：
+        //    每个清单/分片都要新建一条到节点的 TLS（中继不复用连接，见 LocalProxyServer），
+        //    而真实情况往往是这台 CDN 直连就好好的。
+        let leg = EgressRouter.shared.leg(for: url, purpose: .media)
         var relayURL: URL?
         let context0 = channel.historyContext
-        let proxyID = context0.map {
-            // A line-level route (set on the line chip) wins over the source-level route.
-            LineSettings.shared.route(origin: $0.origin, sourceKey: $0.sourceKey, flag: $0.episodeFlag)?.proxyID
-                ?? CustomProxyStore.shared.route(origin: $0.origin, sourceKey: $0.sourceKey).proxyID
-                // ★ 最后读「源路由已经算好的那份结论」。
-                //
-                // ⛔ 少了这一句，配了「默认出口」（只配一台代理时它就是出口）的观众会看到：
-                //    源的列表页经代理（`api` 被改写成 `/p/<id>/…`），**视频却直连出去** ——
-                //    因为播放侧只认「行级/源级显式指定的代理」，不认默认出口。
-                //    Loon 那边于是只看到临时端口，永远等不到我们规定的那两个端口段。
-                ?? RelayRouteRegistry.shared.proxyID(origin: $0.origin, sourceKey: $0.sourceKey)
-        } ?? nil
-        if let proxyID {
+        if leg.isProxy {
             // ⛔ 只有 http/https 目标能走 relay：`LocalProxyServer.encode` 把目标拼成
             // `/p/<id>/<scheme>/<host>/<port><path>`，再按 `<scheme>` 决定是否开 TLS；
             // 而 `tvbox-hongguo:` / `tvbox-dash:` 这些自造 scheme 是由上面几个工厂自己的
@@ -1049,18 +1116,24 @@ import TVCore
             let scheme = url.scheme?.lowercased() ?? ""
             let relayable = scheme == "http" || scheme == "https"
             if !relayable {
-                Diagnostics.shared.record(.debug, "proxy",
-                    "route set but target scheme is not relayable; using its own loader scheme=\(scheme) source=\(context0?.sourceKey ?? "-")")
-            } else if let base = LocalProxyServer.shared.baseSync {
-                relayURL = LocalProxyServer.proxyURL(base: base, url: url, proxyID: proxyID)
+                Diagnostics.shared.record(.debug, "egress",
+                    "media leg is proxy but scheme is not relayable; using its own loader scheme=\(scheme) source=\(context0?.sourceKey ?? "-")")
             } else {
-                // Not up yet on the first item after launch: start it so the next item is
-                // relayed, and say so rather than pretending the route was honoured.
-                // ⚠ 这里必须**回退直连**：relay 起不来不能让「配了代理」变成「必然不能播」。
-                LocalProxyServer.shared.ensureStarted()
-                Diagnostics.shared.record(.warning, "proxy", "relay not listening yet; this item plays direct source=\(context0?.sourceKey ?? "-")")
+                let relayed = EgressRouter.shared.routed(url, leg: leg)
+                if relayed == url {
+                    // Not up yet on the first item after launch: start it so the next item is
+                    // relayed, and say so rather than pretending the route was honoured.
+                    // ⚠ 这里必须**回退直连**：relay 起不来不能让「该走代理」变成「必然不能播」。
+                    LocalProxyServer.shared.ensureStarted()
+                    Diagnostics.shared.record(.warning, "egress",
+                        "relay not listening yet; this item plays direct source=\(context0?.sourceKey ?? "-")")
+                } else {
+                    relayURL = relayed
+                }
             }
         }
+        Diagnostics.shared.record(.info, "egress",
+            "media \(leg.label)\(leg.proxyID.map { ":" + $0 } ?? "") host=\(url.host() ?? "-") source=\(context0?.sourceKey ?? "-")")
         let asset: AVURLAsset
         if let relayURL {
             // 代理已生效：字节由 relay 搬运，四个工厂必须让路。
@@ -1250,6 +1323,8 @@ import TVCore
                         return "assetURL=\(a.url.absoluteString) \(hdrs)"
                     }()
                     Diagnostics.shared.record(.error, "player", "[DIAG-12939] item.status=\(status.rawValue) \(__assetDesc) url=\(url.absoluteString)")
+                    if (network || PlaybackDropRecovery.isDrop(failure)),
+                       self.retryEgress(failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.retryRange(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.retryHDR(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.recoverLoopback(Self.urlErrorCode(failure), channel: channel, url: url, generation: activeGeneration) { return }
@@ -1400,6 +1475,13 @@ import TVCore
         if (loading || buffering) && tick % 5 == 0 {
             Diagnostics.shared.record(.debug, "player", "waiting host=\(next.host ?? "-") received=\(next.received) speed=\(Int(next.bytesPerSecond ?? -1)) required=\(Int(next.required ?? -1)) failure=\(next.failure ?? "-")")
         }
+        // 起播卡死：连接建立了，但一个字节都没进来，8 秒过去还没出过画面。
+        //
+        // 旧链路在这里没有任何重试 —— `resumeAfterDrop` 要求 `hasTimeline || reopenedAfterDrop`，
+        // 一次画面都没出过时两者都是 false，于是只能一直转圈到观众放弃。
+        // 现在把这条 host 翻到代理重开一次（每台只翻一次）。
+        if loading, !showsPicture, next.received == 0, tick >= 8,
+           retryEgress(nil, channel: channel, url: url, generation: activeGeneration) { return false }
         return true
     }
     /// A live stream playing before everything its playlist still lists shows a frozen picture (`LiveEdge`); it
@@ -1531,6 +1613,7 @@ import TVCore
         // suppress this one's own retry, or leave a stale drop/loopback/live state behind on auto-advance.
         liveReopen = LiveReopen(); liveRetrying = false; rangeRetried = false
         loopbackRecovered = nil; dropRecovery = PlaybackDropRecovery(); reopenedAfterDrop = false
+        egressFlipped.removeAll()
         // A drive's folder and file names don't name a show to find comments for.
         let source = channel.historyContext?.sourceKey
         if !DanmakuSource.has(channel.url), source != Bilibili.siteKey, source != CloudFiles.sourceKey {

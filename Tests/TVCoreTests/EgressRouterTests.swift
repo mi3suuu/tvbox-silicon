@@ -127,6 +127,9 @@ import Testing
         #expect(!EgressRouter.isLoopbackHost("127.0.0.1.nip.io"))
         #expect(!EgressRouter.isLoopbackHost("127.0.0.1."))
         #expect(!EgressRouter.isLoopbackHost("0x7f000001"))
+        // 末尾一个点会让 split 多出一个空段 —— 这条断言压住
+        // `omittingEmptySubsequences` 被谁顺手改掉（那会把 `127.0.0.1.` 判成回环）。
+        #expect(!EgressRouter.isLoopbackHost("127.0.0."))
     }
 
     // MARK: 语义

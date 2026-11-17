@@ -112,4 +112,27 @@ import Testing
         let (data, _) = try await URLSession.shared.data(from: relayed)
         #expect(String(decoding: data, as: UTF8.self) == "still-here")
     }
+
+    /// 中继不许把自己的监听端口当目标去拨（自环）。
+    ///
+    /// 这条路径的目标串由请求方给出，**清单正文也算** —— 远端 `.m3u8` 里写一行
+    /// `http://127.0.0.1:<relayPort>/p/<任意 id>/http/127.0.0.1/<port>/y` 就能让中继
+    /// 把请求发给自己，并把内层再转给任意本机端口。
+    ///
+    /// 两个独立信号都要成立，缺一不可：
+    ///   · 请求必须失败（守卫直接 cancel）。若守卫漏了，中继会正常回一个响应，这条断言就红；
+    ///   · 源站一次请求都不该收到。只有第一条时，「守卫漏了但内层恰好也失败」会造成假绿。
+    @Test func theRelayRefusesToDialItsOwnListener() async throws {
+        let origin = try TinyServer()
+        try await origin.start(respond: "should-not-arrive")
+        defer { origin.stop() }
+
+        let base = try await LocalProxyServer.shared.base()
+        let own = try #require(base.port)
+        let inner = "/p/any-id/http/127.0.0.1/\(origin.port)/y"
+        let target = URL(string: "http://127.0.0.1:\(own)\(inner)")!
+        let outcome = try? await URLSession.shared.data(from: LocalProxyServer.directURL(base: base, url: target))
+        #expect(outcome == nil, "中继接受了「目标是自己」的请求：\(String(describing: outcome?.1))")
+        #expect(origin.lastRequestLine.isEmpty, "内层请求被转出去了：\(origin.lastRequestLine.prefix(80))")
+    }
 }
