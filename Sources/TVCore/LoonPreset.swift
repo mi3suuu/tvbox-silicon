@@ -127,7 +127,35 @@ public struct LoonPreset: Sendable, Equatable {
                           hasDirectLine: LoonSRCPortRule.hasDirectRule(inConfig: text),
                           hasLegacyWideRange: LoonSRCPortRule.hasLegacyWideRange(inConfig: text),
                           portRuleTarget: LoonSRCPortRule.portRuleTarget(inConfig: text),
-                          nodeProtocols: Self.nodeProtocols(inConfig: text))
+                          nodeProtocols: Self.nodeProtocols(inConfig: text),
+                          nodeCiphers: Self.nodeCiphers(inConfig: text))
+    }
+
+    /// `[Proxy]` 段里出现过的加密方式（shadowsocks 的 method / vless 的加密参数）。
+    ///
+    /// 只记名字，不记服务器、密码、uuid。用途是判断「App 自己连节点」这条路的可行性：
+    /// SS-AEAD（aes-gcm / chacha20-poly1305）系统 CryptoKit 直接支持；
+    /// 老式 SS（rc4-md5 / aes-cfb）与 vmess 不在这个范围内。
+    public let nodeCiphers: [String]
+
+    /// SS 的 method、vless 的 `cipher` 字段等。去重排序。
+    static func nodeCiphers(inConfig text: String) -> [String] {
+        var inside = false
+        var found: Set<String> = []
+        let known: Set<String> = [
+            "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "chacha20-poly1305",
+            "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+            "aes-128-cfb", "aes-256-cfb", "rc4-md5", "none", "auto", "vless"
+        ]
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { inside = line.lowercased().hasPrefix("[proxy]"); continue }
+            guard inside, !line.hasPrefix("#"), let equals = line.firstIndex(of: "=") else { continue }
+            let fields = line[line.index(after: equals)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            for field in fields where known.contains(field) { found.insert(field) }
+        }
+        return found.sorted()
     }
 
     /// `[Proxy]` 段里每个节点的协议名（第一段），去重排序。
