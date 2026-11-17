@@ -2,6 +2,9 @@ import SwiftUI
 
 /// Layout constants that differ per platform (phone / Mac / Apple TV). These are the few numbers
 /// that shape a page's grid and gutters; spacing *between* elements uses `Spacing` instead.
+///
+/// [mi3s] 上游把 `Layout` 放在 `GlassKit.swift` 里；我方拆到本文件。合并 1.8.23 时已把
+/// `GlassKit.swift` 里的重复定义删除，**唯一真源是本文件**。上游若再改这些常量，改这里。
 enum Layout {
     #if os(tvOS)
     static let gutter: CGFloat = 64, posterMin: CGFloat = 240, cardMin: CGFloat = 480, tileMin: CGFloat = 340

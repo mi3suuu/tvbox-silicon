@@ -4,6 +4,7 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 import Metal
+import os
 import TVCore
 
 /// Sharper and smoother video with Apple's own machine-learning frame processors (VideoToolbox, OS 26):
@@ -574,18 +575,29 @@ private protocol EnhancementEngine: AnyObject, Sendable {
 struct EnhancedVideoSurface: View {
     let enhancer: VideoEnhancer
     /// How the picture meets its box: the viewer's size pick, not a per-shape guess.
-    var gravity: AVLayerVideoGravity = .resizeAspect
+    /// [mi3s] 二开：显式 gravity 优先。未给时按上游的 `stretches`/`fills` 两种布尔推出来，
+    /// 上游调用点因此零改动（R3：两边语义都保留，我方在前）。
+    var gravity: AVLayerVideoGravity?
+    /// Stretched to the view's shape (the iPhone and iPad player's Stretch). Upstream 1.8.23.
+    var fills = false
+    /// Stretched to the view's shape (the iPhone and iPad player's Stretch). Upstream 1.8.23.
+    var stretches = false
     /// Which safe-area edges AVKit's picture runs under. On a screen of its own it runs under every
     /// edge (`.all`); at the top of an iPhone watch page the picture keeps to its frame vertically but
     /// bleeds sideways so the Duo's asymmetric outer notch/corner inset doesn't leave a strip of page
     /// showing beside the picture. Passing `.all` mirrors the old `bleeds: true`, `[]` mirrors `false`.
     var bleeds: Edge.Set = .all
+
+    /// The gravity the host applies: the viewer's explicit pick, else upstream's two booleans.
+    private var effectiveGravity: AVLayerVideoGravity {
+        gravity ?? (stretches ? .resize : fills ? .resizeAspectFill : .resizeAspect)
+    }
     var body: some View {
         if VideoEnhancement.enabled {
             // The same area as AVKit's own picture: inside the safe area (under the Mac's title bar) the fitted
             // picture came out smaller than AVKit's, and under the status bar above a watch page's player it came out
             // taller and higher; either way AVKit's picture showed around its edges.
-            Host(enhancer: enhancer, gravity: gravity).ignoresSafeArea(edges: bleeds).allowsHitTesting(false).accessibilityHidden(true)
+            Host(enhancer: enhancer, gravity: effectiveGravity).ignoresSafeArea(edges: bleeds).allowsHitTesting(false).accessibilityHidden(true)
         }
     }
 
@@ -822,6 +834,11 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
     /// The most pixels interpolated per frame. 1080p takes about 90 ms a frame on an M1 Pro against 15 ms
     /// for 720p, so bigger pictures are interpolated from a 720p copy; 540p when even that is too slow.
     private var workBudget = 1280 * 720
+    /// What this device was too slow for in earlier videos of this run, shared by every player.
+    private static let limits = OSAllocatedUnfairLock(initialState: SmoothingLimits())
+    /// The picture size (in pixels) `limits` was last asked about, and whether it ruled smoothing out.
+    private var limitedFor = 0
+    private var smoothingRuledOut = false
     private var shrinker: VTPixelTransferSession?
     private var counts = (frames: 0, shown: 0, late: 0, failed: 0, busy: 0.0, lead: 0.0, cuts: 0)
     private var lastReport = 0.0
@@ -900,6 +917,7 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
             self.output = output
             timebaseReady = false
             previous = nil; interval = nil; hdr = false; slow = 0; workBudget = 1280 * 720
+            limitedFor = 0; smoothingRuledOut = false
             scaler = nil; interpolator = nil; refused = []
             counts = (0, 0, 0, 0, 0, 0, 0); timing = (0, 0, 0, 0)
             flush(removingImage: true)
@@ -982,6 +1000,15 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
             } else {
                 interval = gap
             }
+        }
+        if width * height != limitedFor {
+            // A size this device couldn't keep up with a moment ago starts where that video ended up,
+            // not with the same seconds of dropped frames (#866).
+            limitedFor = width * height
+            let known = Self.limits.withLock { $0.budget(pixels: width * height, now: CACurrentMediaTime()) }
+            smoothingRuledOut = known == nil
+            if let known { workBudget = min(workBudget, known) }
+            else if options.smooth { note("smooth \(width)x\(height) skipped: too slow on this device earlier") }
         }
         let work = workSize(width: width, height: height)
         prepare(width: width, height: height, work: work, format: CVPixelBufferGetPixelFormatType(frame.buffer))
@@ -1279,7 +1306,7 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
         let factor = options.upscale ? Self.scaleFactor(width: width, height: height, target: options.target) : nil
         let scaleKey = factor.map { "scale \(width)x\(height) x\($0)" }
         let tooFast = shownInterval.map { $0 <= 1 / 47.0 } ?? false
-        let smoothKey = options.smooth && !tooFast && Self.interpolationFits(width: work.width, height: work.height)
+        let smoothKey = options.smooth && !tooFast && !smoothingRuledOut && Self.interpolationFits(width: work.width, height: work.height)
             ? "smooth \(work.width)x\(work.height)\(work != (width, height) ? " from \(width)x\(height)" : "")" : nil
         wanted = (scaleKey, smoothKey)
         // The work size decides which processor we build. When it changes (unfold, rotation) the size often
@@ -1363,6 +1390,8 @@ private final class EnhancementPipeline: EnhancementEngine, @unchecked Sendable 
             note("\(scaler.key) too slow (\(Int(spent * 1000)) ms a frame), dropped")
         } else if let interpolator {
             refused.insert(interpolator.key); self.interpolator = nil
+            let pixels = limitedFor, tried = workBudget
+            Self.limits.withLock { $0.tooSlow(pixels: pixels, budget: tried, now: CACurrentMediaTime()) }
             if workBudget > 960 * 540 {
                 workBudget = 960 * 540
                 note("\(interpolator.key) too slow (\(Int(spent * 1000)) ms a frame), trying 540p")

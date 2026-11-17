@@ -58,11 +58,23 @@ import Testing
     guard case .subscription(let config) = try await HTTPClient().subscriptionImport(address) else { Issue.record("not a subscription"); return }
     #expect(config.sites.first?.runtime == .python)
     #expect(try await PluginDownloads(lifetime: 0).data(at: address, http: HTTPClient()) == Data("from base.spider import Spider\n".utf8))
+    #expect(!ImportedFiles.isMissing(address.absoluteString))
     ImportedFiles.remove(address.absoluteString)
     await #expect(throws: (any Error).self) { try await HTTPClient().get(address) }
+    // A file's address without its copy, as on another device the subscription list synced to (#842): known as
+    // missing without a fetch. Other addresses never are.
+    #expect(ImportedFiles.isMissing(address.absoluteString))
+    #expect(!ImportedFiles.isMissing("https://example.com/a.py"))
     // Nothing outside the folder is reachable through the reserved host.
     #expect(throws: (any Error).self) { try ImportedFiles.data(at: URL(string: "https://files.yingxia.invalid/../Preferences/x.plist")!) }
     #expect(throws: (any Error).self) { try ImportedFiles.data(at: URL(string: "https://files.yingxia.invalid/a/b.py")!) }
+    // A file a config added as a file names beside itself was never added: it says so, not "another device".
+    let configFile = ImportedFiles.address("tv.json")
+    let beside = try #require(URL(string: "./js/ss/a.py", relativeTo: configFile)?.absoluteURL)
+    do { _ = try ImportedFiles.data(at: beside); Issue.record("read a file that was never added") } catch {
+        #expect(error.localizedDescription.contains("./js/ss/a.py"))
+        #expect(error.localizedDescription != ImportedFiles.missingMessage)
+    }
     #expect(try ImportedFiles.data(at: URL(string: "https://example.com/a.py")!) == nil)
 }
 

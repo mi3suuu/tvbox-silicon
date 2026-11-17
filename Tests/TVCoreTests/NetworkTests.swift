@@ -272,6 +272,7 @@ private actor SearchCollector {
     await model.task?.value
     #expect(model.videoCount == 1)
     #expect(!model.busy)
+    #expect(model.activeSources.isEmpty)
     model.search("second", config: sub)
     await model.task?.value
     model.search("first", config: sub)
@@ -286,7 +287,7 @@ private actor SearchCollector {
 
 @Test @MainActor func searchDoesNotAskBuiltInsTheViewerHid() async throws {
     let base = URL(string: "https://example.com/config")!
-    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/api"}]}"#.utf8), origin: base).withCloudSources(nil)
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/api"}]}"#.utf8), origin: base).withCloudFiles()
     let model = SearchModel(http: client())
     model.search("movie", config: sub) { $0.isBuiltIn }
     // The search page shows a chip for each built-in it is still asking; hidden ones get none.
@@ -357,6 +358,32 @@ private actor SearchCollector {
     #expect(!model.busy)
     model.reset()
     #expect(model.items.isEmpty)
+}
+
+/// #810: the store rebuilds the subscription (and resets this model) when the built-in sources arrive after launch. The
+/// load in flight is dropped, so the count the view keys its load on must move, or Watch Now stays blank.
+@Test @MainActor func recommendationResetDroppingALoadAsksForAnotherLoad() async throws {
+    let base = URL(string: "https://example.com/config")!
+    let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/api","indexs":1}]}"#.utf8), origin: base)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let model = RecommendationModel()
+    // Nothing to drop: a view that resets an empty model for want of a source doesn't load again.
+    model.reset()
+    #expect(model.resets == 0)
+    let load = Task { await model.load(client: api, subscriptionDate: sub.importedAt) }
+    for _ in 0..<100 where !model.busy { await Task.yield() }
+    #expect(model.busy)
+    model.reset()
+    await load.value
+    #expect(model.resets == 1)
+    #expect(model.items.isEmpty && model.site == nil && !model.busy)
+    // A shown home dropped by a reset counts too.
+    await model.load(client: api, subscriptionDate: sub.importedAt)
+    #expect(model.items.count == 1)
+    model.reset()
+    #expect(model.resets == 2)
+    model.reset()
+    #expect(model.resets == 2)
 }
 
 private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
@@ -554,4 +581,51 @@ private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
     let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
     // 带上的是源自己的 Referer，所以这个 mock（只认 example.com）应当拒绝它。
     await #expect(throws: (any Error).self) { _ = try await api.home() }
+}
+
+/// Holds requests open so activity can be inspected independently of response timing.
+private final class SearchActivityProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {}
+    override func stopLoading() {}
+}
+
+@Test @MainActor func searchActivityIncludesNonPluginSourcesFromEverySubscriptionAndClearsOnStop() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [SearchActivityProtocol.self]
+    let model = SearchModel(http: HTTPClient(session: URLSession(configuration: configuration)))
+    let first = try Subscription.parse(Data(#"{"sites":[{"key":"activity-first","type":4,"api":"/api"}]}"#.utf8),
+                                       origin: URL(string: "https://activity-first.example/sub.json")!)
+    let second = try Subscription.parse(Data(#"{"sites":[{"key":"activity-second","type":4,"api":"/api"}]}"#.utf8),
+                                        origin: URL(string: "https://activity-second.example/sub.json")!)
+    let merged = try #require(Subscription.merge([first, second]))
+    model.search("activity", config: merged)
+    let task = model.task
+    for _ in 0..<100 where model.activeSources.count < 2 { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(Set(model.activeSources.map(\.id)) == ["activity-first", "activity-second"])
+    #expect(Set(model.activeSources.map { $0.site.origin(or: merged.origin) }) == [first.origin, second.origin])
+    #expect(model.completed == 0)
+    model.stop()
+    #expect(model.activeSources.isEmpty)
+    await task?.value
+    #expect(model.activeSources.isEmpty && model.results.isEmpty)
+}
+
+@Test @MainActor func searchListsTheSourcesStillWaitingUntilTheyStart() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [SearchActivityProtocol.self]
+    let model = SearchModel(http: HTTPClient(session: URLSession(configuration: configuration)))
+    let sites = (1...6).map { #"{"key":"waiting-\#($0)","type":4,"api":"/api"}"# }.joined(separator: ",")
+    let config = try Subscription.parse(Data(#"{"sites":[\#(sites)]}"#.utf8), origin: URL(string: "https://waiting.example/sub.json")!)
+    model.search("waiting", config: config)
+    let task = model.task
+    for _ in 0..<100 where model.activeSources.count < 4 { try await Task.sleep(for: .milliseconds(20)) }
+    // Four at a time; the other two wait in line, and none is in both lists.
+    #expect(model.activeSources.count == 4)
+    #expect(model.waitingSources.count == 2)
+    #expect(Set(model.activeSources.map(\.id)).union(model.waitingSources.map(\.id)) == Set(config.sites.map(\.id)))
+    model.stop()
+    #expect(model.waitingSources.isEmpty && model.activeSources.isEmpty)
+    await task?.value
 }

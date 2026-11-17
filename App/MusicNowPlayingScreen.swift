@@ -7,6 +7,8 @@ import TVCore
 /// Now Playing, laid out as Music lays it out: the cover large on a backdrop tinted by it, the
 /// title, a thin scrubber, the transport, the system volume, then Lyrics, AirPlay and Up Next.
 /// Lyrics and Up Next take the cover's place, which shrinks into the corner beside the title.
+/// The cover is one view over the page that moves between the two places, as in Music (#857):
+/// two copies cross-faded instead, so the cover went see-through in flight.
 struct MusicNowPlayingScreen: View {
     enum Panel: Hashable { case lyrics, queue }
     @Environment(Store.self) private var store
@@ -31,12 +33,8 @@ struct MusicNowPlayingScreen: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             } else {
                 Spacer(minLength: 12)
-                MusicArtwork(url: music.track?.artwork)
+                Color.clear.aspectRatio(1, contentMode: .fit)
                     .matchedGeometryEffect(id: "cover", in: cover)
-                    .shadow(color: .black.opacity(0.35), radius: 24, y: 14)
-                    // As in Music, the cover steps back while paused.
-                    .scaleEffect(music.isPlaying || music.busy ? 1 : 0.84)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.72), value: music.isPlaying)
                 Spacer(minLength: 12)
                 header(music, compact: false)
             }
@@ -46,16 +44,22 @@ struct MusicNowPlayingScreen: View {
             MusicVolumeSlider().padding(.top, 4)
             bottomBar(music)
         }
+        .overlay { artwork(music) }
         .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 6)
         .foregroundStyle(.white)
         .tint(.white)
-        .background { backdrop.ignoresSafeArea() }
+        .background { sheetBackdrop.ignoresSafeArea() }
         .environment(\.colorScheme, .dark)
         .presentationDragIndicator(.visible)
-        .presentationBackground { backdrop }
+        .presentationBackground { if Self.shapesOwnSheet { Color.clear } else { backdrop } }
+        .presentationCornerRadius(Self.shapesOwnSheet ? 0 : nil)
         .task(id: music.track?.artwork) {
             guard let url = music.track?.artwork, let color = await PosterPalette.average(url) else { return }
             withAnimation(.easeInOut(duration: 0.6)) { tint = color }
+            // The next song's cover, decoded ahead, is there the moment the song changes.
+            if let queue = music.queue, queue.hasNext, let next = queue.tracks[queue.index + 1].artwork, next != url {
+                _ = await PosterPalette.image(next)
+            }
         }
         .onChange(of: music.track == nil) { _, gone in if gone { dismiss() } }
         #if DEBUG
@@ -74,13 +78,40 @@ struct MusicNowPlayingScreen: View {
         LinearGradient(colors: [tint.blend(with: .black, by: 0.2), tint.blend(with: .black, by: 0.62)], startPoint: .top, endPoint: .bottom)
     }
 
-    /// Title, artist and the menu; beside a small cover when a panel is open.
+    /// On an iPhone, iOS 26 and later round the bottom corners of a full-height sheet too, not quite as the display rounds
+    /// its own, so the page behind showed as a light edge around the bottom of this dark sheet (#797). There the sheet
+    /// has no corners or background of its own, and the backdrop rounds the top ones as the system did.
+    private static let shapesOwnSheet: Bool = {
+        if #available(iOS 26, *) { UIDevice.current.userInterfaceIdiom == .phone } else { false }
+    }()
+
+    @ViewBuilder private var sheetBackdrop: some View {
+        if Self.shapesOwnSheet {
+            backdrop.clipShape(.rect(topLeadingRadius: 38, topTrailingRadius: 38, style: .continuous))
+        } else {
+            backdrop
+        }
+    }
+
+    /// The cover, drawn once over the page at the place laid out for it: large above the title, or small beside it
+    /// while a panel is open. It stays opaque and keeps its image while it moves between them.
+    private func artwork(_ music: MusicPlaybackSession) -> some View {
+        let large = panel == nil
+        return MusicArtwork(url: music.track?.artwork, cornerRadius: large ? 12 : 8, fades: true)
+            .shadow(color: .black.opacity(large ? 0.35 : 0.3), radius: large ? 24 : 10, y: large ? 14 : 5)
+            // As in Music, the large cover steps back while paused.
+            .scaleEffect(!large || music.isPlaying || music.busy ? 1 : 0.84)
+            .animation(.spring(response: 0.5, dampingFraction: 0.72), value: music.isPlaying)
+            .matchedGeometryEffect(id: "cover", in: cover, isSource: false)
+            .allowsHitTesting(false)
+    }
+
+    /// Title, artist and the menu; beside the small cover's place when a panel is open.
     private func header(_ music: MusicPlaybackSession, compact: Bool) -> some View {
         HStack(spacing: 14) {
             if compact {
-                MusicArtwork(url: music.track?.artwork, size: 64)
+                Color.clear.frame(width: 64, height: 64)
                     .matchedGeometryEffect(id: "cover", in: cover)
-                    .shadow(color: .black.opacity(0.3), radius: 10, y: 5)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(music.track?.title ?? "").font(compact ? .headline : .title3.weight(.bold)).lineLimit(1)

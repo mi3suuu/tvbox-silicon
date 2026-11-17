@@ -56,8 +56,14 @@ public enum CloudFilesSource {
         case .quark: found = try await QuarkFiles.quark.search(query, page: page, size: pageSize)
         case .uc: found = try await QuarkFiles.uc.search(query, page: page, size: pageSize)
         case .pan115: found = try await Pan115Files.shared.search(query, page: page, size: pageSize)
+        case .baidu: found = try await BaiduFiles.shared.search(query, page: page, size: pageSize)
+        case .tianyi: found = try await TianyiFiles.shared.search(query, page: page, size: pageSize)
+        case .pan123: found = try await Pan123Files.shared.search(query, page: page, size: pageSize)
+        // Guangya's web page has no search to ask.
+        case .guangya: return ([], 1)
         case .alist(let server) where server.isWebDAV: return ([], 1)
         case .alist(let server) where server.isEmby: found = try await Emby.shared.search(server, query, page: page, size: pageSize)
+        case .alist(let server) where server.isFnOS: found = try await FnOS.shared.search(server, query, page: page, size: pageSize)
         case .alist(let server): found = try await AList.shared.search(server, query, page: page, size: pageSize)
         }
         return (found.files.filter { $0.isFolder || drive.plays($0) }, max(1, (found.total + pageSize - 1) / pageSize))
@@ -90,7 +96,13 @@ public enum CloudFilesSource {
             return lists
         }
         let lines = playlist(entry.name, files, subfolders: zip(subfolders, inside).map { (name: $0.name, files: $1) }, drive: drive)
-        guard !lines.isEmpty else { throw TVError.unsupported(L10n.text("This folder has no videos Apple devices can play.")) }
+        guard !lines.isEmpty else {
+            // The kinds of file it held, so a report says why nothing plays.
+            let types = Dictionary(grouping: (files + inside.joined()).filter { !$0.isFolder }) { ($0.name as NSString).pathExtension.lowercased() }
+                .map { "\($0.key.isEmpty ? "-" : $0.key)×\($0.value.count)" }.sorted().joined(separator: " ")
+            Diagnostics.shared.record(.warning, "files", "nothing plays folders=\(subfolders.count) files=\(types.isEmpty ? "none" : types)")
+            throw TVError.unsupported(L10n.text("This folder has no videos Apple devices can play."))
+        }
         fields["vod_play_from"] = .string(lines.map { lineName($0.name) }.joined(separator: "$$$"))
         fields["vod_play_url"] = .string(lines.map { $0.files.map(episode).joined(separator: "#") }.joined(separator: "$$$"))
         return fields

@@ -23,6 +23,12 @@ private let live = ProcessInfo.processInfo.environment["TVBOX_MUSIC_LIVE"] == "1
         for other in model.results.prefix(6) {
             print("[music-live]    result \(other.title) / \(other.artistLine) / \(other.album ?? "-") \(other.duration.map { String(format: "%.0fs", $0) } ?? "-") \(other.ids.keys.map(\.rawValue).sorted()) score=\(MusicMatching.score(other, query: query))")
         }
+        // The channels come from the subscription, as in the app.
+        if CloudMusic.current == nil {
+            let text = try #require(ProcessInfo.processInfo.environment["SOURCES_URL"])
+            let address = try #require(URL(string: text))
+            CloudSources.current = try await CloudSources.fetch(http: HTTPClient(), address: address)
+        }
         let resolver = MusicResolver(preferences: MusicPreferences(), health: health)
         let start = Date()
         do {

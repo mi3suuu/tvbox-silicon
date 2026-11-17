@@ -18,6 +18,7 @@ enum QALaunch {
         case "live": .live
         case "music": .music
         case "manga": .manga
+        case "novels": .novels
         case "search": .search
         case "sites": .sites
         case "favorites": .favorites
@@ -179,10 +180,18 @@ enum QALaunch {
         } else {
             UserDefaults.standard.removeObject(forKey: "qaBiliOpenSettings")
         }
+        // `-qaFnOSServer <address> -qaServerUser <name> -qaServerPassword <password>` adds a 飞牛 fnOS NAS, as the Add form would.
+        if let address = UserDefaults.standard.string(forKey: "qaFnOSServer"), let url = try? WebAddress.resolve(address),
+           var server = await FnOS.probe(url) {
+            server.username = UserDefaults.standard.string(forKey: "qaServerUser") ?? ""
+            server.password = UserDefaults.standard.string(forKey: "qaServerPassword") ?? ""
+            if (try? await FnOS.shared.check(server)) != nil { _ = try? AListServers.add([server]) }
+        }
         guard section != nil || page != nil || UserDefaults.standard.string(forKey: "qaPlay") != nil
                 || UserDefaults.standard.string(forKey: "qaDownload") != nil
                 || UserDefaults.standard.string(forKey: "qaPlayLive") != nil
-                || UserDefaults.standard.string(forKey: "qaPlayURL") != nil else { return }
+                || UserDefaults.standard.string(forKey: "qaPlayURL") != nil
+                || UserDefaults.standard.string(forKey: "qaPlayChannel") != nil else { return }
         if UserDefaults.standard.bool(forKey: "qaResetHistory") { store.playbackHistory.clear() }
         #if os(macOS)
         // `-qaWindowSnapshot <png> [-qaWindowSize 1230x830] [-qaSnapshotDelay 20]`: draws the main window into a PNG
@@ -263,17 +272,18 @@ enum QALaunch {
             }
             await store.importSubscription(address: subscription)
         }
-        else if section != .discover, store.subscription == nil, !Distribution.isAppStore { await store.importSubscription(address: Store.defaultURL) }
         if QASweep.enabled, let config = store.subscription { Task.detached(priority: .utility) { await QASweep.run(config) } }
         // `-qaSeedHistory <source key>:<video id>` records that video's first episode as part watched, for Watch Now's
         // Up Next and Continue Watching.
-        if let seed = UserDefaults.standard.string(forKey: "qaSeedHistory"), let config = store.subscription {
-            let parts = seed.split(separator: ":", maxSplits: 1).map(String.init)
-            if parts.count == 2, let site = config.sites.first(where: { $0.key == parts[0] }) {
+        if let seeds = UserDefaults.standard.string(forKey: "qaSeedHistory"), let config = store.subscription {
+            // Several, separated by commas, fill the History page; each is a little further along than the last.
+            for (index, seed) in seeds.split(separator: ",").enumerated() {
+                let parts = seed.split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2, let site = config.sites.first(where: { $0.key == parts[0] }) else { continue }
                 let client = CatalogClient(site: site, origin: config.origin, jarURL: config.spiderURL).applying(config)
                 if let video = try? await client.detail(parts[1]), let episode = video.episodes.first {
                     store.playbackHistory.record(PlaybackHistoryContext(origin: config.origin, site: site, video: video, episode: episode),
-                                                 position: 30, duration: 120)
+                                                 position: 30 + Double(index * 11 % 80), duration: 120)
                 }
             }
         }
@@ -296,6 +306,22 @@ enum QALaunch {
         if let address = UserDefaults.standard.string(forKey: "qaPlayURL"), let url = URL(string: address) {
             let resume = UserDefaults.standard.double(forKey: "qaResume")
             store.playing = Channel(name: url.lastPathComponent, group: "QA", url: url, resumePosition: resume > 0 ? resume : nil)
+        }
+        // `-qaPlayChannel <index>` plays that channel of the subscription's first live playlist, picked from its list as
+        // the Live tab does: Previous and Next Channel and the channel list go through the playlist (#1010).
+        if let index = UserDefaults.standard.string(forKey: "qaPlayChannel").flatMap(Int.init),
+           let source = store.liveSources.first(where: { !$0.isBuiltIn }) {
+            do {
+                let playlist = try await HTTPClient().playlist(source)
+                let channels = playlist.channels
+                let guide = LiveGuide.address(for: source, playlist: playlist.guide, in: store).map(LiveGuide.init)
+                if let guide { Task { await guide.load(channels) } }
+                if channels.indices.contains(index) {
+                    store.watch(channels[index], in: LiveLineup(title: source.name, channels: channels), guide: guide)
+                }
+            } catch {
+                Diagnostics.shared.record(.warning, "qa", "playlist not loaded: \(error.localizedDescription)")
+            }
         }
         // `-qaPlay <site key>:<video id>[:<episode index>]` opens that source's video in the player.
         if let target = UserDefaults.standard.string(forKey: "qaPlay"), let config = store.subscription {
@@ -418,6 +444,12 @@ enum QALaunch {
         folder == drive.root ? drive.name : (folder as NSString).lastPathComponent
     }
 
+    /// `-qaPage app-icon`: Settings › App Icon. `-qaPage color-theme`: Settings › Color Theme;
+    /// `-colorTheme <name>` starts in that theme.
+    @MainActor @ViewBuilder private static var appIconPage: some View {
+        AppIconSettingsView()
+    }
+
     /// The pushed page to show as the section's root, so detail screens can be captured without taps.
     @MainActor @ViewBuilder static func page(for section: AppSection, store: Store) -> some View {
         // `-qaPage one-preview -qaOneShape <column|split|fullBleed|halfFold>`:
@@ -445,6 +477,9 @@ enum QALaunch {
         // Pages that need no subscription, so an App Store build (`-qaAppStore 1`) can show them before one is added.
         } else if section == self.section, store.subscription == nil, page == "cloud-accounts" {
             CloudDriveView()
+        } else if section == self.section, store.subscription == nil, let page, page.hasPrefix("cloud-login:"),
+                  let drive = CloudDriveQRLogin.Drive(rawValue: String(page.dropFirst("cloud-login:".count))) {
+            CloudQRLoginView(drive: drive) {}
         } else if section == self.section, page == "subtitle-style" {
             SubtitleStyleView()
         } else if section == self.section, page == "speed-test" {
@@ -456,6 +491,15 @@ enum QALaunch {
             // measurement, batch filing and batch routing. It is a sheet on that page, so a deep link
             // is the only way to land on it without a tap.
             SourceSpeedLab()
+        // 上游新增的设置子页深链。
+        } else if section == self.section, page == "danmaku-style" {
+            DanmakuSettingsView()
+        } else if section == self.section, page == "book-sources" {
+            NovelSourcesView()
+        } else if section == self.section, page == "app-icon" {
+            appIconPage
+        } else if section == self.section, page == "color-theme" {
+            ColorThemeSettingsView()
         } else if section == self.section, let page, let config = store.subscription {
             let parts = page.split(separator: ":", maxSplits: 2).map(String.init)
             switch parts.first {
@@ -506,6 +550,15 @@ enum QALaunch {
                 }
             case "alist-add": QASheet { AListServerForm(server: AListServer(name: "", address: "")) {} }
             case "runtime": RuntimeView()
+            // `-qaPage subscription:<n>`: Settings › the nth subscription (from 0).
+            case "subscription":
+                if let entry = store.subscriptions.dropFirst(Int(parts.dropFirst().first ?? "") ?? 0).first {
+                    #if os(tvOS)
+                    TVSubscriptionPage(entry: entry)
+                    #else
+                    SubscriptionDetailView(entry: entry)
+                    #endif
+                }
             case "logs": DiagnosticsView()
             case "feedback": FeedbackView()
             #if os(tvOS)
@@ -535,11 +588,23 @@ enum QALaunch {
                 if let platform = parts.dropFirst().first.flatMap(LivePlatform.init(rawValue:)) {
                     LivePlatformView(platform: platform, initialQuery: UserDefaults.standard.string(forKey: "qaQuery") ?? "")
                 }
+            // `-qaPage live-plugins` (`-qaQuery <source key>` adds that source), `-qaPage live-plugin:<pluginId>`.
+            case "live-plugins": LivePluginsView(initialSource: UserDefaults.standard.string(forKey: "qaQuery"))
+            case "live-plugin":
+                if let plugin = parts.dropFirst().first.flatMap({ LivePlugins.shared.installed($0) }) { LivePluginPage(plugin: plugin) }
+            #if !os(tvOS)
+            // `-qaPage live-plugin-sign-in:<pluginId>`: the plugin's web sign-in sheet.
+            case "live-plugin-sign-in":
+                if let plugin = parts.dropFirst().first.flatMap({ LivePlugins.shared.installed($0) }) { QALivePluginSignIn(plugin: plugin) }
+            #endif
+            // `-qaPage live-plugin-qr:<pluginId>`: the plugin's QR sign-in, in the page itself.
+            case "live-plugin-qr":
+                if let plugin = parts.dropFirst().first.flatMap({ LivePlugins.shared.installed($0) }) { QALivePluginQR(plugin: plugin) }
             case "danmaku-list": QADanmakuList()
             #if !os(tvOS)
             case "danmaku-settings": QADanmakuSettings()
             #endif
-            // `-qaPage cloud-login:<quark|uc|baidu|aliyun>`; `cloud-accounts` shows the accounts page.
+            // `-qaPage cloud-login:<quark|uc|baidu|aliyun|pan115|tianyi|pan123|guangya>`; `cloud-accounts` shows the accounts page.
             case "cloud-login": CloudQRLoginView(drive: parts.dropFirst().first.flatMap(CloudDriveQRLogin.Drive.init(rawValue:)) ?? .quark) {}
             case "cloud-accounts": CloudDriveView()
             #if os(macOS)
@@ -585,7 +650,7 @@ enum QALaunch {
 
     static func overrides(_ section: AppSection) -> Bool {
         guard section == self.section, let page else { return false }
-        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add", "one-preview", "player-controls"].contains(page.split(separator: ":").first.map(String.init) ?? "")
+        return ["site", "detail", "open-detail", "channels", "runtime", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "cloud-login", "cloud-accounts", "subtitle-style", "speed-test", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add", "one-preview", "player-controls", "setting", "subscription", "app-icon", "color-theme", "danmaku-style", "book-sources", "up", "comments", "chapters", "live-plugins", "live-plugin", "live-plugin-sign-in", "live-plugin-qr"].contains(page.split(separator: ":").first.map(String.init) ?? "")
     }
 }
 
@@ -796,6 +861,59 @@ private struct QADanmakuList: View {
             .ignoresSafeArea()
             .sheet(isPresented: .constant(true)) { DanmakuListView(player: player, comments: comments).danmakuListPresentation() }
         #endif
+    }
+}
+#endif
+
+#if DEBUG && os(tvOS)
+private struct QABilibiliChapters: View {
+    let part: BilibiliAPI.Part?
+    @State private var chapters: [PlaybackChapter] = []
+    @State private var failure: String?
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.ignoresSafeArea()
+            if !chapters.isEmpty { PlayerChaptersView(player: AVPlayer(), chapters: chapters).frame(height: 330).background(.thinMaterial) }
+        }
+        .overlay { if let failure { Text(failure).foregroundStyle(.white) } }
+        .task {
+            guard let part else { failure = "no part"; return }
+            do { chapters = try await BilibiliAPI.playerInfo(part).chapters; if chapters.isEmpty { failure = "no chapters" } }
+            catch { failure = "\(error)" }
+        }
+    }
+}
+#endif
+
+#if DEBUG && !os(tvOS)
+/// A live plugin's web sign-in sheet, once its manifest is read.
+private struct QALivePluginSignIn: View {
+    let plugin: LivePlugins.Installed
+    @State private var flow: LivePluginLoginFlow?
+    var body: some View {
+        Color.clear
+            .task { flow = await LivePlugins.shared.loginFlow(plugin.pluginId) }
+            .sheet(isPresented: .constant(flow != nil)) { if let flow { LivePluginWebSignIn(plugin: plugin, flow: flow) } }
+    }
+}
+#endif
+
+#if DEBUG
+
+/// A live plugin's QR sign-in, once its manifest is read.
+private struct QALivePluginQR: View {
+    let plugin: LivePlugins.Installed
+    @State private var plan: LivePluginQRPlan?
+    @State private var device = false
+    var body: some View {
+        ZStack {
+            if let plan { LivePluginQRPage(plugin: plugin, plan: plan, useWebPage: {}) }
+            else if device { LivePluginDevicePage(plugin: plugin) }
+        }
+        .task {
+            plan = await LivePlugins.shared.qrLogin(plugin.pluginId)
+            device = await LivePlugins.shared.signsInByDeviceCode(plugin.pluginId)
+        }
     }
 }
 #endif

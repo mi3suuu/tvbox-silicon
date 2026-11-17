@@ -2,13 +2,14 @@ import SwiftUI
 import TVCore
 
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
-    case home = "Watch Now", discover = "Discover", live = "Live TV", music = "Music", manga = "Manga", search = "Global Search", sites = "Sources", files = "Cloud Files", favorites = "Favorites", history = "Playback History", downloads = "Downloads", settings = "Settings", more = "More"
+    case home = "Watch Now", discover = "Discover", live = "Live TV", music = "Music", manga = "Manga", novels = "Novels", search = "Global Search", sites = "Sources", files = "Cloud Files", favorites = "Favorites", history = "Playback History", downloads = "Downloads", settings = "Settings", more = "More"
     /// Messages from the website (App/Announcements.swift); only the phone lists it, in More.
     case messages = "Messages"
     /// Apple TV's sidebar item for the song playing, first while one is loaded; it opens the player.
     case nowPlaying = "Now Playing"
     var id: String { rawValue }
-    var title: String { L10n.text(rawValue) }
+    /// The raw values are also saved settings and QA arguments, so the offline cache keeps its old one.
+    var title: String { self == .downloads ? L10n.text("Offline Cache") : L10n.text(rawValue) }
     /// Where Software Update lives: Settings, or More when Settings is folded into it.
     var showsUpdateBadge: Bool { self == .settings || self == .more }
     var icon: String {
@@ -19,6 +20,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .live: "dot.radiowaves.left.and.right"
         case .music: "music.note"
         case .manga: "book.fill"
+        case .novels: "text.book.closed.fill"
         case .sites: "square.grid.2x2.fill"
         case .files: "folder.fill"
         case .favorites: "heart.fill"
@@ -103,7 +105,7 @@ struct RootView: View {
         // The iPad's sidebar, in the order set in Settings > Edit Tab Bar (#427).
         return PhoneTabs.sidebar(stored: storedTabs, hiding: store.hiddenSections)
         #else
-        let sections = [AppSection.home, .discover, .live, .music, .manga, .search, .sites, .files, .history, .favorites, .downloads, .settings]
+        let sections = [AppSection.home, .discover, .live, .music, .manga, .novels, .search, .sites, .files, .history, .favorites, .downloads, .settings]
             .filter { !store.hiddenSections.contains($0) }
         #if os(tvOS)
         // Where the remote already goes to change section, so the song is one move away from anywhere.
@@ -151,6 +153,7 @@ struct RootView: View {
                 // section change collapsed the sidebar while the new page was still a placeholder.
                 NavigationStack(path: $detailPath) { content(store.section).musicBar().routeDestinations() }
                     .environment(\.openRoute, RouteOpener { detailPath.append($0) })
+                    .overlay { ThemedTitleBand() }
             }
             .onChange(of: store.section) { detailPath = NavigationPath() }
             .overlay {
@@ -263,7 +266,8 @@ struct RootView: View {
     /// The phone's tab bar: the tabs the viewer arranged in Settings, then More with the rest. Which screens use
     /// it, and why: `PhoneTabs.inUse`.
     @AppStorage(PhoneTabs.labelsKey) private var showsTabLabels = true
-    private var phoneTabs: Bool { PhoneTabs.inUse(horizontal: sizeClass) }
+    @AppStorage(PhoneTabs.collapsesKey) private var collapsesTabBar = true
+    private var phoneTabs: Bool { PhoneTabs.inUse(horizontal: tabSizes.horizontal) }
     /// Sections a phone reaches through More, as arranged in the tab bar editor.
     private var inMore: [AppSection] { PhoneTabs(stored: storedTabs).arranged(slots: barSlots, hiding: store.hiddenSections).more }
     /// ⛔ 槽位必须**形态无关**，否则切形态会崩。
@@ -309,9 +313,12 @@ struct RootView: View {
             }
             #endif
             #if os(iOS)
-            .minimizesTabBarOnScroll()
-            // 页面标题上的「查看更多 ›」要知道哪些分区被折进了 More：
+            // [mi3s] 二开：页面标题上的「查看更多 ›」要知道哪些分区被折进了 More ——
             // 有独立标签的直接切过去，没有的 push 到本页栈上（Back 才回得来）。
+            .minimizesTabBarOnScroll(collapsesTabBar)
+            .onChange(of: TabSizeClasses(horizontal: sizeClass, vertical: verticalSizeClass), initial: true) { _, now in
+                followsSizeClasses(now)
+            }
             .environment(\.sectionsInMore, phoneTabs ? inMore : [])
             .musicAccessory(enabled: store.music.showsStrip(videoPlaying: store.playing != nil) && phoneTabs)
             // Opened from the mini player; swiping down closes it, as in Music.
@@ -452,11 +459,22 @@ struct RootView: View {
             if phoneTabsWithoutSidebar {
                 TabView(selection: $store.section) {
                     ForEach(tabs) { item in
-                        Tab(value: item) { tabPage(item) } label: { tabLabel(item) }
+                        // 上游 #1012/#1115：iOS 18 按标签在栏里的位置保存页面，用 `.id(item)` 让页面跟着分区走。
+                        Tab(value: item) { tabPage(item).id(item) } label: { tabLabel(item) }
                             #if os(iOS)
                             .badge(tabBadge(item))
                             #endif
                     }
+=======
+            TabView(selection: $store.section) {
+                ForEach(tabs) { item in
+                    // The page is the section's own: iOS 18 keeps a tab's page by its place in the bar, so a section the
+                    // tab bar editor put in another's place (Novels for Favorites) got a stack whose links pushed
+                    // nothing (#1012, #1115). iOS 26 and 27 didn't.
+                    Tab(value: item) { tabPage(item).id(item) } label: { tabLabel(item) }
+                        #if os(iOS)
+                        .badge(tabBadge(item))
+                        #endif
                 }
                 .tabViewStyle(.tabBarOnly)
             } else {
@@ -549,6 +567,7 @@ struct RootView: View {
         case .live: LiveView()
         case .music: MusicView()
         case .manga: MangaView()
+        case .novels: NovelView()
         case .sites: SitesView()
         case .files: CloudFilesView()
         case .favorites: FavoritesView()
@@ -849,24 +868,27 @@ private struct MacSidebar: View {
     @Environment(Store.self) private var store
     @Environment(Updates.self) private var updates
     private var groups: [(title: String, items: [AppSection])] {
-        let groups: [(title: String, items: [AppSection])] = [(L10n.text("Browse"), [.home, .discover, .search, .live, .music, .sites, .files]),
+        // 上游新增漫画与小说两个分区。
+        let groups: [(title: String, items: [AppSection])] = [(L10n.text("Browse"), [.home, .discover, .search, .live, .music, .manga, .novels, .sites, .files]),
                                                              (L10n.text("Library"), [.history, .favorites, .downloads, .settings])]
         return groups.map { (title: $0.title, items: $0.items.filter { !store.hiddenSections.contains($0) }) }
     }
 
     var body: some View {
         let ordered = groups.flatMap(\.items)
+        let decor = ColorThemes.shared.current.palette.regions?.decor
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 ForEach(groups, id: \.title) { group in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(group.title)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(decor == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Brand.accent.opacity(0.85)))
                             .padding(.horizontal, 10).padding(.bottom, 4)
                             .accessibilityAddTraits(.isHeader)
                         ForEach(group.items) { item in
                             SidebarRow(section: item, selected: store.section == item,
+                                       decor: decor.map { $0[(ordered.firstIndex(of: item) ?? 0) % $0.count] },
                                        badge: item.showsUpdateBadge && !updates.available.isEmpty,
                                        shortcut: (ordered.firstIndex(of: item).map { $0 + 1 }).flatMap { $0 < 10 ? Character(String($0)) : nil }) {
                                 store.section = item
@@ -879,12 +901,15 @@ private struct MacSidebar: View {
         }
         .scrollIndicators(.never)
         .safeAreaInset(edge: .bottom, spacing: 0) { SidebarStatus() }
+        .background { ThemedSidebarFill() }
     }
 }
 
 private struct SidebarRow: View {
     let section: AppSection
     let selected: Bool
+    /// A mixed theme's icon colour for this row.
+    var decor: Color? = nil
     var badge = false
     /// ⌘1–⌘9; sections past the ninth have none.
     let shortcut: Character?
@@ -892,24 +917,28 @@ private struct SidebarRow: View {
     @State private var hovering = false
 
     var body: some View {
+        // Classic keeps the neutral rows; another theme draws the icons and the selection in its highlight.
+        let themed = ColorThemes.shared.tintsChrome
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: section.icon)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(decor.map { AnyShapeStyle($0) } ?? (themed ? AnyShapeStyle(Brand.accent.opacity(selected ? 1 : 0.8))
+                                     : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary)))
                     .frame(width: 20)
                 Text(section.title)
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(themed && selected ? AnyShapeStyle(Brand.accent) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if badge { NewBadge() }
             }
-            .foregroundStyle(.primary)
             .padding(.horizontal, 10)
             .frame(height: 32)
             .background {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(selected ? 0.11 : (hovering ? 0.05 : 0)))
+                    .fill(themed ? Brand.accent.opacity(selected ? 0.2 : (hovering ? 0.08 : 0))
+                                 : Color.primary.opacity(selected ? 0.11 : (hovering ? 0.05 : 0)))
             }
             .contentShape(Rectangle())
         }
@@ -933,11 +962,16 @@ struct SidebarStatus: View {
     }
     var body: some View {
         if let version {
+            // A mixed theme draws it as an editor's status bar, in a strip of its own colour.
+            let regions = ColorThemes.shared.current.palette.regions
             Text(version)
-                .font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                .font(.caption).monospacedDigit().lineLimit(1)
+                // 上游彩色主题：混合主题给状态条自带前景色，单色主题退回 tertiary。
+                .foregroundStyle(regions.map { AnyShapeStyle($0.onStatus) } ?? AnyShapeStyle(.tertiary))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20).frame(height: 40)
-                .overlay(alignment: .top) { Divider().padding(.horizontal, 12) }
+                .background { regions?.status }
+                .overlay(alignment: .top) { if regions == nil { Divider().padding(.horizontal, 12) } }
                 .selectable()
         }
     }

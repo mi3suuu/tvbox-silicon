@@ -459,11 +459,17 @@ enum ScriptHTTP {
         }
     }
 
-    private static func session(_ options: [String: JSONValue], stopsRedirects: Bool) -> URLSession {
-        guard let text = options["proxy"]?.string, !text.isEmpty, let proxy = ScriptProxy(text) else {
-            return stopsRedirects ? stopping : following
+    /// The session a request runs on. Priority:
+    ///
+    ///  1. `proxy` 指定了代理 → 每代理一个缓存会话（[mi3s] 二开：`proxy` 少见，按请求建会话会漏连接）；
+    ///  2. 脚本点名了 `jar` → 该 jar 的会话（上游：登录 cookie 不串到别处）；
+    ///  3. 都没有 → 全局 `following` / `stopping`。
+    private static func session(_ options: [String: JSONValue], stopsRedirects: Bool, jar: Jars.Jar? = nil) -> URLSession {
+        if let text = options["proxy"]?.string, !text.isEmpty, let proxy = ScriptProxy(text) {
+            return proxied.session(proxy, stopsRedirects: stopsRedirects)
         }
-        return proxied.session(proxy, stopsRedirects: stopsRedirects)
+        if let jar { return stopsRedirects ? jar.stopping : jar.following }
+        return stopsRedirects ? stopping : following
     }
 
     /// A session of its own, for a hedged try that must not share a connection.
@@ -473,6 +479,34 @@ enum ScriptHTTP {
         return URLSession(configuration: configuration, delegate: stopsRedirects ? Redirects() : nil, delegateQueue: nil)
     }
 
+    /// Cookie jars a script names (`jar`): requests naming the same jar share its cookies and no others, so a
+    /// sign-in's cookies neither leak into a source's other requests nor pick theirs up. In memory only.
+    final class Jars: @unchecked Sendable {
+        struct Jar { let following: URLSession; let stopping: URLSession; let storage: HTTPCookieStorage? }
+        static let shared = Jars()
+        static let limit = 8
+        private let lock = NSLock()
+        private var jars: [String: Jar] = [:]
+        private var order: [String] = []
+
+        func jar(_ name: String) -> Jar {
+            lock.withLock {
+                if let jar = jars[name] { return jar }
+                // An ephemeral configuration has a cookie store of its own, which both sessions share.
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.httpCookieAcceptPolicy = .always
+                let jar = Jar(following: URLSession(configuration: configuration),
+                              stopping: URLSession(configuration: configuration, delegate: Redirects(), delegateQueue: nil),
+                              storage: configuration.httpCookieStorage)
+                jars[name] = jar; order.append(name)
+                while order.count > Self.limit {
+                    let old = jars.removeValue(forKey: order.removeFirst())
+                    old?.following.invalidateAndCancel(); old?.stopping.invalidateAndCancel()
+                }
+                return jar
+            }
+        }
+    }
     typealias Reply = (Data?, URLResponse?, Error?)
 
     /// Starts one try, and another each time `hedge` seconds pass without an answer or a try fails, up to
@@ -508,7 +542,8 @@ enum ScriptHTTP {
     static func perform(_ json: String) throws -> String {
         let options = try JSONDecoder().decode([String: JSONValue].self, from: Data(json.utf8))
         let (request, stopsRedirects) = try prepare(options)
-        let racers = min(4, max(1, options["racers"]?.int ?? 1))
+        let jar = options["jar"]?.string.flatMap { $0.isEmpty || $0.count > 80 ? nil : Jars.shared.jar($0) }
+        let racers = jar == nil ? min(4, max(1, options["racers"]?.int ?? 1)) : 1
         let result: Reply
         if racers > 1 {
             let hedge = Double(options["hedge"]?.int ?? 0) / 1000
@@ -521,11 +556,11 @@ enum ScriptHTTP {
         } else {
             let semaphore = DispatchSemaphore(value: 0)
             nonisolated(unsafe) var reply: Reply = (nil, nil, nil)
-            session(options, stopsRedirects: stopsRedirects).dataTask(with: request) { data, response, error in reply = (data, response, error); semaphore.signal() }.resume()
+            session(options, stopsRedirects: stopsRedirects, jar: jar).dataTask(with: request) { data, response, error in reply = (data, response, error); semaphore.signal() }.resume()
             semaphore.wait()
             result = reply
         }
-        return try answer(result, request: request, options: options)
+        return try answer(result, request: request, options: options, cookies: jar?.storage)
     }
 
     /// Starts a request without waiting for it (`httpStart`): `finish` gets the same answer `perform` returns.
@@ -553,14 +588,23 @@ enum ScriptHTTP {
             if let encoded = options["bodyBase64"]?.string { request.httpBody = Data(base64Encoded: encoded) ?? Data() }
             else if let body = options["body"]?.string { request.httpBody = Data(body.utf8) }
         }
+        // `cookies: false`: only the request's own Cookie header goes, and nothing the answer sets is kept.
+        if case .bool(false)? = options["cookies"] { request.httpShouldHandleCookies = false }
         let stopsRedirects = options["redirect"].map { if case .bool(false) = $0 { return true } else { return false } } == true
         return (request, stopsRedirects)
     }
 
-    private static func answer(_ result: Reply, request: URLRequest, options: [String: JSONValue]) throws -> String {
+    private static func answer(_ result: Reply, request: URLRequest, options: [String: JSONValue], cookies: HTTPCookieStorage? = nil) throws -> String {
         let url = request.url!
         let host = url.host ?? ""
         var answer: [String: Any] = ["url": (result.1?.url ?? url).absoluteString, "host": host]
+        if let cookies {
+            // The jar's live cookies for the answered address, or for the one the script asks about.
+            let about = options["cookiesFor"]?.string.flatMap { try? WebAddress.resolve($0) } ?? result.1?.url ?? url
+            var fields: [String: String] = [:]
+            for cookie in cookies.cookies(for: about) ?? [] where !cookie.value.isEmpty && (cookie.expiresDate.map { $0 > Date() } ?? true) { fields[cookie.name] = cookie.value }
+            answer["cookies"] = fields
+        }
         if let error = result.2 {
             answer["code"] = 0; answer["content"] = ""; answer["failed"] = "Network request to \(host) failed: \(error.localizedDescription)"
         } else {

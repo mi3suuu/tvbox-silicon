@@ -70,8 +70,25 @@ struct SitesView: View {
     private let foldState = SourceFoldState()
     @State private var prepared = false
     @State private var editingSource: Site?
-    /// The fold as it was when a search began; restored when the search is cleared.
-    @State private var foldBeforeSearch: Set<String>?
+    /// Groups folded during the current search. A search opens every group; clearing it shows the page's own fold
+    /// again in the same update. Swapping `collapsed` in `onChange` drew one pass with every group open, hidden
+    /// sources included, before the fold came back: the page flickered or folded with cards ghosting over it (#935).
+    @State private var searchFold: Set<String> = []
+    #if os(tvOS)
+    private var folded: Set<String> { query.isEmpty ? collapsed : searchFold }
+    #else
+    /// iPhone, iPad and Mac show one group at a time, switched from a row of chips, rather than folding them (#994, #975,
+    /// #1006): with a dozen subscriptions, the folds were a long page to scroll and fold one by one. 书架/选择/批处理
+    /// 仍在这一组里生效（`groupBody`）。
+    private var folded: Set<String> { [] }
+    /// The group chosen from the chips; saved, so the page opens on it again. Nil until one is chosen.
+    @State private var group: String?
+    private static let groupKey = "sources.group"
+    #endif
+    #if os(iOS)
+    /// Counts groups changed by a sideways swipe, for the haptic tick (#1052).
+    @State private var swipes = 0
+    #endif
     @State private var arranging = false
     @State private var choosingHidden = false
     /// The group-priority list, opened from the search-order card.
@@ -131,8 +148,14 @@ struct SitesView: View {
         self.pick = pick
         self.pickable = pickable
         self.picked = picked
-        _collapsed = State(initialValue: pick == nil ? (SourceFoldState().collapsed ?? []) : [])
+        _collapsed = State(initialValue: pick == nil ? Self.savedFold : [])
+        #if !os(tvOS)
+        _group = State(initialValue: pick == nil ? UserDefaults.standard.string(forKey: Self.groupKey) : nil)
+        #endif
     }
+    /// [mi3s] 二开（I-33）：折叠记忆仍由我方 `SourceFoldState` 落盘（`sourceFoldState.v1`）。
+    /// 上游用 `sources.foldedGroups` 这个 key，两边不能各存一份 —— 以我方为准，上游的读法照走 `Self.savedFold`。
+    private static var savedFold: Set<String> { SourceFoldState().collapsed ?? [] }
     var body: some View {
         Group {
             if let config = store.subscription {
@@ -173,6 +196,12 @@ struct SitesView: View {
                                             searched.filter { $0.kind != .hidden }.flatMap(\.sites),
                                             reading: latestReading))
                         }
+                        // 手机 / iPad / Mac：一行订阅 chips，一次只读一组（上游 #994 #975 #1006）。
+                        // 搜索时改成「按名字找视频」的入口（上游 #974）。
+                        #if !os(tvOS)
+                        if query.isEmpty, groups.count > 1 { groupChips(groups) }
+                        if pick == nil, !query.isEmpty { SearchVideosRow(query: query) }
+                        #endif
                         if pick == nil, query.isEmpty && sites.count > 1, !selecting {
                             VStack(alignment: .leading, spacing: Layout.cardSpacing) {
                                 // The sweep card is first among the tools because it is what the other
@@ -190,17 +219,21 @@ struct SitesView: View {
                                 HideSourcesCard(hidden: hiddenCount) { choosingHidden = true }
                             }.tvFocusSection()
                         }
-                        ForEach(groups) { group in
+                        ForEach(shown(groups)) { group in
                             // 用 `Section` 而不是「头 + 网格」两行：只有 Section 的 header 会被
                             // `pinnedViews` 认成吸顶头。内容折起来时留一个空的 Section ——
                             // 头仍然在，仍然可以点开。
                             Section {
-                                if !collapsed.contains(group.id) {
+                                if !folded.contains(group.id) {
                                     groupBody(group, config: config, sites: sites)
                                 }
                             } header: {
                                 groupHeader(group)
                             }
+                            #if os(iOS)
+                            // Swiping the sources sideways moves along the chips above (#1052). Not while picking.
+                            .background { if pick == nil, query.isEmpty, groups.count > 1 { groupSwipe(groups) } }
+                            #endif
                         }
                         // Picking leaves hidden sources out; the way to show them again is at the end, where the
                         // list runs out (#704). Not on Apple TV, where a sheet over a pushed page never settles (#272).
@@ -210,6 +243,8 @@ struct SitesView: View {
                         }
                         #endif
                     }.pageContainer()
+                    // Starting or clearing a search swaps the whole page at once: never as a fade.
+                    .transaction(value: query) { $0.animation = nil }
                 }
                 .reportsScrollingToPosterLoader()
                 // `safeAreaInset` 而不是 `overlay`：胶囊出现时把列表内容顶上去一格，
@@ -219,6 +254,9 @@ struct SitesView: View {
                 // Picking opens on the current choice rather than the top of a long page.
                 .defaultFocus($focusedSite, picked)
                 .onAppear { if pick != nil, let picked { proxy.scrollTo(picked, anchor: .center) } }
+                #if os(iOS)
+                .sensoryFeedback(.selection, trigger: swipes)
+                #endif
                 }
                 .sheet(isPresented: $arranging) { SourceOrderEditor(sites: sites, automatic: store.automaticSites(config)) }
                 .sheet(isPresented: $choosingHidden) { HiddenSourcesEditor() }
@@ -233,11 +271,15 @@ struct SitesView: View {
                     arranging = true
                 }
                 #endif
-            } else { ContentUnavailableView(L10n.text("No Sources Yet"), systemImage: "square.grid.2x2", description: Text(L10n.text("Add a TVBox subscription in Settings."))) }
+            } else { EmptyResults(symbol: "square.grid.2x2", title: L10n.text("No Sources Yet"), message: L10n.text("Add a TVBox subscription in Settings."), fills: true) }
         }
         .screenBackdrop()
         .catalogSearchable(text: $query, prompt: L10n.text("Find a source"))
         .modifier(SitesTitle(picking: pick != nil))
+        #if DEBUG
+        // `-qaSection sites -qaQuery <text>` shows the Sources page's search.
+        .task { if pick == nil, QALaunch.section == .sites, let text = UserDefaults.standard.string(forKey: "qaQuery") { query = text } }
+        #endif
         #if !os(tvOS)
         .toolbar {
             // The sweep belongs here rather than on a settings page: the decision it feeds — which
@@ -304,6 +346,17 @@ struct SitesView: View {
                     // Edit, where people look first to remove a source that stopped working or to bring back one they hid
                     // (#669, #704). It opens the same list as the Hide or Show Sources card.
                     Button(L10n.text("Edit")) { choosingHidden = true }.accessibilityIdentifier("sources.edit")
+                    // [mi3s] 二开融合：上游 1.8.23 把「隐藏源 / 自定义搜索顺序」收进 Edit 菜单（#973 #994）。
+                    // 我方原有的 Tools 菜单与「Edit = 隐藏源」入口都保留，这里补上「自定义搜索顺序」这一项。
+                    Menu {
+                        Button { choosingHidden = true } label: { Label(L10n.text("Hidden Sources"), systemImage: "eye.slash") }
+                            .accessibilityIdentifier("sources.edit.hidden")
+                        Button { arranging = true } label: { Label(L10n.text("Custom Search Order"), systemImage: "arrow.up.arrow.down") }
+                            .accessibilityIdentifier("sources.edit.order")
+                    } label: {
+                        Label(L10n.text("Edit"), systemImage: "slider.horizontal.3")
+                    }
+                    .accessibilityIdentifier("sources.edit")
                 }
             }
         }
@@ -336,14 +389,8 @@ struct SitesView: View {
         .onChange(of: store.section) { _, new in
             if new != .sites { prepared = false }
         }
-        .onChange(of: query) { old, new in
-            if old.isEmpty && !new.isEmpty {
-                foldBeforeSearch = collapsed
-                collapsed = []
-            } else if !old.isEmpty && new.isEmpty, let saved = foldBeforeSearch {
-                collapsed = saved
-                foldBeforeSearch = nil
-            }
+        .onChange(of: query) { _, new in
+            if new.isEmpty { searchFold = [] }
         }
         // 下面这些是读者的选择：改一次就落盘。重启之后还按他上次看到的样子打开 ——
         // 折叠、展开、只看能播、按连通排序，一个都不该「关一次 App 就忘」。
@@ -355,6 +402,61 @@ struct SitesView: View {
         // 从别处（QA 启动参数、以后加的入口）改 `shelfMode` 就不会落盘。
         .onChange(of: shelfMode) { _, new in SourceShelfState().save(new) }
     }
+
+    #if os(tvOS)
+    private func shown(_ groups: [SourceGroup]) -> [SourceGroup] { groups }
+    #else
+    /// The group the chips have chosen, or every group's matches while searching.
+    private func shown(_ groups: [SourceGroup]) -> [SourceGroup] {
+        guard query.isEmpty else { return groups }
+        let id = current(groups)
+        return groups.filter { $0.id == id }
+    }
+
+    /// The chosen group, else the one holding the source being replaced, else the first.
+    private func current(_ groups: [SourceGroup]) -> String {
+        if let group, groups.contains(where: { $0.id == group }) { return group }
+        if let picked, let holding = groups.first(where: { $0.sites.contains { $0.key == picked } }) { return holding.id }
+        return groups.first?.id ?? ""
+    }
+
+    private func groupChips(_ groups: [SourceGroup]) -> some View {
+        let subscriptions = groups.filter { if case .subscription = $0.kind { true } else { false } }.map(\.id)
+        return SourceStrip(items: groups.map { .init(id: $0.id, name: L10n.text($0.title), count: $0.sites.count) },
+                           selection: current(groups), select: { choose($0) }, actions: pick != nil ? nil : { id in
+            // A subscription's chip moves it along, as dragging its header did: earlier subscriptions win duplicates.
+            let index = subscriptions.firstIndex(of: id)
+            return AnyView(Group {
+                if let index, index > 0 {
+                    Button(L10n.text("Move Left")) { store.moveSourceGroup(id, onto: subscriptions[index - 1], includeHidden: false) }
+                }
+                if let index, index < subscriptions.count - 1 {
+                    Button(L10n.text("Move Right")) { store.moveSourceGroup(id, onto: subscriptions[index + 1], includeHidden: false) }
+                }
+            })
+        })
+        .scrollClipDisabled()
+        .accessibilityIdentifier("sources.groups")
+    }
+
+    private func choose(_ id: String) {
+        group = id
+        if pick == nil { UserDefaults.standard.set(id, forKey: Self.groupKey) }
+    }
+
+    #if os(iOS)
+    /// A sideways swipe over the sources picks the next chip (leftwards) or the previous one (rightwards), in the
+    /// chips' order (#1052). On iOS 26 a swipe to the right on the first chip goes back, as it does on other pages.
+    private func groupSwipe(_ groups: [SourceGroup]) -> some View {
+        let ids = groups.map(\.id)
+        let index = ids.firstIndex(of: current(groups)) ?? 0
+        return GroupSwipe(canGo: { ids.indices.contains(index + $0) }, go: { step in
+            guard ids.indices.contains(index + step) else { return }
+            withAnimation(.snappy(duration: 0.3)) { choose(ids[index + step]) }
+            swipes += 1
+        }, back: { dismiss() })
+    }
+    #endif
 
     @ViewBuilder
     private func groupHeader(_ group: SourceGroup) -> some View {
@@ -450,126 +552,8 @@ struct SitesView: View {
         .padding(.vertical, 6)
         .background(CanvasColor())
         .padding(.horizontal, -Layout.gutter)
-        #if !os(tvOS)
-        if case .subscription(let address) = group.kind, query.isEmpty {
-            header
-                .draggable(group.id)
-                .dropDestination(for: String.self) { items, _ in
-                    guard query.isEmpty, let address = items.first else { return false }
-                    // A group's title dragged onto a subscription header: the viewer's own groups always
-                    // sit above the feeds, so there is no place for it here.
-                    guard CustomSourceGroup.id(inTarget: address) == nil else { return false }
-                    store.moveSourceGroup(address, onto: group.id, includeHidden: false)
-                    return true
-                }
-                // A dropped card is a source, not a group: it files that one source here.
-                .dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
-                    guard query.isEmpty, let drag = items.first else { return false }
-                    store.reassignSourceByKey(drag.key, origin: drag.origin, to: address)
-                    return true
-                }
-                // 订阅头：测速这一组 + 改名 + 整订阅是否参与搜索（要求 7）。
-                .contextMenu {
-                    measureGroupButton(group)
-                    Divider()
-                    SubscriptionSearchMenu(address: address) { renamingSubscription = address }
-                }
-        } else if case .custom(let id) = group.kind, query.isEmpty {
-            // Dropping onto one of the viewer's own groups files the source there — the same move the
-            // speed page's "移动到…" makes, done one card at a time. Dropping another group's *title*
-            // here changes the order the groups are listed in: they are the viewer's, so their order is
-            // theirs to set. The menu carries the same two moves for places a drag is awkward.
-            header
-                .draggable(group.id)
-                .dropDestination(for: String.self) { items, _ in
-                    guard query.isEmpty, let payload = items.first else { return false }
-                    // Only a group's title reorders groups; a subscription dragged here has no business
-                    // moving above the feeds, so it is refused rather than half-applied.
-                    guard CustomSourceGroup.id(inTarget: payload) != nil else { return false }
-                    store.moveCustomGroup(id, onto: payload)
-                    return true
-                }
-                .dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
-                    guard query.isEmpty, let drag = items.first else { return false }
-                    // `groupID:`, not `to:`: the page holds a group's id, while a move stores its
-                    // target (`group:<id>`). Handing the bare id to the address form filed the card
-                    // under "Other Sources" and left the group it was dropped on empty.
-                    store.reassignSourceByKey(drag.key, origin: drag.origin, groupID: group.id)
-                    return true
-                }
-                .contextMenu {
-                    measureGroupButton(group)
-                    Divider()
-                    Button { store.moveCustomGroup(id, by: -1) } label: {
-                        Label(L10n.text("Move Group Up"), systemImage: "arrow.up")
-                    }
-                    .disabled(!store.canMoveCustomGroup(id, by: -1))
-                    Button { store.moveCustomGroup(id, by: 1) } label: {
-                        Label(L10n.text("Move Group Down"), systemImage: "arrow.down")
-                    }
-                    .disabled(!store.canMoveCustomGroup(id, by: 1))
-                    // 改名与搜索开关都挂在分组头上（要求 7）：分组是用户自己整理的批次，
-                    // 这两件事都是「对整组做点什么」，放这里比放进设置页更近。
-                    GroupSearchParticipationButton(sourceGroup: group) { renamingGroup = group }
-                    // 删除分组（要求 7）。组内源**不会**跟着消失 —— 它们的 move 指向
-                    // `group:<id>`，组没了就指不到，`SourceGroups.make` 会把它们放回
-                    // 各自的订阅源下。用户要的正是这个：整理可以撤，销毁不行。
-                    Button(role: .destructive) {
-                        deletingGroup = group
-                    } label: {
-                        Label(L10n.text("Delete Group"), systemImage: "trash")
-                    }
-                    .disabled(!deletableGroup(group))
-                }
-        } else if group.kind == .other, query.isEmpty {
-            // Dropping into "Other Sources" is the way back: the source returns to its own subscription.
-            header.dropDestination(for: SourceDrag.self) { (items: [SourceDrag], _: CGPoint) -> Bool in
-                guard query.isEmpty, let drag = items.first else { return false }
-                store.reassignSourceByKey(drag.key, origin: drag.origin, to: nil)
-                return true
-            }
-            .contextMenu { measureGroupButton(group) }
-        } else {
-            // 固定 / 内置 / 来自订阅这些系统组没有别的菜单，但「测这一组」对哪一组都成立。
-            header.contextMenu { measureGroupButton(group) }
-        }
-        #else
-        // tvOS：拖拽不存在，所以上面那整段（分组头拖拽 + 订阅头/分组头菜单）被排除了。
-        // 但「改名 / 删分组」不能因此没有入口 —— 本项目自己在 `:138` 记过教训：
-        // 「守卫加在消费端却没加在触发端，结果是一张点了没反应的卡」。
-        // 反过来同样糟：`RenameAlerts` 的弹窗三平台都在，触发端却只有 iOS 有。
-        //
-        // tvOS 支持 `.contextMenu`（`WatchNowTV.swift:80/459` 已在用），
-        // 所以这里给它补一份只含「菜单类」动作的分支，拖拽/放置那部分仍然不进来。
-        switch group.kind {
-        case .custom:
-            header.contextMenu {
-                measureGroupButton(group)
-                Divider()
-                Button { store.moveCustomGroup(group.id, by: -1) } label: {
-                    Label(L10n.text("Move Group Up"), systemImage: "arrow.up")
-                }
-                .disabled(!store.canMoveCustomGroup(group.id, by: -1))
-                Button { store.moveCustomGroup(group.id, by: 1) } label: {
-                    Label(L10n.text("Move Group Down"), systemImage: "arrow.down")
-                }
-                .disabled(!store.canMoveCustomGroup(group.id, by: 1))
-                GroupSearchParticipationButton(sourceGroup: group) { renamingGroup = group }
-                Button(role: .destructive) { deletingGroup = group } label: {
-                    Label(L10n.text("Delete Group"), systemImage: "trash")
-                }
-            }
-        case .subscription(let address):
-            header.contextMenu {
-                measureGroupButton(group)
-                Divider()
-                SubscriptionSearchMenu(address: address) { renamingSubscription = address }
-            }
-        default:
-            header.contextMenu { measureGroupButton(group) }
-        }
-        #endif
     }
+    #endif
 
     /// 一个分组的内容：源少就直接铺，源多就先分一层书架。
     ///
@@ -1253,8 +1237,8 @@ struct SitesView: View {
     /// is a different visit with a different job: it must open every group, or a source the viewer
     /// folded away on the Sources page is absent from the list they were asked to choose from.
     private func applyDefaultFold() {
-        collapsed = pick == nil ? (foldState.collapsed ?? []) : []
-        foldBeforeSearch = nil
+        collapsed = pick == nil ? Self.savedFold : []
+        searchFold = []
     }
 
     /// 一张源卡片（可选态 / 路由 / 拖拽 / 右键菜单）。
@@ -1312,6 +1296,121 @@ struct SitesView: View {
                                         }
     }
 }
+
+#if os(iOS)
+/// The Sources page's sideways swipe (#1052): a UIKit pan on the page's own scroll view, because a SwiftUI drag on the
+/// cards stopped the page scrolling (iOS 18 and later). It begins only for a clearly sideways swipe that starts on the
+/// cards, away from the left edge (Back) and from anything that scrolls sideways; once it begins, the card under the
+/// finger is not opened. Being a pan under the finger, it turns off iOS 26's swipe back from anywhere on the cards, so
+/// on the first chip a swipe to the right goes back itself.
+private struct GroupSwipe: UIViewRepresentable {
+    /// Whether there is a chip that way: +1 the next, -1 the previous.
+    var canGo: (Int) -> Bool
+    var go: (Int) -> Void
+    /// Leaves the page, as iOS 26's swipe back would.
+    var back: () -> Void
+
+    func makeUIView(context: Context) -> Anchor { Anchor() }
+    func updateUIView(_ anchor: Anchor, context: Context) { anchor.canGo = canGo; anchor.go = go; anchor.back = back }
+    static func dismantleUIView(_ anchor: Anchor, coordinator: ()) { anchor.detach() }
+
+    final class Anchor: UIView {
+        var canGo: (Int) -> Bool = { _ in false }
+        var go: (Int) -> Void = { _ in }
+        var back: () -> Void = {}
+        private weak var pan: UIPanGestureRecognizer?
+        private lazy var rules = Rules(anchor: self)
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            detach()
+            guard window != nil else { return }
+            var view = superview
+            while let current = view, !(current is UIScrollView) { view = current.superview }
+            guard let scroll = view else { return }
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(swiped(_:)))
+            pan.delegate = rules
+            scroll.addGestureRecognizer(pan)
+            self.pan = pan
+        }
+
+        func detach() {
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+            pan = nil
+        }
+
+        /// Only marks out the cards; touches go to them.
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+
+        @objc private func swiped(_ pan: UIPanGestureRecognizer) {
+            guard pan.state == .ended, let window else { return }
+            let moved = pan.translation(in: window), speed = pan.velocity(in: window).x
+            guard abs(moved.x) > 2 * abs(moved.y), abs(moved.x) > 80 || (abs(moved.x) > 50 && abs(speed) > 600) else { return }
+            let step = moved.x < 0 ? 1 : -1
+            if canGo(step) {
+                go(step)
+            } else if step < 0, #available(iOS 26.0, *) {
+                // iOS 26 goes back on a swipe to the right from anywhere, but not where a pan of the page's own (this
+                // one) lies under the finger: past the first chip, the swipe does it instead.
+                back()
+            }
+        }
+    }
+
+    /// When the swipe may begin. Apart from the view, whose own `gestureRecognizerShouldBegin` is UIKit's.
+    final class Rules: NSObject, UIGestureRecognizerDelegate {
+        private weak var anchor: Anchor?
+        init(anchor: Anchor) { self.anchor = anchor }
+
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let anchor, let window = anchor.window, let pan = recognizer as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: window)
+            guard abs(velocity.x) > 2 * abs(velocity.y), anchor.bounds.contains(pan.location(in: anchor)),
+                  pan.location(in: window).x > 32 else { return false }
+            // Every sideways swipe is taken, even past the last chip, so the card it ends on doesn't open.
+            return true
+        }
+
+        /// Not from a row that scrolls sideways (none on the page today, but a strip there would keep its own swipe).
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view, current !== recognizer.view {
+                if let scroll = current as? UIScrollView, scroll.contentSize.width > scroll.bounds.width + 1 { return false }
+                view = current.superview
+            }
+            return true
+        }
+
+    }
+}
+#endif
+
+#if !os(tvOS)
+/// The Sources page's search finds sources by name. Few remember a source's name, so this row takes the words to
+/// Search, which looks through every source for the video (#974).
+private struct SearchVideosRow: View {
+    let query: String
+    @Environment(Store.self) private var store
+    var body: some View {
+        Button { store.searchVideos(query) } label: {
+            HStack(spacing: 14) {
+                IconTile(symbol: "magnifyingglass", tint: Brand.accent, size: 40)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.text("Search for \u{201C}%@\u{201D}", query)).font(.headline).foregroundStyle(.primary).lineLimit(1)
+                    Text(L10n.text("Videos from every source")).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contentPanel(cornerRadius: 22)
+        .accessibilityIdentifier("sources.searchVideos")
+    }
+}
+#endif
 
 /// The Sources tab names itself in the sidebar; a page pushed to pick a source says what is being chosen.
 private struct SitesTitle: ViewModifier {
@@ -1477,7 +1576,7 @@ struct SiteCard: View {
     }
 
     /// Which engine runs a source is an implementation detail; only built-in sources say so.
-    private var engine: String? { site.isBuiltIn ? L10n.text("Built-in") : nil }
+    private var engine: String? { site.isBuiltIn ? L10n.text("Recommended") : nil }
 }
 
 /// A launcher tile's own surface (source cards, live playlists).
@@ -2123,7 +2222,7 @@ private struct PluginWindowView: View {
             ForEach(window.buttons.sorted { order($0.role) < order($1.role) }) { button in
                 if button.role == .positive {
                     Button(button.text) { send(PluginEvent(window: window.id, kind: .click, view: button.id)) }
-                        .buttonStyle(.borderedProminent).disabled(!button.enabled)
+                        .prominentButton().disabled(!button.enabled)
                 } else {
                     Button(button.text) { send(PluginEvent(window: window.id, kind: .click, view: button.id)) }
                         .buttonStyle(.bordered).disabled(!button.enabled)
@@ -2514,7 +2613,7 @@ extension VideoDetailView {
                 VStack(alignment: .leading, spacing: 22) {
                     bilibiliTVPlay
                     HStack(alignment: .top, spacing: 16) {
-                        tvPlate("arrow.down.circle", caption: L10n.text("Download"), id: "detail.download", focus: .download) {
+                        tvPlate("arrow.down.circle", caption: L10n.text("Cache"), id: "detail.download", focus: .download) {
                             choosingDownloads = true
                         }
                         let saved = store.favorites.contains(videoFavorite())
@@ -2648,7 +2747,7 @@ extension SiteView {
     /// The space's listing as Bilibili's 16:9 tiles, four across, with the page's loading, error and Load More states.
     @ViewBuilder private var spaceGrid: some View {
         if let error = browser.error {
-            ErrorStateCard(
+            ErrorState(
                 title: L10n.text("Unable to load this source"),
                 message: L10n.text("Try again, or choose another source to keep watching."),
                 details: error,
@@ -2852,7 +2951,7 @@ extension VideoDetailView {
             VStack(alignment: .leading, spacing: 18) {
                 macPlay
                 HStack(alignment: .top, spacing: 6) {
-                    MacPlate(symbol: "arrow.down.circle", caption: L10n.text("Download"), id: "detail.download") { choosingDownloads = true }
+                    MacPlate(symbol: "arrow.down.circle", caption: L10n.text("Cache"), id: "detail.download") { choosingDownloads = true }
                     let saved = store.favorites.contains(videoFavorite())
                     MacPlate(symbol: "heart", caption: L10n.text(saved ? "Saved" : "Favorite"), on: saved, id: "detail.favorite") {
                         store.favorites.toggle(videoFavorite())

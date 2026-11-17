@@ -320,6 +320,9 @@ import Testing
     library.pauseAll()
     #expect(library.items.allSatisfy { $0.status == .paused })
     #expect(library.isPaused)
+    // Coming back to the app wakes the queue; paused songs stay paused (#947).
+    library.wake()
+    #expect(library.items.allSatisfy { $0.status == .paused })
     // Still paused, and still grouped, when the app opens again.
     let reopened = MusicDownloadLibrary(root: root)
     #expect(reopened.items.allSatisfy { $0.status == .paused })
@@ -352,6 +355,10 @@ import Testing
     let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
     let library = DownloadLibrary(root: root, defaults: defaults)
     #expect(library.items.map(\.id) == ["e1", "e2", "e3"])
+    // The player's Previous and Next step through the show's saved episodes, and stop at its ends.
+    let first = URL(string: "tvbox-download://e1")!, last = URL(string: "tvbox-download://e3")!
+    #expect(library.neighbor(of: first, offset: 1)?.id == "e2" && library.neighbor(of: last, offset: -1)?.id == "e2")
+    #expect(library.neighbor(of: first, offset: -1) == nil && library.neighbor(of: last, offset: 1) == nil)
     #expect(library.file(for: items[0]) == root.appending(path: "e1").appending(path: "media.mp4"))
 
     // Moved away in Finder: playing it says so and it leaves the list.
@@ -454,44 +461,50 @@ import Testing
     library.pause(item.id)
 }
 
-@MainActor @Test func sharedDownloadsAreRenamedCopiesThatLeaveTheDownloadAlone() throws {
-    let root = FileManager.default.temporaryDirectory.appending(path: "downloads-\(UUID().uuidString)")
-    let shared = FileManager.default.temporaryDirectory.appending(path: "shared-\(UUID().uuidString)")
-    defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: shared) }
+/// #960: a saved episode plays under the history entry it has online, so its progress and Continue Watching are the
+/// same either way; once its source leaves the subscription it has none.
+@Test func savedEpisodesShareTheirOnlineHistoryEntry() throws {
+    let origin = try #require(URL(string: "https://example.org/tv.json"))
     let site = Site(key: "s", name: "S", type: 3, api: "csp_Test", raw: [:])
-    func item(_ id: String, _ episode: String, media: String) -> DownloadItem {
-        let source = Episode(id: id, name: episode, address: "https://example.com/\(id)", flag: "line")
-        return DownloadItem(id: id, title: "嫁金钗", episode: episode, poster: nil, posterHeaders: [:],
-                            source: DownloadSource(site: site, videoID: "v", episode: source), created: Date(), status: .completed, media: media)
-    }
-    let movie = item("e1", "第30集", media: "media.mp4"), hls = item("e2", "第31集", media: "index.m3u8")
-    for (entry, name) in [(movie, "media.mp4"), (hls, "index.m3u8")] {
-        try FileManager.default.createDirectory(at: root.appending(path: entry.id), withIntermediateDirectories: true)
-        try Data("mp4".utf8).write(to: root.appending(path: entry.id).appending(path: name))
-    }
-    try JSONEncoder().encode([movie, hls]).write(to: root.appending(path: "downloads.json"))
-    let library = DownloadLibrary(root: root, defaults: try #require(UserDefaults(suiteName: UUID().uuidString)))
+    let subscription = Subscription(origin: origin, importedAt: Date(), sites: [site], lives: [], raw: [:])
+    let episode = Episode(id: "2", name: "第 2 集", address: "https://example.com/2.mp4", flag: "line")
+    let poster = URL(string: "https://example.com/p.jpg")
+    let item = DownloadItem(id: "e2", title: "Show", episode: episode.name, poster: poster, posterHeaders: [:],
+                            source: DownloadSource(site: site, videoID: "v", episode: episode), created: Date(), status: .completed, media: "media.mp4")
+    let online = PlaybackHistoryContext(origin: origin, site: site, video: Video(id: "v", name: "Show", poster: poster), episode: episode)
+    let saved = try #require(item.historyContext(in: subscription))
+    #expect(saved.id == online.id)
+    #expect(saved.episode(in: [episode]) == episode)
+    #expect(saved.videoName == "Show" && saved.poster == poster && saved.sourceName == "S")
+    let entry = PlaybackHistoryEntry(context: online, position: 600, duration: 1500, updatedAt: Date())
+    #expect(entry.resumePosition(for: item.source.episode) == 600)
+    #expect(item.historyContext(in: Subscription(origin: origin, importedAt: Date(), sites: [], lives: [], raw: [:])) == nil)
+    #expect(item.historyContext(in: nil) == nil)
+}
 
-    // An HLS download is many files: nothing to hand over.
-    #expect(library.exportableFile(for: hls) == nil)
-    let file = try #require(library.exportableFile(for: movie))
-    let copy = try DownloadExport.copy(file, named: DownloadLibrary.exportName(for: movie), into: shared)
-    #expect(copy.lastPathComponent == "嫁金钗 · 第30集.mp4")
-    #expect(try Data(contentsOf: copy) == Data("mp4".utf8))
-    // Deleting what was saved elsewhere keeps the episode in the app.
-    try FileManager.default.removeItem(at: copy)
-    library.forgetMissing()
-    #expect(library.items.map(\.id) == ["e1", "e2"])
-    #expect(FileManager.default.fileExists(atPath: file.path))
-    // The next share replaces the last one's copy.
-    _ = try DownloadExport.copy(file, named: "Other", into: shared)
-    #expect(try FileManager.default.contentsOfDirectory(atPath: shared.path) == ["Other.mp4"])
-    DownloadExport.clear(shared)
-    #expect(!FileManager.default.fileExists(atPath: shared.path))
-
-    #expect(DownloadExport.fileName("a/b:c?\n d", extension: "mkv") == "a b c d.mkv")
-    #expect(DownloadExport.fileName("..", extension: "mp4") == "Yingxia.mp4")
-    #expect(MusicDownloadLibrary.exportName(for: MusicTrack(platform: .qq, songID: "s", title: "Song", artists: ["A", "B"])) == "A, B - Song")
+@MainActor @Test func downloadedEpisodesPlayOnInEpisodeOrderWhateverTheirSizeTags() throws {
+    // #1022: drive files start with their size, so by name 14 [2.3GB] came before 16 [2.3GB] and 15 [2.9GB].
+    let root = FileManager.default.temporaryDirectory.appending(path: "downloads-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let site = Site(key: "s", name: "S", type: 3, api: "csp_Test", raw: [:])
+    let names = [14: "[2.3GB]行尸走肉S09E14.mkv【行尸走肉第九季】", 16: "[2.3GB]行尸走肉S09E16.mkv【行尸走肉第九季】",
+                 15: "[2.9GB]行尸走肉S09E15.mkv【行尸走肉第九季】"]
+    let items = [14, 16, 15].map { number in
+        let episode = Episode(id: "\(number)", name: names[number]!, address: "https://example.com/\(number).mkv", flag: "夸克原画")
+        return DownloadItem(id: "e\(number)", title: "行尸走肉第九季", episode: episode.name, poster: nil, posterHeaders: [:],
+                            source: DownloadSource(site: site, videoID: "v", episode: episode), created: Date(), status: .completed, media: "media.mkv")
+    }
+    for item in items {
+        try FileManager.default.createDirectory(at: root.appending(path: item.id), withIntermediateDirectories: true)
+        try Data("mkv".utf8).write(to: root.appending(path: item.id).appending(path: "media.mkv"))
+    }
+    try JSONEncoder().encode(items).write(to: root.appending(path: "downloads.json"))
+    let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+    let library = DownloadLibrary(root: root, defaults: defaults)
+    #expect(DownloadItem.inEpisodeOrder(items).map(\.id) == ["e14", "e15", "e16"])
+    let next = library.neighbor(of: URL(string: "tvbox-download://e14")!, offset: 1)
+    #expect(next?.id == "e15")
+    #expect(library.neighbor(of: URL(string: "tvbox-download://e16")!, offset: -1)?.id == "e15")
 }
 
 // MARK: - 下载时保持屏幕常亮

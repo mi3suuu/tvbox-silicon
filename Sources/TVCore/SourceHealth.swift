@@ -108,7 +108,20 @@ import Observation
     nonisolated static func counts(_ error: Error) -> Bool {
         if error is CancellationError || (error as? URLError)?.code == .cancelled { return false }
         // The plugin runtime turning a caller away is this device's queue, not the source.
-        return !error.localizedDescription.hasPrefix("The plugin runtime is busy")
+        return !PluginQueue.isBusy(error)
+    }
+
+    /// The records of a subscription's sources, moved to its new address (#982). A newer record there stays.
+    public func moveOrigin(from old: URL, to new: URL) {
+        let prefix = old.absoluteString + "|"
+        let moved = records.filter { $0.key.hasPrefix(prefix) }
+        guard !moved.isEmpty else { return }
+        for (key, record) in moved {
+            records[key] = nil
+            let target = new.absoluteString + "|" + String(key.dropFirst(prefix.count))
+            if records[target] == nil { records[target] = record }
+        }
+        scheduleSave()
     }
 
     private func update(_ key: String, _ change: (inout Record) -> Void) {

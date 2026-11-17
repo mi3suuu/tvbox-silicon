@@ -128,12 +128,12 @@ private func temporaryLibrary() throws -> (LXSourceLibrary, URL, UserDefaults) {
     #expect(library.sources.isEmpty)
 }
 
-@Test func lxChannelComesAfterTheBuiltInOnes() {
+@Test func lxChannelComesAfterTheSubscriptionsChannels() {
     struct Stub: MusicStreamProvider {
         let id: MusicProviderID; let platforms: Set<MusicPlatform>
         func resolve(_ songID: String, platform: MusicPlatform, quality: MusicAudioQuality) async throws -> ResolvedMusicStream { throw MusicProviderError.noResource }
     }
-    let resolver = MusicResolver(providers: [Stub(id: .lx, platforms: [.qq, .kuwo]), Stub(id: .vkeys, platforms: [.qq]), Stub(id: .nianxin, platforms: [.kuwo])])
+    let resolver = MusicResolver(routes: .test, providers: [Stub(id: .lx, platforms: [.qq, .kuwo]), Stub(id: .vkeys, platforms: [.qq]), Stub(id: .nianxin, platforms: [.kuwo])])
     var track = MusicTrack(platform: .qq, songID: "q", title: "t", artists: ["a"])
     track.ids[.kuwo] = "k"
     #expect(resolver.candidates(for: track).map { "\($0.provider.rawValue):\($0.platform.rawValue)" } == ["nianxin:kuwo", "vkeys:qq", "lx:qq", "lx:kuwo"])
@@ -160,4 +160,53 @@ private func temporaryLibrary() throws -> (LXSourceLibrary, URL, UserDefaults) {
         #expect(decrypted == Data(count: 128 - message.count) + message)
     }
     #expect(throws: ScriptHostError.self) { try ScriptCrypto.rsaRaw(publicKey: "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----", data: message) }
+}
+
+/// People add LX Music sources under Subscriptions too (#1177). Such a file used to fail as a broken JSON configuration
+/// ("The data couldn't be read because it isn't in the correct format"); it now reads as an LX source.
+@Test func lxSourcesAddedAsSubscriptionsReadAsLXSources() async throws {
+    #expect(LXSourceLibrary.script(in: Data(fakeSource.utf8)) == fakeSource)
+    // Obfuscated sources keep only the header readable.
+    let obfuscated = "\u{FEFF}/*!\n * @name 独家音源\n * @version 5\n */\nglobalThis['SERVER_SCRIPT_CONFIG'] = {};(function(_0x1){})()"
+    #expect(LXSourceLibrary.script(in: Data(obfuscated.utf8)) != nil)
+    for other in ["{\"sites\": []}", "/*\n * @name Radio\n */\nasync function getSongInfo() {}", "/* no name */ const a = 1", "var rule = {}"] {
+        #expect(LXSourceLibrary.script(in: Data(other.utf8)) == nil)
+    }
+    let folder = FileManager.default.temporaryDirectory.appending(path: "lx-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let picked = folder.appending(path: "lx-\(UUID().uuidString).js")
+    try Data(fakeSource.utf8).write(to: picked)
+    let address = try ImportedFiles.add(picked)
+    defer { ImportedFiles.remove(address.absoluteString) }
+    guard case .lxMusicSource(let script) = try await HTTPClient().subscriptionImport(address) else { Issue.record("not an LX source"); return }
+    #expect(script == fakeSource)
+    // A spider that opens with the same kind of comment is still a subscription.
+    let spider = folder.appending(path: "spider-\(UUID().uuidString).js")
+    try Data("/*!\n * @name Spider\n */\nexport default { detail, category, homeContent }\n".utf8).write(to: spider)
+    let spiderAddress = try ImportedFiles.add(spider)
+    defer { ImportedFiles.remove(spiderAddress.absoluteString) }
+    guard case .subscription = try await HTTPClient().subscriptionImport(spiderAddress) else { Issue.record("not a subscription"); return }
+}
+
+@Test func lxSourceAddedAgainKeepsOneEntry() async throws {
+    let (library, folder, _) = try temporaryLibrary()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let runtime = LXSourceRuntime()
+    let address = try #require(URL(string: "https://example.com/lx.js"))
+    let first = try await library.add(script: fakeSource, origin: address, runtime: runtime)
+    library.setEnabled(first.id, false)
+    // The same text again, here from a file: still the one entry, switched back on.
+    let again = try await library.add(script: fakeSource, origin: nil, runtime: runtime)
+    #expect(again.id == first.id && again.enabled && again.origin == address)
+    #expect(library.sources.map(\.id) == [first.id])
+    // A newer text from the same address replaces it in its place.
+    let newer = fakeSource + "\n// v2\n"
+    let updated = try await library.add(script: newer, origin: address, runtime: runtime)
+    #expect(updated.id == first.id && updated.added == first.added && library.sources.count == 1)
+    let kept = try await library.script(for: updated)
+    #expect(kept == newer)
+    // Another script from a file is another source.
+    let other = try await library.add(script: fakeSource + "\n// other\n", origin: nil, runtime: runtime)
+    #expect(other.id != first.id && library.sources.map(\.id) == [first.id, other.id])
 }

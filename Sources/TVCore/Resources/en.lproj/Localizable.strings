@@ -131,18 +131,11 @@
 "This plugin is not supported: ftyguard_v8.so is missing." = "This plugin is not supported: ftyguard_v8.so is missing.";
 "Plugin error: %@" = "Plugin error: %@";
 "Connect to the local media and subscription services you configure." = "Connect to the local media and subscription services you configure.";
-
 "The source %@ could not be reached. Retry later." = "The source %@ could not be reached. Retry later.";
-
 "The plugin stopped unexpectedly. Retry this source." = "The plugin stopped unexpectedly. Retry this source.";
-
 "This source returned a magnet link. Torrent playback is not supported." = "This source returned a magnet link. Torrent playback is not supported.";
-
 "This source needs a playback proxy that is not supported yet." = "This source needs a playback proxy that is not supported yet.";
-
 "This source requires a JavaScript engine, which is not supported yet." = "This source requires a JavaScript engine, which is not supported yet.";
-
-// Desktop playback
 "Buffering…" = "Buffering…";
 "Play / Pause (Space)" = "Play / Pause (Space)";
 "Mute (M)" = "Mute (M)";
@@ -156,17 +149,12 @@
 "← / →: Seek 10s · Shift: 60s" = "← / →: Seek 10s · Shift: 60s";
 "↑ / ↓: Volume · M: Mute · F: Full Screen" = "↑ / ↓: Volume · M: Mute · F: Full Screen";
 "Playback Options" = "Playback Options";
-
 "Choose quality" = "Choose quality";
-
 "This video has no single MP4 stream available for this account." = "This video has no single MP4 stream available for this account.";
-
 "Local JavaScript · Experimental" = "Local JavaScript · Experimental";
 "Lite JavaScript · JAR fallback" = "Lite JavaScript · JAR fallback";
 "Local Python · Experimental" = "Local Python · Experimental";
 "This source requires a Python runtime, which is not available on this platform." = "This source requires a Python runtime, which is not available on this platform.";
-
-// Source error recovery
 "Unable to load this source" = "Unable to load this source";
 "Try again, or choose another source to keep watching." = "Try again, or choose another source to keep watching.";
 "Back to sources" = "Back to sources";
@@ -177,128 +165,66 @@
 "Try again, or go back and choose another video." = "Try again, or go back and choose another video.";
 "Try another episode or playback source." = "Try another episode or playback source.";
 "Go back" = "Go back";
-
 "Diagnostic Logs" = "Diagnostic Logs";
-
 "View Logs" = "View Logs";
-
 "Log Level" = "Log Level";
-
 "All Logs" = "All Logs";
-
 "Live Logs" = "Live Logs";
-
 "Refresh Logs" = "Refresh Logs";
-
 "Export Logs" = "Export Logs";
-
 "Share Logs" = "Share Logs";
-
 "Open Log Folder" = "Open Log Folder";
-
 "No Logs" = "No Logs";
-
 "Search Logs" = "Search Logs";
-
 "Log overload: %lld events dropped" = "Log overload: %lld events dropped";
-
 "Shows the latest 1,000 events from this run. Export includes retained log files." = "Shows the latest 1,000 events from this run. Export includes retained log files.";
-
 "Global Search" = "Global Search";
-
 "Recommendations" = "Recommendations";
-
 "Recommendation Source" = "Recommendation Source";
-
 "Search all available sources in your subscription." = "Search all available sources in your subscription.";
-
 "Recent Searches" = "Recent Searches";
-
 "Clear" = "Clear";
-
 "Stop" = "Stop";
-
 "Searched %lld of %lld sources" = "Searched %lld of %lld sources";
-
 "No searchable sources are available on this device." = "No searchable sources are available on this device.";
-
 "Search failed" = "Search failed";
-
-
 "This source has no recommendations. Choose another source or use Global Search." = "This source has no recommendations. Choose another source or use Global Search.";
-
 "Runtime Activity" = "Runtime Activity";
-
 "Inspect plugin requests and errors." = "Inspect plugin requests and errors.";
-
 "Pause Logs" = "Pause Logs";
-
 "Resume Logs" = "Resume Logs";
-
 "Newest first · Updates every 2 seconds" = "Newest first · Updates every 2 seconds";
-
 "Updates paused" = "Updates paused";
-
 "Exporting Logs…" = "Exporting Logs…";
-
 "Log Files" = "Log Files";
-
 "Clear Search" = "Clear Search";
-
 "Debug Logs" = "Debug Logs";
-
 "Info Logs" = "Info Logs";
-
 "Warning Logs" = "Warning Logs";
-
 "Error Logs" = "Error Logs";
-
 "Plugin activity will appear here." = "Plugin activity will appear here.";
-
 "Try another level or search term." = "Try another level or search term.";
-
 "Log Time" = "Log Time";
-
 "Log Module" = "Log Module";
-
 "Log Message" = "Log Message";
-
 "Searching for “%@”…" = "Searching for “%@”…";
-
 "Results appear as each source responds." = "Results appear as each source responds.";
-
 "More from %@" = "More from %@";
-
 "Clear search" = "Clear search";
-
 "%lld results" = "%lld results";
-
 "Search paused" = "Search paused";
-
 "Continue search" = "Continue search";
-
 "%lld unavailable" = "%lld unavailable";
-
 "All Sources" = "All Sources";
-
 "Unavailable Sources" = "Unavailable Sources";
-
 "Done" = "Done";
-
 "Retry failed sources" = "Retry failed sources";
-
 "Choose a title to find it across your sources." = "Choose a title to find it across your sources.";
-
 "More" = "More";
-
 "Show Less" = "Show Less";
 "Show Full Synopsis" = "Show Full Synopsis";
-
 "This source format is not supported. Choose another source." = "This source format is not supported. Choose another source.";
-
 "Playback error" = "Playback error";
-
-
 "This URL is a subscription directory. Import an individual subscription URL from it." = "This URL is a subscription directory. Import an individual subscription URL from it.";
 "The subscription server returned a web page instead of a configuration." = "The subscription server returned a web page instead of a configuration.";
 "This subscription uses an encrypted configuration that is not supported yet." = "This subscription uses an encrypted configuration that is not supported yet.";
@@ -307,8 +233,6 @@
 "Scroll sources right" = "Scroll sources right";
 "Scroll left" = "Scroll left";
 "Scroll right" = "Scroll right";
-
-// Cloud drive accounts
 "Cloud Drive Accounts" = "Cloud Drive Accounts";
 "Sign In to Cloud Drive" = "Sign In to Cloud Drive";
 "Manage Cloud Accounts" = "Manage Cloud Accounts";
@@ -352,7 +276,6 @@
 "Last updated %@" = "Last updated %@";
 "Run Test" = "Run Test";
 "Check" = "Check";
-
 "The plugin exceeds 20 MB." = "The plugin exceeds 20 MB.";
 "Components prepared: %lld · reused: %lld" = "Components prepared: %lld · reused: %lld";
 "Checking saved plugin…" = "Checking saved plugin…";
@@ -390,8 +313,6 @@
 "This plugin couldn't be prepared on this device (missing %@)." = "This plugin couldn't be prepared on this device (missing %@).";
 "This plugin couldn't be prepared on this device (%@ could not be converted)." = "This plugin couldn't be prepared on this device (%@ could not be converted).";
 "The source's plugin crashed. The site may have changed; try another source." = "The source's plugin crashed. The site may have changed; try another source.";
-
-/* Loading status */
 "Waiting for %@" = "Waiting for %@";
 "The plugin is waiting for %@ to respond. The source's server may be slow or busy." = "The plugin is waiting for %@ to respond. The source's server may be slow or busy.";
 "The plugin file is still downloading from the subscription server." = "The plugin file is still downloading from the subscription server.";
@@ -500,8 +421,6 @@
 "Audio Quality" = "Audio Quality";
 "Auto" = "Auto";
 "LIVE" = "LIVE";
-
-// Downloads
 "The video link stopped working (HTTP %lld) and could not be renewed. Try again later." = "The video link stopped working (HTTP %lld) and could not be renewed. Try again later.";
 "Live streams can't be downloaded." = "Live streams can't be downloaded.";
 "This video is protected and can't be downloaded." = "This video is protected and can't be downloaded.";
@@ -559,7 +478,6 @@
 "Show Downloads" = "Show Downloads";
 "Browse Sources" = "Browse Sources";
 "%@ available on this device" = "%@ available on this device";
-
 "Loaded %lld comments" = "Loaded %lld comments";
 "Opacity" = "Opacity";
 "Text Size" = "Text Size";
@@ -658,11 +576,8 @@
 "%lld titles" = "%lld titles";
 "Removing a title also clears its cached content and skip times." = "Removing a title also clears its cached content and skip times.";
 "Auto-play next episode" = "Auto-play next episode";
-
-// Player episodes
 "Previous Episode" = "Previous Episode";
 "Next Episode" = "Next Episode";
-
 "Hongguo" = "Hongguo";
 "Episode %@" = "Episode %@";
 "Episode %1$@" = "Episode %1$@";
@@ -679,9 +594,7 @@
 "Hongguo did not provide a playable source for this episode. Try again later." = "Hongguo did not provide a playable source for this episode. Try again later.";
 "This Hongguo video could not be prepared for playback. Please try again." = "This Hongguo video could not be prepared for playback. Please try again.";
 "This video is an MKV file, which Apple devices can't play." = "This video is an MKV file, which Apple devices can't play.";
-
 "Waiting for an earlier plugin request to finish." = "Waiting for an earlier plugin request to finish.";
-
 "Douyu Live" = "Douyu Live";
 "Huya Live" = "Huya Live";
 "Douyin Live" = "Douyin Live";
@@ -696,8 +609,6 @@
 "Search Failed" = "Search Failed";
 "Live Channels" = "Live Channels";
 "Search live rooms and channels" = "Search live rooms and channels";
-
-// Multiple subscriptions and source health.
 "Subscriptions" = "Subscriptions";
 "Add Subscription" = "Add Subscription";
 "Refresh All" = "Refresh All";
@@ -715,7 +626,6 @@
 "Slow or unreliable lately" = "Slow or unreliable lately";
 "Failing; skipped in search for now" = "Failing; skipped in search for now";
 "Skipped after repeated failures; back in search at %@" = "Skipped after repeated failures; back in search at %@";
-
 "Skipped after repeated failures" = "Skipped after repeated failures";
 "Sign in to Douyin to search its live rooms." = "Sign in to Douyin to search its live rooms.";
 "Douyin no longer accepts this sign-in. Sign in again in Settings." = "Douyin no longer accepts this sign-in. Sign in again in Settings.";
@@ -762,8 +672,6 @@
 "Sign in to Quark and UC on their official page, and to Baidu and Aliyun by scanning a code with their phone app. Mi3s stores the login on this Mac and supplies it to the plugins you run." = "Sign in to Quark and UC on their official page, and to Baidu and Aliyun by scanning a code with their phone app. Mi3s stores the login on this Mac and supplies it to the plugins you run.";
 "Baidu Cookie (BDUSS, STOKEN)" = "Baidu Cookie (BDUSS, STOKEN)";
 "115 Cookie (UID, CID, SEID)" = "115 Cookie (UID, CID, SEID)";
-
-/* Music */
 "Music" = "Music";
 "Song, or song and artist" = "Song, or song and artist";
 "Music Settings" = "Music Settings";
@@ -871,7 +779,6 @@
 "Play a song from search results, an album or a playlist, and the songs after it play next." = "Play a song from search results, an album or a playlist, and the songs after it play next.";
 "Playback Position" = "Playback Position";
 "Volume" = "Volume";
-// Music on the Mac
 "Repeat Off" = "Repeat Off";
 "Repeat All" = "Repeat All";
 "Repeat One" = "Repeat One";
@@ -970,8 +877,6 @@
 "Download a song, album or playlist from its menu to listen without a connection." = "Download a song, album or playlist from its menu to listen without a connection.";
 "Delete all downloaded songs?" = "Delete all downloaded songs?";
 "%lld downloading" = "%lld downloading";
-
-// Signing in on the service's own page (iPhone, iPad).
 "Sign In Here" = "Sign In Here";
 "Scan a Code with Another Phone" = "Scan a Code with Another Phone";
 "Signing In…" = "Signing In…";
@@ -986,8 +891,6 @@
 "Or scan this code with the %@ app on another phone." = "Or scan this code with the %@ app on another phone.";
 "Sign In on This iPhone" = "Sign In on This iPhone";
 "Sign In on This iPad" = "Sign In on This iPad";
-
-/* Cloud Files */
 "Cloud Files" = "Cloud Files";
 "Cloud Drives" = "Cloud Drives";
 "Sign in to %@ to browse its files." = "Sign in to %@ to browse its files.";
@@ -1085,13 +988,9 @@
 "Chat with the developer and other users" = "Chat with the developer and other users";
 "Prefer to chat? Join the Telegram group." = "Prefer to chat? Join the Telegram group.";
 "Scan with your iPhone to join the group." = "Scan with your iPhone to join the group.";
-
-/* iPhone watch page */
 "Full Screen" = "Full Screen";
 "Exit Full Screen" = "Exit Full Screen";
 "Lines" = "Lines";
-
-/* TMDB details */
 "Reading the title…" = "Reading the title…";
 "Someone is looking up this title right now…" = "Someone is looking up this title right now…";
 "Checking %@ (%lld)…" = "Checking %@ (%lld)…";
@@ -1126,8 +1025,6 @@
 "Look Up Titles on TMDB" = "Look Up Titles on TMDB";
 "Shows cast, artwork and episode details from TMDB on video pages. Sends the video's title, its details from the source and the source's name to Mi3s's lookup service, never your accounts or subscription addresses." = "Shows cast, artwork and episode details from TMDB on video pages. Sends the video's title, its details from the source and the source's name to Mi3s's lookup service, never your accounts or subscription addresses.";
 "You May Like" = "You May Like";
-
-/* Short-drama sources */
 "Xifan" = "Xifan";
 "Hema" = "Hema";
 "%@ Episodes" = "%@ Episodes";
@@ -1164,8 +1061,6 @@
 "Ranked by commits in the last 30 days." = "Ranked by commits in the last 30 days.";
 "1 commit" = "1 commit";
 "%lld commits" = "%lld commits";
-
-// Discover catalog
 "Discover" = "Discover";
 "Trending This Week" = "Trending This Week";
 "In Theaters" = "In Theaters";
@@ -1211,7 +1106,6 @@
 "Reality" = "Reality";
 "Sci-Fi & Fantasy" = "Sci-Fi & Fantasy";
 "Talk" = "Talk";
-
 "Edit Layout" = "Edit Layout";
 "Featured Titles" = "Featured Titles";
 "Featured Collections" = "Featured Collections";
@@ -1220,48 +1114,26 @@
 "Browse by Genre" = "Browse by Genre";
 "Top Rated Collections" = "Top Rated Collections";
 "Film Studios" = "Film Studios";
-
 "Studios & Networks" = "Studios & Networks";
-
 "Stills" = "Stills";
-
 "Trailer Unavailable" = "Trailer Unavailable";
-
 "Crew" = "Crew";
-
 "Share" = "Share";
-
 "Overview" = "Overview";
-
 "Trailer" = "Trailer";
-
 "min" = "min";
-
 "Seasons" = "Seasons";
-
 "Genres" = "Genres";
-
 "Release Date" = "Release Date";
-
 "Country / Region" = "Country / Region";
-
 "Status" = "Status";
-
 "Returning Series" = "Returning Series";
-
 "Ended" = "Ended";
-
 "In Production" = "In Production";
-
 "Post Production" = "Post Production";
-
 "Planned" = "Planned";
-
 "Canceled" = "Canceled";
-
 "Rumored" = "Rumored";
-
-/* Discover catalog search */
 "Search Catalog" = "Search Catalog";
 "Movies, Series, People" = "Movies, Series, People";
 "Clear Search History" = "Clear Search History";
@@ -1308,31 +1180,19 @@
 "Directing" = "Directing";
 "Writing" = "Writing";
 "Production" = "Production";
-
-/* Discover catalog search */
 "Movies" = "Movies";
 "Series" = "Series";
 "Content Type" = "Content Type";
 "Topics" = "Topics";
-
 "Any" = "Any";
-
 "Filter Type" = "Type";
-
 "Filter Genre" = "Genre";
-
 "Filtered Results" = "Filtered Results";
-
 "Actor" = "Actor";
-
 "%@s" = "%@s";
-
 "Language" = "Language";
-
 "Catalog Series" = "TV Shows";
-
 "TV Movie" = "TV Movie";
-
 "iCloud Sync" = "iCloud Sync";
 "Keeps favorites, Continue Watching, subscriptions, and the sources you pinned, hid or ordered the same on your devices signed in to the same iCloud account. Accounts, passwords and downloads stay on each device." = "Keeps favorites, Continue Watching, subscriptions, and the sources you pinned, hid or ordered the same on your devices signed in to the same iCloud account. Accounts, passwords and downloads stay on each device.";
 "Danmaku Area" = "Danmaku Area";
@@ -1348,27 +1208,16 @@
 "Open in UC Browser" = "Open in UC Browser";
 "UC Browser isn't on this device. Get UC Browser (UC浏览器) from the App Store and sign in to it, or scan the code with another phone." = "UC Browser isn't on this device. Get UC Browser (UC浏览器) from the App Store and sign in to it, or scan the code with another phone.";
 "Waiting for UC Browser to approve…" = "Waiting for UC Browser to approve…";
-
 "%lld works" = "%lld works";
-
 "Contribution" = "Contribution";
-
 "Editing" = "Editing";
-
 "List View" = "List View";
-
 "Grid View" = "Grid View";
-
 "No works match these filters." = "No works match these filters.";
-
 "Show Video Info" = "Show Video Info";
-
 "Shows the video's format, resolution, frame rate and bitrate in a corner of the player." = "Shows the video's format, resolution, frame rate and bitrate in a corner of the player.";
-
 "Bitrate %@" = "Bitrate %@";
-
 "Download %@" = "Download %@";
-
 "Uses the official Dandanplay service. You can also enter your own compatible server." = "Uses the official Dandanplay service. You can also enter your own compatible server.";
 "This build is missing its Dandanplay API configuration." = "This build is missing its Dandanplay API configuration.";
 "Uses Dandanplay first, then tries iQIYI and Tencent Video if no comments are found or the service is unavailable. Official public episode pages are sent to dmku, or to danmu.zxz.ee when dmku has none; stream URLs and playback headers are never sent." = "Uses Dandanplay first, then tries iQIYI and Tencent Video if no comments are found or the service is unavailable. Official public episode pages are sent to dmku, or to danmu.zxz.ee when dmku has none; stream URLs and playback headers are never sent.";
@@ -1408,9 +1257,7 @@
 "Douban Hot Series" = "Douban Hot Series";
 "Douban Hot Variety Shows" = "Douban Hot Variety Shows";
 "Douban" = "Douban";
-
 "%@ (Translated from %@)" = "%@ (Translated from %@)";
-
 "Airing Schedule" = "Airing Schedule";
 "Anime" = "Anime";
 "Nothing Airing" = "Nothing Airing";
@@ -1429,8 +1276,6 @@
 "Anime Airing Today" = "Anime Airing Today";
 "Series Airing Today" = "Series Airing Today";
 "Day" = "Day";
-
-/* Mi3s's own features (privacy vault, subtitles, source tools, moved sources) */
 "Direct" = "Direct";
 "Proxy" = "Proxy";
 "Connection" = "Connection";
@@ -1589,7 +1434,6 @@
 "Lock Controls" = "Lock Controls";
 "Unlock Controls" = "Unlock Controls";
 "Rotate" = "Rotate";
-
 "Privacy Vault" = "Privacy Vault";
 "Hide Content in the App Switcher" = "Hide Content in the App Switcher";
 "Hides the subscriptions and sources you choose behind a passcode. Hidden sources stay out of the list, search, and Continue Watching until the vault is unlocked." = "Hides the subscriptions and sources you choose behind a passcode. Hidden sources stay out of the list, search, and Continue Watching until the vault is unlocked.";
@@ -1602,15 +1446,11 @@
 "Allow Speech Recognition in Settings to write subtitles." = "Allow Speech Recognition in Settings to write subtitles.";
 "This video has no sound track to read." = "This video has no sound track to read.";
 "Nothing was recognised in this video's sound." = "Nothing was recognised in this video's sound.";
-
 "Sort by Measured Quality" = "Sort by Measured Quality";
 "Sort" = "Sort";
 "Sorted by measured picture quality. Sources that were never probed are last." = "Sorted by measured picture quality. Sources that were never probed are last.";
-
 "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one." = "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one.";
 "Presets" = "Presets";
-
-/* UI wiring */
 "New Environment" = "New Environment";
 "Create" = "Create";
 "Delete Environment?" = "Delete Environment?";
@@ -1621,35 +1461,23 @@
 "Skip Credits" = "Skip Credits";
 "Describes this exact file" = "Describes this exact file";
 "Describes the title; used only if the timing fits" = "Describes the title; used only if the timing fits";
-
-/* Segment sources, speech subtitles, and the settings group they live in */
 "What Plays" = "What Plays";
 "The intro end and outro you set on a video's page" = "The intro end and outro you set on a video's page";
 "Chapters carried inside the file" = "Chapters carried inside the file";
 "Not connected yet: no request is made to these databases." = "Not connected yet: no request is made to these databases.";
 "Drag to reorder. The first source with a usable segment wins. Your own markers and the file's chapters are read on this device; the public timestamp databases are not connected yet, and their switches stay off until they are." = "Drag to reorder. The first source with a usable segment wins. Your own markers and the file's chapters are read on this device; the public timestamp databases are not connected yet, and their switches stay off until they are.";
 "Recognition runs entirely on this device. No audio leaves the phone. Only languages this device has a model for are listed; the player uses the one picked here." = "Recognition runs entirely on this device. No audio leaves the phone. Only languages this device has a model for are listed; the player uses the one picked here.";
-
-/* HDR */
 "Dolby Vision profile 5 needs an HDR screen" = "Dolby Vision profile 5 needs an HDR screen";
-
-/* ranking honesty + speech availability */
 "No Data" = "No Data";
 "No On-Device Speech Model" = "No On-Device Speech Model";
 "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one. The speed test measures resolution only, so ordering by bitrate, file size or colour range does not change which source comes first yet." = "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one. The speed test measures resolution only, so ordering by bitrate, file size or colour range does not change which source comes first yet.";
-
-/* batch line fix + speech audio */
 "No dead lines have been measured yet. Run Probe All first — this uses those readings rather than asking every source again." = "No dead lines have been measured yet. Run Probe All first — this uses those readings rather than asking every source again.";
 "No custom proxy is set up. Add one under Playback → Custom Proxy, or force the lines direct instead." = "No custom proxy is set up. Add one under Playback → Custom Proxy, or force the lines direct instead.";
 "Dead lines routed through the proxy: %lld" = "Dead lines routed through the proxy: %lld";
 "Dead lines set to play direct: %lld" = "Dead lines set to play direct: %lld";
 "Dead lines hidden from the episode list: %lld" = "Dead lines hidden from the episode list: %lld";
 "This video's sound could not be read on this device." = "This video's sound could not be read on this device.";
-
-/* restore */
 "Removed %lld subscriptions that this file does not list." = "Removed %lld subscriptions that this file does not list.";
-
-/* AI translation */
 "AI Translation" = "AI Translation";
 "Service" = "Service";
 "None" = "None";
@@ -1659,8 +1487,6 @@
 "Leave every field empty to keep the device's own translation, which is free and offline but limited to the language pairs the system carries. A service covers any pair, at the cost of an API key and a network request per batch." = "Leave every field empty to keep the device's own translation, which is free and offline but limited to the language pairs the system carries. A service covers any pair, at the cost of an API key and a network request per batch.";
 "Rules are added to the built-in ones, which already ask the model to keep tone, register, humour and implied subjects using nearby subtitle context." = "Rules are added to the built-in ones, which already ask the model to keep tone, register, humour and implied subjects using nearby subtitle context.";
 "Sends one test line, to confirm the address, model and key work together." = "Sends one test line, to confirm the address, model and key work together.";
-
-// Web Cast
 "Web Cast" = "Web Cast";
 "Drive Mi3s from a browser on the same Wi-Fi." = "Drive Mi3s from a browser on the same Wi-Fi.";
 "When on, a computer on the same network opens the address below and gets a web version of Mi3s." = "When on, a computer on the same network opens the address below and gets a web version of Mi3s.";
@@ -1679,8 +1505,6 @@
 "This source is no longer available." = "This source is no longer available.";
 "Not Running" = "Not Running";
 "The server could not start. Check the port and try again." = "The server could not start. Check the port and try again.";
-
-// Full backup (完整备份)
 "Full Backup" = "Full Backup";
 "Restore Full Backup" = "Restore Full Backup";
 "Backup contents" = "Backup contents";
@@ -1696,9 +1520,6 @@
 "Custom proxies" = "Custom proxies";
 "Settings & preferences" = "Settings & preferences";
 "Sign-in & accounts carries cookies and tokens; restoring them may still require re-signing in if a service expired them." = "Sign-in & accounts carries cookies and tokens; restoring them may still require re-signing in if a service expired them.";
-
-
-// ---- 二开补齐（iOS 界面缺失翻译）----
 "%@ couldn't create the folder." = "%@ couldn't create the folder.";
 "%@ didn't open an upload for this file. Try again." = "%@ didn't open an upload for this file. Try again.";
 "%@ · from %@" = "%@ · from %@";
@@ -1779,8 +1600,6 @@
 "Drop here to hide" = "Drop here to hide";
 "Drag a button onto any slot in the top or bottom row, or into More. Empty slots stay empty." = "Drag a button onto any slot in the top or bottom row, or into More. Empty slots stay empty.";
 "Tap a slot to place %@" = "Tap a slot to place %@";
-
-// MARK: - [mi3s] 融合：上游 1.8.11 新增文案（182 条）
 "Yingxia" = "Yingxia";
 "Yingxia / TVBOX" = "Yingxia / TVBOX";
 "About Yingxia" = "About Yingxia";
@@ -1925,8 +1744,6 @@
 "Couldn't reach %@. The site may be down or blocked on your network." = "Couldn't reach %@. The site may be down or blocked on your network.";
 "This source needs you to sign in. Sign in under Settings › Comic Sources." = "This source needs you to sign in. Sign in under Settings › Comic Sources.";
 "The source said: %@" = "The source said: %@";
-
-/* Subtitle Style (#547) */
 "Subtitle Style" = "Subtitle Style";
 "White" = "White";
 "Yellow" = "Yellow";
@@ -1982,13 +1799,9 @@
 "This source is hidden. Unlock the Privacy Vault to browse it." = "This source is hidden. Unlock the Privacy Vault to browse it.";
 "This source is hidden. Unlock the Privacy Vault to use it." = "This source is hidden. Unlock the Privacy Vault to use it.";
 "This title is hidden. Unlock the Privacy Vault to play it." = "This title is hidden. Unlock the Privacy Vault to play it.";
-
-// MARK: - App Language
 "App Language" = "App Language";
 "Follow System" = "Follow System";
 "The app language is independent of your device language and applies immediately." = "The app language is independent of your device language and applies immediately.";
-
-/* Speed & Grouping (SourceSpeedLab) */
 "Speed & Grouping" = "Speed & Grouping";
 "One Group" = "One Group";
 "Measure" = "Measure";
@@ -2027,14 +1840,10 @@
 "A route changes the address a source API is fetched from. Media comes from whatever CDN the source hands back and is not rewritten, so a source whose API answers but whose segments are blocked still needs hiding." = "A route changes the address a source API is fetched from. Media comes from whatever CDN the source hands back and is not rewritten, so a source whose API answers but whose segments are blocked still needs hiding.";
 "Forget Every Reading" = "Forget Every Reading";
 "Group %lld" = "Group %lld";
-
-/* Sources page: speed card */
 "Tools" = "Tools";
 "Measure the sources, then file them by result." = "Measure the sources, then file them by result.";
 "%lld measured" = "%lld measured";
 "%lld measured, %lld within the window" = "%lld measured, %lld within the window";
-
-// MARK: Bilibili skin
 "Black page, controls over the picture, episodes in a row." = "Black page, controls over the picture, episodes in a row.";
 "Half-screen card, drawer of episodes, settings sliding out from the right." = "Half-screen card, drawer of episodes, settings sliding out from the right.";
 "Playback Settings" = "Playback Settings";
@@ -2070,8 +1879,6 @@
 "No matching episodes" = "No matching episodes";
 "Jump to page" = "Jump to page";
 "Go" = "Go";
-
-// MARK: Bilibili pages and panels
 "Comments" = "Comments";
 "Comments (%@)" = "Comments (%@)";
 "All Comments" = "All Comments";
@@ -2137,8 +1944,6 @@
 "Keeps going through the list." = "Keeps going through the list.";
 "Bili Message" = "Bili Message";
 "Bili Pic" = "Bili Pic";
-
-/* Sources page: batch selection */
 "Select" = "Select";
 "%lld selected" = "%lld selected";
 "%lld groups" = "%lld groups";
@@ -2163,8 +1968,6 @@
 "Tick the sources you want, then choose what to do with them. A group's own button picks everything in it." = "Tick the sources you want, then choose what to do with them. A group's own button picks everything in it.";
 "Pick This Group" = "Pick This Group";
 "Clear This Group" = "Clear This Group";
-
-/* Sources page: group priority */
 "Everything" = "Everything";
 "One Subscription" = "One Subscription";
 "Picked" = "Picked";
@@ -2179,21 +1982,13 @@
 "Groups at the top are searched first, and their results are listed first. Sources inside a group keep their own order. A group left here unranked is still searched — it just comes after the ones you ranked." = "Groups at the top are searched first, and their results are listed first. Sources inside a group keep their own order. A group left here unranked is still searched — it just comes after the ones you ranked.";
 "Clear the Ranking" = "Clear the Ranking";
 "Clearing it returns search to the automatic order, which prefers quick, reliable sources. Nothing is ungrouped and no source order is lost." = "Clearing it returns search to the automatic order, which prefers quick, reliable sources. Nothing is ungrouped and no source order is lost.";
-
-/* Sources page: filing by result */
 "File the Result into the Existing Groups" = "File the Result into the Existing Groups";
 "New Groups from the Result (reachable / unreachable)" = "New Groups from the Result (reachable / unreachable)";
-
-/* Sources page: select all while searching */
 "Select All Shown" = "Select All Shown";
-
-/* Ad blocking: a real control in all three players, and the switch it drives */
 "Ad Blocking" = "Ad Blocking";
 "Ad Blocking On" = "Ad Blocking On";
 "Ad Blocking Off" = "Ad Blocking Off";
 "Mark This as an Ad" = "Mark This as an Ad";
-
-/* Ad blocking + ad fingerprint library (fills the four-language gap) */
 "Ads" = "Ads";
 "Mark Ad" = "Mark Ad";
 "Mark Last 30s as Ad" = "Mark the Last 30 Seconds as an Ad";
@@ -2216,31 +2011,18 @@
 "Ads are recognised by what they look like, not where they sit, so a marked ad is skipped in every video afterwards." = "Ads are recognised by what they look like, not where they sit, so a marked ad is skipped in every video afterwards.";
 "Mark an ad while watching, then it plays no more. Marked ads are shared across your devices." = "Mark an ad while watching, then it plays no more. Marked ads are shared across your devices.";
 "Marking an ad needs the picture we draw ourselves. Switch the watch page to the One skin to mark ads." = "Marking an ad needs the picture we draw ourselves. Switch the watch page to the One skin to mark ads.";
-
-/* Player Controls: the bilibili skin keeps its own arrangement */
-
 "Not used by the Bilibili skin" = "Not used by the Bilibili skin";
 "This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel." = "This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel.";
-
-/* Sources page: tidy after sweep */
 "After the Sweep" = "After the Sweep";
 "Reorder by score" = "Reorder by score";
 "File into Reachable / Unreachable" = "File into Reachable / Unreachable";
 "Answered to Direct, silent to Proxy" = "Answered to Direct, silent to Proxy";
 "Grouping only moves sources that have a reading, so a group you arranged by hand stays as it is until a source in it is measured. Routing rewrites the address a source API is fetched from; media still comes from the source's own CDN." = "Grouping only moves sources that have a reading, so a group you arranged by hand stays as it is until a source in it is measured. Routing rewrites the address a source API is fetched from; media still comes from the source's own CDN.";
-
-/* Sources page: measure button */
 "Measure Now" = "Measure Now";
-
-/* Sources page: reachability wording */
 "Reachable into %@" = "Reachable into %@";
 "Unreachable into %@" = "Unreachable into %@";
 "Reachable to Direct, Unreachable to Proxy" = "Reachable to Direct, Unreachable to Proxy";
-
-/* Sources page: screening report */
 "%lld not attempted: the endpoint did not answer." = "%lld not attempted: the endpoint did not answer.";
-
-/* 出站代理 / Loon */
 "Add Loon" = "Add Loon";
 "Both ranges are in place. They decide where a request goes — except for a site Loon's own rules already classify: those follow the rules, because Loon checks them before the port. Sources whose sites are not in your rules (most of them) are fully controlled here." = "Both ranges are in place. They decide where a request goes — except for a site Loon's own rules already classify: those follow the rules, because Loon checks them before the port. Sources whose sites are not in your rules (most of them) are fully controlled here.";
 "Both ranges went the same way — Loon's own rules decided" = "Both ranges went the same way — Loon's own rules decided";
@@ -2700,19 +2482,14 @@
 "Tile Windows" = "Tile Windows";
 "Free Arrange" = "Free Arrange";
 "Bring Forward" = "Bring Forward";
-
 "Needs parsing" = "Needs parsing";
-
 "That line didn't play. Switched to %@." = "That line didn't play. Switched to %@.";
-
 "Tidy Once" = "Tidy Once";
 "Lock Tiled Layout" = "Lock Tiled Layout";
 "Unlock Layout" = "Unlock Layout";
 "Open Episode List" = "Open Episode List";
-
 "Default Exit" = "Default Exit";
 "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically.";
-
 "Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way." = "Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way.";
 "Ad Range" = "Ad Range";
 "Ad starts at" = "Ad starts at";
@@ -2749,7 +2526,424 @@
 "Start Here" = "Start Here";
 "Trim the Ad" = "Trim the Ad";
 "Trim the Ad Here" = "Trim the Ad Here";
-
-/* 首播自动学习 */
 "Learned automatically from videos you have played on the same source. Only applies to that source." = "Learned automatically from videos you have played on the same source. Only applies to that source.";
 "%@ · from %d videos" = "%@ · from %d videos";
+"Live streams can't be cached." = "Live streams can't be cached.";
+"This video is protected and can't be cached." = "This video is protected and can't be cached.";
+"The server stopped allowing caching to resume. Retry to start again." = "The server stopped allowing caching to resume. Retry to start again.";
+"Offline Cache" = "Offline Cache";
+"This cached video is no longer on this device." = "This cached video is no longer on this device.";
+"%@ is no longer in your subscription, so caching can't continue." = "%@ is no longer in your subscription, so caching can't continue.";
+"Nothing Cached" = "Nothing Cached";
+"Choose Cache on a video's page to keep episodes for watching offline." = "Choose Cache on a video's page to keep episodes for watching offline.";
+"Cached" = "Cached";
+"Date Cached" = "Date Cached";
+"Delete all cached episodes of %@?" = "Delete all cached episodes of %@?";
+"Delete Cached Items" = "Delete Cached Items";
+"Delete from Cache" = "Delete from Cache";
+"Caching" = "Caching";
+"used by the cache" = "used by the cache";
+"%@ used by the cache" = "%@ used by the cache";
+"tvOS may remove cached videos when Apple TV runs low on storage." = "tvOS may remove cached videos when Apple TV runs low on storage.";
+"Cancel Caching" = "Cancel Caching";
+"Cache Next" = "Cache Next";
+"Caching failed" = "Caching failed";
+"Cache Episodes" = "Cache Episodes";
+"Cache" = "Cache";
+"Cache %lld" = "Cache %lld";
+"1 episode added to the cache." = "1 episode added to the cache.";
+"%lld episodes added to the cache." = "%lld episodes added to the cache.";
+"Show Cache" = "Show Cache";
+"The intro must end before the outro starts." = "The intro must end before the outro starts.";
+"Intro skipped" = "Intro skipped";
+"Undo" = "Undo";
+"Skipping the outro in %@ s" = "Skipping the outro in %@ s";
+"This video could not be prepared for playback. Please try again." = "This video could not be prepared for playback. Please try again.";
+"This source needs your %@ account for this line. Sign in with its code, and the episode plays." = "This source needs your %@ account for this line. Sign in with its code, and the episode plays.";
+"123pan" = "123pan";
+"None of your subscriptions lists music channels. Add one that does, such as the recommended sources, to play music." = "None of your subscriptions lists music channels. Add one that does, such as the recommended sources, to play music.";
+"No LX Music source could play it." = "No LX Music source could play it.";
+"Remove from Cache" = "Remove from Cache";
+"Cached Songs" = "Cached Songs";
+"No Cached Songs" = "No Cached Songs";
+"Cache a song, album or playlist from its menu to listen without a connection." = "Cache a song, album or playlist from its menu to listen without a connection.";
+"Delete all cached songs?" = "Delete all cached songs?";
+"%lld caching" = "%lld caching";
+"%@ uses a certificate this device doesn't trust, for example a self-signed one. Use the server's http:// address, or give the server a trusted certificate." = "%@ uses a certificate this device doesn't trust, for example a self-signed one. Use the server's http:// address, or give the server a trusted certificate.";
+"Sign in to Quark, UC, 115 or Baidu Netdisk under Cloud Drive Accounts to browse their files here." = "Sign in to Quark, UC, 115 or Baidu Netdisk under Cloud Drive Accounts to browse their files here.";
+"This file no longer exists." = "This file no longer exists.";
+"Add an AList or OpenList server, a NAS's WebDAV share, an Emby or Jellyfin server, or an fnOS NAS's media library, by the address you open it at. Pasting an AList address, or a TVBox AList configuration, in Add Subscription adds servers too." = "Add an AList or OpenList server, a NAS's WebDAV share, an Emby or Jellyfin server, or an fnOS NAS's media library, by the address you open it at. Pasting an AList address, or a TVBox AList configuration, in Add Subscription adds servers too.";
+"The server's address, such as http://192.168.1.10:5244 for AList, http://192.168.1.10:8096 for Emby or Jellyfin, http://192.168.1.10:5666 for fnOS, or the WebDAV address your NAS shows. Add a folder after an AList or WebDAV address to start there. Emby, Jellyfin and fnOS always want the user name; the others only when they don't let guests browse." = "The server's address, such as http://192.168.1.10:5244 for AList, http://192.168.1.10:8096 for Emby or Jellyfin, http://192.168.1.10:5666 for fnOS, or the WebDAV address your NAS shows. Add a folder after an AList or WebDAV address to start there. Emby, Jellyfin and fnOS always want the user name; the others only when they don't let guests browse.";
+"No AList, WebDAV, Emby, Jellyfin or fnOS server answered at this address." = "No AList, WebDAV, Emby, Jellyfin or fnOS server answered at this address.";
+"Back %@ seconds" = "Back %@ seconds";
+"Forward %@ seconds" = "Forward %@ seconds";
+"Show Time and Battery" = "Show Time and Battery";
+"Skip Interval" = "Skip Interval";
+"Double-tap the left or right of the video to skip forward or back. Turn this off and a double tap plays or pauses instead." = "Double-tap the left or right of the video to skip forward or back. Turn this off and a double tap plays or pauses instead.";
+"Collapse Tab Bar When Scrolling" = "Collapse Tab Bar When Scrolling";
+"Preparing the cached video for this device · %lld%%" = "Preparing the cached video for this device · %lld%%";
+"Opening the cached video" = "Opening the cached video";
+"This Dolby Vision video needs HDR. To keep your Apple TV in SDR and still play it, turn on Settings › Video and Audio › Match Content › Match Dynamic Range: the TV then switches to HDR only while such a video plays." = "This Dolby Vision video needs HDR. To keep your Apple TV in SDR and still play it, turn on Settings › Video and Audio › Match Content › Match Dynamic Range: the TV then switches to HDR only while such a video plays.";
+"One Line" = "One Line";
+"A TVBox JSON subscription, an M3U or TXT live playlist, or one Python (.py) or JavaScript (.js) spider." = "A TVBox JSON subscription, an M3U or TXT live playlist, or one Python (.py) or JavaScript (.js) spider.";
+"This file is on the device it was added on, not on this one. Files don't sync to other devices; use a web address instead." = "This file is on the device it was added on, not on this one. Files don't sync to other devices; use a web address instead.";
+"This source needs %@, a file next to its config. Only the config file itself was added, so add the config by its web address instead." = "This source needs %@, a file next to its config. Only the config file itself was added, so add the config by its web address instead.";
+"Your account and password are sent only to this book source's website, and kept on this device." = "Your account and password are sent only to this book source's website, and kept on this device.";
+"Sign In on the Website" = "Sign In on the Website";
+"Sign in on the page, then tap Done. This source then reads the website as you." = "Sign in on the page, then tap Done. This source then reads the website as you.";
+"This source has nothing to fill in to sign in." = "This source has nothing to fill in to sign in.";
+"This source signs in on its website, which Apple TV can't open." = "This source signs in on its website, which Apple TV can't open.";
+"These sources can sign in to an account on their website." = "These sources can sign in to an account on their website.";
+"Not signed in yet." = "Not signed in yet.";
+"This source's sign-in form isn't supported yet." = "This source's sign-in form isn't supported yet.";
+"This source's sign-in form couldn't be read." = "This source's sign-in form couldn't be read.";
+"This source has no login function." = "This source has no login function.";
+"Video Page" = "Video Page";
+"Play Automatically" = "Play Automatically";
+"Start in Full Screen" = "Start in Full Screen";
+"With Play Automatically on, a video of one episode starts as soon as its page opens. With Start in Full Screen on, a video fills the screen as soon as it starts on its page." = "With Play Automatically on, a video of one episode starts as soon as its page opens. With Start in Full Screen on, a video fills the screen as soon as it starts on its page.";
+"iQIYI" = "iQIYI";
+"Tencent Video" = "Tencent Video";
+"Youku" = "Youku";
+"Mango TV" = "Mango TV";
+"Dandanplay" = "Dandanplay";
+"Scroll Speed" = "Scroll Speed";
+"Scrolling Comments" = "Scrolling Comments";
+"Top Comments" = "Top Comments";
+"Bottom Comments" = "Bottom Comments";
+"Danmaku Settings…" = "Danmaku Settings…";
+"Preferred Source Platform" = "Preferred Source Platform";
+"Use Official URL" = "Use Official URL";
+"Danmaku service settings saved." = "Danmaku service settings saved.";
+"Enter a Dandanplay-compatible server root or an API prefix ending in /api/v2. A token in the path is supported. The URL is saved only on this device." = "Enter a Dandanplay-compatible server root or an API prefix ending in /api/v2. A token in the path is supported. The URL is saved only on this device.";
+"Danmaku Display" = "Danmaku Display";
+"Advance 0.5 s" = "Advance 0.5 s";
+"Advance 5 s" = "Advance 5 s";
+"Delay 0.5 s" = "Delay 0.5 s";
+"Delay 5 s" = "Delay 5 s";
+"Reset Timing" = "Reset Timing";
+"Current Danmaku" = "Current Danmaku";
+"Unknown Source" = "Unknown Source";
+"Unknown Year" = "Unknown Year";
+"It has the same name as a recommended source." = "It has the same name as a recommended source.";
+"Update the app to use the recommended sources." = "Update the app to use the recommended sources.";
+"User Name" = "User Name";
+"API Token" = "API Token";
+"Search Online" = "Search Online";
+"Settings › Subtitle Sources" = "Settings › Subtitle Sources";
+"Online" = "Online";
+"Skip Outro" = "Skip Outro";
+"This source's settings page can't open on this device. Sign in to your drives in Cloud Drive Accounts, and the source uses those sign-ins." = "This source's settings page can't open on this device. Sign in to your drives in Cloud Drive Accounts, and the source uses those sign-ins.";
+"Chapter %lld" = "Chapter %lld";
+"Hide Sources That Aren't Working (%lld)" = "Hide Sources That Aren't Working (%lld)";
+"Sources come from your subscriptions, so a source is hidden rather than deleted. To delete a whole subscription, open it in Settings." = "Sources come from your subscriptions, so a source is hidden rather than deleted. To delete a whole subscription, open it in Settings.";
+"Skip Ad Segments" = "Skip Ad Segments";
+"System Language" = "System Language";
+"Restart Now" = "Restart Now";
+"Restart Yingxia to use the new language." = "Restart Yingxia to use the new language.";
+"%@ couldn't be downloaded." = "%@ couldn't be downloaded.";
+"%@ didn't match its checksum, so it wasn't installed." = "%@ didn't match its checksum, so it wasn't installed.";
+"%@ wasn't updated. %@" = "%@ wasn't updated. %@";
+"A plugin's scripts run inside Yingxia and reach only the internet. Add sources you trust." = "A plugin's scripts run inside Yingxia and reach only the internet. Add sources you trust.";
+"In Settings, add a TVBox subscription with live playlists, an M3U or TXT live playlist, or live plugins." = "In Settings, add a TVBox subscription with live playlists, an M3U or TXT live playlist, or live plugins.";
+"Install All (%lld)" = "Install All (%lld)";
+"Live Plugins" = "Live Plugins";
+"Live platforms added as AngelLive plugins show in Live TV." = "Live platforms added as AngelLive plugins show in Live TV.";
+"Live plugins add platforms to Live TV, such as Huya, Douyu, Twitch and YouTube. They use the AngelLive plugin format: add a source by its address, its install link, or its short key." = "Live plugins add platforms to Live TV, such as Huya, Douyu, Twitch and YouTube. They use the AngelLive plugin format: add a source by its address, its install link, or its short key.";
+"Plugin" = "Plugin";
+"Remove Plugin" = "Remove Plugin";
+"Removing the source also removes the plugins installed from it." = "Removing the source also removes the plugins installed from it.";
+"Sign in to this platform to see this." = "Sign in to this platform to see this.";
+"Sign-In Needed" = "Sign-In Needed";
+"Source Address or Key" = "Source Address or Key";
+"The download isn't the plugin %@." = "The download isn't the plugin %@.";
+"The live stream ended." = "The live stream ended.";
+"The live stream sent no picture." = "The live stream sent no picture.";
+"The platform took too long to answer." = "The platform took too long to answer.";
+"The plugin %@ defines no LiveParsePlugin." = "The plugin %@ defines no LiveParsePlugin.";
+"The plugin %@ is missing its script %@." = "The plugin %@ is missing its script %@.";
+"The plugin %@ isn't installed." = "The plugin %@ isn't installed.";
+"The plugin %@ needs a newer version of Yingxia." = "The plugin %@ needs a newer version of Yingxia.";
+"The plugin has no manifest.json." = "The plugin has no manifest.json.";
+"The streamer isn't live now." = "The streamer isn't live now.";
+"This address isn't a live plugin source." = "This address isn't a live plugin source.";
+"This live stream isn't FLV." = "This live stream isn't FLV.";
+"This platform's plugin can't do this." = "This platform's plugin can't do this.";
+"This video is encrypted, and Yingxia can't play it yet." = "This video is encrypted, and Yingxia can't play it yet.";
+"Update All (%lld)" = "Update All (%lld)";
+"Update to %@" = "Update to %@";
+"Cookie" = "Cookie";
+"In a browser signed in to the platform, copy the Cookie header of one of its requests and paste it here." = "In a browser signed in to the platform, copy the Cookie header of one of its requests and paste it here.";
+"Paste a Cookie" = "Paste a Cookie";
+"Sign In Again" = "Sign In Again";
+"Sign-In Expired" = "Sign-In Expired";
+"Some platforms show more, or better quality, once you sign in. The sign-in stays on this device." = "Some platforms show more, or better quality, once you sign in. The sign-in stays on this device.";
+"%@ shows its live rooms once you sign in. The sign-in stays on this device." = "%@ shows its live rooms once you sign in. The sign-in stays on this device.";
+"Sign In by QR Code" = "Sign In by QR Code";
+"Use the Web Page Instead" = "Use the Web Page Instead";
+"The platform sent no sign-in code." = "The platform sent no sign-in code.";
+"The platform confirmed the sign-in but sent no cookies." = "The platform confirmed the sign-in but sent no cookies.";
+"The platform didn't accept this sign-in. Try again." = "The platform didn't accept this sign-in. Try again.";
+"Scan the code, or open %@ on a phone or computer, and enter this code there." = "Scan the code, or open %@ on a phone or computer, and enter this code there.";
+"Waiting for you to approve the sign-in…" = "Waiting for you to approve the sign-in…";
+"Open the Sign-In Page" = "Open the Sign-In Page";
+"The sign-in was declined." = "The sign-in was declined.";
+"Sign-in details stay on this device." = "Sign-in details stay on this device.";
+"Show %lld Other Results" = "Show %lld Other Results";
+"Intro Ends Here" = "Intro Ends Here";
+"Outro Starts Here" = "Outro Starts Here";
+"In the first five minutes" = "In the first five minutes";
+"In the last ten minutes" = "In the last ten minutes";
+"%@ before the end" = "%@ before the end";
+"Clear Intro and Outro" = "Clear Intro and Outro";
+"Two Lines" = "Two Lines";
+"Three Lines" = "Three Lines";
+"Danmaku Settings" = "Danmaku Settings";
+"Display" = "Display";
+"Comment Types" = "Comment Types";
+"Colored Comments" = "Colored Comments";
+"Turn off Colored Comments to draw every comment in white, which stays readable over bright pictures." = "Turn off Colored Comments to draw every comment in white, which stays readable over bright pictures.";
+"Add a word or /pattern/" = "Add a word or /pattern/";
+"Add Blocked Word" = "Add Blocked Word";
+"No blocked words" = "No blocked words";
+"Comments containing any of these words are hidden in every video. Put a pattern between slashes, like /^哈+$/, to match it as a regular expression." = "Comments containing any of these words are hidden in every video. Put a pattern between slashes, like /^哈+$/, to match it as a regular expression.";
+"Applies to comments in every video, including one that is playing." = "Applies to comments in every video, including one that is playing.";
+"Here it comes!" = "Here it comes!";
+"This scene is incredible" = "This scene is incredible";
+"Hahahahaha" = "Hahahahaha";
+"Third time watching" = "Third time watching";
+"The music is so good" = "The music is so good";
+"Plot twist!" = "Plot twist!";
+"Classic moment" = "Classic moment";
+"Welcome back, everyone" = "Welcome back, everyone";
+"Who else is watching tonight?" = "Who else is watching tonight?";
+"%lld chapters" = "%lld chapters";
+"%lld of %lld on" = "%lld of %lld on";
+"%lld on" = "%lld on";
+"%lld sources didn't answer" = "%lld sources didn't answer";
+"%lld sources have this book" = "%lld sources have this book";
+"Add to Bookshelf" = "Add to Bookshelf";
+"Added a Legado book source list (%lld sources). Search and read in Novels." = "Added a Legado book source list (%lld sources). Search and read in Novels.";
+"Book Sources" = "Book Sources";
+"Book sources are Legado (阅读) sources. Add a list as a subscription in Settings › Subscriptions. Each source reads a website; the website's content is its own." = "Book sources are Legado (阅读) sources. Add a list as a subscription in Settings › Subscriptions. Each source reads a website; the website's content is its own.";
+"Bookshelf" = "Bookshelf";
+"Browse Books" = "Browse Books";
+"Change Source" = "Change Source";
+"Contents" = "Contents";
+"Explore" = "Explore";
+"Latest: %@" = "Latest: %@";
+"No Book Sources" = "No Book Sources";
+"No Books" = "No Books";
+"No book source lists yet." = "No book source lists yet.";
+"No search" = "No search";
+"No source found “%@”. Try a shorter title, or the author's name." = "No source found “%@”. Try a shorter title, or the author's name.";
+"Not started" = "Not started";
+"Novels" = "Novels";
+"Novels shows while a Legado book source list is among your subscriptions." = "Novels shows while a Legado book source list is among your subscriptions.";
+"On Bookshelf" = "On Bookshelf";
+"Read Novels" = "Read Novels";
+"Refresh List" = "Refresh List";
+"Refreshed." = "Refreshed.";
+"Remove from Bookshelf" = "Remove from Bookshelf";
+"Search All Sources" = "Search All Sources";
+"Search Books" = "Search Books";
+"Search asks every source that is on. Turn off the ones that never answer to make it faster." = "Search asks every source that is on. Turn off the ones that never answer to make it faster.";
+"Searches all %lld switched-on book sources." = "Searches all %lld switched-on book sources.";
+"Sepia" = "Sepia";
+"The source listed no chapters for this book." = "The source listed no chapters for this book.";
+"The source returned an empty chapter." = "The source returned an empty chapter.";
+"The source took too long to answer. Try again, or switch to another source." = "The source took too long to answer. Try again, or switch to another source.";
+"This address is not a Legado book source list." = "This address is not a Legado book source list.";
+"This address is now a book source list. Add it again to use it for Novels." = "This address is now a book source list. Add it again to use it for Novels.";
+"This book's source is no longer in your book source lists." = "This book's source is no longer in your book source lists.";
+"This chapter is not in the table of contents." = "This chapter is not in the table of contents.";
+"This source has no explore lists. Search it instead." = "This source has no explore lists. Search it instead.";
+"Title or author" = "Title or author";
+"Turn All Off" = "Turn All Off";
+"Turn All On" = "Turn All On";
+"Turn on book sources in Settings › Book Sources to read here." = "Turn on book sources in Settings › Book Sources to read here.";
+"You've reached the latest chapter." = "You've reached the latest chapter.";
+"Your sources have no explore pages. Search for a title or an author." = "Your sources have no explore pages. Search for a title or an author.";
+"Searches the %lld switched-on sources in %@." = "Searches the %lld switched-on sources in %@.";
+"All Sources (%lld)" = "All Sources (%lld)";
+"Search In" = "Search In";
+"Turn All On and Turn All Off change only the sources the filter shows, such as one group." = "Turn All On and Turn All Off change only the sources the filter shows, such as one group.";
+"The book source returned nothing." = "The book source returned nothing.";
+"The book source took too long to answer." = "The book source took too long to answer.";
+"This source needs a web view, which Yingxia does not have." = "This source needs a web view, which Yingxia does not have.";
+"This source needs a web view (@webjs), which Yingxia does not have." = "This source needs a web view (@webjs), which Yingxia does not have.";
+"This source needs a verification code, which Yingxia cannot show." = "This source needs a verification code, which Yingxia cannot show.";
+"This source needs a browser, which Yingxia does not offer." = "This source needs a browser, which Yingxia does not offer.";
+"This source made too many requests." = "This source made too many requests.";
+"This source cannot search." = "This source cannot search.";
+"This is not a text book source." = "This is not a text book source.";
+"This is not a Legado book source." = "This is not a Legado book source.";
+"The table of contents is empty." = "The table of contents is empty.";
+"The site sent nothing." = "The site sent nothing.";
+"The chapter has no text." = "The chapter has no text.";
+"Signatures are not supported for book sources yet." = "Signatures are not supported for book sources yet.";
+"RSA is not supported for book sources yet." = "RSA is not supported for book sources yet.";
+"Last page in chapter" = "Last page in chapter";
+"1 page left in chapter" = "1 page left in chapter";
+"%d pages left in chapter" = "%d pages left in chapter";
+"Paged" = "Paged";
+"Scroll" = "Scroll";
+"Theme" = "Theme";
+"Font Size" = "Font Size";
+"Line Spacing" = "Line Spacing";
+"Margins" = "Margins";
+"Light" = "Light";
+"Dark" = "Dark";
+"Gray" = "Gray";
+"Grass" = "Grass";
+"Cherry" = "Cherry";
+"Sky" = "Sky";
+"Solarized" = "Solarized";
+"Gruvbox" = "Gruvbox";
+"Nord" = "Nord";
+"Contrast" = "Contrast";
+"Sunset" = "Sunset";
+"Songti" = "Songti";
+"Kaiti" = "Kaiti";
+"Search Chapters" = "Search Chapters";
+"Current Chapter" = "Current Chapter";
+"This source checks for a web browser, which Apple TV doesn't have. Read it on iPhone, iPad or Mac." = "This source checks for a web browser, which Apple TV doesn't have. Read it on iPhone, iPad or Mac.";
+"The site's browser check didn't pass. Try again later." = "The site's browser check didn't pass. Try again later.";
+"This is a Legado subscription source (订阅源), not a book source list. Add the address of a book source list instead." = "This is a Legado subscription source (订阅源), not a book source list. Add the address of a book source list instead.";
+"This page lists %lld Legado book source lists. Choose the ones to add in Settings › Novels › Book Sources." = "This page lists %lld Legado book source lists. Choose the ones to add in Settings › Novels › Book Sources.";
+"This address is now a page of book source lists. Add it again to choose from them." = "This address is now a page of book source lists. Add it again to choose from them.";
+"Lists You Can Add" = "Lists You Can Add";
+"Clear Lists You Can Add" = "Clear Lists You Can Add";
+"Found on %@. Lists you add appear under Source Lists." = "Found on %@. Lists you add appear under Source Lists.";
+"Added" = "Added";
+"Adding…" = "Adding…";
+"The file is larger than %lld MB." = "The file is larger than %lld MB.";
+"Previous Channel" = "Previous Channel";
+"Next Channel" = "Next Channel";
+"Channel List" = "Channel List";
+"Line %@" = "Line %@";
+"Line %@ didn't play. Trying line %@." = "Line %@ didn't play. Trying line %@.";
+"Search Time Limit" = "Search Time Limit";
+"%@ seconds" = "%@ seconds";
+"How long Search Online waits for the sources. Results show as each source answers, so a longer limit only waits longer for slow ones." = "How long Search Online waits for the sources. Results show as each source answers, so a longer limit only waits longer for slow ones.";
+"Search for “%@”" = "Search for “%@”";
+"Videos from every source" = "Videos from every source";
+"Move Left" = "Move Left";
+"Move Right" = "Move Right";
+"Program Guide" = "Program Guide";
+"Now On" = "Now On";
+"Coming Up" = "Coming Up";
+"An XMLTV file (.xml or .xml.gz), or an address with {name} for each channel. Leave it empty to use the playlist's own guide." = "An XMLTV file (.xml or .xml.gz), or an address with {name} for each channel. Leave it empty to use the playlist's own guide.";
+"App Icon" = "App Icon";
+"Pocket" = "Pocket";
+"Gray Pocket" = "Gray Pocket";
+"Layers" = "Layers";
+"Glass Play" = "Glass Play";
+"Seal" = "Seal";
+"Shiba" = "Shiba";
+"Cat" = "Cat";
+"Friends" = "Friends";
+"Panda" = "Panda";
+"Arc" = "Arc";
+"Aurora" = "Aurora";
+"Classic" = "Classic";
+"Porcelain" = "Porcelain";
+"Obsidian" = "Obsidian";
+"Azure" = "Azure";
+"Daybreak" = "Daybreak";
+"Iris" = "Iris";
+"Lagoon" = "Lagoon";
+"Rose Quartz" = "Rose Quartz";
+"Citrus" = "Citrus";
+"Cosmic" = "Cosmic";
+"Couldn't change the app icon: %@" = "Couldn't change the app icon: %@";
+"Couldn't open that picture." = "Couldn't open that picture.";
+"A square picture works best. One with see-through corners, such as an icon made for the Mac, shows as it is." = "A square picture works best. One with see-through corners, such as an icon made for the Mac, shows as it is.";
+"Choose Picture…" = "Choose Picture…";
+"Remove Custom Picture" = "Remove Custom Picture";
+"The Dock and Finder show the icon you pick, also while Yingxia is closed." = "The Dock and Finder show the icon you pick, also while Yingxia is closed.";
+"Yingxia can't change its own icon where it's installed, so the Dock shows this icon only while Yingxia is open." = "Yingxia can't change its own icon where it's installed, so the Dock shows this icon only while Yingxia is open.";
+"The icon on your Home Screen. The system confirms the change with a short message." = "The icon on your Home Screen. The system confirms the change with a short message.";
+"The icon on the Home Screen. When Yingxia sits in the top row, the picture above it stays Pocket." = "The icon on the Home Screen. When Yingxia sits in the top row, the picture above it stays Pocket.";
+"Violet" = "Violet";
+"Ocean" = "Ocean";
+"Forest" = "Forest";
+"Amber" = "Amber";
+"Rose" = "Rose";
+"Crimson" = "Crimson";
+"Orchid" = "Orchid";
+"Graphite" = "Graphite";
+"Color Theme" = "Color Theme";
+"Changes the app's colors: the highlight, page backgrounds, cards and icons, and on a Mac the sidebar and title bar. Classic is the app's original look." = "Changes the app's colors: the highlight, page backgrounds, cards and icons, and on a Mac the sidebar and title bar. Classic is the app's original look.";
+"Highlight" = "Highlight";
+"Page Background, Top" = "Page Background, Top";
+"Page Background, Bottom" = "Page Background, Bottom";
+"Cards and Rows" = "Cards and Rows";
+"Sidebar" = "Sidebar";
+"Title Bar" = "Title Bar";
+"Status Bar" = "Status Bar";
+"Icon Color %@" = "Icon Color %@";
+"Start From a Theme" = "Start From a Theme";
+"Choose a Theme" = "Choose a Theme";
+"Selections, buttons and progress" = "Selections, buttons and progress";
+"Where the page background starts, at the top left" = "Where the page background starts, at the top left";
+"Where it ends, at the bottom right. Pick the same color for a flat background." = "Where it ends, at the bottom right. Pick the same color for a flat background.";
+"Cards, lists and settings rows" = "Cards, lists and settings rows";
+"Behind the sections on the left" = "Behind the sections on the left";
+"The band under the window's toolbar" = "The band under the window's toolbar";
+"The version strip at the foot of the sidebar" = "The version strip at the foot of the sidebar";
+"Section icons, settings icons and tiles" = "Section icons, settings icons and tiles";
+"Each color is used exactly as picked, in light and dark mode. Text turns light or dark to match the page background." = "Each color is used exactly as picked, in light and dark mode. Text turns light or dark to match the page background.";
+"Sunshine Beach" = "Sunshine Beach";
+"Watermelon" = "Watermelon";
+"Tropical" = "Tropical";
+"Sunset Sky" = "Sunset Sky";
+"Mint Lemonade" = "Mint Lemonade";
+"Peach Soda" = "Peach Soda";
+"Neon Night" = "Neon Night";
+"Another subscription already uses this address." = "Another subscription already uses this address.";
+"This address doesn't hold a subscription. Add it as a new one instead." = "This address doesn't hold a subscription. Add it as a new one instead.";
+"Couldn't load this address: %@" = "Couldn't load this address: %@";
+"Use New Address" = "Use New Address";
+"File" = "File";
+"Yingxia keeps its own copy of this file. Later changes to the original don't reach the app; open it again to update it." = "Yingxia keeps its own copy of this file. Later changes to the original don't reach the app; open it again to update it.";
+"Added the LX Music source “%@”. Music plays songs through it; manage it in Music Settings › LX Music Sources." = "Added the LX Music source “%@”. Music plays songs through it; manage it in Music Settings › LX Music Sources.";
+"This address is now an LX Music source. Add it again to play music through it." = "This address is now an LX Music source. Add it again to play music through it.";
+"Use This Source" = "Use This Source";
+"“%@” is already added." = "“%@” is already added.";
+"Follow Show" = "Follow Show";
+"Unfollow Show" = "Unfollow Show";
+"Following Show" = "Following";
+"Following Calendar" = "My Shows";
+"Air Calendar" = "Air Calendar";
+"Episode %@ / %@" = "Ep %@ of %@";
+"%@ · %@ Episodes" = "%@ · %@ Episodes";
+"%@ of %@ aired" = "%@ of %@ aired";
+"Tomorrow" = "Tomorrow";
+"No upcoming episodes" = "No upcoming episodes";
+"No Shows Followed" = "No Shows Followed";
+"Open a series in Discover and tap Follow Show to see when its new episodes air." = "Open a series in Discover and tap Follow Show to see when its new episodes air.";
+"Season %@" = "Season %@";
+"Unfollowed Show" = "Unfollowed";
+"New episodes show up in Following Calendar" = "New episodes show up in My Shows";
+"Previous Month" = "Previous Month";
+"Next Month" = "Next Month";
+"Last Week" = "Last Week";
+"This Week" = "This Week";
+"Next Week" = "Next Week";
+"Aired" = "Aired";
+"In %@ days" = "In %@ days";
+"Last fetch took the %@ leg" = "Last fetch took the %@ leg";
+"Route: %@" = "Route: %@";
+"Sites That Must Use a Node" = "Sites That Must Use a Node";
+"A site your Loon rules already classify as direct cannot be re-routed by this app. Install the generated plugin in Loon once; it stays in effect afterwards." = "A site your Loon rules already classify as direct cannot be re-routed by this app. Install the generated plugin in Loon once; it stays in effect afterwards.";
+"Recorded: %@" = "Recorded: %@";
+"Nothing recorded yet" = "Nothing recorded yet";
+"Open a source that fails to load; the site is recorded once both lines fail." = "Open a source that fails to load; the site is recorded once both lines fail.";
+"Plugin URL" = "Plugin URL";
+"Install in Loon" = "Install in Loon";
+"Identify My Node" = "Identify My Node";
+"Copy Site Rules" = "Copy Site Rules";
+"Copy Remote Rule Line" = "Copy Remote Rule Line";
+"Clear Recorded Sites" = "Clear Recorded Sites";
+"Neither the direct line nor the proxy could reach %@." = "Neither the direct line nor the proxy could reach %@.";

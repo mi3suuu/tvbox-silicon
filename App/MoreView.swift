@@ -8,6 +8,8 @@ struct PhoneTabs: Equatable {
     static let storageKey = "phoneTabOrder"
     /// Off: the bar along the bottom shows only the icons.
     static let labelsKey = "phoneTabLabels"
+    /// Whether the tab bar shrinks to the current tab while scrolling down (iOS 26). On unless switched off (#1098).
+    static let collapsesKey = "phoneTabBarCollapses"
     /// tab bar 的位置数 —— **所有屏幕同一个值**（2026-11-13 第 22 项）。
     ///
     /// ⛔ 这里曾经还有一个 `wideBarSlots = 7`，宽屏（Duo 内屏 / iPad）用它。
@@ -42,9 +44,9 @@ struct PhoneTabs: Equatable {
     static func slots(horizontal: UserInterfaceSizeClass?, vertical: UserInterfaceSizeClass?) -> Int {
         barSlots
     }
-    static let standard = PhoneTabs(bar: [.home, .discover, .live, .search], more: [.music, .manga, .sites, .files, .history, .favorites, .downloads, .messages, .settings])
+    static let standard = PhoneTabs(bar: [.home, .discover, .live, .search], more: [.music, .manga, .novels, .sites, .files, .history, .favorites, .downloads, .messages, .settings])
     /// The iPad sidebar's order until the viewer arranges it. Messages is left out: only the phone lists it.
-    static let sidebarStandard: [AppSection] = [.home, .discover, .live, .music, .manga, .search, .sites, .files, .history, .favorites, .downloads, .settings]
+    static let sidebarStandard: [AppSection] = [.home, .discover, .live, .music, .manga, .novels, .search, .sites, .files, .history, .favorites, .downloads, .settings]
     var bar: [AppSection]
     var more: [AppSection]
 
@@ -99,6 +101,7 @@ extension AppSection {
         case .live: Color(red: 1.0, green: 0.45, blue: 0.32)
         case .music, .nowPlaying: Color(red: 1.0, green: 0.34, blue: 0.56)
         case .manga: Color(red: 1.0, green: 0.58, blue: 0.0)
+        case .novels: Color(red: 0.20, green: 0.70, blue: 0.48)
         case .search: Color(red: 0.36, green: 0.60, blue: 1.0)
         case .sites: Color(red: 0.60, green: 0.46, blue: 1.0)
         case .history: Brand.amber

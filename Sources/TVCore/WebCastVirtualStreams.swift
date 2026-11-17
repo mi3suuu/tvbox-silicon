@@ -17,7 +17,8 @@ enum WebCastVirtualStreams {
         /// A cloud drive file: length known up front, chunks fetched from the CDN.
         case cloud(CloudByteStream)
         /// An encrypted Hongguo MP4: length comes from the file's own index.
-        case hongguo(HongguoByteStream)
+        /// 上游 1.8.23：红果族已泛化为 CENC 解密流（#957）。
+        case cenc(CENCByteStream)
         /// A DASH pair rendered as an HLS playlist; the playlist is small and served whole.
         case playlist(String)
 
@@ -35,9 +36,9 @@ enum WebCastVirtualStreams {
         case CloudStreams.scheme:
             guard let stream = await CloudStreams.byteStream(for: url) else { return nil }
             return .cloud(stream)
-        case HongguoStreams.scheme:
-            guard let stream = await HongguoStreams.byteStream(for: url) else { return nil }
-            return .hongguo(stream)
+        case CENCStreams.scheme:
+            guard let stream = await CENCStreams.byteStream(for: url) else { return nil }
+            return .cenc(stream)
         case DashStreams.scheme:
             guard let text = await DashStreams.playlist(for: url) else { return nil }
             return .playlist(text)
@@ -68,7 +69,7 @@ extension WebCastVirtualStreams.Source {
     func length() async -> Int? {
         switch self {
         case .cloud(let stream): return await stream.length
-        case .hongguo(let stream):
+        case .cenc(let stream):
             guard let index = try? await stream.metadata() else { return nil }
             return index.length
         case .playlist: return nil
@@ -82,7 +83,7 @@ extension WebCastVirtualStreams.Source {
             let total = await stream.length
             guard offset < total else { return Data() }
             return try await stream.read(at: offset, count: min(count, total - offset))
-        case .hongguo(let stream):
+        case .cenc(let stream):
             let total = try await stream.metadata().length
             guard offset < total else { return Data() }
             // `bounded: false` is required here. The bounded read throttles itself against the
@@ -112,7 +113,7 @@ extension WebCastVirtualStreams.Source {
             return WebCastVirtualStreams.mime(forUTI: uti)
         }
         // A decrypted Hongguo file is always the clear MP4 the index describes.
-        if case .hongguo = self { return "video/mp4" }
+        if case .cenc = self { return "video/mp4" }
         return "application/octet-stream"
     }
 }

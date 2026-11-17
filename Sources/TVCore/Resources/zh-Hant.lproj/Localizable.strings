@@ -130,18 +130,11 @@
 "This plugin is not supported: ftyguard_v8.so is missing." = "此外掛尚未支援：缺少 ftyguard_v8.so。";
 "Plugin error: %@" = "外掛錯誤：%@";
 "Connect to the local media and subscription services you configure." = "連接你設定的區域網路媒體與訂閱服務。";
-
 "The source %@ could not be reached. Retry later." = "無法連線至來源 %@。請稍後重試。";
-
 "The plugin stopped unexpectedly. Retry this source." = "外掛程式意外停止。請重試此來源。";
-
 "This source returned a magnet link. Torrent playback is not supported." = "此來源傳回磁力連結。目前不支援種子播放。";
-
 "This source needs a playback proxy that is not supported yet." = "此來源需要尚未支援的播放代理。";
-
 "This source requires a JavaScript engine, which is not supported yet." = "此來源需要尚未支援的 JavaScript 引擎。";
-
-// Desktop playback
 "Buffering…" = "正在緩衝…";
 "Play / Pause (Space)" = "播放 / 暫停（空白鍵）";
 "Mute (M)" = "靜音（M）";
@@ -155,17 +148,12 @@
 "← / →: Seek 10s · Shift: 60s" = "← / →：跳轉 10 秒 · Shift：60 秒";
 "↑ / ↓: Volume · M: Mute · F: Full Screen" = "↑ / ↓：音量 · M：靜音 · F：全螢幕";
 "Playback Options" = "播放選項";
-
 "Choose quality" = "選擇畫質";
-
 "This video has no single MP4 stream available for this account." = "目前帳號無法取得此影片的單一 MP4 串流。";
-
 "Local JavaScript · Experimental" = "本機 JavaScript · 實驗性";
 "Lite JavaScript · JAR fallback" = "輕量 JavaScript · JAR 備用";
 "Local Python · Experimental" = "本機 Python · 實驗性";
 "This source requires a Python runtime, which is not available on this platform." = "此來源需要 Python 執行環境，此平台尚未支援。";
-
-// Source error recovery
 "Unable to load this source" = "暫時無法載入此來源";
 "Try again, or choose another source to keep watching." = "可以重新嘗試，或換個來源繼續觀看。";
 "Back to sources" = "返回來源列表";
@@ -176,128 +164,66 @@
 "Try again, or go back and choose another video." = "可以重新嘗試，或返回選擇其他影片。";
 "Try another episode or playback source." = "請嘗試其他劇集或播放線路。";
 "Go back" = "返回上一頁";
-
 "Diagnostic Logs" = "診斷日誌";
-
 "View Logs" = "檢視日誌";
-
 "Log Level" = "日誌層級";
-
 "All Logs" = "所有日誌";
-
 "Live Logs" = "即時更新";
-
 "Refresh Logs" = "重新整理";
-
 "Export Logs" = "匯出日誌";
-
 "Share Logs" = "分享日誌";
-
 "Open Log Folder" = "開啟日誌資料夾";
-
 "No Logs" = "尚無日誌";
-
 "Search Logs" = "搜尋日誌";
-
 "Log overload: %lld events dropped" = "日誌過多：已捨棄 %lld 筆";
-
 "Shows the latest 1,000 events from this run. Export includes retained log files." = "顯示本次執行最近 1,000 筆記錄，匯出包含保留的歷史日誌。";
-
 "Global Search" = "全域搜尋";
-
 "Recommendations" = "推薦";
-
 "Recommendation Source" = "推薦來源";
-
 "Search all available sources in your subscription." = "搜尋訂閱中所有可用的影片來源。";
-
 "Recent Searches" = "搜尋記錄";
-
 "Clear" = "清除";
-
 "Stop" = "停止";
-
 "Searched %lld of %lld sources" = "已搜尋 %lld / %lld 個來源";
-
 "No searchable sources are available on this device." = "目前裝置沒有可搜尋的影片來源。";
-
 "Search failed" = "搜尋失敗";
-
-
 "This source has no recommendations. Choose another source or use Global Search." = "此來源暫無推薦，請切換來源或使用全域搜尋。";
-
 "Runtime Activity" = "執行記錄";
-
 "Inspect plugin requests and errors." = "檢視外掛請求與異常記錄。";
-
 "Pause Logs" = "暫停更新";
-
 "Resume Logs" = "繼續更新";
-
 "Newest first · Updates every 2 seconds" = "最新在前 · 每 2 秒更新";
-
 "Updates paused" = "已暫停更新";
-
 "Exporting Logs…" = "正在匯出…";
-
 "Log Files" = "日誌檔案";
-
 "Clear Search" = "清除搜尋";
-
 "Debug Logs" = "偵錯";
-
 "Info Logs" = "資訊";
-
 "Warning Logs" = "警告";
-
 "Error Logs" = "錯誤";
-
 "Plugin activity will appear here." = "外掛執行後，記錄會顯示在此處。";
-
 "Try another level or search term." = "試試其他層級或搜尋詞。";
-
 "Log Time" = "時間";
-
 "Log Module" = "模組";
-
 "Log Message" = "內容";
-
 "Searching for “%@”…" = "正在搜尋「%@」…";
-
 "Results appear as each source responds." = "找到結果後會立即顯示。";
-
 "More from %@" = "查看更多「%@」的結果";
-
 "Clear search" = "清除搜尋";
-
 "%lld results" = "%lld 個結果";
-
 "Search paused" = "搜尋已暫停";
-
 "Continue search" = "繼續搜尋";
-
 "%lld unavailable" = "%lld 個來源無法使用";
-
 "All Sources" = "全部來源";
-
 "Unavailable Sources" = "無法使用的來源";
-
 "Done" = "完成";
-
 "Retry failed sources" = "重試失敗來源";
-
 "Choose a title to find it across your sources." = "點選片名，在所有來源中尋找片源。";
-
 "More" = "更多";
-
 "Show Less" = "收起";
 "Show Full Synopsis" = "展開完整簡介";
-
 "This source format is not supported. Choose another source." = "尚未支援此來源格式，請選擇其他來源。";
-
 "Playback error" = "播放錯誤";
-
-
 "This URL is a subscription directory. Import an individual subscription URL from it." = "此網址是訂閱目錄，請匯入其中的個別訂閱網址。";
 "The subscription server returned a web page instead of a configuration." = "訂閱伺服器回傳了網頁，而非設定檔。";
 "This subscription uses an encrypted configuration that is not supported yet." = "此訂閱使用了尚未支援的加密設定。";
@@ -306,8 +232,6 @@
 "Scroll sources right" = "向右捲動來源";
 "Scroll left" = "向左捲動";
 "Scroll right" = "向右捲動";
-
-// Cloud drive accounts
 "Cloud Drive Accounts" = "網盤帳號";
 "Sign In to Cloud Drive" = "登入網盤";
 "Manage Cloud Accounts" = "管理網盤帳號";
@@ -351,7 +275,6 @@
 "Last updated %@" = "上次更新 %@";
 "Run Test" = "執行測試";
 "Check" = "檢查";
-
 "The plugin exceeds 20 MB." = "外掛超過 20 MB。";
 "Components prepared: %lld · reused: %lld" = "已準備 %lld 個元件 · 已重用 %lld 個";
 "Checking saved plugin…" = "正在檢查本機外掛…";
@@ -389,8 +312,6 @@
 "This plugin couldn't be prepared on this device (missing %@)." = "無法在本機準備此外掛（缺少 %@）。";
 "This plugin couldn't be prepared on this device (%@ could not be converted)." = "無法在本機準備此外掛（%@ 轉換失敗）。";
 "The source's plugin crashed. The site may have changed; try another source." = "此來源的外掛崩潰了，網站可能已變更。請換一個來源。";
-
-/* Loading status */
 "Waiting for %@" = "正在等待 %@";
 "The plugin is waiting for %@ to respond. The source's server may be slow or busy." = "外掛正在等待 %@ 回應。該來源的伺服器可能較慢或忙碌。";
 "The plugin file is still downloading from the subscription server." = "外掛檔案仍在從訂閱伺服器下載。";
@@ -499,8 +420,6 @@
 "Audio Quality" = "音質";
 "Auto" = "自動";
 "LIVE" = "直播";
-
-// Downloads
 "The video link stopped working (HTTP %lld) and could not be renewed. Try again later." = "影片連結已失效（HTTP %lld），且無法重新取得。請稍後再試。";
 "Live streams can't be downloaded." = "直播無法下載。";
 "This video is protected and can't be downloaded." = "此影片受保護，無法下載。";
@@ -558,7 +477,6 @@
 "Show Downloads" = "查看下載";
 "Browse Sources" = "瀏覽隨選來源";
 "%@ available on this device" = "本機可用 %@";
-
 "Loaded %lld comments" = "已載入 %lld 條彈幕";
 "Opacity" = "不透明度";
 "Text Size" = "字號";
@@ -657,11 +575,8 @@
 "%lld titles" = "%lld 部影片";
 "Removing a title also clears its cached content and skip times." = "刪除記錄也會清理該劇的快取與跳過時間。";
 "Auto-play next episode" = "自動播放下一集";
-
-// Player episodes
 "Previous Episode" = "上一集";
 "Next Episode" = "下一集";
-
 "Hongguo" = "紅果短劇";
 "Episode %@" = "第 %@ 集";
 "Episode %1$@" = "第%1$@集";
@@ -678,9 +593,7 @@
 "Hongguo did not provide a playable source for this episode. Try again later." = "紅果暫未提供本集的可用片源，請稍後重試。";
 "This Hongguo video could not be prepared for playback. Please try again." = "無法準備此紅果影片，請重試。";
 "This video is an MKV file, which Apple devices can't play." = "此影片是 MKV 檔案，Apple 裝置無法播放。";
-
 "Waiting for an earlier plugin request to finish." = "正在等待先前的外掛請求結束。";
-
 "Douyu Live" = "鬥魚直播";
 "Huya Live" = "虎牙直播";
 "Douyin Live" = "抖音直播";
@@ -695,8 +608,6 @@
 "Search Failed" = "搜尋失敗";
 "Live Channels" = "直播頻道";
 "Search live rooms and channels" = "搜尋直播間和頻道";
-
-// Multiple subscriptions and source health.
 "Subscriptions" = "訂閱";
 "Add Subscription" = "新增訂閱";
 "Refresh All" = "全部更新";
@@ -714,7 +625,6 @@
 "Slow or unreliable lately" = "最近較慢或不穩定";
 "Failing; skipped in search for now" = "連續失敗，暫時不參與搜尋";
 "Skipped after repeated failures; back in search at %@" = "連續失敗，已略過；%@ 後恢復搜尋";
-
 "Skipped after repeated failures" = "連續失敗，已略過";
 "Sign in to Douyin to search its live rooms." = "登入抖音後即可搜尋直播間。";
 "Douyin no longer accepts this sign-in. Sign in again in Settings." = "抖音登入已失效，請在設定中重新登入。";
@@ -761,8 +671,6 @@
 "Sign in to Quark and UC on their official page, and to Baidu and Aliyun by scanning a code with their phone app. Mi3s stores the login on this Mac and supplies it to the plugins you run." = "夸克和 UC 在官方頁面登入，百度網盤和阿里雲盤用手機 App 掃碼登入。Mi3s會將登入資訊儲存在這台 Mac 上，並提供給你執行的外掛。";
 "Baidu Cookie (BDUSS, STOKEN)" = "百度網盤 Cookie（BDUSS、STOKEN）";
 "115 Cookie (UID, CID, SEID)" = "115 Cookie（UID、CID、SEID）";
-
-/* Music */
 "Music" = "音樂";
 "Song, or song and artist" = "歌名，或歌名加歌手";
 "Music Settings" = "音樂設定";
@@ -870,7 +778,6 @@
 "Play a song from search results, an album or a playlist, and the songs after it play next." = "從搜尋結果、專輯或歌單中播放一首歌，之後的歌曲會接著播放。";
 "Playback Position" = "播放位置";
 "Volume" = "音量";
-// Music on the Mac
 "Repeat Off" = "不重複";
 "Repeat All" = "全部重複";
 "Repeat One" = "單曲重複";
@@ -969,8 +876,6 @@
 "Download a song, album or playlist from its menu to listen without a connection." = "在歌曲、專輯或播放清單的選單中選擇「下載」，沒有網路時也能收聽。";
 "Delete all downloaded songs?" = "刪除所有已下載的歌曲？";
 "%lld downloading" = "%lld 首正在下載";
-
-// Signing in on the service's own page (iPhone, iPad).
 "Sign In Here" = "在此登入";
 "Scan a Code with Another Phone" = "用另一支手機掃碼";
 "Signing In…" = "正在登入…";
@@ -985,8 +890,6 @@
 "Or scan this code with the %@ app on another phone." = "也可以用另一支手機上的%@ App 掃描此 QR 碼。";
 "Sign In on This iPhone" = "在這支 iPhone 上登入";
 "Sign In on This iPad" = "在這台 iPad 上登入";
-
-/* Cloud Files */
 "Cloud Files" = "網盤檔案";
 "Cloud Drives" = "網盤";
 "Sign in to %@ to browse its files." = "登入%@後即可瀏覽其中的檔案。";
@@ -1085,13 +988,9 @@
 "Chat with the developer and other users" = "與開發者和其他使用者交流";
 "Prefer to chat? Join the Telegram group." = "想直接聊聊？加入 Telegram 群組。";
 "Scan with your iPhone to join the group." = "用 iPhone 掃描加入群組。";
-
-/* iPhone watch page */
 "Full Screen" = "全螢幕";
 "Exit Full Screen" = "結束全螢幕";
 "Lines" = "線路";
-
-/* TMDB details */
 "Reading the title…" = "正在讀取片名…";
 "Someone is looking up this title right now…" = "其他人正在查找這部作品…";
 "Checking %@ (%lld)…" = "正在核對《%@》（%lld）…";
@@ -1126,8 +1025,6 @@
 "Look Up Titles on TMDB" = "在 TMDB 上查找作品";
 "Shows cast, artwork and episode details from TMDB on video pages. Sends the video's title, its details from the source and the source's name to Mi3s's lookup service, never your accounts or subscription addresses." = "在影片頁面顯示來自 TMDB 的演員、海報和劇集資訊。會把影片的標題、來源提供的簡介和劇集名稱，以及來源的名稱傳送給Mi3s的查找服務，絕不傳送你的帳號或訂閱地址。";
 "You May Like" = "猜你喜歡";
-
-/* Short-drama sources */
 "Xifan" = "西飯短劇";
 "Hema" = "河馬短劇";
 "%@ Episodes" = "共 %@ 集";
@@ -1164,8 +1061,6 @@
 "Ranked by commits in the last 30 days." = "依最近 30 天的提交次數排序。";
 "1 commit" = "1 次提交";
 "%lld commits" = "%lld 次提交";
-
-// Discover catalog
 "Discover" = "探索";
 "Trending This Week" = "本週趨勢";
 "In Theaters" = "現正熱映";
@@ -1211,7 +1106,6 @@
 "Reality" = "實境秀";
 "Sci-Fi & Fantasy" = "科幻與奇幻";
 "Talk" = "脫口秀";
-
 "Edit Layout" = "編輯版面";
 "Featured Titles" = "精選影片";
 "Featured Collections" = "精選專題";
@@ -1220,48 +1114,26 @@
 "Browse by Genre" = "分類瀏覽";
 "Top Rated Collections" = "高分片單";
 "Film Studios" = "電影公司";
-
 "Studios & Networks" = "製片與播出平台";
-
 "Stills" = "劇照";
-
 "Trailer Unavailable" = "預告片暫時無法播放";
-
 "Crew" = "製作團隊";
-
 "Share" = "分享";
-
 "Overview" = "劇情簡介";
-
 "Trailer" = "預告片";
-
 "min" = "分鐘";
-
 "Seasons" = "季";
-
 "Genres" = "類型";
-
 "Release Date" = "上映日期";
-
 "Country / Region" = "國家 / 地區";
-
 "Status" = "狀態";
-
 "Returning Series" = "連載中";
-
 "Ended" = "已完結";
-
 "In Production" = "製作中";
-
 "Post Production" = "後期製作";
-
 "Planned" = "籌備中";
-
 "Canceled" = "已取消";
-
 "Rumored" = "傳聞";
-
-/* Discover catalog search */
 "Search Catalog" = "搜尋影視";
 "Movies, Series, People" = "電影、影集、人物";
 "Clear Search History" = "清除搜尋記錄";
@@ -1308,31 +1180,19 @@
 "Directing" = "導演";
 "Writing" = "編劇";
 "Production" = "製片";
-
-/* Discover catalog search */
 "Movies" = "電影";
 "Series" = "影集";
 "Content Type" = "影視類別";
 "Topics" = "題材";
-
 "Any" = "不限";
-
 "Filter Type" = "類型";
-
 "Filter Genre" = "分類";
-
 "Filtered Results" = "篩選結果";
-
 "Actor" = "演員";
-
 "%@s" = "%@ 年代";
-
 "Language" = "語言";
-
 "Catalog Series" = "電視劇";
-
 "TV Movie" = "電視電影";
-
 "iCloud Sync" = "iCloud 同步";
 "Keeps favorites, Continue Watching, subscriptions, and the sources you pinned, hid or ordered the same on your devices signed in to the same iCloud account. Accounts, passwords and downloads stay on each device." = "在登入同一 iCloud 帳號的裝置之間同步收藏、繼續觀看、訂閱，以及你置頂、隱藏或排序的來源。帳號、密碼和下載內容只保存在各自的裝置上。";
 "Danmaku Area" = "彈幕區域";
@@ -1348,27 +1208,16 @@
 "Open in UC Browser" = "在 UC 瀏覽器中開啟";
 "UC Browser isn't on this device. Get UC Browser (UC浏览器) from the App Store and sign in to it, or scan the code with another phone." = "此裝置未安裝 UC 瀏覽器。請從 App Store 下載 UC 瀏覽器（UC浏览器）並登入，或用另一支手機掃碼。";
 "Waiting for UC Browser to approve…" = "等待 UC 瀏覽器確認…";
-
 "%lld works" = "%lld 部作品";
-
 "Contribution" = "參與職務";
-
 "Editing" = "剪輯";
-
 "List View" = "列表檢視";
-
 "Grid View" = "網格檢視";
-
 "No works match these filters." = "沒有符合篩選條件的作品。";
-
 "Show Video Info" = "顯示影片資訊";
-
 "Shows the video's format, resolution, frame rate and bitrate in a corner of the player." = "在播放器一角顯示影片的格式、解析度、影格率和位元率。";
-
 "Bitrate %@" = "位元率 %@";
-
 "Download %@" = "下載 %@";
-
 "Uses the official Dandanplay service. You can also enter your own compatible server." = "使用彈彈play官方服務，也可填入自建相容服務位址。";
 "This build is missing its Dandanplay API configuration." = "此版本缺少彈彈play API 設定。";
 "Uses Dandanplay first, then tries iQIYI and Tencent Video if no comments are found or the service is unavailable. Official public episode pages are sent to dmku, or to danmu.zxz.ee when dmku has none; stream URLs and playback headers are never sent." = "優先使用彈彈play；找不到彈幕或服務無法使用時，再查詢愛奇藝和騰訊影片。僅將官方公開單集頁面交給 dmku（dmku 沒有時交給 danmu.zxz.ee），不傳送播放串流位址或請求標頭。";
@@ -1408,9 +1257,7 @@
 "Douban Hot Series" = "豆瓣熱門劇集";
 "Douban Hot Variety Shows" = "豆瓣熱門綜藝";
 "Douban" = "豆瓣";
-
 "%@ (Translated from %@)" = "%@（譯自%@）";
-
 "Airing Schedule" = "播出時間表";
 "Anime" = "動畫";
 "Nothing Airing" = "當天沒有播出";
@@ -1429,8 +1276,6 @@
 "Anime Airing Today" = "今日番劇";
 "Series Airing Today" = "今日劇集";
 "Day" = "日期";
-
-/* Mi3s's own features (privacy vault, subtitles, source tools, moved sources) */
 "Direct" = "直連";
 "Proxy" = "代理";
 "Connection" = "連線方式";
@@ -1589,7 +1434,6 @@
 "Lock Controls" = "鎖定控制項";
 "Unlock Controls" = "解鎖控制項";
 "Rotate" = "旋轉";
-
 "Privacy Vault" = "隱私保險箱";
 "Hide Content in the App Switcher" = "在 App 切換器中隱藏內容";
 "Hides the subscriptions and sources you choose behind a passcode. Hidden sources stay out of the list, search, and Continue Watching until the vault is unlocked." = "把你選擇的訂閱和源藏在密碼後面。保險箱未解鎖時，被隱藏的源不會出現在列表、搜尋和繼續觀看裡。";
@@ -1602,15 +1446,11 @@
 "Allow Speech Recognition in Settings to write subtitles." = "請在「設定」裡允許語音辨識，才能產生字幕。";
 "This video has no sound track to read." = "這個影片沒有可讀取的聲音軌。";
 "Nothing was recognised in this video's sound." = "在這個影片的聲音裡沒有辨識出內容。";
-
 "Sort by Measured Quality" = "按實測畫質排序";
 "Sort" = "排序";
 "Sorted by measured picture quality. Sources that were never probed are last." = "已按實測畫質排序。從未測速的源排在最後。";
-
 "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one." = "屬性從上到下依次生效。拖動可調整順序，左滑可停用某一項。";
 "Presets" = "預設";
-
-/* UI wiring */
 "New Environment" = "新環境";
 "Create" = "建立";
 "Delete Environment?" = "刪除環境？";
@@ -1621,35 +1461,23 @@
 "Skip Credits" = "跳過片尾";
 "Describes this exact file" = "描述的就是這個檔案";
 "Describes the title; used only if the timing fits" = "只描述這部劇，時間對得上才用";
-
-/* Segment sources, speech subtitles, and the settings group they live in */
 "What Plays" = "播放內容";
 "The intro end and outro you set on a video's page" = "你在影片頁面設定的片頭結束與片尾長度";
 "Chapters carried inside the file" = "隨檔案一起的章節";
 "Not connected yet: no request is made to these databases." = "尚未接入：不會向這些資料庫發出請求。";
 "Drag to reorder. The first source with a usable segment wins. Your own markers and the file's chapters are read on this device; the public timestamp databases are not connected yet, and their switches stay off until they are." = "拖曳可調整優先順序。排在最前、且給出可用片段的來源生效。你自己的標記與檔案內建章節在本機讀取；公開時間戳資料庫尚未接入，接入前它們的開關保持關閉。";
 "Recognition runs entirely on this device. No audio leaves the phone. Only languages this device has a model for are listed; the player uses the one picked here." = "辨識完全在本機進行，聲音不會離開手機。這裡只列出本機擁有模型的語言；播放器使用你在這裡選定的那一種。";
-
-/* HDR */
 "Dolby Vision profile 5 needs an HDR screen" = "杜比視界 Profile 5 需要 HDR 螢幕";
-
-/* ranking honesty + speech availability */
 "No Data" = "暫無資料";
 "No On-Device Speech Model" = "本機沒有語音辨識模型";
 "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one. The speed test measures resolution only, so ordering by bitrate, file size or colour range does not change which source comes first yet." = "屬性由上到下依次生效。拖曳可調整順序，左滑可停用某一項。測速只測得解析度，因此依影片位元率、檔案大小或色彩範圍排序，現在不會改變哪個來源排在前面。";
-
-/* batch line fix + speech audio */
 "No dead lines have been measured yet. Run Probe All first — this uses those readings rather than asking every source again." = "還沒有測到任何不可用線路。請先執行「全部測速」——這裡用的是那些測速結果，不會再去請求每個來源。";
 "No custom proxy is set up. Add one under Playback → Custom Proxy, or force the lines direct instead." = "還沒有設定自訂代理。可在「播放 → 自訂代理」裡加入，或改為讓這些線路直連。";
 "Dead lines routed through the proxy: %lld" = "已讓 %lld 條線路走代理";
 "Dead lines set to play direct: %lld" = "已讓 %lld 條線路直連";
 "Dead lines hidden from the episode list: %lld" = "已從選集清單隱藏 %lld 條線路";
 "This video's sound could not be read on this device." = "無法在本機讀取這個影片的聲音。";
-
-/* restore */
 "Removed %lld subscriptions that this file does not list." = "已移除 %lld 個檔案裡沒有的訂閱。";
-
-/* AI translation */
 "AI Translation" = "AI 翻譯";
 "Service" = "服務商";
 "None" = "無";
@@ -1659,8 +1487,6 @@
 "Leave every field empty to keep the device's own translation, which is free and offline but limited to the language pairs the system carries. A service covers any pair, at the cost of an API key and a network request per batch." = "全部留空則繼續使用系統內建翻譯：免費、離線，但只支援系統提供的那些語言對。改用服務可以翻譯任意語言對，代價是填一個 API Key，且每批字幕要發一次網路請求。";
 "Rules are added to the built-in ones, which already ask the model to keep tone, register, humour and implied subjects using nearby subtitle context." = "這裡的規則會追加到內建規則之後。內建規則已經要求模型藉助上下文字幕保留語氣、語域、幽默與隱含主語。";
 "Sends one test line, to confirm the address, model and key work together." = "發送一句測試字幕，確認位址、模型與 Key 能配合工作。";
-
-// Web Cast (網頁投射)
 "Web Cast" = "網頁投射";
 "Drive Mi3s from a browser on the same Wi-Fi." = "在瀏覽器裡控制Mi3s";
 "When on, a computer on the same network opens the address below and gets a web version of Mi3s." = "開啟後，同一網路下的電腦開啟下方網址即可獲得Mi3s網頁版。";
@@ -1679,8 +1505,6 @@
 "This source is no longer available." = "此來源已不可用。";
 "Not Running" = "未執行";
 "The server could not start. Check the port and try again." = "服務無法啟動。請檢查連接埠後重試。";
-
-// Full backup (完整備份)
 "Full Backup" = "完整備份";
 "Restore Full Backup" = "恢復完整備份";
 "Backup contents" = "備份內容";
@@ -1696,7 +1520,6 @@
 "Custom proxies" = "自訂代理";
 "Settings & preferences" = "設定與偏好";
 "Sign-in & accounts carries cookies and tokens; restoring them may still require re-signing in if a service expired them." = "登入與帳號包含 Cookie 和令牌；若服務方已令其失效，恢復後可能仍需重新登入。";
-// Cloud-drive backup (網盤備份)
 "Back Up to Cloud Drive" = "備份到網盤";
 "Into a signed-in Quark, UC, 115, AList or WebDAV" = "存入已登入的夸克、UC、115、AList 或 WebDAV";
 "Restore from Cloud Drive" = "從網盤恢復";
@@ -1711,9 +1534,6 @@
 "Backed up to %@." = "已備份到 %@。";
 "Restored from %@." = "已從 %@ 恢復。";
 "Sign in to %@ first." = "請先登入 %@。";
-
-
-// ---- 二开补齐（iOS 界面缺失翻译）----
 "%@ couldn't create the folder." = "%@ 無法建立資料夾。";
 "%@ didn't open an upload for this file. Try again." = "%@ 沒有為這個檔案開啟上傳，請重試。";
 "%@ · from %@" = "%@ · 來自 %@";
@@ -1794,8 +1614,6 @@
 "Drop here to hide" = "拖到此處隱藏";
 "Drag a button onto any slot in the top or bottom row, or into More. Empty slots stay empty." = "將按鈕拖到頂部列或底部列的任意槽位，或拖入「更多」。空槽位保持留空。";
 "Tap a slot to place %@" = "點擊槽位放置 %@";
-
-// MARK: - [mi3s] 融合：上游 1.8.11 新增文案（182 条）
 "Yingxia" = "映匣";
 "Yingxia / TVBOX" = "映匣 / TVBOX";
 "About Yingxia" = "關於映匣";
@@ -1940,8 +1758,6 @@
 "Couldn't reach %@. The site may be down or blocked on your network." = "無法連線至 %@。網站可能已關閉，或在你的網路中被封鎖。";
 "This source needs you to sign in. Sign in under Settings › Comic Sources." = "此源需要登入。請在 設定 › 漫畫源 中登入。";
 "The source said: %@" = "源回傳的訊息：%@";
-
-/* Subtitle Style (#547) */
 "Subtitle Style" = "字幕樣式";
 "White" = "白色";
 "Yellow" = "黃色";
@@ -1983,13 +1799,9 @@
 "This source is hidden. Unlock the Privacy Vault to browse it." = "這個來源已隱藏。解鎖隱私保險庫後才能瀏覽。";
 "This source is hidden. Unlock the Privacy Vault to use it." = "這個來源已隱藏。解鎖隱私保險庫後才能使用。";
 "This title is hidden. Unlock the Privacy Vault to play it." = "這個項目已隱藏。解鎖隱私保險庫後才能播放。";
-
-// MARK: - App Language
 "App Language" = "App 語言";
 "Follow System" = "跟隨系統";
 "The app language is independent of your device language and applies immediately." = "App 語言獨立於系統語言設定，切換後立即生效。";
-
-/* Speed & Grouping (SourceSpeedLab) */
 "Speed & Grouping" = "測速與分組";
 "One Group" = "單個分組";
 "Measure" = "測速範圍";
@@ -2028,14 +1840,10 @@
 "A route changes the address a source API is fetched from. Media comes from whatever CDN the source hands back and is not rewritten, so a source whose API answers but whose segments are blocked still needs hiding." = "路由只改源 API 的請求位址。媒體由源回傳的 CDN 直接提供、不會被改寫，所以 API 通但分片被封的源仍然需要隱藏。";
 "Forget Every Reading" = "清除全部讀數";
 "Group %lld" = "分組 %lld";
-
-/* Sources page: speed card */
 "Tools" = "工具";
 "Measure the sources, then file them by result." = "先測速，再按結果分組。";
 "%lld measured" = "已測 %lld 個";
 "%lld measured, %lld within the window" = "已測 %lld 個，其中 %lld 個在時間窗內";
-
-// MARK: Bilibili skin
 "Black page, controls over the picture, episodes in a row." = "黑底、控制條壓在畫面上、選集橫排。";
 "Half-screen card, drawer of episodes, settings sliding out from the right." = "半屏卡片、選集抽屜，設定面板從右側劃出。";
 "Playback Settings" = "播放設定";
@@ -2071,8 +1879,6 @@
 "No matching episodes" = "沒有符合的劇集";
 "Jump to page" = "跳到第幾頁";
 "Go" = "前往";
-
-// MARK: Bilibili pages and panels
 "Comments" = "評論";
 "Comments (%@)" = "評論（%@）";
 "All Comments" = "全部評論";
@@ -2138,8 +1944,6 @@
 "Keeps going through the list." = "順著列表往下播。";
 "Bili Message" = "私訊";
 "Bili Pic" = "圖片";
-
-/* Sources page: batch selection */
 "Select" = "選擇";
 "%lld selected" = "已選 %lld 個";
 "%lld groups" = "共 %lld 組";
@@ -2164,8 +1968,6 @@
 "Tick the sources you want, then choose what to do with them. A group's own button picks everything in it." = "勾選要處理的源，再選擇要對它們做什麼。點分組右側的按鈕可整組勾選。";
 "Pick This Group" = "整組勾選";
 "Clear This Group" = "取消整組";
-
-/* Sources page: group priority */
 "Everything" = "全部";
 "One Subscription" = "單個訂閱";
 "Picked" = "手選的源";
@@ -2180,21 +1982,13 @@
 "Groups at the top are searched first, and their results are listed first. Sources inside a group keep their own order. A group left here unranked is still searched — it just comes after the ones you ranked." = "排在上面的分組先被搜尋，結果也排在前面。組內各源保持自己的順序。沒排序的分組照樣會被搜尋，只是排在已排序的之後。";
 "Clear the Ranking" = "清除排序";
 "Clearing it returns search to the automatic order, which prefers quick, reliable sources. Nothing is ungrouped and no source order is lost." = "清除後搜尋回到自動順序（優先快而穩的源）。分組不會被解散，源順序也不會丟。";
-
-/* Sources page: filing by result */
 "File the Result into the Existing Groups" = "把結果歸入已有的分組";
 "New Groups from the Result (reachable / unreachable)" = "按結果新建分組（可連 / 不通）";
-
-/* Sources page: select all while searching */
 "Select All Shown" = "全選目前顯示";
-
-/* 廣告攔截：三套播放器都能擺放的控制項，以及它驅動的總開關 */
 "Ad Blocking" = "廣告攔截";
 "Ad Blocking On" = "廣告攔截（已開）";
 "Ad Blocking Off" = "廣告攔截（已關）";
 "Mark This as an Ad" = "把這段標為廣告";
-
-/* 廣告攔截與廣告指紋庫（補齊四語） */
 "Ads" = "廣告";
 "Mark Ad" = "標註廣告";
 "Mark Last 30s as Ad" = "把剛才 30 秒標為廣告";
@@ -2217,31 +2011,18 @@
 "%d ads, about %@ in total" = "共 %d 條，約 %@";
 "Ad %@" = "廣告 %@";
 "Marking an ad needs the picture we draw ourselves. Switch the watch page to the One skin to mark ads." = "標註廣告要抓我們自己畫的那一格畫面。把觀看頁切到 One 面板才能標註。";
-
-/* 播放控制項：嗶哩嗶哩面板用自己那套排布 */
-
 "Not used by the Bilibili skin" = "嗶哩嗶哩面板不使用這一套";
 "This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel." = "這套排布只對原版與 One 面板生效。嗶哩嗶哩面板保留它自帶的版式，要改請用它「更多」面板裡的「自訂選單」。";
-
-/* Sources page: tidy after sweep */
 "After the Sweep" = "測完之後";
 "Reorder by score" = "按得分重排搜尋順序";
 "File into Reachable / Unreachable" = "歸入「可連 / 不通」兩組";
 "Answered to Direct, silent to Proxy" = "能連的走直連、連不上的走代理";
 "Grouping only moves sources that have a reading, so a group you arranged by hand stays as it is until a source in it is measured. Routing rewrites the address a source API is fetched from; media still comes from the source's own CDN." = "分組只會移動「有測速讀數」的源，所以你手工整理過的分組會保持原樣，直到組裡有源被重新測到。改路由只改源 API 的取址方式，媒體仍然來自源自己的 CDN。";
-
-/* Sources page: measure button */
 "Measure Now" = "測速";
-
-/* Sources page: reachability wording */
 "Reachable into %@" = "「可連」歸入 %@";
 "Unreachable into %@" = "「不通」歸入 %@";
 "Reachable to Direct, Unreachable to Proxy" = "能連的走直連、連不上的走代理";
-
-/* Sources page: screening report */
 "%lld not attempted: the endpoint did not answer." = "%lld 個未細測：介面沒有回應。";
-
-/* 出站代理 / Loon */
 "Add Loon" = "新增 Loon";
 "Both ranges are in place. They decide where a request goes — except for a site Loon's own rules already classify: those follow the rules, because Loon checks them before the port. Sources whose sites are not in your rules (most of them) are fully controlled here." = "两段已就位。它们决定请求去向——但 Loon 自己规则已分类的站点除外：那些会跟随规则，因为 Loon 先看域名再看端口。站点不在你规则里的源（大多数）完全由此控制。";
 "Both ranges went the same way — Loon's own rules decided" = "两段走了同一条路——是 Loon 自己的规则在决定";
@@ -2702,19 +2483,14 @@
 "Tile Windows" = "並排視窗";
 "Free Arrange" = "自由擺放";
 "Bring Forward" = "上移一層";
-
 "Needs parsing" = "需解析";
-
 "That line didn't play. Switched to %@." = "那條線路播不出來，已自動切到「%@」。";
-
 "Tidy Once" = "整理一次";
 "Lock Tiled Layout" = "鎖定整理";
 "Unlock Layout" = "解除鎖定";
 "Open Episode List" = "回到選集頁";
-
 "Default Exit" = "預設出口";
 "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "配了多台代理時，選一台作為「代理」源的出口。只配一台時會自動使用它。";
-
 "Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way." = "回環位址會自動改用區域網路位址撥出 —— Loon 的埠規則只對從區域網路位址進來的連線生效。";
 "Ad Range" = "廣告區間";
 "Ad starts at" = "廣告起點";
@@ -2750,7 +2526,424 @@
 "Start Here" = "起點用這裡";
 "Trim the Ad" = "剪掉這段廣告";
 "Trim the Ad Here" = "直接在畫面上剪廣告";
-
-/* 首播自动学习 */
 "Learned automatically from videos you have played on the same source. Only applies to that source." = "從你在同一源上播過的影片裡自動學到的。只對該源生效。";
 "%@ · from %d videos" = "%@ · 來自 %d 部影片";
+"Live streams can't be cached." = "直播無法快取。";
+"This video is protected and can't be cached." = "此影片受保護，無法快取。";
+"The server stopped allowing caching to resume. Retry to start again." = "伺服器不再支援續傳。請重試以重新快取。";
+"Offline Cache" = "離線快取";
+"This cached video is no longer on this device." = "此快取已不在本裝置上。";
+"%@ is no longer in your subscription, so caching can't continue." = "%@ 已不在你的訂閱中，無法繼續快取。";
+"Nothing Cached" = "沒有快取";
+"Choose Cache on a video's page to keep episodes for watching offline." = "在影片頁面選擇「快取」，即可儲存劇集離線觀看。";
+"Cached" = "已快取";
+"Date Cached" = "快取時間";
+"Delete all cached episodes of %@?" = "刪除《%@》的所有已快取劇集？";
+"Delete Cached Items" = "刪除快取";
+"Delete from Cache" = "刪除快取";
+"Caching" = "正在快取";
+"used by the cache" = "已被快取佔用";
+"%@ used by the cache" = "快取已佔用 %@";
+"tvOS may remove cached videos when Apple TV runs low on storage." = "Apple TV 儲存空間不足時，tvOS 可能會刪除快取內容。";
+"Cancel Caching" = "取消快取";
+"Cache Next" = "優先快取";
+"Caching failed" = "快取失敗";
+"Cache Episodes" = "快取劇集";
+"Cache" = "快取";
+"Cache %lld" = "快取 %lld 集";
+"1 episode added to the cache." = "已將 1 集加入快取。";
+"%lld episodes added to the cache." = "已將 %lld 集加入快取。";
+"Show Cache" = "查看快取";
+"The intro must end before the outro starts." = "片頭結束時間需早於片尾開始時間。";
+"Intro skipped" = "已為你跳過片頭";
+"Undo" = "復原";
+"Skipping the outro in %@ s" = "%@ 秒後為你跳過片尾";
+"This video could not be prepared for playback. Please try again." = "無法準備此影片，請重試。";
+"This source needs your %@ account for this line. Sign in with its code, and the episode plays." = "這個來源的這條線路需要你的%@帳號。用它提供的 QR 碼登入後，即可播放這一集。";
+"123pan" = "123雲盤";
+"None of your subscriptions lists music channels. Add one that does, such as the recommended sources, to play music." = "你加入的訂閱都沒有提供音樂渠道。請加入提供音樂渠道的訂閱（例如推薦片源的訂閱）後再播放。";
+"No LX Music source could play it." = "洛雪音源都沒能播放這首歌。";
+"Remove from Cache" = "移除快取";
+"Cached Songs" = "已快取的歌曲";
+"No Cached Songs" = "沒有已快取的歌曲";
+"Cache a song, album or playlist from its menu to listen without a connection." = "在歌曲、專輯或播放清單的選單中選擇「快取」，沒有網路時也能收聽。";
+"Delete all cached songs?" = "刪除所有已快取的歌曲？";
+"%lld caching" = "%lld 首正在快取";
+"%@ uses a certificate this device doesn't trust, for example a self-signed one. Use the server's http:// address, or give the server a trusted certificate." = "%@ 使用的憑證不受此裝置信任（例如自簽憑證）。請改用伺服器的 http:// 位址，或為伺服器換用受信任的憑證。";
+"Sign in to Quark, UC, 115 or Baidu Netdisk under Cloud Drive Accounts to browse their files here." = "在「網盤帳號」中登入夸克、UC、115 或百度網盤後，即可在此瀏覽其中的檔案。";
+"This file no longer exists." = "此檔案已不存在。";
+"Add an AList or OpenList server, a NAS's WebDAV share, an Emby or Jellyfin server, or an fnOS NAS's media library, by the address you open it at. Pasting an AList address, or a TVBox AList configuration, in Add Subscription adds servers too." = "用開啟 AList、OpenList 伺服器、NAS 的 WebDAV 共享、Emby、Jellyfin 伺服器或飛牛 fnOS 飛牛影視的網址來新增它。在「新增訂閱」中貼上 AList 網址或 TVBox AList 設定，也能新增伺服器。";
+"The server's address, such as http://192.168.1.10:5244 for AList, http://192.168.1.10:8096 for Emby or Jellyfin, http://192.168.1.10:5666 for fnOS, or the WebDAV address your NAS shows. Add a folder after an AList or WebDAV address to start there. Emby, Jellyfin and fnOS always want the user name; the others only when they don't let guests browse." = "伺服器的網址，例如 AList 的 http://192.168.1.10:5244、Emby 或 Jellyfin 的 http://192.168.1.10:8096、飛牛 fnOS 的 http://192.168.1.10:5666，或 NAS 顯示的 WebDAV 網址。在 AList 或 WebDAV 網址後面加上檔案夾即可從那裡開始瀏覽。Emby、Jellyfin 和飛牛 fnOS 總是需要使用者名稱；其他伺服器僅在不允許訪客瀏覽時需要。";
+"No AList, WebDAV, Emby, Jellyfin or fnOS server answered at this address." = "此網址上沒有回應的 AList、WebDAV、Emby、Jellyfin 或飛牛 fnOS 伺服器。";
+"Back %@ seconds" = "倒轉 %@ 秒";
+"Forward %@ seconds" = "快轉 %@ 秒";
+"Show Time and Battery" = "顯示時間和電量";
+"Skip Interval" = "快轉倒轉時長";
+"Double-tap the left or right of the video to skip forward or back. Turn this off and a double tap plays or pauses instead." = "雙擊影片左側或右側可倒轉或快轉。關閉後，雙擊將改為播放或暫停。";
+"Collapse Tab Bar When Scrolling" = "捲動時收合標籤列";
+"Preparing the cached video for this device · %lld%%" = "正在為這台裝置整理已快取的影片 · %lld%%";
+"Opening the cached video" = "正在開啟已快取的影片";
+"This Dolby Vision video needs HDR. To keep your Apple TV in SDR and still play it, turn on Settings › Video and Audio › Match Content › Match Dynamic Range: the TV then switches to HDR only while such a video plays." = "這是杜比視界影片，需要 HDR 才能播放。若想讓 Apple TV 維持 SDR 又能播放，請開啟「設定 › 影片與音訊 › 符合內容 › 符合動態範圍」：電視只在播放這類影片時切換到 HDR。";
+"One Line" = "單行";
+"A TVBox JSON subscription, an M3U or TXT live playlist, or one Python (.py) or JavaScript (.js) spider." = "TVBox JSON 訂閱、M3U / TXT 直播清單，或單一 Python（.py）或 JavaScript（.js）爬蟲。";
+"This file is on the device it was added on, not on this one. Files don't sync to other devices; use a web address instead." = "此檔案在加入它的裝置上，不在這部裝置上。本機檔案不會同步到其他裝置，請改用網址訂閱。";
+"This source needs %@, a file next to its config. Only the config file itself was added, so add the config by its web address instead." = "此來源需要設定檔旁邊的 %@，但加入時只匯入了設定檔本身。請改用網址加入此設定。";
+"Your account and password are sent only to this book source's website, and kept on this device." = "帳號和密碼只會傳送給此書源的網站，並儲存在本裝置上。";
+"Sign In on the Website" = "在網站上登入";
+"Sign in on the page, then tap Done. This source then reads the website as you." = "在網頁上登入後點「完成」，此書源之後會以你的身分讀取網站。";
+"This source has nothing to fill in to sign in." = "此書源登入無需填寫任何內容。";
+"This source signs in on its website, which Apple TV can't open." = "此書源需要在網站上登入，Apple TV 無法開啟網頁。";
+"These sources can sign in to an account on their website." = "這些書源可以登入其網站的帳號。";
+"Not signed in yet." = "還沒有登入。";
+"This source's sign-in form isn't supported yet." = "暫不支援此書源的登入介面。";
+"This source's sign-in form couldn't be read." = "無法讀取此書源的登入介面。";
+"This source has no login function." = "此書源沒有登入函式（login）。";
+"Video Page" = "影片詳情頁";
+"Play Automatically" = "自動播放";
+"Start in Full Screen" = "開始播放時全螢幕";
+"With Play Automatically on, a video of one episode starts as soon as its page opens. With Start in Full Screen on, a video fills the screen as soon as it starts on its page." = "開啟「自動播放」後，單集影片在打開詳情頁時立即開始播放。開啟「開始播放時全螢幕」後，在詳情頁開始播放的影片會立即全螢幕。";
+"iQIYI" = "愛奇藝";
+"Tencent Video" = "騰訊影片";
+"Youku" = "優酷";
+"Mango TV" = "芒果 TV";
+"Dandanplay" = "彈彈play";
+"Scroll Speed" = "彈幕速度";
+"Scrolling Comments" = "滾動彈幕";
+"Top Comments" = "頂部彈幕";
+"Bottom Comments" = "底部彈幕";
+"Danmaku Settings…" = "彈幕設定…";
+"Preferred Source Platform" = "彈幕來源平台";
+"Use Official URL" = "使用官方網址";
+"Danmaku service settings saved." = "彈幕服務設定已儲存。";
+"Enter a Dandanplay-compatible server root or an API prefix ending in /api/v2. A token in the path is supported. The URL is saved only on this device." = "填寫相容彈彈play的服務根網址，也可填寫以 /api/v2 結尾的介面網址；支援路徑中的權杖。網址僅儲存在本機。";
+"Danmaku Display" = "彈幕顯示";
+"Advance 0.5 s" = "提前 0.5 秒";
+"Advance 5 s" = "提前 5 秒";
+"Delay 0.5 s" = "延後 0.5 秒";
+"Delay 5 s" = "延後 5 秒";
+"Reset Timing" = "重設時間偏移";
+"Current Danmaku" = "目前彈幕";
+"Unknown Source" = "未知來源";
+"Unknown Year" = "年份未知";
+"It has the same name as a recommended source." = "它與推薦來源同名。";
+"Update the app to use the recommended sources." = "請更新 App 以使用推薦來源。";
+"User Name" = "使用者名稱";
+"API Token" = "API 權杖";
+"Search Online" = "線上搜尋";
+"Settings › Subtitle Sources" = "設定 › 字幕來源";
+"Online" = "線上";
+"Skip Outro" = "跳過片尾";
+"This source's settings page can't open on this device. Sign in to your drives in Cloud Drive Accounts, and the source uses those sign-ins." = "此片源的設定頁面無法在此裝置上打開。請在「網盤帳號」中登入網盤，片源會使用這些登入。";
+"Chapter %lld" = "第 %lld 章";
+"Hide Sources That Aren't Working (%lld)" = "隱藏失效的來源（%lld）";
+"Sources come from your subscriptions, so a source is hidden rather than deleted. To delete a whole subscription, open it in Settings." = "來源來自你的訂閱，所以單一來源只能隱藏，不能刪除。若要刪除整個訂閱，請在「設定」中打開它。";
+"Skip Ad Segments" = "跳過廣告片段";
+"System Language" = "系統語言";
+"Restart Now" = "立即重新啟動";
+"Restart Yingxia to use the new language." = "重新啟動映匣後即可使用新語言。";
+"%@ couldn't be downloaded." = "無法下載 %@。";
+"%@ didn't match its checksum, so it wasn't installed." = "%@ 的校驗值不符，未安裝。";
+"%@ wasn't updated. %@" = "%@ 未更新。%@";
+"A plugin's scripts run inside Yingxia and reach only the internet. Add sources you trust." = "外掛的腳本在映匣內執行，只能存取網路。請只加入你信任的外掛來源。";
+"In Settings, add a TVBox subscription with live playlists, an M3U or TXT live playlist, or live plugins." = "請在設定中加入含直播源的 TVBox 訂閱、M3U 或 TXT 直播清單，或直播外掛。";
+"Install All (%lld)" = "全部安裝（%lld）";
+"Live Plugins" = "直播外掛";
+"Live platforms added as AngelLive plugins show in Live TV." = "以 AngelLive 外掛加入的直播平台會顯示在「直播」中。";
+"Live plugins add platforms to Live TV, such as Huya, Douyu, Twitch and YouTube. They use the AngelLive plugin format: add a source by its address, its install link, or its short key." = "直播外掛可為「直播」加入虎牙、鬥魚、Twitch、YouTube 等平台，採用 AngelLive 外掛格式：輸入外掛來源的網址、安裝連結或短碼即可加入。";
+"Plugin" = "外掛";
+"Remove Plugin" = "移除外掛";
+"Removing the source also removes the plugins installed from it." = "移除外掛來源會一併移除從它安裝的外掛。";
+"Sign in to this platform to see this." = "登入此平台後才能查看。";
+"Sign-In Needed" = "需登入";
+"Source Address or Key" = "外掛來源網址或短碼";
+"The download isn't the plugin %@." = "下載的檔案不是外掛 %@。";
+"The live stream ended." = "直播已結束。";
+"The live stream sent no picture." = "直播串流沒有畫面。";
+"The platform took too long to answer." = "平台回應逾時。";
+"The plugin %@ defines no LiveParsePlugin." = "外掛 %@ 沒有定義 LiveParsePlugin。";
+"The plugin %@ is missing its script %@." = "外掛 %@ 缺少腳本 %@。";
+"The plugin %@ isn't installed." = "外掛 %@ 未安裝。";
+"The plugin %@ needs a newer version of Yingxia." = "外掛 %@ 需要更新版本的映匣。";
+"The plugin has no manifest.json." = "外掛缺少 manifest.json。";
+"The streamer isn't live now." = "主播目前未開播。";
+"This address isn't a live plugin source." = "此網址不是直播外掛來源。";
+"This live stream isn't FLV." = "此直播串流不是 FLV 格式。";
+"This platform's plugin can't do this." = "此平台的外掛不支援此操作。";
+"This video is encrypted, and Yingxia can't play it yet." = "此影片已加密，映匣暫時無法播放。";
+"Update All (%lld)" = "全部更新（%lld）";
+"Update to %@" = "更新到 %@";
+"Cookie" = "Cookie";
+"In a browser signed in to the platform, copy the Cookie header of one of its requests and paste it here." = "在已登入該平台的瀏覽器中，複製任一請求的 Cookie 標頭，貼到這裡。";
+"Paste a Cookie" = "貼上 Cookie";
+"Sign In Again" = "重新登入";
+"Sign-In Expired" = "登入已過期";
+"Some platforms show more, or better quality, once you sign in. The sign-in stays on this device." = "部分平台登入後可看到更多內容或更高畫質。登入資訊只保存在本裝置上。";
+"%@ shows its live rooms once you sign in. The sign-in stays on this device." = "登入後才能看到%@的直播間。登入資訊只儲存在這台裝置上。";
+"Sign In by QR Code" = "掃碼登入";
+"Use the Web Page Instead" = "改用網頁登入";
+"The platform sent no sign-in code." = "平台沒有回傳登入 QR 碼。";
+"The platform confirmed the sign-in but sent no cookies." = "平台已確認登入，但沒有回傳登入資訊。";
+"The platform didn't accept this sign-in. Try again." = "平台沒有接受這次登入，請再試一次。";
+"Scan the code, or open %@ on a phone or computer, and enter this code there." = "掃描 QR 碼，或在手機、電腦上打開 %@，並輸入下方代碼。";
+"Waiting for you to approve the sign-in…" = "等待你核准登入…";
+"Open the Sign-In Page" = "打開登入頁面";
+"The sign-in was declined." = "登入已被拒絕。";
+"Sign-in details stay on this device." = "登入資訊只儲存在此裝置上。";
+"Show %lld Other Results" = "顯示其餘 %lld 個結果";
+"Intro Ends Here" = "片頭到此結束";
+"Outro Starts Here" = "片尾從此開始";
+"In the first five minutes" = "可設在前 5 分鐘內";
+"In the last ten minutes" = "可設在最後 10 分鐘內";
+"%@ before the end" = "結束前 %@";
+"Clear Intro and Outro" = "清除片頭片尾時間";
+"Two Lines" = "兩行";
+"Three Lines" = "三行";
+"Danmaku Settings" = "彈幕設定";
+"Display" = "顯示";
+"Comment Types" = "彈幕類型";
+"Colored Comments" = "彩色彈幕";
+"Turn off Colored Comments to draw every comment in white, which stays readable over bright pictures." = "關閉「彩色彈幕」後，所有彈幕都顯示為白色，在明亮的畫面上也看得清。";
+"Add a word or /pattern/" = "新增詞語或 /正規表示式/";
+"Add Blocked Word" = "新增屏蔽詞";
+"No blocked words" = "沒有屏蔽詞";
+"Comments containing any of these words are hidden in every video. Put a pattern between slashes, like /^哈+$/, to match it as a regular expression." = "含有這些詞語的彈幕在所有影片中都會隱藏。把規則寫在兩個斜線之間（例如 /^哈+$/），就按正規表示式比對。";
+"Applies to comments in every video, including one that is playing." = "對所有影片的彈幕生效，包括正在播放的影片。";
+"Here it comes!" = "前方高能！";
+"This scene is incredible" = "這一幕絕了";
+"Hahahahaha" = "哈哈哈哈哈";
+"Third time watching" = "三刷打卡";
+"The music is so good" = "配樂好好聽";
+"Plot twist!" = "反轉了！";
+"Classic moment" = "名場面";
+"Welcome back, everyone" = "歡迎回來";
+"Who else is watching tonight?" = "今晚還有誰在看？";
+"%lld chapters" = "%lld 章";
+"%lld of %lld on" = "已開 %1$lld/%2$lld";
+"%lld on" = "已開 %lld 個";
+"%lld sources didn't answer" = "%lld 個書源未回應";
+"%lld sources have this book" = "%lld 個書源有這本書";
+"Add to Bookshelf" = "加入書架";
+"Added a Legado book source list (%lld sources). Search and read in Novels." = "已加入閱讀書源列表（%lld 個書源）。在「小說」中搜尋並閱讀。";
+"Book Sources" = "書源";
+"Book sources are Legado (阅读) sources. Add a list as a subscription in Settings › Subscriptions. Each source reads a website; the website's content is its own." = "書源即「閱讀」（Legado）書源。在「設定 › 訂閱」中把書源列表作為訂閱加入。每個書源讀取一個網站，內容歸該網站所有。";
+"Bookshelf" = "書架";
+"Browse Books" = "發現";
+"Change Source" = "換源";
+"Contents" = "目錄";
+"Explore" = "可發現";
+"Latest: %@" = "最新：%@";
+"No Book Sources" = "沒有書源";
+"No Books" = "沒有書籍";
+"No book source lists yet." = "還沒有書源列表。";
+"No search" = "不支援搜尋";
+"No source found “%@”. Try a shorter title, or the author's name." = "沒有書源找到「%@」。試試更短的書名或作者名。";
+"Not started" = "未開始";
+"Novels" = "小說";
+"Novels shows while a Legado book source list is among your subscriptions." = "訂閱中有閱讀書源列表時會顯示「小說」。";
+"On Bookshelf" = "已在書架";
+"Read Novels" = "閱讀小說";
+"Refresh List" = "重新整理列表";
+"Refreshed." = "已重新整理。";
+"Remove from Bookshelf" = "從書架移除";
+"Search All Sources" = "搜尋全部書源";
+"Search Books" = "搜尋書籍";
+"Search asks every source that is on. Turn off the ones that never answer to make it faster." = "搜尋會詢問所有已開啟的書源。關掉從不回應的書源可以搜得更快。";
+"Searches all %lld switched-on book sources." = "搜尋全部 %lld 個已開啟的書源。";
+"Sepia" = "羊皮紙";
+"The source listed no chapters for this book." = "書源沒有列出這本書的章節。";
+"The source returned an empty chapter." = "書源傳回了空章節。";
+"The source took too long to answer. Try again, or switch to another source." = "書源回應太慢。請重試，或換一個書源。";
+"This address is not a Legado book source list." = "此地址不是閱讀書源列表。";
+"This address is now a book source list. Add it again to use it for Novels." = "此地址現在是書源列表。重新加入即可用於「小說」。";
+"This book's source is no longer in your book source lists." = "這本書的書源已不在你的書源列表中。";
+"This chapter is not in the table of contents." = "目錄中沒有這一章。";
+"This source has no explore lists. Search it instead." = "這個書源沒有發現頁。請直接搜尋。";
+"Title or author" = "書名或作者";
+"Turn All Off" = "全部關閉";
+"Turn All On" = "全部開啟";
+"Turn on book sources in Settings › Book Sources to read here." = "在「設定 › 書源」中開啟書源後即可在此閱讀。";
+"You've reached the latest chapter." = "已經是最新一章了。";
+"Your sources have no explore pages. Search for a title or an author." = "你的書源沒有發現頁。請搜尋書名或作者。";
+"Searches the %lld switched-on sources in %@." = "搜尋「%2$@」中 %1$lld 個已開啟的書源。";
+"All Sources (%lld)" = "全部書源（%lld）";
+"Search In" = "搜尋範圍";
+"Turn All On and Turn All Off change only the sources the filter shows, such as one group." = "「全部開啟」和「全部關閉」只作用於篩選出的書源，例如某一分組。";
+"The book source returned nothing." = "書源沒有回傳內容。";
+"The book source took too long to answer." = "書源回應逾時。";
+"This source needs a web view, which Yingxia does not have." = "此書源需要網頁檢視，映匣暫不支援。";
+"This source needs a web view (@webjs), which Yingxia does not have." = "此書源需要網頁檢視（@webjs），映匣暫不支援。";
+"This source needs a verification code, which Yingxia cannot show." = "此書源需要驗證碼，映匣無法顯示。";
+"This source needs a browser, which Yingxia does not offer." = "此書源需要瀏覽器，映匣暫不提供。";
+"This source made too many requests." = "此書源發出的請求過多。";
+"This source cannot search." = "此書源不支援搜尋。";
+"This is not a text book source." = "這不是文字書源。";
+"This is not a Legado book source." = "這不是閱讀書源。";
+"The table of contents is empty." = "目錄是空的。";
+"The site sent nothing." = "網站沒有回傳內容。";
+"The chapter has no text." = "本章沒有正文。";
+"Signatures are not supported for book sources yet." = "書源暫不支援簽章。";
+"RSA is not supported for book sources yet." = "書源暫不支援 RSA。";
+"Last page in chapter" = "本章最後一頁";
+"1 page left in chapter" = "本章還剩 1 頁";
+"%d pages left in chapter" = "本章還剩 %d 頁";
+"Paged" = "翻頁";
+"Scroll" = "捲動";
+"Theme" = "主題";
+"Font Size" = "字級";
+"Line Spacing" = "行距";
+"Margins" = "頁邊距";
+"Light" = "淺色";
+"Dark" = "深色";
+"Gray" = "灰色";
+"Grass" = "青草";
+"Cherry" = "櫻桃";
+"Sky" = "天空";
+"Solarized" = "Solarized";
+"Gruvbox" = "Gruvbox";
+"Nord" = "Nord";
+"Contrast" = "高對比";
+"Sunset" = "日落";
+"Songti" = "宋體";
+"Kaiti" = "楷體";
+"Search Chapters" = "搜尋章節";
+"Current Chapter" = "目前章節";
+"This source checks for a web browser, which Apple TV doesn't have. Read it on iPhone, iPad or Mac." = "此書源要求網頁瀏覽器驗證，而 Apple TV 沒有瀏覽器。請在 iPhone、iPad 或 Mac 上閱讀。";
+"The site's browser check didn't pass. Try again later." = "網站的瀏覽器驗證未通過，請稍後再試。";
+"This is a Legado subscription source (订阅源), not a book source list. Add the address of a book source list instead." = "這是「閱讀」的訂閱源，不是書源列表。請改為加入書源列表的位址。";
+"This page lists %lld Legado book source lists. Choose the ones to add in Settings › Novels › Book Sources." = "此頁面列出 %lld 個閱讀書源列表。請在「設定 › 小說 › 書源」中選擇要加入的列表。";
+"This address is now a page of book source lists. Add it again to choose from them." = "此位址現在是書源列表的索引頁。請重新加入它以從中選擇。";
+"Lists You Can Add" = "可加入的列表";
+"Clear Lists You Can Add" = "清除可加入的列表";
+"Found on %@. Lists you add appear under Source Lists." = "來自 %@。加入的列表會出現在「源列表」中。";
+"Added" = "已加入";
+"Adding…" = "正在加入…";
+"The file is larger than %lld MB." = "檔案超過 %lld MB。";
+"Previous Channel" = "上一個頻道";
+"Next Channel" = "下一個頻道";
+"Channel List" = "頻道列表";
+"Line %@" = "線路 %@";
+"Line %@ didn't play. Trying line %@." = "線路 %1$@ 無法播放，正在嘗試線路 %2$@。";
+"Search Time Limit" = "搜尋時限";
+"%@ seconds" = "%@ 秒";
+"How long Search Online waits for the sources. Results show as each source answers, so a longer limit only waits longer for slow ones." = "線上搜尋等待各字幕來源的時間。每個來源一有結果就會顯示，所以時限加長只是多等較慢的來源。";
+"Search for “%@”" = "搜尋「%@」";
+"Videos from every source" = "在全部點播源中找影片";
+"Move Left" = "左移";
+"Move Right" = "右移";
+"Program Guide" = "節目表";
+"Now On" = "正在播出";
+"Coming Up" = "即將播出";
+"An XMLTV file (.xml or .xml.gz), or an address with {name} for each channel. Leave it empty to use the playlist's own guide." = "XMLTV 檔案（.xml 或 .xml.gz），或帶 {name} 的按頻道查詢網址。留空則使用直播源內建的節目表。";
+"App Icon" = "App 圖像";
+"Pocket" = "口袋";
+"Gray Pocket" = "灰口袋";
+"Layers" = "層疊";
+"Glass Play" = "玻璃播放";
+"Seal" = "海豹";
+"Shiba" = "柴犬";
+"Cat" = "貓咪";
+"Friends" = "小夥伴";
+"Panda" = "熊貓";
+"Arc" = "Arc";
+"Aurora" = "極光";
+"Classic" = "經典";
+"Porcelain" = "白瓷";
+"Obsidian" = "黑曜石";
+"Azure" = "蔚藍";
+"Daybreak" = "破曉";
+"Iris" = "鳶尾";
+"Lagoon" = "瀉湖";
+"Rose Quartz" = "玫瑰石英";
+"Citrus" = "柑橘";
+"Cosmic" = "宇宙";
+"Couldn't change the app icon: %@" = "無法更換 App 圖像：%@";
+"Couldn't open that picture." = "無法打開這張圖片。";
+"A square picture works best. One with see-through corners, such as an icon made for the Mac, shows as it is." = "方形圖片效果最好。四角透明的圖片（例如為 Mac 製作的圖像）會按原樣顯示。";
+"Choose Picture…" = "選擇圖片…";
+"Remove Custom Picture" = "移除自訂圖片";
+"The Dock and Finder show the icon you pick, also while Yingxia is closed." = "你選的圖像會顯示在 Dock 和 Finder 中，映匣關閉後也不變。";
+"Yingxia can't change its own icon where it's installed, so the Dock shows this icon only while Yingxia is open." = "映匣無法更改安裝位置中自己的圖像，因此只在映匣開啟時，Dock 才顯示這個圖像。";
+"The icon on your Home Screen. The system confirms the change with a short message." = "主畫面上的圖像。更換後，系統會顯示一則簡短提示。";
+"The icon on the Home Screen. When Yingxia sits in the top row, the picture above it stays Pocket." = "主畫面上的圖像。映匣放在第一排時，上方顯示的大圖仍是「口袋」。";
+"Violet" = "紫羅蘭";
+"Ocean" = "海洋";
+"Forest" = "森林";
+"Amber" = "琥珀";
+"Rose" = "玫瑰";
+"Crimson" = "緋紅";
+"Orchid" = "蘭紫";
+"Graphite" = "石墨";
+"Color Theme" = "配色主題";
+"Changes the app's colors: the highlight, page backgrounds, cards and icons, and on a Mac the sidebar and title bar. Classic is the app's original look." = "更改 App 的配色：高亮色、頁面背景、卡片和圖示，在 Mac 上還有側邊欄和標題列。「經典」是 App 原本的樣子。";
+"Highlight" = "高亮色";
+"Page Background, Top" = "頁面背景（上）";
+"Page Background, Bottom" = "頁面背景（下）";
+"Cards and Rows" = "卡片和列表列";
+"Sidebar" = "側邊欄";
+"Title Bar" = "標題列";
+"Status Bar" = "狀態列";
+"Icon Color %@" = "圖示顏色 %@";
+"Start From a Theme" = "從主題開始";
+"Choose a Theme" = "選擇主題";
+"Selections, buttons and progress" = "選取項目、按鈕和進度";
+"Where the page background starts, at the top left" = "頁面背景的起點（左上角）";
+"Where it ends, at the bottom right. Pick the same color for a flat background." = "終點（右下角）。選同一顏色即為純色背景。";
+"Cards, lists and settings rows" = "卡片、列表和設定列";
+"Behind the sections on the left" = "左側欄目列表的背景";
+"The band under the window's toolbar" = "視窗工具列所在的橫條";
+"The version strip at the foot of the sidebar" = "側邊欄底部的版本條";
+"Section icons, settings icons and tiles" = "欄目圖示、設定圖示和圖塊";
+"Each color is used exactly as picked, in light and dark mode. Text turns light or dark to match the page background." = "所選顏色會原樣用於淺色和深色模式。文字會隨頁面背景自動變淺或變深。";
+"Sunshine Beach" = "陽光海灘";
+"Watermelon" = "西瓜";
+"Tropical" = "熱帶";
+"Sunset Sky" = "晚霞";
+"Mint Lemonade" = "薄荷檸檬";
+"Peach Soda" = "蜜桃蘇打";
+"Neon Night" = "霓虹之夜";
+"Another subscription already uses this address." = "已有其他訂閱使用此網址。";
+"This address doesn't hold a subscription. Add it as a new one instead." = "此網址不是訂閱，請作為新的訂閱加入。";
+"Couldn't load this address: %@" = "無法載入此網址：%@";
+"Use New Address" = "改用新網址";
+"File" = "檔案";
+"Yingxia keeps its own copy of this file. Later changes to the original don't reach the app; open it again to update it." = "映匣會保存這個檔案的副本。之後修改原檔案不會同步到映匣；需要更新時，請再次用映匣打開它。";
+"Added the LX Music source “%@”. Music plays songs through it; manage it in Music Settings › LX Music Sources." = "已新增洛雪音源「%@」，音樂會透過它播放歌曲。可在「音樂設定 › 洛雪音樂自訂源」中管理。";
+"This address is now an LX Music source. Add it again to play music through it." = "此網址現在是洛雪音源。重新新增即可透過它播放音樂。";
+"Use This Source" = "使用此音源";
+"“%@” is already added." = "「%@」已新增過。";
+"Follow Show" = "追劇";
+"Unfollow Show" = "取消追劇";
+"Following Show" = "已追劇";
+"Following Calendar" = "追劇日曆";
+"Air Calendar" = "播出日曆";
+"Episode %@ / %@" = "第 %@/%@ 集";
+"%@ · %@ Episodes" = "%@ · 共 %@ 集";
+"%@ of %@ aired" = "已播 %@/%@ 集";
+"Tomorrow" = "明天";
+"No upcoming episodes" = "暫無更新";
+"No Shows Followed" = "還沒有追劇";
+"Open a series in Discover and tap Follow Show to see when its new episodes air." = "在發現裡打開一部劇，點「追劇」，它的新劇集播出日期會顯示在這裡。";
+"Season %@" = "第 %@ 季";
+"Unfollowed Show" = "已取消追劇";
+"New episodes show up in Following Calendar" = "新劇集會出現在追劇日曆";
+"Previous Month" = "上個月";
+"Next Month" = "下個月";
+"Last Week" = "上週";
+"This Week" = "本週";
+"Next Week" = "下週";
+"Aired" = "已播出";
+"In %@ days" = "%@ 天後";
+"Last fetch took the %@ leg" = "上次取片單走的是%@線路";
+"Route: %@" = "線路：%@";
+"Sites That Must Use a Node" = "必須走節點的站點";
+"A site your Loon rules already classify as direct cannot be re-routed by this app. Install the generated plugin in Loon once; it stays in effect afterwards." = "Loon 規則裡已歸為直連的站點，本 App 無法改道。把生成的插件在 Loon 裡裝一次，之後長期生效。";
+"Recorded: %@" = "已記錄：%@";
+"Nothing recorded yet" = "暫無記錄";
+"Open a source that fails to load; the site is recorded once both lines fail." = "開啟一個載入失敗的源；直連與代理兩條線路都失敗時，該站點會被記下。";
+"Plugin URL" = "外掛位址";
+"Install in Loon" = "在 Loon 中安裝";
+"Identify My Node" = "辨識我的節點";
+"Copy Site Rules" = "複製站點規則";
+"Copy Remote Rule Line" = "複製遠端規則行";
+"Clear Recorded Sites" = "清除已記錄站點";
+"Neither the direct line nor the proxy could reach %@." = "直連與代理都沒有到達 %@。";

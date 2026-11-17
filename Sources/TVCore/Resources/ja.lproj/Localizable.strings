@@ -130,18 +130,11 @@
 "This plugin is not supported: ftyguard_v8.so is missing." = "このプラグインは未対応です：ftyguard_v8.so がありません。";
 "Plugin error: %@" = "プラグインエラー：%@";
 "Connect to the local media and subscription services you configure." = "設定したローカルネットワークのメディアや配信設定サービスに接続します。";
-
 "The source %@ could not be reached. Retry later." = "ソース %@ に接続できませんでした。後でもう一度お試しください。";
-
 "The plugin stopped unexpectedly. Retry this source." = "プラグインが予期せず停止しました。このソースを再試行してください。";
-
 "This source returned a magnet link. Torrent playback is not supported." = "このソースはマグネットリンクを返しました。トレント再生には対応していません。";
-
 "This source needs a playback proxy that is not supported yet." = "このソースには未対応の再生プロキシが必要です。";
-
 "This source requires a JavaScript engine, which is not supported yet." = "このソースには未対応の JavaScript エンジンが必要です。";
-
-// Desktop playback
 "Buffering…" = "バッファリング中…";
 "Play / Pause (Space)" = "再生 / 一時停止（スペース）";
 "Mute (M)" = "消音（M）";
@@ -155,17 +148,12 @@
 "← / →: Seek 10s · Shift: 60s" = "← / →：10秒移動 · Shift：60秒";
 "↑ / ↓: Volume · M: Mute · F: Full Screen" = "↑ / ↓：音量 · M：消音 · F：フルスクリーン";
 "Playback Options" = "再生オプション";
-
 "Choose quality" = "画質を選択";
-
 "This video has no single MP4 stream available for this account." = "このアカウントでは、この動画の単一 MP4 ストリームを利用できません。";
-
 "Local JavaScript · Experimental" = "ローカル JavaScript・試験的";
 "Lite JavaScript · JAR fallback" = "軽量 JavaScript・JAR 予備";
 "Local Python · Experimental" = "ローカル Python・試験的";
 "This source requires a Python runtime, which is not available on this platform." = "このソースには、このプラットフォームでは利用できない Python ランタイムが必要です。";
-
-// Source error recovery
 "Unable to load this source" = "このソースを読み込めません";
 "Try again, or choose another source to keep watching." = "再試行するか、別のソースを選んで視聴を続けてください。";
 "Back to sources" = "ソース一覧に戻る";
@@ -176,128 +164,66 @@
 "Try again, or go back and choose another video." = "再試行するか、戻って別の作品を選んでください。";
 "Try another episode or playback source." = "別のエピソードや再生ソースをお試しください。";
 "Go back" = "前に戻る";
-
 "Diagnostic Logs" = "診断ログ";
-
 "View Logs" = "ログを表示";
-
 "Log Level" = "ログレベル";
-
 "All Logs" = "すべて";
-
 "Live Logs" = "自動更新";
-
 "Refresh Logs" = "更新";
-
 "Export Logs" = "ログを書き出す";
-
 "Share Logs" = "ログを共有";
-
 "Open Log Folder" = "ログフォルダを開く";
-
 "No Logs" = "ログがありません";
-
 "Search Logs" = "ログを検索";
-
 "Log overload: %lld events dropped" = "ログ過多：%lld 件を破棄";
-
 "Shows the latest 1,000 events from this run. Export includes retained log files." = "今回の実行の最新 1,000 件を表示します。書き出しには保持された過去のログも含まれます。";
-
 "Global Search" = "横断検索";
-
 "Recommendations" = "おすすめ";
-
 "Recommendation Source" = "おすすめのソース";
-
 "Search all available sources in your subscription." = "登録した利用可能なすべてのソースを検索します。";
-
 "Recent Searches" = "検索履歴";
-
 "Clear" = "クリア";
-
 "Stop" = "停止";
-
 "Searched %lld of %lld sources" = "%lld / %lld ソースを検索済み";
-
 "No searchable sources are available on this device." = "このデバイスで検索できるソースはありません。";
-
 "Search failed" = "検索に失敗しました";
-
-
 "This source has no recommendations. Choose another source or use Global Search." = "このソースにはおすすめがありません。別のソースを選ぶか横断検索をお使いください。";
-
 "Runtime Activity" = "実行ログ";
-
 "Inspect plugin requests and errors." = "プラグインのリクエストとエラーを確認。";
-
 "Pause Logs" = "更新を一時停止";
-
 "Resume Logs" = "更新を再開";
-
 "Newest first · Updates every 2 seconds" = "新しい順 · 2 秒ごとに更新";
-
 "Updates paused" = "更新を一時停止中";
-
 "Exporting Logs…" = "書き出し中…";
-
 "Log Files" = "ログファイル";
-
 "Clear Search" = "検索をクリア";
-
 "Debug Logs" = "デバッグ";
-
 "Info Logs" = "情報";
-
 "Warning Logs" = "警告";
-
 "Error Logs" = "エラー";
-
 "Plugin activity will appear here." = "プラグインの実行ログがここに表示されます。";
-
 "Try another level or search term." = "別のレベルや検索語をお試しください。";
-
 "Log Time" = "時刻";
-
 "Log Module" = "モジュール";
-
 "Log Message" = "内容";
-
 "Searching for “%@”…" = "「%@」を検索中…";
-
 "Results appear as each source responds." = "ソースから応答が届き次第、結果を表示します。";
-
 "More from %@" = "%@ の結果をもっと見る";
-
 "Clear search" = "検索をクリア";
-
 "%lld results" = "%lld 件の結果";
-
 "Search paused" = "検索を一時停止しました";
-
 "Continue search" = "検索を続ける";
-
 "%lld unavailable" = "%lld ソースが利用不可";
-
 "All Sources" = "すべてのソース";
-
 "Unavailable Sources" = "利用できないソース";
-
 "Done" = "完了";
-
 "Retry failed sources" = "失敗したソースを再検索";
-
 "Choose a title to find it across your sources." = "作品を選ぶと、すべてのソースから検索します。";
-
 "More" = "その他";
-
 "Show Less" = "折りたたむ";
 "Show Full Synopsis" = "あらすじをすべて表示";
-
 "This source format is not supported. Choose another source." = "この配信元の形式には対応していません。別の配信元を選んでください。";
-
 "Playback error" = "再生エラー";
-
-
 "This URL is a subscription directory. Import an individual subscription URL from it." = "このURLは購読ディレクトリです。中の個別の購読URLを読み込んでください。";
 "The subscription server returned a web page instead of a configuration." = "購読サーバーが設定ファイルではなくウェブページを返しました。";
 "This subscription uses an encrypted configuration that is not supported yet." = "この購読は未対応の暗号化設定を使用しています。";
@@ -306,8 +232,6 @@
 "Scroll sources right" = "ソースを右にスクロール";
 "Scroll left" = "左にスクロール";
 "Scroll right" = "右にスクロール";
-
-// Cloud drive accounts
 "Cloud Drive Accounts" = "クラウドドライブのアカウント";
 "Sign In to Cloud Drive" = "クラウドドライブにログイン";
 "Manage Cloud Accounts" = "アカウントを管理";
@@ -351,7 +275,6 @@
 "Last updated %@" = "最終更新 %@";
 "Run Test" = "テストを実行";
 "Check" = "確認";
-
 "The plugin exceeds 20 MB." = "プラグインが20 MBを超えています。";
 "Components prepared: %lld · reused: %lld" = "準備済み %lld 個・再利用 %lld 個";
 "Checking saved plugin…" = "保存済みプラグインを確認中…";
@@ -389,8 +312,6 @@
 "This plugin couldn't be prepared on this device (missing %@)." = "この端末でプラグインを準備できませんでした（%@ がありません）。";
 "This plugin couldn't be prepared on this device (%@ could not be converted)." = "この端末でプラグインを準備できませんでした（%@ を変換できませんでした）。";
 "The source's plugin crashed. The site may have changed; try another source." = "ソースのプラグインがクラッシュしました。サイトが変更された可能性があります。別のソースをお試しください。";
-
-/* Loading status */
 "Waiting for %@" = "%@ を待機中";
 "The plugin is waiting for %@ to respond. The source's server may be slow or busy." = "プラグインは %@ の応答を待っています。ソースのサーバーが遅いか混雑している可能性があります。";
 "The plugin file is still downloading from the subscription server." = "プラグインファイルを購読サーバーからダウンロード中です。";
@@ -499,8 +420,6 @@
 "Audio Quality" = "音質";
 "Auto" = "自動";
 "LIVE" = "配信中";
-
-// Downloads
 "The video link stopped working (HTTP %lld) and could not be renewed. Try again later." = "動画のリンクが無効になり（HTTP %lld）、再取得できませんでした。しばらくしてからお試しください。";
 "Live streams can't be downloaded." = "ライブ配信はダウンロードできません。";
 "This video is protected and can't be downloaded." = "この動画は保護されているため、ダウンロードできません。";
@@ -558,7 +477,6 @@
 "Show Downloads" = "ダウンロードを表示";
 "Browse Sources" = "配信ソースを見る";
 "%@ available on this device" = "このデバイスの空き容量 %@";
-
 "Loaded %lld comments" = "%lld 件の弾幕を読み込みました";
 "Opacity" = "不透明度";
 "Text Size" = "文字サイズ";
@@ -657,11 +575,8 @@
 "%lld titles" = "%lld作品";
 "Removing a title also clears its cached content and skip times." = "履歴を削除すると、その作品のキャッシュとスキップ時間も削除します。";
 "Auto-play next episode" = "次のエピソードを自動再生";
-
-// Player episodes
 "Previous Episode" = "前のエピソード";
 "Next Episode" = "次のエピソード";
-
 "Hongguo" = "Hongguo";
 "Episode %@" = "エピソード %@";
 "Episode %1$@" = "第%1$@話";
@@ -678,9 +593,7 @@
 "Hongguo did not provide a playable source for this episode. Try again later." = "このエピソードの再生ソースがありません。しばらくしてから再試行してください。";
 "This Hongguo video could not be prepared for playback. Please try again." = "Hongguo の動画を再生する準備ができませんでした。再試行してください。";
 "This video is an MKV file, which Apple devices can't play." = "この動画は MKV ファイルのため、Apple のデバイスでは再生できません。";
-
 "Waiting for an earlier plugin request to finish." = "先行するプラグイン要求の完了を待っています。";
-
 "Douyu Live" = "斗魚ライブ";
 "Huya Live" = "虎牙ライブ";
 "Douyin Live" = "Douyinライブ";
@@ -695,8 +608,6 @@
 "Search Failed" = "検索できませんでした";
 "Live Channels" = "ライブチャンネル";
 "Search live rooms and channels" = "ライブ配信とチャンネルを検索";
-
-// Multiple subscriptions and source health.
 "Subscriptions" = "配信設定";
 "Add Subscription" = "配信設定を追加";
 "Refresh All" = "すべて更新";
@@ -714,7 +625,6 @@
 "Slow or unreliable lately" = "最近遅いか不安定です";
 "Failing; skipped in search for now" = "失敗が続いているため、しばらく検索しません";
 "Skipped after repeated failures; back in search at %@" = "失敗が続いたためスキップしました。%@ に検索を再開します";
-
 "Skipped after repeated failures" = "失敗が続いたためスキップしました";
 "Sign in to Douyin to search its live rooms." = "ライブルームを検索するにはDouyinにサインインしてください。";
 "Douyin no longer accepts this sign-in. Sign in again in Settings." = "Douyinがこのサインインを受け付けなくなりました。設定でもう一度サインインしてください。";
@@ -761,8 +671,6 @@
 "Sign in to Quark and UC on their official page, and to Baidu and Aliyun by scanning a code with their phone app. Mi3s stores the login on this Mac and supplies it to the plugins you run." = "Quark と UC は公式ページで、Baidu と Aliyun はスマートフォンのアプリでコードをスキャンしてサインインします。Mi3sはログイン情報をこの Mac に保存し、実行するプラグインに渡します。";
 "Baidu Cookie (BDUSS, STOKEN)" = "Baidu の Cookie（BDUSS、STOKEN）";
 "115 Cookie (UID, CID, SEID)" = "115 Cookie（UID、CID、SEID）";
-
-/* Music */
 "Music" = "ミュージック";
 "Song, or song and artist" = "曲名、または曲名とアーティスト";
 "Music Settings" = "ミュージック設定";
@@ -870,7 +778,6 @@
 "Play a song from search results, an album or a playlist, and the songs after it play next." = "検索結果、アルバム、プレイリストから曲を再生すると、その後の曲が続けて再生されます。";
 "Playback Position" = "再生位置";
 "Volume" = "音量";
-// Music on the Mac
 "Repeat Off" = "リピートオフ";
 "Repeat All" = "すべてをリピート";
 "Repeat One" = "1曲をリピート";
@@ -969,8 +876,6 @@
 "Download a song, album or playlist from its menu to listen without a connection." = "曲、アルバム、プレイリストのメニューからダウンロードすると、オフラインでも聴けます。";
 "Delete all downloaded songs?" = "ダウンロードした曲をすべて削除しますか？";
 "%lld downloading" = "%lld 曲をダウンロード中";
-
-// Signing in on the service's own page (iPhone, iPad).
 "Sign In Here" = "ここでサインイン";
 "Scan a Code with Another Phone" = "別のスマートフォンでコードをスキャン";
 "Signing In…" = "サインインしています…";
@@ -985,8 +890,6 @@
 "Or scan this code with the %@ app on another phone." = "または、別のスマートフォンの%@アプリでこのコードをスキャンします。";
 "Sign In on This iPhone" = "このiPhoneでサインイン";
 "Sign In on This iPad" = "このiPadでサインイン";
-
-/* Cloud Files */
 "Cloud Files" = "クラウドファイル";
 "Cloud Drives" = "クラウドドライブ";
 "Sign in to %@ to browse its files." = "%@ にサインインするとファイルを閲覧できます。";
@@ -1085,13 +988,9 @@
 "Chat with the developer and other users" = "開発者やほかのユーザーと話せます";
 "Prefer to chat? Join the Telegram group." = "チャットで話したいときは、Telegram グループへどうぞ。";
 "Scan with your iPhone to join the group." = "iPhone でスキャンしてグループに参加します。";
-
-/* iPhone watch page */
 "Full Screen" = "フルスクリーン";
 "Exit Full Screen" = "フルスクリーンを終了";
 "Lines" = "再生ライン";
-
-/* TMDB details */
 "Reading the title…" = "タイトルを確認中…";
 "Someone is looking up this title right now…" = "ほかの人がこの作品を検索中です…";
 "Checking %@ (%lld)…" = "「%@」（%lld）を確認中…";
@@ -1126,8 +1025,6 @@
 "Look Up Titles on TMDB" = "TMDB で作品を検索";
 "Shows cast, artwork and episode details from TMDB on video pages. Sends the video's title, its details from the source and the source's name to Mi3s's lookup service, never your accounts or subscription addresses." = "動画のページに TMDB のキャスト、アートワーク、エピソード情報を表示します。動画のタイトル、ソースの説明とエピソード名、ソース名をMi3sの検索サービスに送信します。アカウントや購読先アドレスは送信しません。";
 "You May Like" = "あなたへのおすすめ";
-
-/* Short-drama sources */
 "Xifan" = "Xifan";
 "Hema" = "Hema";
 "%@ Episodes" = "全 %@ 話";
@@ -1164,8 +1061,6 @@
 "Ranked by commits in the last 30 days." = "過去 30 日間のコミット数順です。";
 "1 commit" = "1 件のコミット";
 "%lld commits" = "%lld 件のコミット";
-
-// Discover catalog
 "Discover" = "見つける";
 "Trending This Week" = "今週のトレンド";
 "In Theaters" = "上映中";
@@ -1211,7 +1106,6 @@
 "Reality" = "リアリティ";
 "Sci-Fi & Fantasy" = "SF＆ファンタジー";
 "Talk" = "トーク";
-
 "Edit Layout" = "レイアウトを編集";
 "Featured Titles" = "注目の作品";
 "Featured Collections" = "特集";
@@ -1220,48 +1114,26 @@
 "Browse by Genre" = "ジャンルから探す";
 "Top Rated Collections" = "高評価のコレクション";
 "Film Studios" = "映画スタジオ";
-
 "Studios & Networks" = "制作・配信";
-
 "Stills" = "場面写真";
-
 "Trailer Unavailable" = "予告編を再生できません";
-
 "Crew" = "スタッフ";
-
 "Share" = "共有";
-
 "Overview" = "あらすじ";
-
 "Trailer" = "予告編";
-
 "min" = "分";
-
 "Seasons" = "シーズン";
-
 "Genres" = "ジャンル";
-
 "Release Date" = "公開日";
-
 "Country / Region" = "国・地域";
-
 "Status" = "状態";
-
 "Returning Series" = "放送中";
-
 "Ended" = "放送終了";
-
 "In Production" = "制作中";
-
 "Post Production" = "ポストプロダクション";
-
 "Planned" = "企画中";
-
 "Canceled" = "中止";
-
 "Rumored" = "未確定";
-
-/* Discover catalog search */
 "Search Catalog" = "作品を検索";
 "Movies, Series, People" = "映画・ドラマ・人物";
 "Clear Search History" = "検索履歴を消去";
@@ -1308,31 +1180,19 @@
 "Directing" = "監督";
 "Writing" = "脚本";
 "Production" = "制作";
-
-/* Discover catalog search */
 "Movies" = "映画";
 "Series" = "ドラマ";
 "Content Type" = "作品の種類";
 "Topics" = "ジャンル";
-
 "Any" = "指定なし";
-
 "Filter Type" = "種類";
-
 "Filter Genre" = "ジャンル";
-
 "Filtered Results" = "絞り込み結果";
-
 "Actor" = "俳優";
-
 "%@s" = "%@年代";
-
 "Language" = "言語";
-
 "Catalog Series" = "テレビ番組";
-
 "TV Movie" = "テレビ映画";
-
 "iCloud Sync" = "iCloud 同期";
 "Keeps favorites, Continue Watching, subscriptions, and the sources you pinned, hid or ordered the same on your devices signed in to the same iCloud account. Accounts, passwords and downloads stay on each device." = "同じ iCloud アカウントでサインインしているデバイス間で、お気に入り、視聴を続ける、配信設定、固定・非表示・並べ替えたソースを同期します。アカウント、パスワード、ダウンロードは各デバイスにのみ保存されます。";
 "Danmaku Area" = "弾幕の表示範囲";
@@ -1348,27 +1208,16 @@
 "Open in UC Browser" = "UC Browser で開く";
 "UC Browser isn't on this device. Get UC Browser (UC浏览器) from the App Store and sign in to it, or scan the code with another phone." = "このデバイスには UC Browser がありません。App Store から UC Browser（UC浏览器）を入手してサインインするか、別のスマートフォンでコードをスキャンしてください。";
 "Waiting for UC Browser to approve…" = "UC Browser での承認を待っています…";
-
 "%lld works" = "%lld 作品";
-
 "Contribution" = "担当";
-
 "Editing" = "編集";
-
 "List View" = "リスト表示";
-
 "Grid View" = "グリッド表示";
-
 "No works match these filters." = "この条件に合う作品はありません。";
-
 "Show Video Info" = "ビデオ情報を表示";
-
 "Shows the video's format, resolution, frame rate and bitrate in a corner of the player." = "プレーヤーの隅にビデオの形式、解像度、フレームレート、ビットレートを表示します。";
-
 "Bitrate %@" = "ビットレート %@";
-
 "Download %@" = "ダウンロード %@";
-
 "Uses the official Dandanplay service. You can also enter your own compatible server." = "Dandanplay公式サービスを使用します。独自の互換サーバーも指定できます。";
 "This build is missing its Dandanplay API configuration." = "このビルドにはDandanplay API設定がありません。";
 "Uses Dandanplay first, then tries iQIYI and Tencent Video if no comments are found or the service is unavailable. Official public episode pages are sent to dmku, or to danmu.zxz.ee when dmku has none; stream URLs and playback headers are never sent." = "Dandanplayを優先し、コメントが見つからないかサービスを利用できない場合はiQIYIとTencent Videoを検索します。dmku（見つからない場合は danmu.zxz.ee）には公式の公開エピソードページのみ送信し、ストリームURLや再生ヘッダーは送信しません。";
@@ -1408,9 +1257,7 @@
 "Douban Hot Series" = "Douban 人気ドラマ";
 "Douban Hot Variety Shows" = "Douban 人気バラエティ";
 "Douban" = "Douban";
-
 "%@ (Translated from %@)" = "%@（%@から翻訳）";
-
 "Airing Schedule" = "放送スケジュール";
 "Anime" = "アニメ";
 "Nothing Airing" = "この日の放送はありません";
@@ -1429,8 +1276,6 @@
 "Anime Airing Today" = "今日のアニメ";
 "Series Airing Today" = "今日のドラマ";
 "Day" = "曜日";
-
-/* Mi3s's own features (privacy vault, subtitles, source tools, moved sources) */
 "Direct" = "直接";
 "Proxy" = "プロキシ";
 "Connection" = "接続";
@@ -1589,7 +1434,6 @@
 "Lock Controls" = "コントロールをロック";
 "Unlock Controls" = "ロック解除";
 "Rotate" = "回転";
-
 "Privacy Vault" = "プライバシー金庫";
 "Hide Content in the App Switcher" = "アプリスイッチャーで内容を隠す";
 "Hides the subscriptions and sources you choose behind a passcode. Hidden sources stay out of the list, search, and Continue Watching until the vault is unlocked." = "選んだ購読とソースをパスコードの背後に隠します。金庫がロックされている間、隠したソースは一覧・検索・視聴中に表示されません。";
@@ -1602,15 +1446,11 @@
 "Allow Speech Recognition in Settings to write subtitles." = "字幕を作成するには「設定」で音声認識を許可してください。";
 "This video has no sound track to read." = "この動画には読み取れる音声トラックがありません。";
 "Nothing was recognised in this video's sound." = "この動画の音声からは何も認識できませんでした。";
-
 "Sort by Measured Quality" = "計測した画質で並べ替え";
 "Sort" = "並べ替え";
 "Sorted by measured picture quality. Sources that were never probed are last." = "計測した画質で並べ替えました。未計測のソースは最後になります。";
-
 "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one." = "属性は上から順に適用されます。ドラッグで並べ替え、スワイプで外せます。";
 "Presets" = "プリセット";
-
-/* UI wiring */
 "New Environment" = "新しい環境";
 "Create" = "作成";
 "Delete Environment?" = "環境を削除しますか？";
@@ -1621,35 +1461,23 @@
 "Skip Credits" = "エンドロールをスキップ";
 "Describes this exact file" = "このファイル自体の情報";
 "Describes the title; used only if the timing fits" = "作品の情報のみ。時間が合う場合だけ使用";
-
-/* Segment sources, speech subtitles, and the settings group they live in */
 "What Plays" = "再生する内容";
 "The intro end and outro you set on a video's page" = "動画ページで設定したイントロ終了位置とアウトロの長さ";
 "Chapters carried inside the file" = "ファイルに含まれるチャプター";
 "Not connected yet: no request is made to these databases." = "未接続：これらのデータベースへの問い合わせは行いません。";
 "Drag to reorder. The first source with a usable segment wins. Your own markers and the file's chapters are read on this device; the public timestamp databases are not connected yet, and their switches stay off until they are." = "ドラッグで優先順位を変更できます。利用できる区間を返した、いちばん上のソースが使われます。自分のマーカーとファイル内のチャプターは端末内で読み取ります。公開タイムスタンプのデータベースは未接続で、接続するまでスイッチはオフのままです。";
 "Recognition runs entirely on this device. No audio leaves the phone. Only languages this device has a model for are listed; the player uses the one picked here." = "認識はすべて端末内で行われ、音声が端末の外に出ることはありません。ここには端末にモデルがある言語だけを表示します。プレイヤーはここで選んだ言語を使います。";
-
-/* HDR */
 "Dolby Vision profile 5 needs an HDR screen" = "Dolby Vision プロファイル 5 には HDR 画面が必要です";
-
-/* ranking honesty + speech availability */
 "No Data" = "データなし";
 "No On-Device Speech Model" = "この端末に音声認識モデルがありません";
 "Attributes are applied top to bottom. Drag to reorder; swipe to stop using one. The speed test measures resolution only, so ordering by bitrate, file size or colour range does not change which source comes first yet." = "属性は上から順に適用されます。ドラッグで並べ替え、左スワイプで項目を外せます。速度テストが測るのは解像度だけなので、ビットレート・ファイルサイズ・色範囲で並べても、どのソースが先に来るかはまだ変わりません。";
-
-/* batch line fix + speech audio */
 "No dead lines have been measured yet. Run Probe All first — this uses those readings rather than asking every source again." = "まだ利用できない回線が計測されていません。先に「すべて計測」を実行してください。ここではその結果を使い、各ソースへ問い合わせ直しません。";
 "No custom proxy is set up. Add one under Playback → Custom Proxy, or force the lines direct instead." = "カスタムプロキシが設定されていません。「再生 → カスタムプロキシ」で追加するか、これらの回線を直接接続に切り替えてください。";
 "Dead lines routed through the proxy: %lld" = "プロキシ経由にした回線: %lld 件";
 "Dead lines set to play direct: %lld" = "直接接続にした回線: %lld 件";
 "Dead lines hidden from the episode list: %lld" = "エピソード一覧から隠した回線: %lld 件";
 "This video's sound could not be read on this device." = "この動画の音声をこの端末で読み取れませんでした。";
-
-/* restore */
 "Removed %lld subscriptions that this file does not list." = "このファイルにないサブスクリプションを %lld 件削除しました。";
-
-/* AI translation */
 "AI Translation" = "AI 翻訳";
 "Service" = "サービス";
 "None" = "なし";
@@ -1659,8 +1487,6 @@
 "Leave every field empty to keep the device's own translation, which is free and offline but limited to the language pairs the system carries. A service covers any pair, at the cost of an API key and a network request per batch." = "すべて空欄のままにすると、システム内蔵の翻訳を使い続けます（無料・オフラインですが、対応する言語ペアはシステムが提供するものに限られます）。サービスを使えば任意の言語ペアを翻訳できますが、API キーとバッチごとの通信が必要です。";
 "Rules are added to the built-in ones, which already ask the model to keep tone, register, humour and implied subjects using nearby subtitle context." = "ここでのルールは組み込みルールに追加されます。組み込みルールはすでに、周辺の字幕を手がかりに語調・語域・ユーモア・含意された主語を保つようモデルに指示しています。";
 "Sends one test line, to confirm the address, model and key work together." = "テスト用の一行を送り、アドレス・モデル・キーが揃って動作するか確認します。";
-
-// Web Cast (ウェブキャスト)
 "Web Cast" = "ウェブキャスト";
 "Drive Mi3s from a browser on the same Wi-Fi." = "ブラウザからMi3sを操作";
 "When on, a computer on the same network opens the address below and gets a web version of Mi3s." = "オンにすると、同じネットワーク上のパソコンで下記のアドレスを開くとMi3sのウェブ版が表示されます。";
@@ -1679,8 +1505,6 @@
 "This source is no longer available." = "このソースは利用できなくなりました。";
 "Not Running" = "未実行";
 "The server could not start. Check the port and try again." = "サーバーを起動できませんでした。ポートを確認して再試行してください。";
-
-// Full backup (完全バックアップ)
 "Full Backup" = "完全バックアップ";
 "Restore Full Backup" = "完全バックアップを復元";
 "Backup contents" = "バックアップ内容";
@@ -1696,7 +1520,6 @@
 "Custom proxies" = "カスタムプロキシ";
 "Settings & preferences" = "設定と環境設定";
 "Sign-in & accounts carries cookies and tokens; restoring them may still require re-signing in if a service expired them." = "ログインとアカウントには Cookie とトークンが含まれます。サービス側で失効している場合は、復元後も再ログインが必要になることがあります。";
-// Cloud-drive backup (クラウドドライブへのバックアップ)
 "Back Up to Cloud Drive" = "クラウドドライブにバックアップ";
 "Into a signed-in Quark, UC, 115, AList or WebDAV" = "ログイン済みの Quark、UC、115、AList、WebDAV に保存";
 "Restore from Cloud Drive" = "クラウドドライブから復元";
@@ -1711,9 +1534,6 @@
 "Backed up to %@." = "%@ にバックアップしました。";
 "Restored from %@." = "%@ から復元しました。";
 "Sign in to %@ first." = "まず %@ にログインしてください。";
-
-
-// ---- 二开补齐（iOS 界面缺失翻译）----
 "%@ couldn't create the folder." = "%@ はフォルダを作成できませんでした。";
 "%@ didn't open an upload for this file. Try again." = "%@ はこのファイルのアップロードを開いていません。もう一度お試しください。";
 "%@ · from %@" = "%@ · %@ より";
@@ -1794,8 +1614,6 @@
 "Drop here to hide" = "ここにドロップして非表示";
 "Drag a button onto any slot in the top or bottom row, or into More. Empty slots stay empty." = "ボタンを上段または下段の任意のスロット、または「その他」にドラッグします。空のスロットは空のままです。";
 "Tap a slot to place %@" = "スロットをタップして %@ を配置";
-
-// MARK: - [mi3s] 融合：上游 1.8.11 新增文案（182 条）
 "Yingxia" = "映匣";
 "Yingxia / TVBOX" = "映匣 / TVBOX";
 "About Yingxia" = "映匣について";
@@ -1940,8 +1758,6 @@
 "Couldn't reach %@. The site may be down or blocked on your network." = "%@ に接続できませんでした。サイトが停止しているか、ネットワークでブロックされている可能性があります。";
 "This source needs you to sign in. Sign in under Settings › Comic Sources." = "このソースはサインインが必要です。設定 › コミックソース でサインインしてください。";
 "The source said: %@" = "ソースのメッセージ：%@";
-
-/* Subtitle Style (#547) */
 "Subtitle Style" = "字幕のスタイル";
 "White" = "白";
 "Yellow" = "黄";
@@ -1983,13 +1799,9 @@
 "This source is hidden. Unlock the Privacy Vault to browse it." = "このソースは非表示です。プライバシー保管庫をロック解除して閲覧してください。";
 "This source is hidden. Unlock the Privacy Vault to use it." = "このソースは非表示です。プライバシー保管庫をロック解除して使用してください。";
 "This title is hidden. Unlock the Privacy Vault to play it." = "この項目は非表示です。プライバシー保管庫をロック解除して再生してください。";
-
-// MARK: - App Language
 "App Language" = "アプリの言語";
 "Follow System" = "システムに従う";
 "The app language is independent of your device language and applies immediately." = "アプリの言語は端末の言語設定とは独立しており、すぐに反映されます。";
-
-/* Speed & Grouping (SourceSpeedLab) */
 "Speed & Grouping" = "速度とグループ";
 "One Group" = "単一グループ";
 "Measure" = "計測範囲";
@@ -2028,14 +1840,10 @@
 "A route changes the address a source API is fetched from. Media comes from whatever CDN the source hands back and is not rewritten, so a source whose API answers but whose segments are blocked still needs hiding." = "ルーティングが変えるのはソース API の取得先だけです。メディアはソースが返す CDN から直接取得され書き換えないため、API は通るがセグメントが遮断されるソースは非表示にする必要があります。";
 "Forget Every Reading" = "すべての測定値を消去";
 "Group %lld" = "グループ %lld";
-
-/* Sources page: speed card */
 "Tools" = "ツール";
 "Measure the sources, then file them by result." = "ソースを計測し、結果でグループ分けします。";
 "%lld measured" = "%lld 件を計測済み";
 "%lld measured, %lld within the window" = "%lld 件を計測済み、うち %lld 件は時間内";
-
-// MARK: Bilibili skin
 "Black page, controls over the picture, episodes in a row." = "黒背景、コントロールは画面の上、エピソードは横並び。";
 "Half-screen card, drawer of episodes, settings sliding out from the right." = "半画面カード、エピソードはドロワー、設定は右から。";
 "Playback Settings" = "再生設定";
@@ -2071,8 +1879,6 @@
 "No matching episodes" = "一致する話がありません";
 "Jump to page" = "ページへ移動";
 "Go" = "移動";
-
-// MARK: Bilibili pages and panels
 "Comments" = "コメント";
 "Comments (%@)" = "コメント（%@）";
 "All Comments" = "すべてのコメント";
@@ -2138,8 +1944,6 @@
 "Keeps going through the list." = "リストを順に再生します。";
 "Bili Message" = "メッセージ";
 "Bili Pic" = "画像";
-
-/* Sources page: batch selection */
 "Select" = "選択";
 "%lld selected" = "%lld 件を選択";
 "%lld groups" = "%lld グループ";
@@ -2164,8 +1968,6 @@
 "Tick the sources you want, then choose what to do with them. A group's own button picks everything in it." = "処理したいソースにチェックを入れ、その後に操作を選びます。グループ右のボタンでまとめて選択できます。";
 "Pick This Group" = "このグループを選択";
 "Clear This Group" = "このグループの選択を解除";
-
-/* Sources page: group priority */
 "Everything" = "すべて";
 "One Subscription" = "1つの購読";
 "Picked" = "選択したソース";
@@ -2180,21 +1982,13 @@
 "Groups at the top are searched first, and their results are listed first. Sources inside a group keep their own order. A group left here unranked is still searched — it just comes after the ones you ranked." = "上のグループが先に検索され、結果も先に並びます。グループ内の順序は変わりません。順位未設定のグループも検索され、設定済みの後になります。";
 "Clear the Ranking" = "順位を消去";
 "Clearing it returns search to the automatic order, which prefers quick, reliable sources. Nothing is ungrouped and no source order is lost." = "消去すると自動順序（速く安定したソースを優先）に戻ります。グループは解散せず、ソース順も失われません。";
-
-/* Sources page: filing by result */
 "File the Result into the Existing Groups" = "既存のグループに振り分ける";
 "New Groups from the Result (reachable / unreachable)" = "結果でグループを作成（到達可 / 不可）";
-
-/* Sources page: select all while searching */
 "Select All Shown" = "表示中をすべて選択";
-
-/* 広告ブロック：3 つのプレイヤーすべてに置けるコントロールと、その元スイッチ */
 "Ad Blocking" = "広告ブロック";
 "Ad Blocking On" = "広告ブロック（オン）";
 "Ad Blocking Off" = "広告ブロック（オフ）";
 "Mark This as an Ad" = "この区間を広告として記録";
-
-/* 広告ブロックと広告指紋ライブラリ（4 言語を補完） */
 "Ads" = "広告";
 "Mark Ad" = "広告を記録";
 "Mark Last 30s as Ad" = "直前の 30 秒を広告として記録";
@@ -2217,31 +2011,18 @@
 "%d ads, about %@ in total" = "%d 件・合計約 %@";
 "Ad %@" = "広告 %@";
 "Marking an ad needs the picture we draw ourselves. Switch the watch page to the One skin to mark ads." = "広告の記録には自前で描画した画面が必要です。視聴ページを One スキンに切り替えてください。";
-
-/* プレイヤーコントロール：bilibili スキンは独自の配置を使う */
-
 "Not used by the Bilibili skin" = "bilibili スキンでは使われません";
 "This layout applies to the Original and One skins. The Bilibili skin keeps its own built-in arrangement — customise it from Customize Menu inside its More panel." = "この配置はオリジナルと One スキンに適用されます。bilibili スキンは独自の配置を保つため、「その他」パネルの「メニューをカスタマイズ」から変更してください。";
-
-/* Sources page: tidy after sweep */
 "After the Sweep" = "計測のあと";
 "Reorder by score" = "スコア順に並べ替え";
 "File into Reachable / Unreachable" = "「到達可 / 不可」に振り分け";
 "Answered to Direct, silent to Proxy" = "到達可は直結、不可はプロキシ";
 "Grouping only moves sources that have a reading, so a group you arranged by hand stays as it is until a source in it is measured. Routing rewrites the address a source API is fetched from; media still comes from the source's own CDN." = "振り分けは計測値のあるソースだけを動かすので、手で整えたグループはそのソースが再計測されるまでそのままです。ルート変更は API の取得先だけを変え、メディアは各ソースの CDN から届きます。";
-
-/* Sources page: measure button */
 "Measure Now" = "計測する";
-
-/* Sources page: reachability wording */
 "Reachable into %@" = "到達可を「%@」へ";
 "Unreachable into %@" = "不可を「%@」へ";
 "Reachable to Direct, Unreachable to Proxy" = "到達可は直結、不可はプロキシ";
-
-/* Sources page: screening report */
 "%lld not attempted: the endpoint did not answer." = "%lld 件は未計測：エンドポイントが応答しませんでした。";
-
-/* 出站代理 / Loon */
 "Add Loon" = "Loon を追加";
 "Both ranges are in place. They decide where a request goes — except for a site Loon's own rules already classify: those follow the rules, because Loon checks them before the port. Sources whose sites are not in your rules (most of them) are fully controlled here." = "両方の範囲が設定済みです。リクエストの行き先はこれで決まります。ただし Loon 自身のルールがすでに分類しているサイトは除きます。Loon はポートより先にルールを確認するため、それらはルールに従います。ルールにないサイト（大半）のソースは、ここで完全に制御されます。";
 "Both ranges went the same way — Loon's own rules decided" = "両方の範囲が同じ結果です — Loon 自身のルールで判定されました";
@@ -2702,19 +2483,14 @@
 "Tile Windows" = "ウィンドウを並べる";
 "Free Arrange" = "自由配置";
 "Bring Forward" = "前面へ移動";
-
 "Needs parsing" = "解析が必要";
-
 "That line didn't play. Switched to %@." = "この回線は再生できませんでした。「%@」に切り替えました。";
-
 "Tidy Once" = "一度だけ整列";
 "Lock Tiled Layout" = "整列をロック";
 "Unlock Layout" = "ロック解除";
 "Open Episode List" = "エピソード一覧へ";
-
 "Default Exit" = "既定の出口";
 "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "プロキシが複数あるとき、「Proxy」の源が使う出口を選びます。1 台だけなら自動で使われます。";
-
 "Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way." = "ループバックアドレスはローカルネットワークのアドレス経由で接続します。Loon のポートルールはその経路の接続にのみ適用されます。";
 "Ad Range" = "広告の範囲";
 "Ad starts at" = "広告の開始";
@@ -2750,7 +2526,424 @@
 "Start Here" = "ここを開始に";
 "Trim the Ad" = "この広告をカット";
 "Trim the Ad Here" = "この画面で広告をカット";
-
-/* 首播自动学习 */
 "Learned automatically from videos you have played on the same source. Only applies to that source." = "同じソースで再生した動画から自動的に学習したものです。そのソースにのみ適用されます。";
 "%@ · from %d videos" = "%@ · %d 本の動画から";
+"Live streams can't be cached." = "ライブ配信はキャッシュできません。";
+"This video is protected and can't be cached." = "この動画は保護されているため、キャッシュできません。";
+"The server stopped allowing caching to resume. Retry to start again." = "サーバーが再開キャッシュに対応しなくなりました。再試行すると最初からキャッシュします。";
+"Offline Cache" = "オフラインキャッシュ";
+"This cached video is no longer on this device." = "このキャッシュはこのデバイスにありません。";
+"%@ is no longer in your subscription, so caching can't continue." = "%@ はサブスクリプションにないため、キャッシュを続行できません。";
+"Nothing Cached" = "キャッシュはありません";
+"Choose Cache on a video's page to keep episodes for watching offline." = "動画のページで「キャッシュ」を選ぶと、エピソードを保存してオフラインで視聴できます。";
+"Cached" = "キャッシュ済み";
+"Date Cached" = "キャッシュ日";
+"Delete all cached episodes of %@?" = "「%@」のキャッシュ済みエピソードをすべて削除しますか？";
+"Delete Cached Items" = "キャッシュを削除";
+"Delete from Cache" = "キャッシュを削除";
+"Caching" = "キャッシュ中";
+"used by the cache" = "キャッシュで使用中";
+"%@ used by the cache" = "キャッシュで %@ 使用中";
+"tvOS may remove cached videos when Apple TV runs low on storage." = "Apple TV の空き容量が少なくなると、tvOS がキャッシュを削除することがあります。";
+"Cancel Caching" = "キャッシュをキャンセル";
+"Cache Next" = "次にキャッシュ";
+"Caching failed" = "キャッシュに失敗しました";
+"Cache Episodes" = "エピソードをキャッシュ";
+"Cache" = "キャッシュ";
+"Cache %lld" = "%lld 件をキャッシュ";
+"1 episode added to the cache." = "1 エピソードをキャッシュに追加しました。";
+"%lld episodes added to the cache." = "%lld エピソードをキャッシュに追加しました。";
+"Show Cache" = "キャッシュを表示";
+"The intro must end before the outro starts." = "オープニングはエンディングより前に終わる必要があります。";
+"Intro skipped" = "オープニングをスキップしました";
+"Undo" = "取り消す";
+"Skipping the outro in %@ s" = "%@ 秒後にエンディングをスキップします";
+"This video could not be prepared for playback. Please try again." = "動画を再生する準備ができませんでした。再試行してください。";
+"This source needs your %@ account for this line. Sign in with its code, and the episode plays." = "このソースのこの回線には%@アカウントが必要です。ソースのコードでサインインすると、エピソードが再生されます。";
+"123pan" = "123pan";
+"None of your subscriptions lists music channels. Add one that does, such as the recommended sources, to play music." = "追加したサブスクリプションには音楽チャンネルがありません。おすすめのソースなど、音楽チャンネルを含むサブスクリプションを追加してください。";
+"No LX Music source could play it." = "LX Music のソースでは再生できませんでした。";
+"Remove from Cache" = "キャッシュを削除";
+"Cached Songs" = "キャッシュした曲";
+"No Cached Songs" = "キャッシュした曲はありません";
+"Cache a song, album or playlist from its menu to listen without a connection." = "曲、アルバム、プレイリストのメニューからキャッシュすると、オフラインでも聴けます。";
+"Delete all cached songs?" = "キャッシュした曲をすべて削除しますか？";
+"%lld caching" = "%lld 曲をキャッシュ中";
+"%@ uses a certificate this device doesn't trust, for example a self-signed one. Use the server's http:// address, or give the server a trusted certificate." = "%@ の証明書はこのデバイスで信頼されていません（自己署名証明書など）。サーバの http:// アドレスを使うか、サーバに信頼された証明書を設定してください。";
+"Sign in to Quark, UC, 115 or Baidu Netdisk under Cloud Drive Accounts to browse their files here." = "クラウドドライブのアカウントで Quark、UC、115 または Baidu Netdisk にサインインすると、ここでファイルを閲覧できます。";
+"This file no longer exists." = "このファイルはもう存在しません。";
+"Add an AList or OpenList server, a NAS's WebDAV share, an Emby or Jellyfin server, or an fnOS NAS's media library, by the address you open it at. Pasting an AList address, or a TVBox AList configuration, in Add Subscription adds servers too." = "AList・OpenList サーバ、NAS の WebDAV 共有、Emby・Jellyfin サーバ、飛牛 fnOS の飛牛影視は、開くときのアドレスで追加します。AList のアドレスや TVBox の AList 設定を「配信設定を追加」に貼り付けても追加できます。";
+"The server's address, such as http://192.168.1.10:5244 for AList, http://192.168.1.10:8096 for Emby or Jellyfin, http://192.168.1.10:5666 for fnOS, or the WebDAV address your NAS shows. Add a folder after an AList or WebDAV address to start there. Emby, Jellyfin and fnOS always want the user name; the others only when they don't let guests browse." = "サーバのアドレスです（例：AList なら http://192.168.1.10:5244、Emby・Jellyfin なら http://192.168.1.10:8096、飛牛 fnOS なら http://192.168.1.10:5666、NAS なら表示される WebDAV のアドレス）。AList や WebDAV のアドレスの後ろにフォルダを付けると、そこから閲覧を始めます。Emby、Jellyfin、飛牛 fnOS では常にユーザ名が必要です。それ以外は、ゲストに閲覧を許可していないサーバの場合のみ必要です。";
+"No AList, WebDAV, Emby, Jellyfin or fnOS server answered at this address." = "このアドレスで応答する AList、WebDAV、Emby、Jellyfin、飛牛 fnOS サーバがありません。";
+"Back %@ seconds" = "%@ 秒戻る";
+"Forward %@ seconds" = "%@ 秒進む";
+"Show Time and Battery" = "時刻とバッテリーを表示";
+"Skip Interval" = "スキップ間隔";
+"Double-tap the left or right of the video to skip forward or back. Turn this off and a double tap plays or pauses instead." = "動画の左側または右側をダブルタップすると早送り・早戻しします。オフにすると、ダブルタップで再生/一時停止になります。";
+"Collapse Tab Bar When Scrolling" = "スクロール時にタブバーを縮小";
+"Preparing the cached video for this device · %lld%%" = "このデバイス用にキャッシュを準備しています · %lld%%";
+"Opening the cached video" = "保存したキャッシュを開いています";
+"This Dolby Vision video needs HDR. To keep your Apple TV in SDR and still play it, turn on Settings › Video and Audio › Match Content › Match Dynamic Range: the TV then switches to HDR only while such a video plays." = "これは Dolby Vision のビデオで、再生には HDR が必要です。Apple TV を SDR のまま使いながら再生するには、「設定 › ビデオとオーディオ › コンテンツに合わせる › ダイナミックレンジを合わせる」をオンにしてください。このようなビデオの再生中だけ HDR に切り替わります。";
+"One Line" = "1 行";
+"A TVBox JSON subscription, an M3U or TXT live playlist, or one Python (.py) or JavaScript (.js) spider." = "TVBox JSON 配信設定、M3U / TXT ライブ再生リスト、または Python（.py）か JavaScript（.js）のスパイダー 1 つ。";
+"This file is on the device it was added on, not on this one. Files don't sync to other devices; use a web address instead." = "このファイルは追加したデバイスにあり、このデバイスにはありません。ファイルはほかのデバイスに同期されないため、URL で追加してください。";
+"This source needs %@, a file next to its config. Only the config file itself was added, so add the config by its web address instead." = "このソースには設定ファイルの隣にある %@ が必要ですが、追加されたのは設定ファイルだけです。設定を URL で追加してください。";
+"Your account and password are sent only to this book source's website, and kept on this device." = "アカウントとパスワードはこのブックソースのサイトにのみ送信され、このデバイスに保存されます。";
+"Sign In on the Website" = "ウェブサイトでサインイン";
+"Sign in on the page, then tap Done. This source then reads the website as you." = "ページでサインインしてから「完了」をタップすると、このソースはあなたとしてサイトを読み込みます。";
+"This source has nothing to fill in to sign in." = "このソースのサインインには入力する項目がありません。";
+"This source signs in on its website, which Apple TV can't open." = "このソースはウェブサイトでサインインしますが、Apple TV ではサイトを開けません。";
+"These sources can sign in to an account on their website." = "これらのソースはサイトのアカウントにサインインできます。";
+"Not signed in yet." = "まだサインインしていません。";
+"This source's sign-in form isn't supported yet." = "このソースのサインインフォームにはまだ対応していません。";
+"This source's sign-in form couldn't be read." = "このソースのサインインフォームを読み込めませんでした。";
+"This source has no login function." = "このソースには login 関数がありません。";
+"Video Page" = "動画の詳細ページ";
+"Play Automatically" = "自動再生";
+"Start in Full Screen" = "再生開始時にフルスクリーン";
+"With Play Automatically on, a video of one episode starts as soon as its page opens. With Start in Full Screen on, a video fills the screen as soon as it starts on its page." = "「自動再生」をオンにすると、1話だけの動画は詳細ページを開くとすぐに再生されます。「再生開始時にフルスクリーン」をオンにすると、詳細ページで再生を始めた動画はすぐにフルスクリーンになります。";
+"iQIYI" = "iQIYI";
+"Tencent Video" = "Tencent Video";
+"Youku" = "Youku";
+"Mango TV" = "Mango TV";
+"Dandanplay" = "Dandanplay";
+"Scroll Speed" = "スクロール速度";
+"Scrolling Comments" = "スクロールコメント";
+"Top Comments" = "上部コメント";
+"Bottom Comments" = "下部コメント";
+"Danmaku Settings…" = "弾幕設定…";
+"Preferred Source Platform" = "コメントの配信元";
+"Use Official URL" = "公式URLを使う";
+"Danmaku service settings saved." = "弾幕サービスの設定を保存しました。";
+"Enter a Dandanplay-compatible server root or an API prefix ending in /api/v2. A token in the path is supported. The URL is saved only on this device." = "Dandanplay互換サーバーのルート、または /api/v2 で終わるアドレスを入力します。パス内のトークンに対応し、URLはこのデバイスにのみ保存されます。";
+"Danmaku Display" = "弾幕表示";
+"Advance 0.5 s" = "0.5 秒早める";
+"Advance 5 s" = "5 秒早める";
+"Delay 0.5 s" = "0.5 秒遅らせる";
+"Delay 5 s" = "5 秒遅らせる";
+"Reset Timing" = "タイミングをリセット";
+"Current Danmaku" = "現在の弾幕";
+"Unknown Source" = "不明な配信元";
+"Unknown Year" = "年不明";
+"It has the same name as a recommended source." = "おすすめのソースと同じ名前です。";
+"Update the app to use the recommended sources." = "おすすめのソースを使うには App をアップデートしてください。";
+"User Name" = "ユーザー名";
+"API Token" = "API トークン";
+"Search Online" = "オンラインで検索";
+"Settings › Subtitle Sources" = "設定 › 字幕ソース";
+"Online" = "オンライン";
+"Skip Outro" = "エンディングをスキップ";
+"This source's settings page can't open on this device. Sign in to your drives in Cloud Drive Accounts, and the source uses those sign-ins." = "このソースの設定ページはこのデバイスでは開けません。「クラウドドライブのアカウント」でドライブにサインインすると、ソースはそのサインインを使います。";
+"Chapter %lld" = "チャプター %lld";
+"Hide Sources That Aren't Working (%lld)" = "動作していないソースを隠す（%lld）";
+"Sources come from your subscriptions, so a source is hidden rather than deleted. To delete a whole subscription, open it in Settings." = "ソースは配信設定から読み込まれるため、1つずつ削除はできず、非表示にします。配信設定ごと削除するには「設定」で開いてください。";
+"Skip Ad Segments" = "広告セグメントをスキップ";
+"System Language" = "システム言語";
+"Restart Now" = "今すぐ再起動";
+"Restart Yingxia to use the new language." = "新しい言語は映匣を再起動すると反映されます。";
+"%@ couldn't be downloaded." = "%@ をダウンロードできませんでした。";
+"%@ didn't match its checksum, so it wasn't installed." = "%@ はチェックサムが一致しないため、インストールしませんでした。";
+"%@ wasn't updated. %@" = "%@ は更新されませんでした。%@";
+"A plugin's scripts run inside Yingxia and reach only the internet. Add sources you trust." = "プラグインのスクリプトは映匣の中で動き、インターネットにだけアクセスします。信頼できるソースだけを追加してください。";
+"In Settings, add a TVBox subscription with live playlists, an M3U or TXT live playlist, or live plugins." = "設定で、ライブ再生リストを含む TVBox サブスクリプション、M3U・TXT のライブ再生リスト、またはライブプラグインを追加してください。";
+"Install All (%lld)" = "すべてインストール（%lld）";
+"Live Plugins" = "ライブプラグイン";
+"Live platforms added as AngelLive plugins show in Live TV." = "AngelLive プラグインとして追加したライブ配信サービスは「ライブ TV」に表示されます。";
+"Live plugins add platforms to Live TV, such as Huya, Douyu, Twitch and YouTube. They use the AngelLive plugin format: add a source by its address, its install link, or its short key." = "ライブプラグインは Huya、Douyu、Twitch、YouTube などを「ライブ TV」に追加します。AngelLive プラグイン形式で、ソースはアドレス、インストールリンク、短いキーのいずれかで追加できます。";
+"Plugin" = "プラグイン";
+"Remove Plugin" = "プラグインを削除";
+"Removing the source also removes the plugins installed from it." = "ソースを削除すると、そこからインストールしたプラグインも削除されます。";
+"Sign in to this platform to see this." = "表示するにはこのサービスにサインインしてください。";
+"Sign-In Needed" = "サインインが必要";
+"Source Address or Key" = "ソースのアドレスまたはキー";
+"The download isn't the plugin %@." = "ダウンロードしたファイルはプラグイン %@ ではありません。";
+"The live stream ended." = "ライブ配信は終了しました。";
+"The live stream sent no picture." = "ライブ配信から映像が届きませんでした。";
+"The platform took too long to answer." = "サービスの応答に時間がかかりすぎました。";
+"The plugin %@ defines no LiveParsePlugin." = "プラグイン %@ には LiveParsePlugin がありません。";
+"The plugin %@ is missing its script %@." = "プラグイン %@ にスクリプト %@ がありません。";
+"The plugin %@ isn't installed." = "プラグイン %@ はインストールされていません。";
+"The plugin %@ needs a newer version of Yingxia." = "プラグイン %@ には新しいバージョンの映匣が必要です。";
+"The plugin has no manifest.json." = "プラグインに manifest.json がありません。";
+"The streamer isn't live now." = "配信者は現在配信していません。";
+"This address isn't a live plugin source." = "このアドレスはライブプラグインのソースではありません。";
+"This live stream isn't FLV." = "このライブ配信は FLV ではありません。";
+"This platform's plugin can't do this." = "このサービスのプラグインではこの操作はできません。";
+"This video is encrypted, and Yingxia can't play it yet." = "この動画は暗号化されているため、映匣ではまだ再生できません。";
+"Update All (%lld)" = "すべてアップデート（%lld）";
+"Update to %@" = "%@ にアップデート";
+"Cookie" = "Cookie";
+"In a browser signed in to the platform, copy the Cookie header of one of its requests and paste it here." = "サービスにサインイン済みのブラウザで、リクエストの Cookie ヘッダーをコピーしてここに貼り付けてください。";
+"Paste a Cookie" = "Cookie を貼り付け";
+"Sign In Again" = "もう一度サインイン";
+"Sign-In Expired" = "サインインの期限切れ";
+"Some platforms show more, or better quality, once you sign in. The sign-in stays on this device." = "サインインすると、より多くの配信や高画質を見られるサービスもあります。サインイン情報はこのデバイスにだけ保存されます。";
+"%@ shows its live rooms once you sign in. The sign-in stays on this device." = "%@のライブ配信はサインインすると表示されます。サインイン情報はこのデバイスにのみ保存されます。";
+"Sign In by QR Code" = "QRコードでサインイン";
+"Use the Web Page Instead" = "代わりにWebページを使う";
+"The platform sent no sign-in code." = "プラットフォームからサインインコードが届きませんでした。";
+"The platform confirmed the sign-in but sent no cookies." = "サインインは確認されましたが、Cookieが届きませんでした。";
+"The platform didn't accept this sign-in. Try again." = "このサインインは受け付けられませんでした。もう一度お試しください。";
+"Scan the code, or open %@ on a phone or computer, and enter this code there." = "コードをスキャンするか、スマートフォンやパソコンで %@ を開き、このコードを入力してください。";
+"Waiting for you to approve the sign-in…" = "サインインの承認を待っています…";
+"Open the Sign-In Page" = "サインインページを開く";
+"The sign-in was declined." = "サインインは拒否されました。";
+"Sign-in details stay on this device." = "サインイン情報はこのデバイスにのみ保存されます。";
+"Show %lld Other Results" = "その他の結果 %lld 件を表示";
+"Intro Ends Here" = "オープニングはここまで";
+"Outro Starts Here" = "エンディングはここから";
+"In the first five minutes" = "最初の5分以内で設定";
+"In the last ten minutes" = "最後の10分以内で設定";
+"%@ before the end" = "終了の %@ 前";
+"Clear Intro and Outro" = "オープニングとエンディングを消去";
+"Two Lines" = "2 行";
+"Three Lines" = "3 行";
+"Danmaku Settings" = "弾幕の設定";
+"Display" = "表示";
+"Comment Types" = "弾幕の種類";
+"Colored Comments" = "カラー弾幕";
+"Turn off Colored Comments to draw every comment in white, which stays readable over bright pictures." = "「カラー弾幕」をオフにすると、すべての弾幕が白で表示され、明るい画面でも読みやすくなります。";
+"Add a word or /pattern/" = "単語または /パターン/ を追加";
+"Add Blocked Word" = "NG ワードを追加";
+"No blocked words" = "NG ワードはありません";
+"Comments containing any of these words are hidden in every video. Put a pattern between slashes, like /^哈+$/, to match it as a regular expression." = "これらの語を含む弾幕は、すべての動画で非表示になります。/^哈+$/ のようにスラッシュで囲むと、正規表現として照合します。";
+"Applies to comments in every video, including one that is playing." = "再生中の動画を含め、すべての動画の弾幕に適用されます。";
+"Here it comes!" = "来るぞ！";
+"This scene is incredible" = "この場面すごい";
+"Hahahahaha" = "ｗｗｗｗｗ";
+"Third time watching" = "3 回目の視聴";
+"The music is so good" = "音楽が最高";
+"Plot twist!" = "まさかの展開！";
+"Classic moment" = "名シーン";
+"Welcome back, everyone" = "おかえり";
+"Who else is watching tonight?" = "今夜見てる人いる？";
+"%lld chapters" = "%lld 話";
+"%lld of %lld on" = "%1$lld/%2$lld 件オン";
+"%lld on" = "%lld 件オン";
+"%lld sources didn't answer" = "%lld 件のソースが応答しませんでした";
+"%lld sources have this book" = "%lld 件のソースにこの本があります";
+"Add to Bookshelf" = "本棚に追加";
+"Added a Legado book source list (%lld sources). Search and read in Novels." = "Legado のブックソースリスト（%lld 件）を追加しました。「小説」で検索して読めます。";
+"Book Sources" = "ブックソース";
+"Book sources are Legado (阅读) sources. Add a list as a subscription in Settings › Subscriptions. Each source reads a website; the website's content is its own." = "ブックソースは Legado（阅读）のソースです。「設定 › サブスクリプション」でリストを追加します。各ソースはウェブサイトを読み込み、その内容はサイトのものです。";
+"Bookshelf" = "本棚";
+"Browse Books" = "本を探す";
+"Change Source" = "ソースを切り替え";
+"Contents" = "目次";
+"Explore" = "探索あり";
+"Latest: %@" = "最新：%@";
+"No Book Sources" = "ブックソースがありません";
+"No Books" = "本がありません";
+"No book source lists yet." = "ブックソースのリストはまだありません。";
+"No search" = "検索なし";
+"No source found “%@”. Try a shorter title, or the author's name." = "「%@」は見つかりませんでした。短いタイトルか著者名で試してください。";
+"Not started" = "未読";
+"Novels" = "小説";
+"Novels shows while a Legado book source list is among your subscriptions." = "Legado のブックソースリストを購読していると「小説」が表示されます。";
+"On Bookshelf" = "本棚にあり";
+"Read Novels" = "小説を読む";
+"Refresh List" = "リストを更新";
+"Refreshed." = "更新しました。";
+"Remove from Bookshelf" = "本棚から削除";
+"Search All Sources" = "すべてのソースを検索";
+"Search Books" = "本を検索";
+"Search asks every source that is on. Turn off the ones that never answer to make it faster." = "検索はオンのソースすべてに問い合わせます。応答しないソースをオフにすると速くなります。";
+"Searches all %lld switched-on book sources." = "オンのブックソース %lld 件をすべて検索します。";
+"Sepia" = "セピア";
+"The source listed no chapters for this book." = "ソースにこの本の章がありません。";
+"The source returned an empty chapter." = "ソースが空の章を返しました。";
+"The source took too long to answer. Try again, or switch to another source." = "ソースの応答に時間がかかりすぎました。もう一度試すか、別のソースに切り替えてください。";
+"This address is not a Legado book source list." = "このアドレスは Legado のブックソースリストではありません。";
+"This address is now a book source list. Add it again to use it for Novels." = "このアドレスはブックソースリストになりました。「小説」で使うには追加し直してください。";
+"This book's source is no longer in your book source lists." = "この本のソースはブックソースリストにもうありません。";
+"This chapter is not in the table of contents." = "この章は目次にありません。";
+"This source has no explore lists. Search it instead." = "このソースには探索リストがありません。検索してください。";
+"Title or author" = "タイトルまたは著者";
+"Turn All Off" = "すべてオフ";
+"Turn All On" = "すべてオン";
+"Turn on book sources in Settings › Book Sources to read here." = "「設定 › ブックソース」でソースをオンにすると、ここで読めます。";
+"You've reached the latest chapter." = "最新の章まで読みました。";
+"Your sources have no explore pages. Search for a title or an author." = "ソースに探索ページがありません。タイトルか著者で検索してください。";
+"Searches the %lld switched-on sources in %@." = "「%2$@」のオンのソース %1$lld 件を検索します。";
+"All Sources (%lld)" = "すべてのソース（%lld）";
+"Search In" = "検索範囲";
+"Turn All On and Turn All Off change only the sources the filter shows, such as one group." = "「すべてオン」と「すべてオフ」は、絞り込んだソース（グループなど）だけに作用します。";
+"The book source returned nothing." = "書籍ソースから何も返ってきませんでした。";
+"The book source took too long to answer." = "書籍ソースの応答に時間がかかりすぎました。";
+"This source needs a web view, which Yingxia does not have." = "このソースには Web ビューが必要ですが、映匣では使用できません。";
+"This source needs a web view (@webjs), which Yingxia does not have." = "このソースには Web ビュー（@webjs）が必要ですが、映匣では使用できません。";
+"This source needs a verification code, which Yingxia cannot show." = "このソースには認証コードが必要ですが、映匣では表示できません。";
+"This source needs a browser, which Yingxia does not offer." = "このソースにはブラウザが必要ですが、映匣では利用できません。";
+"This source made too many requests." = "このソースのリクエストが多すぎます。";
+"This source cannot search." = "このソースは検索に対応していません。";
+"This is not a text book source." = "これはテキストの書籍ソースではありません。";
+"This is not a Legado book source." = "これは Legado の書籍ソースではありません。";
+"The table of contents is empty." = "目次が空です。";
+"The site sent nothing." = "サイトから何も返ってきませんでした。";
+"The chapter has no text." = "この章には本文がありません。";
+"Signatures are not supported for book sources yet." = "書籍ソースの署名にはまだ対応していません。";
+"RSA is not supported for book sources yet." = "書籍ソースの RSA にはまだ対応していません。";
+"Last page in chapter" = "この章の最後のページ";
+"1 page left in chapter" = "この章は残り1ページ";
+"%d pages left in chapter" = "この章は残り%dページ";
+"Paged" = "ページ";
+"Scroll" = "スクロール";
+"Theme" = "テーマ";
+"Font Size" = "文字サイズ";
+"Line Spacing" = "行間";
+"Margins" = "余白";
+"Light" = "ライト";
+"Dark" = "ダーク";
+"Gray" = "グレー";
+"Grass" = "グラス";
+"Cherry" = "チェリー";
+"Sky" = "スカイ";
+"Solarized" = "Solarized";
+"Gruvbox" = "Gruvbox";
+"Nord" = "Nord";
+"Contrast" = "コントラスト";
+"Sunset" = "サンセット";
+"Songti" = "宋体";
+"Kaiti" = "楷書";
+"Search Chapters" = "章を検索";
+"Current Chapter" = "現在の章";
+"This source checks for a web browser, which Apple TV doesn't have. Read it on iPhone, iPad or Mac." = "この書籍ソースはブラウザによる確認を必要としますが、Apple TV にはブラウザがありません。iPhone、iPad、Mac でお読みください。";
+"The site's browser check didn't pass. Try again later." = "サイトのブラウザ確認を通過できませんでした。しばらくしてからもう一度お試しください。";
+"This is a Legado subscription source (订阅源), not a book source list. Add the address of a book source list instead." = "これは Legado（閱読）の購読ソース（订阅源）で、ブックソースリストではありません。ブックソースリストのアドレスを追加してください。";
+"This page lists %lld Legado book source lists. Choose the ones to add in Settings › Novels › Book Sources." = "このページには Legado のブックソースリストが %lld 件あります。「設定 › 小説 › ブックソース」で追加するものを選んでください。";
+"This address is now a page of book source lists. Add it again to choose from them." = "このアドレスはブックソースリストの一覧ページになりました。もう一度追加して、そこから選んでください。";
+"Lists You Can Add" = "追加できるリスト";
+"Clear Lists You Can Add" = "追加できるリストを消去";
+"Found on %@. Lists you add appear under Source Lists." = "%@ で見つかりました。追加したリストは「ソースリスト」に表示されます。";
+"Added" = "追加済み";
+"Adding…" = "追加中…";
+"The file is larger than %lld MB." = "ファイルが %lld MB を超えています。";
+"Previous Channel" = "前のチャンネル";
+"Next Channel" = "次のチャンネル";
+"Channel List" = "チャンネル一覧";
+"Line %@" = "ライン %@";
+"Line %@ didn't play. Trying line %@." = "ライン %1$@ を再生できません。ライン %2$@ を試しています。";
+"Search Time Limit" = "検索の制限時間";
+"%@ seconds" = "%@ 秒";
+"How long Search Online waits for the sources. Results show as each source answers, so a longer limit only waits longer for slow ones." = "オンライン検索が各ソースを待つ時間です。結果はソースが応答するたびに表示されるため、長くしても遅いソースを長く待つだけです。";
+"Search for “%@”" = "「%@」を検索";
+"Videos from every source" = "すべてのソースから動画を探す";
+"Move Left" = "左へ移動";
+"Move Right" = "右へ移動";
+"Program Guide" = "番組表";
+"Now On" = "放送中";
+"Coming Up" = "この後";
+"An XMLTV file (.xml or .xml.gz), or an address with {name} for each channel. Leave it empty to use the playlist's own guide." = "XMLTV ファイル（.xml または .xml.gz）、またはチャンネルごとの {name} を含むアドレス。空欄にするとプレイリストの番組表を使います。";
+"App Icon" = "アプリアイコン";
+"Pocket" = "ポケット";
+"Gray Pocket" = "グレーポケット";
+"Layers" = "レイヤー";
+"Glass Play" = "ガラスの再生";
+"Seal" = "アザラシ";
+"Shiba" = "柴犬";
+"Cat" = "ネコ";
+"Friends" = "なかま";
+"Panda" = "パンダ";
+"Arc" = "Arc";
+"Aurora" = "オーロラ";
+"Classic" = "クラシック";
+"Porcelain" = "ポーセリン";
+"Obsidian" = "オブシディアン";
+"Azure" = "アズール";
+"Daybreak" = "夜明け";
+"Iris" = "アイリス";
+"Lagoon" = "ラグーン";
+"Rose Quartz" = "ローズクォーツ";
+"Citrus" = "シトラス";
+"Cosmic" = "コズミック";
+"Couldn't change the app icon: %@" = "アプリアイコンを変更できませんでした：%@";
+"Couldn't open that picture." = "その画像を開けませんでした。";
+"A square picture works best. One with see-through corners, such as an icon made for the Mac, shows as it is." = "正方形の画像がおすすめです。Mac 用アイコンのように四隅が透明な画像は、そのまま表示されます。";
+"Choose Picture…" = "画像を選択…";
+"Remove Custom Picture" = "カスタム画像を削除";
+"The Dock and Finder show the icon you pick, also while Yingxia is closed." = "選んだアイコンは、映匣を閉じている間も Dock と Finder に表示されます。";
+"Yingxia can't change its own icon where it's installed, so the Dock shows this icon only while Yingxia is open." = "映匣はインストール先で自分のアイコンを変更できないため、このアイコンは映匣を開いている間だけ Dock に表示されます。";
+"The icon on your Home Screen. The system confirms the change with a short message." = "ホーム画面のアイコンです。変更すると、システムが短いメッセージで知らせます。";
+"The icon on the Home Screen. When Yingxia sits in the top row, the picture above it stays Pocket." = "ホーム画面のアイコンです。映匣を一番上の列に置いたとき、その上に表示される画像は「ポケット」のままです。";
+"Violet" = "バイオレット";
+"Ocean" = "オーシャン";
+"Forest" = "フォレスト";
+"Amber" = "アンバー";
+"Rose" = "ローズ";
+"Crimson" = "クリムゾン";
+"Orchid" = "オーキッド";
+"Graphite" = "グラファイト";
+"Color Theme" = "カラーテーマ";
+"Changes the app's colors: the highlight, page backgrounds, cards and icons, and on a Mac the sidebar and title bar. Classic is the app's original look." = "アプリの色を変えます。ハイライト、ページの背景、カード、アイコン、Mac ではサイドバーとタイトルバーも。「クラシック」はアプリ本来の見た目です。";
+"Highlight" = "ハイライト";
+"Page Background, Top" = "ページ背景(上)";
+"Page Background, Bottom" = "ページ背景(下)";
+"Cards and Rows" = "カードと行";
+"Sidebar" = "サイドバー";
+"Title Bar" = "タイトルバー";
+"Status Bar" = "ステータスバー";
+"Icon Color %@" = "アイコンの色 %@";
+"Start From a Theme" = "テーマから始める";
+"Choose a Theme" = "テーマを選ぶ";
+"Selections, buttons and progress" = "選択項目、ボタン、進行状況";
+"Where the page background starts, at the top left" = "ページ背景の始まり(左上)";
+"Where it ends, at the bottom right. Pick the same color for a flat background." = "終わり(右下)。同じ色を選ぶと単色の背景になります。";
+"Cards, lists and settings rows" = "カード、リスト、設定の行";
+"Behind the sections on the left" = "左側のセクション一覧の背景";
+"The band under the window's toolbar" = "ウインドウのツールバーの帯";
+"The version strip at the foot of the sidebar" = "サイドバー下端のバージョン表示";
+"Section icons, settings icons and tiles" = "セクションと設定のアイコン、タイル";
+"Each color is used exactly as picked, in light and dark mode. Text turns light or dark to match the page background." = "選んだ色をそのまま、ライトモードでもダークモードでも使います。文字はページ背景に合わせて明るく、または暗くなります。";
+"Sunshine Beach" = "サンシャインビーチ";
+"Watermelon" = "スイカ";
+"Tropical" = "トロピカル";
+"Sunset Sky" = "夕焼け空";
+"Mint Lemonade" = "ミントレモネード";
+"Peach Soda" = "ピーチソーダ";
+"Neon Night" = "ネオンナイト";
+"Another subscription already uses this address." = "このアドレスはほかの配信設定で使われています。";
+"This address doesn't hold a subscription. Add it as a new one instead." = "このアドレスは配信設定ではありません。新しい配信設定として追加してください。";
+"Couldn't load this address: %@" = "このアドレスを読み込めません：%@";
+"Use New Address" = "新しいアドレスを使う";
+"File" = "ファイル";
+"Yingxia keeps its own copy of this file. Later changes to the original don't reach the app; open it again to update it." = "映匣はこのファイルのコピーを保存します。元のファイルを後で変更しても映匣には反映されません。更新するには、もう一度映匣で開いてください。";
+"Added the LX Music source “%@”. Music plays songs through it; manage it in Music Settings › LX Music Sources." = "LX Music ソース「%@」を追加しました。ミュージックはこのソースで曲を再生します。ミュージック設定 › LX Music カスタムソースで管理できます。";
+"This address is now an LX Music source. Add it again to play music through it." = "このアドレスは現在 LX Music ソースです。追加し直すとこのソースで音楽を再生できます。";
+"Use This Source" = "このソースを使用";
+"“%@” is already added." = "「%@」は追加済みです。";
+"Follow Show" = "フォロー";
+"Unfollow Show" = "フォローを解除";
+"Following Show" = "フォロー中";
+"Following Calendar" = "フォロー中の番組";
+"Air Calendar" = "放送カレンダー";
+"Episode %@ / %@" = "第%@話／全%@話";
+"%@ · %@ Episodes" = "%@・全%@話";
+"%@ of %@ aired" = "%@／%@話 放送済み";
+"Tomorrow" = "明日";
+"No upcoming episodes" = "放送予定なし";
+"No Shows Followed" = "フォロー中の番組はありません";
+"Open a series in Discover and tap Follow Show to see when its new episodes air." = "発見でシリーズを開いて「フォロー」をタップすると、新しいエピソードの放送日がここに表示されます。";
+"Season %@" = "シーズン%@";
+"Unfollowed Show" = "フォローを解除しました";
+"New episodes show up in Following Calendar" = "新しいエピソードはフォロー中の番組に表示";
+"Previous Month" = "前の月";
+"Next Month" = "次の月";
+"Last Week" = "先週";
+"This Week" = "今週";
+"Next Week" = "来週";
+"Aired" = "放送済み";
+"In %@ days" = "%@日後";
+"Last fetch took the %@ leg" = "前回の取得は%@経由でした";
+"Route: %@" = "経路：%@";
+"Sites That Must Use a Node" = "ノード経由が必須のサイト";
+"A site your Loon rules already classify as direct cannot be re-routed by this app. Install the generated plugin in Loon once; it stays in effect afterwards." = "Loon のルールで既にダイレクト判定のサイトは本アプリから経路変更できません。生成したプラグインを Loon に一度インストールすれば以後も有効です。";
+"Recorded: %@" = "記録済み：%@";
+"Nothing recorded yet" = "まだ記録はありません";
+"Open a source that fails to load; the site is recorded once both lines fail." = "読み込みに失敗するソースを開いてください。直結とプロキシの両方が失敗するとそのサイトが記録されます。";
+"Plugin URL" = "プラグイン URL";
+"Install in Loon" = "Loon にインストール";
+"Identify My Node" = "自分のノードを判定";
+"Copy Site Rules" = "サイトルールをコピー";
+"Copy Remote Rule Line" = "リモートルール行をコピー";
+"Clear Recorded Sites" = "記録済みサイトを消去";
+"Neither the direct line nor the proxy could reach %@." = "直結もプロキシも %@ に到達できませんでした。";

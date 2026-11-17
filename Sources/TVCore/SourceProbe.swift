@@ -1217,7 +1217,7 @@ public enum SourceProbeRunner {
         // 是这三种 scheme 但解析不出流（还没注册、或注册已被回收）：**没测出来**，不是判死。
         // 落到下面的 `URLRequest` 会必然失败并被记成 `.unreachable` —— 那就把一个能播的源
         // 送进了「不通」分组。
-        if let scheme = url.scheme, [CloudStreams.scheme, HongguoStreams.scheme, DashStreams.scheme].contains(scheme) {
+        if let scheme = url.scheme, [CloudStreams.scheme, CENCStreams.scheme, DashStreams.scheme].contains(scheme) {
             return SourceProbeResult(reachability: .unknown)
         }
         var request = URLRequest(url: url)

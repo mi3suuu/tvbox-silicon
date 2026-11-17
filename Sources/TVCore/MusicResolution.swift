@@ -253,19 +253,17 @@ public struct MusicResolver: Sendable {
     /// For one selection, resolution and probing together.
     var budget: TimeInterval = 15
     var parallel = 2
-    /// Primary providers per catalog, then fallbacks. Migu's own servers and Kuwo through Nianxin
-    /// lead: in the 2026-10-14 test they played songs VKeys and GD no longer reach (Jay Chou's).
-    static let primaries: [(MusicPlatform, MusicProviderID)] = [(.migu, .migu), (.kuwo, .nianxin), (.qq, .vkeys), (.netease, .gdstudio)]
-    /// LX Music sources the listener imported come last: third-party scripts, asked when the built-in channels
-    /// found nothing better.
-    static let order: [(MusicPlatform, MusicProviderID)] = primaries + [(.kuwo, .xinghai), (.netease, .nianxin), (.qq, .hyw), (.netease, .xinghai),
-                                                                         (.qq, .lx), (.netease, .lx), (.kuwo, .lx), (.migu, .lx)]
-    static func isPrimary(_ candidate: MusicCandidate) -> Bool {
-        primaries.contains { $0.0 == candidate.platform && $0.1 == candidate.provider }
-    }
+    /// The order to ask in: the subscription's, then the listener's LX Music sources.
+    let routes: MusicRoutes
+    /// Whether a subscription lists music channels. Without one only LX Music sources are asked, and when they find
+    /// nothing the failure says what is missing rather than what the last source did (#979).
+    var channelsListed = true
+    /// Whether any channel (a listed one, an LX Music source or a music extension) can be asked at all.
+    public var hasChannels: Bool { !providers.isEmpty }
 
-    public init(providers: [any MusicStreamProvider], prober: MusicProber = MusicProber(), health: MusicHealth = .shared,
+    public init(routes: MusicRoutes = .current, providers: [any MusicStreamProvider], prober: MusicProber = MusicProber(), health: MusicHealth = .shared,
                 companions: MusicCompanionFinder? = nil, budget: TimeInterval = 15) {
+        self.routes = routes
         self.providers = Dictionary(providers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         self.prober = prober; self.health = health; self.companions = companions; self.budget = budget
     }
@@ -274,23 +272,24 @@ public struct MusicResolver: Sendable {
     public init(preferences: MusicPreferences, transport: MusicTransport = URLSessionMusicTransport(), health: MusicHealth = .shared) {
         var list: [any MusicStreamProvider] = []
         if preferences.enabled(.extension), let extensions = MusicExtensionProvider() { list.append(extensions) }
-        if preferences.enabled(.vkeys) { list.append(VKeysProvider(transport: transport)) }
-        if preferences.enabled(.gdstudio) { list.append(GDStudioProvider(transport: transport, health: health)) }
-        if preferences.enabled(.hyw) { list.append(HYWProvider(key: preferences.hywKey, transport: transport)) }
-        if preferences.enabled(.migu) { list.append(MiguProvider(transport: transport)) }
-        if preferences.enabled(.nianxin) { list.append(NianxinProvider(transport: transport)) }
-        if preferences.enabled(.xinghai) { list.append(XinghaiProvider(transport: transport, health: health)) }
+        if let listing = CloudMusic.current {
+            for channel in listing.channels where preferences.enabled(channel.id) {
+                list.append(CloudMusicProvider(channel: channel, api: listing.api, key: preferences.key(channel.id), health: health))
+            }
+        }
         if preferences.enabled(.lx), let lx = LXMusicProvider(sources: LXSourceLibrary.shared.enabled, health: health) { list.append(lx) }
         self.init(providers: list, prober: MusicProber(transport: transport), health: health,
                   companions: MusicCompanionFinder(catalogs: MusicSearchModel.defaultCatalogs(transport: transport, health: health)))
+        channelsListed = CloudMusic.current != nil
     }
 
     public func candidates(for track: MusicTrack) -> [MusicCandidate] {
-        let listed = Self.order.compactMap { platform, provider -> MusicCandidate? in
+        let listed = routes.order.compactMap { route -> MusicCandidate? in
+            let platform = route.platform, provider = route.provider
             guard let songID = track.ids[platform], let resolver = providers[provider], resolver.platforms.contains(platform) else { return nil }
             return MusicCandidate(platform: platform, songID: songID, provider: provider)
         }
-        // A music extension's own song plays from what the extension gives; after the built-in channels when the
+        // A music extension's own song plays from what the extension gives; after the other channels when the
         // song was also found in a catalog.
         guard let songID = track.ids[.ext], providers[.extension]?.platforms.contains(.ext) == true else { return listed }
         return listed + [MusicCandidate(platform: .ext, songID: songID, provider: .extension)]
@@ -312,7 +311,10 @@ public struct MusicResolver: Sendable {
             let key = MusicHealth.key(candidate.provider.rawValue, candidate.platform, .resolve)
             if await health.failing(key) { cooling.append(candidate) } else { ready.append(candidate) }
         }
-        guard !(ready.isEmpty && cooling.isEmpty) else { throw providers.isEmpty ? MusicProviderError.authRequired : MusicProviderError.noResource }
+        guard !(ready.isEmpty && cooling.isEmpty) else {
+            if !channelsListed { throw MusicProviderError.noChannels }
+            throw providers.isEmpty ? MusicProviderError.authRequired : MusicProviderError.noResource
+        }
         // A cooling channel is only asked when nothing else is left: one probe, after the others.
         var queue = ready + cooling
         var attempts: [MusicAttempt] = [], found: [Found] = [], order = 0
@@ -323,7 +325,7 @@ public struct MusicResolver: Sendable {
             if !found.isEmpty, let first = queue.first, cooling.contains(first) { break }
             // Each catalog's primary channel runs alongside the other's; a fallback, or a channel
             // cooling down, only runs alone, after what came before it failed.
-            let together = queue.prefix(parallel).prefix { Self.isPrimary($0) && !cooling.contains($0) }
+            let together = queue.prefix(parallel).prefix { routes.isPrimary($0) && !cooling.contains($0) }
             let wave = together.isEmpty ? [queue[0]] : Array(together)
             queue.removeFirst(wave.count)
             let winner: Found? = await withTaskGroup(of: (MusicCandidate, Result<(ResolvedMusicStream, MusicProbeResult), MusicProviderError>, Double).self) { group in
@@ -365,6 +367,7 @@ public struct MusicResolver: Sendable {
         }
         guard let best = usable.min(by: { Self.better($0, than: $1, preference: preference) }) else {
             if !found.isEmpty { throw MusicProviderError.notLossless }
+            if !channelsListed { throw MusicProviderError.noChannels }
             throw Self.summary(attempts.compactMap { attempt in
                 if case .failed(let error) = attempt.outcome { return error }
                 return nil
@@ -450,14 +453,33 @@ public struct MusicResolver: Sendable {
         let key = MusicHealth.key(candidate.provider.rawValue, candidate.platform, .resolve)
         do {
             guard let provider = providers[candidate.provider] else { throw MusicProviderError.authRequired }
-            let stream = try await MusicHTTP.withTimeout(min(8, timeout)) {
+            let deadline = start.addingTimeInterval(timeout)
+            var stream = try await MusicHTTP.withTimeout(min(8, timeout)) {
                 try await provider.resolve(candidate.songID, platform: candidate.platform, track: track, quality: quality)
             }
             await health.record(key, error: nil)
-            let probe = try await prober.probe(stream, expected: track.duration)
-            if probe.completeness == .preview { throw MusicProviderError.preview(probe.duration ?? 0) }
-            if let expected = track.duration, let duration = probe.duration, duration > expected + MusicMatching.durationTolerance(expected) {
-                throw MusicProviderError.differentRecording(duration)
+            var probe: MusicProbeResult
+            // An address that doesn't play is the source's, not the channel's: a channel of several sources (LX
+            // Music) is asked again without it. A song only LX sources find (Jay Chou's, which NetEase, Kuwo and
+            // Migu don't carry) otherwise failed whenever the first source's server was down or gave a preview.
+            var skipped: Set<String> = []
+            while true {
+                do {
+                    probe = try await playable(stream, track: track)
+                    break
+                } catch {
+                    let failure = MusicProviderError(error)
+                    guard let alternatives = provider as? any MusicStreamAlternatives, let upstream = stream.upstream,
+                          failure != .cancelled, deadline.timeIntervalSinceNow > 1 else { throw failure }
+                    skipped.insert(upstream)
+                    Diagnostics.shared.record(.info, "music", "\(candidate.provider.rawValue) \(candidate.platform.rawValue) \(upstream) unplayable: \(failure.detail)")
+                    let left = deadline.timeIntervalSinceNow, tried = skipped
+                    // No source left, or none answers: the address that didn't play is the reason.
+                    guard let next = try? await MusicHTTP.withTimeout(min(8, left), {
+                        try await alternatives.resolve(candidate.songID, platform: candidate.platform, track: track, quality: quality, skipping: tried)
+                    }) else { throw failure }
+                    stream = next
+                }
             }
             await cache.put(cacheKey, .init(stream: stream, probe: probe))
             Diagnostics.shared.record(.info, "music", "\(candidate.provider.rawValue) \(candidate.platform.rawValue) host=\(stream.url.host() ?? "-") \(probe.format.label) \(probe.completeness.rawValue) in \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
@@ -468,6 +490,16 @@ public struct MusicResolver: Sendable {
             Diagnostics.shared.record(.info, "music", "\(candidate.provider.rawValue) \(candidate.platform.rawValue) failed: \(failure.detail)")
             return (candidate, .failure(failure), Date().timeIntervalSince(start))
         }
+    }
+
+    /// What `stream` serves, when it is the whole song.
+    private func playable(_ stream: ResolvedMusicStream, track: MusicTrack) async throws -> MusicProbeResult {
+        let probe = try await prober.probe(stream, expected: track.duration)
+        if probe.completeness == .preview { throw MusicProviderError.preview(probe.duration ?? 0) }
+        if let expected = track.duration, let duration = probe.duration, duration > expected + MusicMatching.durationTolerance(expected) {
+            throw MusicProviderError.differentRecording(duration)
+        }
+        return probe
     }
 }
 
@@ -487,6 +519,30 @@ public struct MusicCompanionFinder: Sendable {
             Diagnostics.shared.record(.info, "music", "companion \(catalog.platform.rawValue) found: \(wider.evidence.joined(separator: ","))")
         }
         return wider.ids.count > track.ids.count ? wider : nil
+    }
+}
+
+/// Whether music plays again after an alarm, a call or Siri took the sound (#803). Music the system paused for the
+/// interruption plays again when the system says it may, as in Music; music the viewer paused, or that stopped for
+/// another reason long before (headphones pulled out), stays paused.
+public struct MusicInterruption: Sendable {
+    private var resumes = false
+    private var systemPausedAt: Date?
+    public init() {}
+
+    /// The player stopped without the viewer pausing it. An interruption's own pause can arrive just before its notice.
+    public mutating func systemPaused(now: Date = Date()) { systemPausedAt = now }
+    /// The viewer paused: nothing plays again by itself.
+    public mutating func viewerPaused() { resumes = false; systemPausedAt = nil }
+
+    public mutating func began(playing: Bool, now: Date = Date()) {
+        resumes = playing || systemPausedAt.map { now.timeIntervalSince($0) < 3 } == true
+    }
+
+    /// True when playback should start again; `paused` is whether it is still paused now.
+    public mutating func ended(shouldResume: Bool, paused: Bool) -> Bool {
+        defer { resumes = false }
+        return resumes && shouldResume && paused
     }
 }
 

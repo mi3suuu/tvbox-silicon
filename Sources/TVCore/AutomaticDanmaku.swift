@@ -21,8 +21,9 @@ public struct DanmakuTrack: Codable, Hashable, Sendable {
     public let title: String
     public let page: URL?
     public let id: String?
-    public init(number: Int?, title: String, page: URL? = nil, id: String? = nil) {
-        self.number = number; self.title = title; self.page = page; self.id = id
+    public let source: String?
+    public init(number: Int?, title: String, page: URL? = nil, id: String? = nil, source: String? = nil) {
+        self.number = number; self.title = title; self.page = page; self.id = id; self.source = source
     }
 }
 public struct DanmakuMapping: Codable, Sendable {
@@ -30,18 +31,34 @@ public struct DanmakuMapping: Codable, Sendable {
     public let title: String
     public let year: String?
     public let tracks: [DanmakuTrack]
-    public init(provider: String, title: String, year: String?, tracks: [DanmakuTrack]) {
+    /// Catalog identity retained for refreshing a manual selection when its episode IDs expire.
+    public let animeID: String?
+    public let source: String?
+    public init(provider: String, title: String, year: String?, tracks: [DanmakuTrack], animeID: String? = nil, source: String? = nil) {
         self.provider = provider; self.title = title; self.year = year; self.tracks = tracks
+        self.animeID = animeID; self.source = source
     }
     public func track(for context: PlaybackHistoryContext) -> DanmakuTrack? {
-        guard CatalogDanmakuMatcher.normalized(title) == CatalogDanmakuMatcher.normalized(context.videoName),
-              context.year == nil || year == nil || context.year == year else { return nil }
-        if let number = CatalogDanmakuMatcher.episodeNumber(context.episodeName) {
-            let matches = tracks.filter { $0.number == number }
-            return matches.count == 1 ? matches.first : nil
+        let work = CatalogDanmakuAnime(id: animeID ?? "mapping", title: title, source: source ?? provider, year: year)
+        guard CatalogDanmakuMatcher.anime(title: context.videoName, year: context.year, in: [work]) != nil else { return nil }
+        // Official catalogs already provide authoritative episode numbers; keep their existing behavior.
+        if animeID == nil, source == nil {
+            if let number = CatalogDanmakuMatcher.episodeNumber(context.episodeName) {
+                let matches = tracks.filter { $0.number == number }
+                return matches.count == 1 ? matches.first : nil
+            }
+            let movies = ["正片", "电影", "hd", "1080p", "720p", "完整版", "蓝光"]
+            return tracks.count == 1 && movies.contains(CatalogDanmakuMatcher.normalized(context.episodeName)) ? tracks.first : nil
         }
-        let movies = ["正片", "电影", "hd", "1080p", "720p", "完整版", "蓝光"]
-        return tracks.count == 1 && movies.contains(CatalogDanmakuMatcher.normalized(context.episodeName)) ? tracks.first : nil
+        let selectedProvider = DanmakuProvider(source: source ?? provider)
+        let episodes = tracks.enumerated().compactMap { index, track -> CatalogDanmakuEpisode? in
+            let episode = CatalogDanmakuEpisode(id: String(index), title: track.title, episodeNumber: track.number, source: track.source ?? source ?? provider)
+            guard selectedProvider == .automatic || episode.provider == selectedProvider else { return nil }
+            return episode
+        }
+        guard let match = CatalogDanmakuMatcher.episode(name: context.episodeName, seriesTitle: title, in: episodes),
+              let index = Int(match.id) else { return nil }
+        return tracks[index]
     }
 }
 public struct AutomaticDanmakuResult: Codable, Sendable {
@@ -87,7 +104,7 @@ public struct OfficialDanmakuCatalog: Sendable {
     public init(http: DanmakuHTTP = .init()) { self.http = http }
     public func iqiyi(_ context: PlaybackHistoryContext) async throws -> DanmakuMapping? {
         var url = URLComponents(string: "https://mesh.if.iqiyi.com/portal/lw/search/homePageV3")!
-        url.queryItems = ["key": context.videoName, "current_page": "1", "mode": "1", "source": "input", "pcv": "13.074.22699",
+        url.queryItems = ["key": CatalogDanmakuMatcher.withoutReleaseNotes(context.videoName), "current_page": "1", "mode": "1", "source": "input", "pcv": "13.074.22699",
             "version": "13.074.22699", "pageNum": "1", "pageSize": "25", "pu": "", "u": UUID().uuidString,
             "userVip": "0", "vipType": "-1", "osShortName": "win10"].map { URLQueryItem(name: $0.key, value: $0.value) }
         let root = try await http.json(url.url!, referer: "https://www.iqiyi.com/")
@@ -100,7 +117,8 @@ public struct OfficialDanmakuCatalog: Sendable {
             return item["intentAlbumInfos"] as? [[String: Any]] ?? []
         }
         let matches = albums.filter { album in
-            guard let title = album["title"] as? String, CatalogDanmakuMatcher.normalized(HTMLText.plain(title)) == CatalogDanmakuMatcher.normalized(context.videoName) else { return false }
+            guard let title = album["title"] as? String,
+                  CatalogDanmakuMatcher.normalized(HTMLText.plain(title)) == CatalogDanmakuMatcher.normalized(CatalogDanmakuMatcher.withoutReleaseNotes(context.videoName)) else { return false }
             let year = (album["year"] as? [String: Any])?["value"] as? String ?? album["superscript"] as? String
             return context.year == nil || year == context.year
         }
@@ -122,7 +140,7 @@ public struct OfficialDanmakuCatalog: Sendable {
     }
     public func tencent(_ context: PlaybackHistoryContext) async throws -> DanmakuMapping? {
         let endpoint = URL(string: "https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2")!
-        let payload: [String: Any] = ["version": "25071701", "clientType": 1, "query": context.videoName, "pagenum": 0,
+        let payload: [String: Any] = ["version": "25071701", "clientType": 1, "query": CatalogDanmakuMatcher.withoutReleaseNotes(context.videoName), "pagenum": 0,
             "pagesize": 30, "uuid": UUID().uuidString, "isPrefetch": true, "isneedQc": true,
             "extraInfo": ["multi_terminal_pc": "1", "themeType": "1", "sugRelatedIds": "{}", "appVersion": ""]]
         let root = try await http.json(endpoint, body: JSONSerialization.data(withJSONObject: payload), referer: "https://v.qq.com/")
@@ -132,7 +150,7 @@ public struct OfficialDanmakuCatalog: Sendable {
         var seen = Set<String>()
         let matches = items.filter { item in
             guard let info = item["videoInfo"] as? [String: Any], let title = info["title"] as? String,
-                  CatalogDanmakuMatcher.normalized(HTMLText.plain(title)) == CatalogDanmakuMatcher.normalized(context.videoName),
+                  CatalogDanmakuMatcher.normalized(HTMLText.plain(title)) == CatalogDanmakuMatcher.normalized(CatalogDanmakuMatcher.withoutReleaseNotes(context.videoName)),
                   (info["playFlag"] as? Int) != 2, let id = (item["doc"] as? [String: Any])?["id"] as? String,
                   id.range(of: #"^[a-zA-Z0-9]+$"#, options: .regularExpression) != nil else { return false }
             let year = (info["year"] as? NSNumber)?.stringValue ?? info["year"] as? String

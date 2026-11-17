@@ -319,6 +319,12 @@ struct MobilePlayerView: View {
     /// 用 `@AppStorage` 而不是读 `AdSkip.enabled`：后者是计算属性，
     /// SwiftUI 不知道它变了，开关点了图标不换。
     @AppStorage(AdSkip.key) private var skipsAds = true
+    // 上游 1.8.23：三条新状态（弹幕设置 sheet / 选集 / 频道列表）+ 时间电量徽标 + 跳过间隔。
+    @State private var showsDanmakuSettings = false
+    @State private var showsEpisodes = false
+    @State private var showsChannels = false
+    @AppStorage(PlayerStatusBadge.key) private var showsStatus = true
+    @AppStorage(SkipInterval.key) private var skipInterval = SkipInterval.standard
     @State private var showsDanmakuList = false
     /// 「更多本剧」/「跳过片头片尾」两个 sheet。
     ///
@@ -354,6 +360,10 @@ struct MobilePlayerView: View {
     @State private var subtitleProgress: Double = 0
     /// Why the last attempt produced nothing, shown in place of the menu item.
     @State private var subtitleError: String?
+    /// 上游 1.8.23：外挂字幕「从文件 / 从地址 / 在线搜索」三个入口的开关。
+    @State private var importsSubtitleFile = false
+    @State private var asksSubtitleAddress = false
+    @State private var searchesSubtitles = false
     /// Persisted appearance, shared by every title.
     // [mi3s] 二开：键位与上游分开（见 `Mi3sSubtitleStyle.storageKey`）。共用一个键时，
     // 设置页的「Subtitle Style」与这里各自把对方写成默认值。
@@ -484,9 +494,9 @@ struct MobilePlayerView: View {
                         if waiting.starting { WatchCoverBackdrop(poster: waiting.artwork.poster, headers: waiting.artwork.headers, loading: session.error == nil) }
                         else { WaitSpinner(status: waiting.state) }
                     }
-                    .transition(.opacity)
+                    .transition(PlaybackWaitContent.transition)
                 } else {
-                    waiting.view.playerBleed(true).transition(.opacity)
+                    waiting.view.playerBleed(true).transition(PlaybackWaitContent.transition)
                 }
             }
             if pip.active || PictureInPicture.isActive { pipPlaceholder }
@@ -505,6 +515,7 @@ struct MobilePlayerView: View {
             skippedLabel
             swipeLabel
             levelLabel
+            episodeFailureLabel
             if let playingOn {
                 PlayOnPlaceholder(receiver: playingOn) {
                     self.playingOn = nil
@@ -534,8 +545,9 @@ struct MobilePlayerView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
-        .animation(.easeInOut(duration: 0.7), value: waiting == nil)
-        .animation(.easeInOut(duration: 0.4), value: waiting?.starting)
+        // In with a fade; out at once, so the first frame replaces the wait with no pause or crossfade.
+        .animation(waiting == nil ? nil : .easeInOut(duration: 0.7), value: waiting == nil)
+        .animation(waiting == nil ? nil : .easeInOut(duration: 0.4), value: waiting?.starting)
         .onAppear {
             clock.attach(session.player)
             speed = session.player.defaultRate
@@ -562,6 +574,10 @@ struct MobilePlayerView: View {
         // Pausing ends the faster speed in the session; another episode or quality plays at the chosen one.
         .onChange(of: session.boost == nil) { _, ended in if ended { boost = nil } }
         .onChange(of: clock.item) { endBoost() }
+        .onChange(of: store.resolvingEpisode?.name) { _, name in
+            if let name { askedEpisode = name; showEpisodeFailure(nil) }
+        }
+        .onChange(of: store.episodeError) { _, reason in showEpisodeFailure(reason) }
         .sensoryFeedback(trigger: boost) { old, new in
             guard let new else { return nil }
             guard let old else { return .impact(weight: .light) }
@@ -598,7 +614,10 @@ struct MobilePlayerView: View {
         }
         .sheet(isPresented: $showsDanmakuList) {
             DanmakuListView(player: session.player, comments: session.danmaku) { showsDanmakuList = false }
-                .danmakuListPresentation()
+                .danmakuListPresentation().environment(store)
+        }
+        .sheet(isPresented: $showsDanmakuSettings) {
+            CatalogDanmakuSettingsView(model: session.catalogDanmaku, channelName: channel.name).playerSheet().environment(store)
         }
         // 广告拦截开关当场生效（见 `PlaybackSession.adBlockingDidChange`）。
         .onChange(of: skipsAds) { _, enabled in
@@ -606,6 +625,10 @@ struct MobilePlayerView: View {
         }
         .sheet(isPresented: $showsSeries) { SeriesSuggestionSheet(channel: channel) }
         .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: session) }
+        // 上游 1.8.23（#576）：外挂字幕（文件 / 地址 / 在线搜索）+ 选集与频道列表两个 sheet。
+        .subtitleImport(files: $importsSubtitleFile, address: $asksSubtitleAddress, search: $searchesSubtitles, subtitles: session.externalSubtitles)
+        .playerEpisodesSheet(isPresented: $showsEpisodes, channel: channel)
+        .playerChannelsSheet(isPresented: $showsChannels, channel: channel, session: session)
         // 手标广告起止点（与 One 皮肤同一页）。
         .sheet(isPresented: $showsAdRange) {
             AdRangeEditor(session: session) { _ in Task { await loadSkipSegment() } }
@@ -641,7 +664,8 @@ struct MobilePlayerView: View {
         // Locked controls: a tap only shows or hides them; it never pauses or skips.
         // `doubleTapSkips` off: two taps anywhere play or pause, and the sides don't skip.
         let zone = PictureTaps.zone(x: x, width: width, seekable: doubleTapSkips && !controlsLocked && seekable && showsTransport && playingOn == nil && !pip.active)
-        switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone) {
+        // 上游 1.8.23（#929）：双击两侧的步长取设置里的跳过间隔。
+        switch taps.tap(at: ProcessInfo.processInfo.systemUptime, in: zone, step: SkipInterval.seconds(skipInterval)) {
         case .toggleControls:
             // Locked controls stay put: a tap may reveal the chrome (so the lock button stays reachable)
             // but never hides it or pauses — "lock" means the picture and the controls both stop reacting.
@@ -761,12 +785,55 @@ struct MobilePlayerView: View {
         }
     }
 
+    private struct EpisodeFailure: Equatable {
+        var name: String
+        var reason: String
+    }
+
+    /// The episode list says it itself, and a player that stopped with an error shows that instead.
+    private func showEpisodeFailure(_ reason: String?) {
+        episodeFailureTask?.cancel()
+        guard let reason, !showsEpisodes, session.error == nil else {
+            if episodeFailure != nil { withAnimation(.easeOut(duration: 0.3)) { episodeFailure = nil } }
+            return
+        }
+        withAnimation(.easeOut(duration: 0.2)) { episodeFailure = EpisodeFailure(name: askedEpisode, reason: reason) }
+        episodeFailureTask = Task {
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) { episodeFailure = nil }
+        }
+    }
+
+    /// At the top, where the faster speed shows: below the top row when the controls are up.
+    @ViewBuilder private var episodeFailureLabel: some View {
+        if let episodeFailure {
+            VStack(spacing: 3) {
+                Label(L10n.text("Couldn't play %@", EpisodeRow.title(episodeFailure.name)), systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(episodeFailure.reason).font(.caption).lineLimit(2).multilineTextAlignment(.center)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .glassSurface(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .environment(\.colorScheme, .dark)
+            .padding(.horizontal, 24)
+            .padding(.top, inline ? (chromeVisible ? 58 : 10) : chromeVisible ? 112 : 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .animation(.easeOut(duration: 0.2), value: chromeVisible)
+            .allowsHitTesting(false)
+            .transition(.opacity)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("player.episodeFailure")
+        }
+    }
+
     /// How far a run of double taps skipped, on its side.
     @ViewBuilder private var skippedLabel: some View {
         if let skipped {
             // Glass like the other gesture labels, with the skip buttons' symbol; it bounces on each further tap.
             VStack(spacing: 4) {
-                Image(systemName: skipped.forward ? "goforward.10" : "gobackward.10")
+                Image(systemName: SkipInterval.symbol(forward: skipped.forward, seconds: skipInterval))
                     .font(.system(size: 30, weight: .medium))
                     .symbolEffect(.bounce, value: skipped.total)
                 Text((skipped.forward ? "+" : "\u{2212}") + L10n.text("%lld s", Int(skipped.total)))
@@ -953,6 +1020,11 @@ struct MobilePlayerView: View {
         pip.active || PictureInPicture.isActive ? .resizeAspect : scaling.gravity
     }
 
+    /// 上游 1.8.23（#996/#901）：全屏控件起始处的时间与电量；iPhone 竖持走状态栏，不重复画。
+    private var statusBadge: Bool {
+        showsStatus && !inline && !(horizontalSizeClass == .compact && verticalSizeClass == .regular)
+    }
+
     private var seekable: Bool { session.hasTimeline && !session.isLive }
 
     /// The picture on a watch page can own a full-height column (held sideways, or on the unfolded Duo),
@@ -1014,7 +1086,8 @@ struct MobilePlayerView: View {
                 Spacer(minLength: 0)
                 // The buttons the viewer put in the bar, then the "more" menu with the rest. On a
                 // watch page the episodes are listed right below the picture anyway.
-                toolbar
+                // 上游 1.8.23：按钮收进一个玻璃胶囊（`chromeGroup`）。
+                HStack(spacing: 0) { toolbar }.chromeGroup()
             }
             .simultaneousGesture(TapGesture().onEnded { poke() })
         } else {
@@ -1031,7 +1104,12 @@ struct MobilePlayerView: View {
                 .keyboardShortcut(.cancelAction)
             Text(channel.name).font(.headline).lineLimit(1)
                 .shadow(color: .black.opacity(0.6), radius: 4)
-            toolbar
+            // 上游 1.8.23（#996）：全屏时的时间与电量，与按钮同处一个玻璃胶囊。
+            HStack(spacing: 0) {
+                if statusBadge { PlayerStatusBadge() }
+                toolbar
+            }
+            .chromeGroup()
         }
         .simultaneousGesture(TapGesture().onEnded { poke() })
     }
@@ -1221,7 +1299,6 @@ struct MobilePlayerView: View {
             if tvBrowser.receivers.isEmpty {
                 AirPlayButton()
                     .frame(width: 44, height: 44)
-                    .glassSurface(.regular.interactive(), in: Circle())
                     .contentShape(Circle())
                     .accessibilityLabel(L10n.text("AirPlay"))
             } else {
@@ -1379,9 +1456,12 @@ struct MobilePlayerView: View {
             } label: { Label(L10n.text("Danmaku Area"), systemImage: "rectangle.tophalf.inset.filled") }
             .pickerStyle(.menu)
             DanmakuStylePickers(model: session.catalogDanmaku)
+            // 上游 1.8.23：设置从二级菜单升成独立 sheet。
+            Button { showsDanmakuSettings = true } label: { Label(L10n.text("Danmaku Settings…"), systemImage: "slider.horizontal.3") }
             Button { showsDanmakuList = true } label: { Label(L10n.text("Danmaku List"), systemImage: "list.bullet.rectangle") }
+                .disabled(session.danmaku.isEmpty)
         } label: {
-            Image(systemName: showsDanmaku ? "text.bubble.fill" : "text.bubble").font(.headline).frame(width: 22, height: 22)
+            Image(systemName: DanmakuPreference.symbol).font(.headline).frame(width: 22, height: 22)
         }
         .chromeButton()
         .accessibilityLabel(L10n.text("Danmaku"))
@@ -1542,11 +1622,28 @@ struct MobilePlayerView: View {
 
     @ViewBuilder private var subtitlePicker: some View {
         if let legible = tracks.legible, !legible.options.isEmpty {
-            Picker(L10n.text("Subtitles"), selection: Binding(get: { tracks.selected(in: legible) }, set: { tracks.select($0, in: legible) })) {
+            Picker(L10n.text("Subtitles"), selection: Binding(get: { session.externalSubtitles.selected == nil ? tracks.selected(in: legible) : nil },
+                                                              set: { tracks.select($0, in: legible); session.choseSubtitle($0); session.externalSubtitles.nativeChosen() })) {
                 if legible.group.allowsEmptySelection { Text(L10n.text("Off")).tag(AVMediaSelectionOption?.none) }
-                ForEach(legible.options, id: \.self) { Text($0.displayName).tag(Optional($0)) }
+                ForEach(legible.options, id: \.self) { Text(legible.name($0)).tag(Optional($0)) }
             }
             .pickerStyle(.inline)
+        } else if session.externalSubtitles.selected != nil {
+            Button(L10n.text("Off")) { session.externalSubtitles.select(nil) }
+        }
+        // 上游 1.8.23（#576）：片源旁边的字幕文件，或当场添加。
+        ExternalSubtitleMenu(subtitles: session.externalSubtitles, addFile: { importsSubtitleFile = true },
+                             addAddress: { asksSubtitleAddress = true }, searchOnline: { searchesSubtitles = true })
+        // 上游 1.8.23（#599）：字幕比画面快时的延时，每步半秒。
+        if session.externalSubtitles.selected == nil, let legible = tracks.legible, !legible.options.isEmpty {
+            Menu(L10n.text("Subtitle Delay")) {
+                Text(SubtitleDelay.title(session.subtitles.delay))
+                Button(String(format: "%+.1f s", -SubtitleDelay.step)) { SubtitleDelay.save(session.subtitles.delay - SubtitleDelay.step) }
+                    .disabled(session.subtitles.delay <= SubtitleDelay.range.lowerBound)
+                Button(String(format: "%+.1f s", SubtitleDelay.step)) { SubtitleDelay.save(session.subtitles.delay + SubtitleDelay.step) }
+                    .disabled(session.subtitles.delay >= SubtitleDelay.range.upperBound)
+                if session.subtitles.delay != 0 { Button(L10n.text("Reset")) { SubtitleDelay.save(0) } }
+            }
         }
     }
 
@@ -1900,6 +1997,26 @@ struct MobilePlayerView: View {
         }
     }
 
+    /// The speed, by the seek bar: a tap lists them all, from a quarter to four times.
+    private var speedButton: some View {
+        Menu {
+            Picker(L10n.text("Playback Speed"), selection: Binding(get: { speed }, set: { speed = $0; session.setSpeed($0) })) {
+                ForEach(Self.speeds, id: \.self) { Text(Self.speedLabel($0)).tag($0) }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Text(Self.speedLabel(speed))
+                .font(.system(size: 14, weight: .semibold)).monospacedDigit().foregroundStyle(.white)
+                .lineLimit(1).fixedSize()
+                .frame(minWidth: 36).padding(.horizontal, 6).frame(height: 36)
+                .contentShape(Capsule())
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+        .accessibilityLabel(L10n.text("Playback Speed"))
+        .accessibilityValue(Self.speedLabel(speed))
+        .accessibilityIdentifier("player.speed")
+    }
+
     @ViewBuilder private var bottomRow: some View {
         if session.isLive {
             HStack {
@@ -2178,6 +2295,8 @@ private struct SeekBar<Accessory: View>: View {
         let duration = clock.duration
         let value = min(max(0, position), duration)
         let x = duration > 0 ? width * value / duration : 0
+        // How far the video has loaded past the position (#900): a lighter part of the bar ahead of the played one.
+        let loaded = duration > 0 ? width * min(max(clock.buffered, value), duration) / duration : 0
         let held = drag != nil
         return VStack(alignment: .leading, spacing: 6) {
             if showsClock || held {
@@ -2192,8 +2311,12 @@ private struct SeekBar<Accessory: View>: View {
                 .accessibilityHidden(true)
             }
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.3)).frame(height: held ? 6 : 4)
-                Capsule().fill(.white).frame(width: max(0, x), height: held ? 6 : 4)
+                // The played part is an overlay, so it never sizes the bar: at the very end it is the bar's whole
+                // measured width, and as a child it held the bar (and the watch page around it) at the landscape
+                // width after leaving Full Screen (#1008).
+                Capsule().fill(.white.opacity(0.25)).frame(height: held ? 6 : 4)
+                    .overlay(alignment: .leading) { Capsule().fill(.white.opacity(0.5)).frame(width: max(0, loaded)) }
+                    .overlay(alignment: .leading) { Capsule().fill(.white).frame(width: max(0, x)) }
                 Circle().fill(.white)
                     .frame(width: held ? 24 : 14, height: held ? 24 : 14)
                     .shadow(color: .black.opacity(0.35), radius: 3)
@@ -2345,11 +2468,13 @@ private struct PlayerTopBar: SwiftUI.Layout {
 private struct PlayerCircleStyle: ButtonStyle {
     var size: CGFloat
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.chromeGrouped) private var grouped
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: size * 0.4, weight: .semibold)).foregroundStyle(.white)
             .frame(width: size, height: size)
-            .glassSurface(.regular.interactive(), in: Circle())
+            // In a button group (`chromeGroup`) the group's capsule is the glass.
+            .glassSurface(grouped ? .identity : .regular.interactive(), in: Circle())
             .contentShape(Circle())
             .opacity(enabled ? (configuration.isPressed ? 0.72 : 1) : 0.38)
             // Gives under the finger, so a tap shows before the player answers.
@@ -3044,6 +3169,8 @@ struct PlayerLayerView: UIViewRepresentable {
     private(set) var stalled = false
     @ObservationIgnored private weak var player: AVPlayer?
     @ObservationIgnored private var token: Any?
+    /// The item's loaded ranges, which grow while it is paused too.
+    @ObservationIgnored private var loading: NSKeyValueObservation?
 
     func attach(_ player: AVPlayer) {
         detach()
@@ -3058,6 +3185,7 @@ struct PlayerLayerView: UIViewRepresentable {
     func detach() {
         if let token { player?.removeTimeObserver(token) }
         token = nil
+        loading = nil
     }
 
     /// The player's position now, read without waiting for the next tick.
@@ -3135,7 +3263,13 @@ struct PlayerLayerView: UIViewRepresentable {
 
     private func tick(_ time: CMTime) {
         guard let player else { return }
-        if item !== player.currentItem { item = player.currentItem }
+        if item !== player.currentItem {
+            item = player.currentItem
+            buffered = 0
+            loading = item?.observe(\.loadedTimeRanges, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor [weak self] in self?.measureLoaded() }
+            }
+        }
         let seconds = time.seconds
         position = seconds.isFinite ? max(0, seconds) : 0
         // The first non-zero position means a frame reached the screen.
@@ -3154,6 +3288,17 @@ struct PlayerLayerView: UIViewRepresentable {
         let finite = length.isFinite ? max(0, length) : 0
         // Observation reports every assignment, even of the same value; the duration rarely changes.
         if finite != duration { duration = finite }
+        measureLoaded()
+    }
+
+    /// Changed by a second or more, so the bar isn't redrawn for every few packets.
+    private func measureLoaded() {
+        guard let player, let item = player.currentItem else { return }
+        let now = player.currentTime()
+        let range = item.loadedTimeRanges.lazy.map(\.timeRangeValue).first { CMTimeRangeContainsTime($0, time: now) }
+        let end = range.map { CMTimeRangeGetEnd($0).seconds } ?? 0
+        let value = end.isFinite ? max(0, end) : 0
+        if abs(value - buffered) >= 1 || (value == 0) != (buffered == 0) { buffered = value }
     }
 }
 
@@ -3162,6 +3307,19 @@ struct PlayerLayerView: UIViewRepresentable {
     struct Group {
         let group: AVMediaSelectionGroup
         let options: [AVMediaSelectionOption]
+        /// The menu's names for them (`TrackLabel`): the language and what else is known, not just the language.
+        let names: [AVMediaSelectionOption: String]
+        init(group: AVMediaSelectionGroup, options: [AVMediaSelectionOption], details: [String: TrackDetail]) {
+            self.group = group; self.options = options
+            let labels = TrackLabel.names(options.map { option in
+                let title = AVMetadataItem.metadataItems(from: option.commonMetadata, filteredByIdentifier: .commonIdentifierTitle).first?.stringValue
+                let detail = title.flatMap { details[$0] }
+                return TrackLabel.Option(displayName: option.displayName, language: option.extendedLanguageTag ?? option.locale?.identifier,
+                                         title: detail?.title ?? title, format: detail?.format)
+            })
+            names = Dictionary(zip(options, labels)) { first, _ in first }
+        }
+        func name(_ option: AVMediaSelectionOption) -> String { names[option] ?? option.displayName }
     }
     private(set) var audio: Group?
     private(set) var legible: Group?
@@ -3176,10 +3334,12 @@ struct PlayerLayerView: UIViewRepresentable {
         let audible = try? await asset.loadMediaSelectionGroup(for: .audible)
         let subtitles = try? await asset.loadMediaSelectionGroup(for: .legible)
         guard !Task.isCancelled, self.item === item else { return }
-        audio = audible.map { Group(group: $0, options: $0.options) }
+        // A repackaged file's tracks: their titles and formats, which the options don't carry.
+        let details = (asset as? AVURLAsset).map { Remux.trackDetails($0.url) } ?? (audio: [:], subtitles: [:])
+        audio = audible.map { Group(group: $0, options: $0.options, details: details.audio) }
         // Forced subtitles only translate foreign speech and come on by themselves; they aren't a choice.
         legible = subtitles.map { group in
-            Group(group: group, options: group.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) })
+            Group(group: group, options: group.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }, details: details.subtitles)
         }
     }
 
@@ -3352,6 +3512,75 @@ import TVCore
     func select(_ option: AVMediaSelectionOption?, in group: Group) {
         item?.select(option, in: group.group)
         revision += 1
+    }
+}
+
+/// 上游 1.8.23（#996）：全屏按钮起始处的时间与电量。电量只在它显示时监听；模拟器没有电池，只显示时间。
+struct PlayerStatusBadge: View {
+    static let key = "player.showsTimeAndBattery"
+    @State private var battery = PlayerBattery()
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TimelineView(.everyMinute) { context in
+                // As the status bar shows it: no AM or PM.
+                Text(context.date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
+            }
+            if let level = battery.level {
+                HStack(spacing: 3) {
+                    Text(level, format: .percent.precision(.fractionLength(0)))
+                    Image(systemName: battery.symbol)
+                        .foregroundStyle(level <= 0.2 && !battery.charging ? .red : .white)
+                }
+            }
+        }
+        .font(.system(size: 14, weight: .semibold)).monospacedDigit()
+        .lineLimit(1).fixedSize()
+        .padding(.leading, 14).padding(.trailing, 6).frame(height: 44)
+        .onAppear { battery.start() }
+        .onDisappear { battery.stop() }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("player.status")
+    }
+}
+
+@MainActor @Observable final class PlayerBattery {
+    /// 0 to 1; nil where the device has no battery to report.
+    private(set) var level: Double?
+    private(set) var charging = false
+    @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var enabledMonitoring = false
+
+    var symbol: String {
+        guard let level else { return "battery.100percent" }
+        if charging { return "battery.100percent.bolt" }
+        return level >= 0.875 ? "battery.100percent" : level >= 0.625 ? "battery.75percent"
+            : level >= 0.375 ? "battery.50percent" : level >= 0.125 ? "battery.25percent" : "battery.0percent"
+    }
+
+    func start() {
+        guard observers.isEmpty else { return }
+        let device = UIDevice.current
+        if !device.isBatteryMonitoringEnabled { device.isBatteryMonitoringEnabled = true; enabledMonitoring = true }
+        read()
+        for name in [UIDevice.batteryLevelDidChangeNotification, UIDevice.batteryStateDidChangeNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.read() }
+            })
+        }
+    }
+
+    func stop() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if enabledMonitoring { UIDevice.current.isBatteryMonitoringEnabled = false; enabledMonitoring = false }
+    }
+
+    private func read() {
+        let device = UIDevice.current
+        let value = device.batteryLevel
+        level = value < 0 || device.batteryState == .unknown ? nil : Double(value)
+        charging = device.batteryState == .charging || device.batteryState == .full
     }
 }
 

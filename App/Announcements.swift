@@ -148,8 +148,9 @@ struct MessagesView: View {
         let messages = announcements.all
         Group {
             if messages.isEmpty {
-                ContentUnavailableView(L10n.text("No Messages"), systemImage: "megaphone",
-                                       description: Text(L10n.text("News and notices from Mi3s appear here.")))
+                // 上游统一空态组件（Liquid Glass 一版）；品牌名取我方。
+                EmptyResults(symbol: "megaphone", title: L10n.text("No Messages"),
+                             message: L10n.text("News and notices from Mi3s appear here."), fills: true)
             } else {
                 ScrollView {
                     VStack(spacing: 12) {

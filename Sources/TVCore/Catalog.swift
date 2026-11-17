@@ -756,22 +756,24 @@ public struct CatalogClient: Sendable {
                     throw error
                 }
             }
-            // An encrypted MP4 with its key, which the app decrypts as it plays.
+            // An encrypted MP4 with its key (`decryptKey`), which the app decrypts as it plays; `backupUrls` are the same
+            // file elsewhere, and `retryHeader` what to add when a node answers 403.
             if let key = result["decryptKey"]?.string, !key.isEmpty {
                 do {
                     let remote = try WebAddress.resolve(choices[0].address)
                     let backups = (result["backupUrls"]?.array ?? []).compactMap { $0.string.flatMap { try? WebAddress.resolve($0) } }
+                    let retry = result["retryHeader"]?.object?.compactMapValues(\.string) ?? [:]
                     let address: URL
                     if forDownload {
-                        address = try await HongguoMedia.shared.prepare(url: remote, backups: backups, key: key, headers: headers, http: http)
+                        address = try await CENCFiles.shared.prepare(url: remote, backups: backups, key: key, headers: headers, retry: retry, http: http)
                     } else {
-                        address = try HongguoStreams.register(url: remote, backups: backups, key: key, headers: headers, http: http)
+                        address = try CENCStreams.register(url: remote, backups: backups, key: key, headers: headers, retry: retry, http: http)
                     }
                     choices = [PlaybackChoice(id: 0, name: episode.name, address: address.absoluteString)]
                     headers = [:]
                 } catch {
                     if error is CancellationError || Task.isCancelled { throw CancellationError() }
-                    throw TVError.unsupported(L10n.text("This Hongguo video could not be prepared for playback. Please try again."))
+                    throw TVError.unsupported(L10n.text("This video could not be prepared for playback. Please try again."))
                 }
             } else if danmaku != nil, let url = try? WebAddress.resolve(choices[0].address) {
                 DanmakuSource.register(url, feed: danmaku, duration: duration)
@@ -803,7 +805,7 @@ public struct CatalogClient: Sendable {
     /// This does not call a spider `isVideoFormat`.
     public func resolvePlayback(_ plan: PlaybackPlan, choice: PlaybackChoice) async throws -> Channel {
         // Addresses the app made itself from the play result: a keyed MP4 or DASH described as HLS.
-        if let url = URL(string: choice.address), url.scheme == HongguoStreams.scheme || url.scheme == DashStreams.scheme {
+        if let url = URL(string: choice.address), url.scheme == CENCStreams.scheme || url.scheme == DashStreams.scheme {
             return Channel(name: choice.name, group: plan.group, url: url, headers: url.scheme == DashStreams.scheme ? plan.headers : [:],
                            subtitles: plan.subtitles, skips: plan.skips)
         }
@@ -882,10 +884,12 @@ public struct CatalogClient: Sendable {
 
     private func playResolved(_ plan: PlaybackPlan, choice: PlaybackChoice) async throws -> Channel {
         let address = Self.unwrapPluginProxy(choice.address)
+        // [mi3s] 二开：磁力链走我方 BT 桥（TorrentBridge），上游这里直接抛「不支持」。
         if address.lowercased().hasPrefix("magnet:") {
             return try await playTorrent(address, name: choice.name, group: plan.group)
         }
-        if Self.isPluginProxy(address) {
+        // 上游 #990：插件自带 /proxy? 地址时不再当作本 App 的中继改写。
+        if Self.isPluginProxy(address), !Self.servesOwnProxy(address, catPaw: site.isCatPawOpen) {
             // A Bili JAR spider's proxy id: Yingxia's own Bilibili source plays the same video.
             if let id = Self.bilibiliProxyID(address), let bilibili = CloudSources.site(where: \.isBilibili) {
                 let channel = try await CatalogClient(site: bilibili, origin: CloudSources.address, http: http)
@@ -975,6 +979,15 @@ public struct CatalogClient: Sendable {
             if authority.hasPrefix(host + ":"), let port = Int(authority.dropFirst(host.count + 1)), (-1...65535).contains(port) { return true }
         }
         return false
+    }
+    /// A CatPawOpen bundle answers its own `/proxy?url=` on the port its Node server listens on, as it does its
+    /// `/m3u8-proxy?`, so that address plays as it is (#990). A spider's TVBox proxy (port -1, or one the app doesn't
+    /// run) still can't.
+    static func servesOwnProxy(_ address: String, catPaw: Bool) -> Bool {
+        guard catPaw, isPluginProxy(address), let marker = address.range(of: "/proxy?") else { return false }
+        let authority = address[..<marker.lowerBound]
+        guard let colon = authority.lastIndex(of: ":"), let port = Int(authority[authority.index(after: colon)...]) else { return false }
+        return port > 0
     }
     /// The query of a plugin proxy address, split by hand. Plugins don't always percent-encode the wrapped
     /// address (spaces, CJK, `|` headers, a bare `%`), and `URLComponents.percentEncodedQuery` traps on those.

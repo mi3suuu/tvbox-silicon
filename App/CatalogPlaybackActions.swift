@@ -18,6 +18,7 @@ struct CatalogPlaybackActions: View {
     var openEpisodes: () -> Void = {}
     @Environment(Store.self) private var store
     @State private var showsSkip = false
+    // [mi3s] 二开：弹幕设置与同类推荐两个 sheet 的状态（上游无）。
     @State private var showsDanmaku = false
     @State private var showsSeries = false
 
@@ -54,6 +55,16 @@ struct CatalogPlaybackActions: View {
                     Button(L10n.text("Danmaku")) { showsDanmaku = true }
                         .accessibilityIdentifier("player.danmaku")
                 }
+                if !session.chapters.isEmpty {
+                    Menu {
+                        ForEach(Array(session.chapters.enumerated()), id: \.offset) { _, chapter in
+                            Button { session.jump(to: chapter.start) } label: {
+                                Text(EpisodeSkipSettings.formatTime(chapter.start) + "  " + chapter.title)
+                            }
+                        }
+                    } label: { Label(L10n.text("Chapters"), systemImage: "list.bullet") }
+                    .accessibilityIdentifier("player.chapters")
+                }
                 if let error = store.episodeError { Text(error) }
             } label: {
                 #if os(macOS)
@@ -64,12 +75,12 @@ struct CatalogPlaybackActions: View {
                 #endif
             }
             #if os(macOS)
-            // The same 34 pt glass circle as the window's other buttons; a bordered menu drew a wider capsule, and a
+            // A 34 pt button in the window's glass button group; a bordered menu drew a wider capsule, and a
             // borderless one drew its icon at the leading edge of the circle instead of the centre.
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
             .fixedSize()
-            .glassSurface(.regular.interactive(), in: Circle())
-            .help(L10n.text("Episodes"))
+            .playerBarButton()
+            .help(L10n.text("Playback Options"))
             #else
             // ⛔ 这里不用 `.chromeButton()`。
             //
@@ -81,10 +92,12 @@ struct CatalogPlaybackActions: View {
             #endif
             .accessibilityLabel(L10n.text("Playback Options"))
             .accessibilityIdentifier("player.catalogOptions")
+            // Store handed in, as for every sheet over the player (`PlayerSheetPresentation`).
+            .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: session).playerSheet().environment(store) }
+            // [mi3s] 二开：同类推荐与弹幕设置（上游无这两个入口）。
             .sheet(isPresented: $showsSeries) {
                 SeriesSuggestionSheet(channel: channel)
             }
-            .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: session) }
             .sheet(isPresented: $showsDanmaku) {
                 CatalogDanmakuSettingsView(model: session.catalogDanmaku, channelName: channel.name)
             }
@@ -99,6 +112,42 @@ struct CatalogPlaybackActions: View {
 // 上游 1.8.11 在 CatalogPlaybackActions.swift 里定义了 `View.playerSheet()`（播放器上的设置 sheet 用深色，
 // 治 #533 浅色模式下白底白字）。我方重写了本文件、把 sheet 呈现交给播放器宿主，但上游 PlayerEpisodes
 // 仍在调用它，所以这里原样保留。
+
+/// The viewer's own intro and outro times at work (#1003): the intro just skipped, with Undo, and a countdown before
+/// the outro is skipped, with Cancel, so a wrong time can be put right on the spot.
+struct SkipNoticeView: View {
+    let session: PlaybackSession
+    var body: some View {
+        if let notice = session.skipNotice {
+            HStack(spacing: 12) {
+                switch notice {
+                case .introSkipped:
+                    Text(L10n.text("Intro skipped"))
+                    Button(L10n.text("Undo")) { session.undoIntroSkip() }
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("player.skipNotice.undo")
+                case .outroIn(let seconds):
+                    Text(L10n.text("Skipping the outro in %@ s", String(seconds)))
+                        .contentTransition(.numericText(countsDown: true))
+                        .monospacedDigit()
+                    Button(L10n.text("Cancel")) { session.keepOutro() }
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("player.skipNotice.keep")
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .glassSurface(.regular.interactive(), in: Capsule())
+            .foregroundStyle(.white)
+            .animation(.smooth(duration: 0.25), value: notice)
+            .padding(.leading, 20).padding(.bottom, 96)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .transition(.opacity)
+            .accessibilityIdentifier("player.skipNotice")
+        }
+    }
+}
 
 extension View {
     /// A settings sheet over the player, dark like the player. A player at the top of a page makes only its own views

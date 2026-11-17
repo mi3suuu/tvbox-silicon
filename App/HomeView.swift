@@ -239,7 +239,9 @@ struct HomeView: View {
     private var welcomeCopy: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 16) {
-                AppMark(size: heroTitle * 1.4)
+                // 上游 #? 换成自带组装动画的 GatherMark；品牌名取我方。
+                // The mark putting itself together, lined up with the text below (its blades sit inside its square).
+                GatherMark().frame(width: heroTitle * 1.4, height: heroTitle * 1.4).padding(.leading, -heroTitle * 0.17)
                 Text(L10n.text("Mi3s")).font(.title3.weight(.semibold)).foregroundStyle(.secondary)
             }
             .padding(.bottom, 32)
@@ -301,14 +303,9 @@ struct HomeView: View {
 
     /// Every section switched off in Settings: say so, rather than leave a blank page.
     private var allHidden: some View {
-        ContentUnavailableView {
-            Label(L10n.text("Watch Now"), systemImage: AppSection.home.icon)
-        } description: {
-            Text(L10n.text("Choose what Watch Now shows in Settings."))
-        } actions: {
-            Button(L10n.text("Settings")) { store.section = .settings }.controlButton()
-        }
-        .frame(maxWidth: .infinity).padding(.top, 60)
+        EmptyResults(symbol: AppSection.home.icon, title: L10n.text("Watch Now"), message: L10n.text("Choose what Watch Now shows in Settings."),
+                     action: L10n.text("Settings"), actionSymbol: AppSection.settings.icon) { store.section = .settings }
+            .padding(.top, 20)
     }
 
     private func pinnedSources(_ config: Subscription) -> some View {
@@ -401,7 +398,7 @@ private struct HomeFavoriteCard: View {
     @ViewBuilder private var tvBody: some View {
         switch item {
         case .live(let channel):
-            tvButton(name: channel.name) { store.playing = channel } label: {
+            tvButton(name: channel.name) { store.watchFavorite(channel) } label: {
                 media(ChannelLogo(channel: channel), title: channel.name, subtitle: channel.displayGroup)
             }
         case .video(let video):
@@ -440,7 +437,7 @@ private struct HomeFavoriteCard: View {
     @ViewBuilder private var cardBody: some View {
         switch item {
         case .live(let channel):
-            ChannelCard(channel: channel)
+            ChannelCard(channel: channel) { store.watchFavorite($0) }
         case .video(let video):
             videoCard(video)
         case .episode(let episode):
@@ -534,21 +531,24 @@ private struct HomeFavoriteCard: View {
     }
 }
 
-/// The app icon artwork, masked like a home-screen icon.
+/// The app icon artwork, masked like a home-screen icon: the one picked in Settings › App Icon.
 struct AppMark: View {
     var size: CGFloat
     var body: some View {
-        Image("YingxiaLogo").resizable().interpolation(.high).scaledToFill()
+        AppIcons.shared.artwork.resizable().interpolation(.high).scaledToFill()
             .frame(width: size, height: size)
             .clipShape(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
             .shadow(color: Color(red: 0.1, green: 0.55, blue: 1).opacity(0.35), radius: size * 0.22, y: size * 0.06)
     }
 }
 
-/// Decorative poster tiles: staggered columns in the icon's blues, fading into the canvas.
+/// Poster tiles in staggered columns, fading into the canvas: this week's trending covers from Discover, each fading in
+/// over its placeholder as it arrives. A tile with no cover (offline, or before the list answers) keeps its placeholder.
 private struct PosterWall: View {
-    private static let hues: [Color] = [Brand.cyan, Brand.indigo, Brand.teal, Brand.cyan.opacity(0.6)]
-    private static let symbols = ["film", "sparkles.tv", "theatermasks", "music.note.tv", "popcorn", "star"]
+    /// The covers, kept for the session so coming back to the page draws them without asking again.
+    @MainActor private static var loaded: [URL]?
+    @State private var posters = PosterWall.loaded ?? []
+
     var body: some View {
         GeometryReader { proxy in
             let spacing = proxy.size.width * 0.045
@@ -556,7 +556,10 @@ private struct PosterWall: View {
             HStack(alignment: .top, spacing: spacing) {
                 ForEach(0..<3, id: \.self) { column in
                     VStack(spacing: spacing) {
-                        ForEach(0..<4, id: \.self) { row in tile(column * 4 + row, width: width) }
+                        ForEach(0..<4, id: \.self) { row in
+                            let index = column * 4 + row
+                            PosterWallTile(index: index, width: width, poster: index < posters.count ? posters[index] : nil)
+                        }
                     }
                     .offset(y: column == 1 ? -width * 0.55 : column == 2 ? -width * 0.15 : 0)
                 }
@@ -567,9 +570,45 @@ private struct PosterWall: View {
             // An ellipse that reaches clear at the frame's edges, so no tile meets a hard clip.
             .mask { EllipticalGradient(stops: [.init(color: .black, location: 0), .init(color: .black.opacity(0.75), location: 0.45), .init(color: .clear, location: 1)], endRadiusFraction: 0.5) }
         }
+        .task {
+            guard Self.loaded == nil, let page = try? await TMDBCatalog.page(.trending), !Task.isCancelled else { return }
+            let covers = Array(page.items.compactMap(\.poster).prefix(12))
+            Self.loaded = covers
+            posters = covers
+        }
+    }
+}
+
+/// One tile of the wall: the placeholder, and the cover fading in over it once loaded.
+private struct PosterWallTile: View {
+    private static let hues: [Color] = [Brand.cyan, Brand.indigo, Brand.teal, Brand.cyan.opacity(0.6)]
+    private static let symbols = ["film", "sparkles.tv", "theatermasks", "music.note.tv", "popcorn", "star"]
+    let index: Int
+    let width: CGFloat
+    let poster: URL?
+    @State private var cover: CGImage?
+
+    var body: some View {
+        ZStack {
+            placeholder
+            if let cover {
+                Image(decorative: cover, scale: 1).resizable().scaledToFill()
+                    .frame(width: width, height: width * 1.5)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: width, height: width * 1.5)
+        .clipShape(RoundedRectangle(cornerRadius: width * 0.08, style: .continuous))
+        .task(id: poster) {
+            guard let poster else { cover = nil; return }
+            if let image = PosterPalette.cachedImage(poster) { cover = image; return }
+            guard let image = await PosterPalette.image(poster), !Task.isCancelled else { return }
+            // Down each column and across, rather than all at once.
+            withAnimation(.easeOut(duration: 0.6).delay(Double(index / 4) * 0.12 + Double(index % 4) * 0.08)) { cover = image }
+        }
     }
 
-    private func tile(_ index: Int, width: CGFloat) -> some View {
+    private var placeholder: some View {
         let hue = Self.hues[index % Self.hues.count]
         let lit = index % 3 != 1
         return RoundedRectangle(cornerRadius: width * 0.08, style: .continuous)
@@ -588,7 +627,6 @@ private struct PosterWall: View {
                 .foregroundStyle(.white.opacity(lit ? 0.35 : 0.12))
                 .padding(width * 0.09)
             }
-            .frame(width: width, height: width * 1.45)
     }
 }
 

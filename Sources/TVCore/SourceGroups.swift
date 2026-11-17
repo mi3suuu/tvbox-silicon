@@ -88,7 +88,7 @@ public enum SourceGroups {
         let pinnedSites = pinOrder.filter(eligible)
         if !pinnedSites.isEmpty { groups.append(SourceGroup(kind: .pinned, title: "Pinned Group", sites: pinnedSites)) }
         let builtInSites = builtIns.filter { eligible($0) && !isPinned($0, fallback: builtInOrigin) }
-        if !builtInSites.isEmpty { groups.append(SourceGroup(kind: .builtIn, title: "Built-in", sites: builtInSites)) }
+        if !builtInSites.isEmpty { groups.append(SourceGroup(kind: .builtIn, title: "Recommended", sites: builtInSites)) }
         // The viewer's own groups sit above the feeds: a sweep that says "these answer, those do not"
         // is only useful if the answer is the first thing on the page. A group with nothing in it is
         // still listed — it was just made, and it needs somewhere to be dropped onto.

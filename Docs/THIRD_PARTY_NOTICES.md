@@ -56,6 +56,12 @@ Portions of this software are copyright © 1996-2026 The FreeType Project (https
 
 ## Reference implementation
 
+The scripts of the recommended sources are not part of this app: the sources service serves them and the app
+runs them. The reference implementations they are adapted from, with their attribution, modification records
+and licenses, are recorded with those scripts.
+The native sample-by-sample CENC media preparation is implemented for Yingxia. No Electron, FFmpeg,
+captured user cookies, or fixed device IDs are bundled.
+
 **No adapted third-party code is bundled for Hongguo, Xifan or Hema (updated 2026-11-06).**
 
 The earlier adaptation of
@@ -76,7 +82,6 @@ they only ever covered code that is no longer present.
 The catalog adapter and native sample-by-sample CENC media preparation remain
 first-party implementations for Yingxia. No Electron, FFmpeg, captured user cookies,
 or fixed device IDs are bundled.
-
 [FongMi/TV](https://github.com/FongMi/TV) is a GPL-3.0 reference implementation. The local reference checkout, when present, retains its own Git history and license. It is not included as an app build target. Its `quickjs/src/main/assets/js/lib/cheerio.min.js` and `crypto-js.js` assets (commit `c616c0aa3613e87529791587a9f71b78c278c991`) are copied unmodified into `Runtime/ScriptHost/assets/js/lib/` and bundled with the script host. Its `cat.js`, `gbk.js`, and `similarity.js` assets are copied unmodified from commit `4a11089cb6a1377cbf437ebccd24468296357132` into the same directory. The upstream license is retained as `Runtime/ScriptHost/LICENSE.assets` and `ScriptHost/LICENSE.assets` in the app. Embedded library copyright notices are preserved.
 
 ## Node.js (Mac)

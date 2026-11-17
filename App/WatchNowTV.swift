@@ -371,11 +371,15 @@ struct WatchNowTVCover: View {
     var landscape = false
     /// A word on the cover's corner (LIVE), painted into it so it lifts with the picture.
     var badge: (text: String, color: Color)? = nil
+    /// Square, at the poster's width: an album's or a playlist's cover.
+    var square = false
+    /// Shown until the cover loads, and when there is none.
+    var symbol = "film"
     private var width: CGFloat { landscape ? Self.landscapeWidth : Self.width }
-    private var height: CGFloat { landscape ? Self.landscapeHeight : Self.height }
+    private var height: CGFloat { landscape ? Self.landscapeHeight : square ? Self.width : Self.height }
     var body: some View {
         VStack(spacing: 5) {
-            PosterImage(url: poster, headers: headers).frame(width: width, height: height)
+            PosterImage(url: poster, headers: headers, symbol: symbol).frame(width: width, height: height)
                 .coverOverlay(alignment: .topLeading) {
                     if let badge {
                         Text(badge.text).font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
@@ -387,7 +391,7 @@ struct WatchNowTVCover: View {
                 Text(title).font(.system(size: 26))
                 Text(detail.isEmpty ? " " : detail).font(.system(size: 22, weight: .medium)).foregroundStyle(.white.opacity(0.5))
             }
-            .lineLimit(1).cardCaption()
+            .lineLimit(1).cardCaption(drop: square ? 0.09 : 0.06)
         }
         .frame(width: width)
     }
@@ -467,7 +471,7 @@ private struct WatchNowTVFavorite: View {
             }
             .cardButton().contextMenu { FavoriteMenuButton(item: item, name: episode.video.videoName) }
         case .live(let channel):
-            plate(title: channel.name, detail: channel.displayGroup, action: { store.playing = channel }) {
+            plate(title: channel.name, detail: channel.displayGroup, action: { store.watchFavorite(channel) }) {
                 ChannelLogo(channel: channel).frame(width: 140, height: 140)
             }
         case .music(let track):
@@ -629,7 +633,9 @@ struct WatchNowTVCategoryRail: View {
         Task {
             defer { loading.remove(key) }
             do {
-                let page = try await client.list(category: category, query: "", page: 1)
+                // Rows of one plugin source start together (Discover starts four at once), and its queue turns
+                // away calls past the few it holds: wait and ask again, or the row would be gone for ten minutes.
+                let page = try await PluginQueue.retrying { try await client.list(category: category, query: "", page: 1) }
                 var seen = Set<String>()
                 let videos = page.videos.filter { seen.insert($0.id).inserted }
                 if rows[key]?.videos != videos { rows[key] = Row(videos: videos, date: Date()) } else { rows[key]?.date = Date() }

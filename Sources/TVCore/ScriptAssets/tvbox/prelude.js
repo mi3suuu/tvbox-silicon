@@ -134,7 +134,11 @@ function request(address, options = {}) {
         // that only answers certain regions. Omitted unless the source set one.
         proxy: options.proxy ? String(options.proxy) : undefined,
         redirect: !(options.redirect === 0 || options.redirect === false), encoding: options.encoding || 'utf-8',
-        binary: options.buffer === 1 || options.buffer === 2 || options.buffer === 3 };
+        binary: options.buffer === 1 || options.buffer === 2 || options.buffer === 3,
+        // Yingxia extensions: a cookie jar of the caller's own (`jar`, with the answer's `cookies` for the answered
+        // address or `cookiesFor`), and `cookies: false` to send only the request's own Cookie header.
+        jar: options.jar == null ? null : String(options.jar), cookiesFor: options.cookiesFor == null ? null : String(options.cookiesFor),
+        cookies: options.cookies !== false };
     const answer = JSON.parse(host('http', JSON.stringify(payload)));
     let content = answer.content ?? '';
     if (answer.base64 != null) {
@@ -146,6 +150,7 @@ function request(address, options = {}) {
     else if (answer.code >= 400) lastFailure = remoteError(answer.host, answer.code, `The source ${answer.host} returned HTTP ${answer.code}`);
     else if (lastFailure?.remote === answer.host) lastFailure = undefined;
     const response = { code: answer.code, headers: answer.headers || {}, content, url: answer.url };
+    if (answer.cookies) response.cookies = answer.cookies;
     if (typeof options.complete === 'function') options.complete(response);
     return response;
 }
@@ -280,7 +285,10 @@ globalThis.__tvbox = {
             // Yingxia extension: the cheap half of a playback, resolved ahead of the player.
             // A source that has nothing to warm says so by not implementing it — that is not an
             // error, so it answers with the empty result rather than one.
+            // [mi3s] 二开：warm 是我方的预取缝（上游无）。
             else if ('warm' in params) { method = 'warm'; args = [params.flag || '', params.warm]; }
+            // Yingxia extension: a source that takes a sign-in answers `account(request, input)` (SourceAccount.swift).
+            else if ('account' in params) { method = 'account'; args = [params.account, params.input ? JSON.parse(params.input) : {}]; }
             else if ('ids' in params) { method = 'detail'; args = [params.ids]; }
             else if ('wd' in params) { method = 'search'; args = [params.wd, false, params.pg || '1']; }
             else if ('t' in params) { method = 'category'; args = [params.t, params.pg || '1', true, params.filters ? JSON.parse(params.filters) : {}]; }

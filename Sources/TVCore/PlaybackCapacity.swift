@@ -13,7 +13,7 @@ import Foundation
 /// | 云盘字节流 | **3** | `CloudStreams.swift` `CloudStreamStore.add` |
 /// | 转封装会话（MKV/AVI…） | **3** | `Remux.swift` `RemuxStore.add` |
 /// | DASH 生成清单 | **4** | `DashStreams.swift` `PlaylistStore.add` |
-/// | 红果解密流 | **4** | `HongguoStreams.swift` `HongguoStreamStore.add` |
+/// | 解密流（CENC，含红果） | **4** | `CENCStreams.swift` `CENCStreamStore.add` |
 ///
 /// 四张表里没有一个引用坞的上限，全是各自文件里的字面量。于是「坞 4 个 + 前台 1 个 = 5」
 /// 必然超过「流按 3 个逐出」—— 而逐出策略是**淘汰最老的**（`order.removeFirst()`），

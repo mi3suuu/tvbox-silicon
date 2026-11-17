@@ -46,14 +46,14 @@ struct EpisodeSkipSettingsView: View {
                     timeField(L10n.text("Intro ends at"), text: $intro, identifier: "player.skip.intro")
                     Button(L10n.text("Use current position (%@)", EpisodeSkipSettings.formatTime(session.position))) {
                         intro = EpisodeSkipSettings.formatTime(session.position); enabled = true
-                    }.disabled(session.duration < 120)
+                    }.disabled(session.duration <= 0)
                     .accessibilityIdentifier("player.skip.markIntro")
                 }
                 Section(L10n.text("Outro starts at")) {
                     timeField(L10n.text("Outro starts at"), text: $outro, identifier: "player.skip.outro")
                     Button(L10n.text("Use current position (%@)", EpisodeSkipSettings.formatTime(session.position))) {
                         outro = EpisodeSkipSettings.formatTime(session.position); enabled = true
-                    }.disabled(session.duration < 120)
+                    }.disabled(session.duration <= 0)
                     .accessibilityIdentifier("player.skip.markOutro")
                     Text(L10n.text("Leave a time empty to keep that segment. Format: minutes:seconds."))
                         .font(.footnote).foregroundStyle(.secondary)
@@ -96,8 +96,13 @@ struct EpisodeSkipSettingsView: View {
         #endif
     }
 
+    /// A time typed in switches automatic skipping on, as Use Current Position does. Saved with the switch at the top
+    /// still off, the times skipped nothing, and nothing said why (#865).
     private func timeField(_ title: String, text: Binding<String>, identifier: String) -> some View {
-        TextField(title, text: text, prompt: Text("01:30"))
+        TextField(title, text: Binding(get: { text.wrappedValue }, set: { value in
+            text.wrappedValue = value
+            if !value.isEmpty { enabled = true }
+        }), prompt: Text("01:30"))
             .monospacedDigit()
             .accessibilityIdentifier(identifier)
             #if os(iOS)

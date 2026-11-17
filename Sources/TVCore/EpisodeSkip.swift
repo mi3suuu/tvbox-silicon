@@ -110,17 +110,24 @@ public struct EpisodeSkipSettings: Codable, Equatable, Sendable {
         ads = try c.decodeIfPresent([AdRange].self, forKey: .ads) ?? []
     }
 
-    public static func introLimit(_ duration: Double) -> Double { min(300, duration / 4) }
-    public static func outroLimit(_ duration: Double) -> Double { min(600, duration / 4) }
-
+    /// Any times the video has room for, as long as the intro ends before the outro starts. Limits on their length
+    /// (five minutes, a quarter of the video, 60% left between) refused the right times for short episodes, such as
+    /// an anime's 90-second opening in a 12-minute episode (#1003).
     public func validationError(duration: Double) -> String? {
         guard duration.isFinite, duration > 0 else { return L10n.text("Wait for the video duration. Live streams cannot use skipping.") }
-        guard duration >= 120 else { return L10n.text("Skipping is available for videos at least two minutes long.") }
         guard introEnd.isFinite, outroLength.isFinite, introEnd >= 0, outroLength >= 0 else { return L10n.text("Enter a valid time such as 01:30.") }
-        guard introEnd <= Self.introLimit(duration) else { return L10n.text("The intro cannot exceed five minutes or a quarter of the video.") }
-        guard outroLength <= Self.outroLimit(duration) else { return L10n.text("The outro cannot exceed ten minutes or a quarter of the video.") }
-        guard duration - introEnd - outroLength >= max(60, duration * 0.6) else { return L10n.text("Keep at least 60% of the video as main content.") }
+        guard introEnd + outroLength < duration else { return L10n.text("The intro must end before the outro starts.") }
         return nil
+    }
+
+    /// These settings with the intro ending, or the outro starting, at `position`, and switched on: what Apple TV's
+    /// "Intro Ends Here" saves, where there is no keyboard for a time (#808). Nil where the rules above refuse it.
+    public func marking(intro: Bool, at position: Double, duration: Double) -> Self? {
+        guard position.isFinite, duration.isFinite, position >= 0, position <= duration else { return nil }
+        var value = self
+        value.enabled = true
+        if intro { value.introEnd = position.rounded(.down) } else { value.outroLength = (duration - position).rounded(.up) }
+        return value.validationError(duration: duration) == nil ? value : nil
     }
 
     public static func parseTime(_ text: String) -> Double? {
@@ -174,11 +181,38 @@ public struct EpisodeSkipSettings: Codable, Equatable, Sendable {
     public static func remove(scope: String, defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: "episodeSkip.v1." + scope)
     }
+
+    /// `scope` under a subscription's new address when it was saved under `old`; nil when it belongs to another one.
+    /// A subscription whose address the viewer changed (#982) keeps what was saved against its sources this way.
+    public static func rescope(_ scope: String, from old: URL, to new: URL) -> String? {
+        guard let parts = try? JSONDecoder().decode([String].self, from: Data(scope.utf8)), parts.count == 3,
+              parts[0] == old.absoluteString else { return nil }
+        return Self.scope(origin: new, source: parts[1], video: parts[2])
+    }
+
+    /// Saved scope keys with `old` moved to `new`, in their order, without repeats.
+    static func rescope(_ scopes: [String], from old: URL, to new: URL) -> [String] {
+        var seen = Set<String>()
+        return scopes.map { rescope($0, from: old, to: new) ?? $0 }.filter { seen.insert($0).inserted }
+    }
+
+    /// Moves the intro and outro times saved for a subscription's videos to its new address. Times already saved
+    /// under the new one stay.
+    public static func moveOrigin(from old: URL, to new: URL, defaults: UserDefaults = .standard) {
+        let prefix = "episodeSkip.v1."
+        for (key, value) in defaults.dictionaryRepresentation() where key.hasPrefix(prefix) {
+            guard let scope = rescope(String(key.dropFirst(prefix.count)), from: old, to: new) else { continue }
+            if defaults.object(forKey: prefix + scope) == nil { defaults.set(value, forKey: prefix + scope) }
+            defaults.removeObject(forKey: key)
+        }
+    }
 }
 
 /// Each segment is skipped once per play-through. Rewinding manually never traps the viewer
 /// in an automatic seek loop; restarting playback or applying new settings starts a new pass.
 public struct EpisodeSkipPass: Sendable {
+    /// How long before the outro the player counts down to skipping it, so the viewer can keep it (#1003).
+    public static let outroWarning = 5.0
     private var introHandled = false
     private var outroHandled = false
     /// 已经跳过的广告段 id。用 id 而不是索引：用户可能在播放中增删广告段，
@@ -192,6 +226,18 @@ public struct EpisodeSkipPass: Sendable {
     /// 现在改成「先记待确认，调用方确认成功再 `confirm`」。
     private var pending: UUID?
     public init() {}
+
+    /// Seconds until the outro is skipped, while that is `outroWarning` or less; nil before then, and once it is
+    /// skipped or kept.
+    public func outroCountdown(time: Double, duration: Double, settings: EpisodeSkipSettings) -> Double? {
+        guard !outroHandled, settings.enabled, settings.outroLength > 0, time.isFinite,
+              settings.validationError(duration: duration) == nil else { return nil }
+        let left = duration - settings.outroLength - time
+        return left > 0 && left <= Self.outroWarning ? left : nil
+    }
+
+    /// The viewer keeps this play-through's outro.
+    public mutating func keepOutro() { outroHandled = true }
 
     /// - Parameter blocksAds: 「广告拦截」总开关（`player.skipAds`）。
     ///

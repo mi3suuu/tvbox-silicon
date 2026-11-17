@@ -27,10 +27,10 @@ public enum Remux {
     }
 
     /// Whether repackaging shows a picture AVPlayer can't decode in the file itself, from its sample entries:
-    /// HEVC that an MP4 tags `hev1` (`dvhe`) plays inside HLS as it is, and VP9 is converted. AV1 isn't, as
-    /// FFmpeg here has no decoder for it.
+    /// HEVC that an MP4 tags `hev1` (`dvhe`) plays inside HLS as it is, and VP9 and ByteVC2 (`bvc2`, Hongguo, #957)
+    /// are converted. AV1 isn't, as FFmpeg here has no decoder for it.
     public static func showsPicture(_ codecs: [String]) -> Bool {
-        !codecs.isEmpty && codecs.allSatisfy { ["hev1", "dvhe", "vp09"].contains($0) }
+        !codecs.isEmpty && codecs.allSatisfy { ["hev1", "dvhe", "vp09", "bvc2"].contains($0) }
     }
 
     /// Opens the file and returns the address of its HLS master playlist on a loopback server. `subtitles`, the
@@ -89,11 +89,11 @@ public enum Remux {
     public static func isRemuxed(_ url: URL) -> Bool { identifier(url).map(RemuxStore.shared.contains) ?? false }
 
     /// Whether `url` is an HLS stream the repackager serves (`HLSRemux`).
-    public static func isSegmented(_ url: URL) -> Bool { identifier(url).flatMap(RemuxStore.shared.segmented) != nil }
+    public static func isSegmented(_ url: URL) -> Bool { identifier(url).flatMap(RemuxStore.shared.stream) != nil }
 
     /// Whether the picture behind `url` is served as HDR (PQ or HLG), not converted to SDR.
     public static func isHDR(_ url: URL) -> Bool {
-        if let stream = identifier(url).flatMap(RemuxStore.shared.segmented) { return stream.copiesHDR }
+        if let stream = identifier(url).flatMap(RemuxStore.shared.stream) { return stream.copiesHDR }
         guard let plan = session(url)?.plan, plan.tracks.first?.kind == .video else { return false }
         return plan.videoRange != "SDR"
     }
@@ -101,6 +101,10 @@ public enum Remux {
     /// Whether the picture behind `url` is Dolby Vision profile 5, served as it is: it has no HDR10 picture to
     /// convert to SDR, so a device that refuses it refuses it again.
     public static func isDolbyVision(_ url: URL) -> Bool { session(url)?.plan.isDolbyVision ?? false }
+
+    /// What the master playlist of the stream at `url` tells AVPlayer about its picture (codecs, size, frame
+    /// rate, range), for a failure report; nil when the repackager doesn't serve it.
+    public static func variant(_ url: URL) -> String? { session(url)?.variant }
 
     /// An HDR or Dolby Vision picture served as it is: what an Apple TV switches its display to before AVPlayer
     /// opens it (in SDR mode AVPlayer refuses an HDR variant of an HLS stream).
@@ -171,6 +175,33 @@ public enum Remux {
         let counter = CloudCounter()
         let probe = try await RangeConnection.open(url, headers: headers, from: 0, through: 1, configuration: configuration, counter: counter)
         if probe.last > 1 {
+            Diagnostics.shared.record(.info, "remux", "link sends the rest of the file host=\(url.host() ?? "-") length=\(probe.length)")
+            return StreamingRemuxSource(url: url, headers: headers, configuration: configuration, counter: counter, first: probe)
+        }
+        probe.close()
+        let source = CloudStreams.Source(url: url, headers: headers, length: Int(probe.length), name: url.lastPathComponent)
+        return CloudRemuxSource(stream: CloudByteStream(source: source, session: chunks, rewritesSampleEntries: false, refresh: { nil }))
+    }
+
+    /// Whether an address is a server inside this app that doesn't name the file it sends: a plugin's own
+    /// loopback proxy (`http://127.0.0.1:19981/chunk?…`, #776). Only its first bytes say what it holds.
+    public static func hidesName(_ url: URL) -> Bool {
+        url.scheme == "http" && ["127.0.0.1", "localhost"].contains(url.host() ?? "") && url.pathExtension.isEmpty && !isRemuxed(url)
+    }
+
+    /// The file behind a link when its first bytes are a container the repackager opens and AVPlayer doesn't
+    /// (`handles`); nil for anything else, and for a link that answers no byte ranges.
+    public static func sniffedSource(_ url: URL, headers: [String: String]) async -> RemuxSource? {
+        await sniffedSource(url, headers: headers, chunks: CloudByteStream.session, configuration: RangeConnection.configuration)
+    }
+
+    static func sniffedSource(_ url: URL, headers: [String: String], chunks: URLSession, configuration: URLSessionConfiguration) async -> RemuxSource? {
+        let counter = CloudCounter()
+        guard let probe = try? await RangeConnection.open(url, headers: headers, from: 0, through: 15, configuration: configuration, counter: counter) else { return nil }
+        var head = Data()
+        while head.count < 16, let data = try? await probe.read(at: Int64(head.count), count: 16 - head.count, readThrough: 0), !data.isEmpty { head.append(data) }
+        guard handles(head) else { probe.close(); return nil }
+        if probe.last > 15 {
             Diagnostics.shared.record(.info, "remux", "link sends the rest of the file host=\(url.host() ?? "-") length=\(probe.length)")
             return StreamingRemuxSource(url: url, headers: headers, configuration: configuration, counter: counter, first: probe)
         }
@@ -464,6 +495,18 @@ protocol RemuxStored: AnyObject, Sendable {
 
 extension RemuxSession: RemuxStored {}
 
+/// A stream served as HLS whose segments are made on the way (`HLSRemuxSession`, `FLVLiveSession`): a master
+/// playlist, a media playlist per track (0 video, 1 audio), and `<track>-<segment>.mp4` initialization segments for
+/// the discontinuity beginning at that segment and `<track>-<segment>.m4s` segments.
+protocol SegmentedStream: RemuxStored {
+    var master: String { get }
+    /// The picture is HDR, copied as it is.
+    var copiesHDR: Bool { get }
+    func playlist(_ track: Int) async -> String?
+    func initialization(track: Int, index: Int) async throws -> Data
+    func segment(track: Int, index: Int) async throws -> Data
+}
+
 /// The open files and streams; the oldest is closed when a fourth opens (an episode queued behind another holds two).
 ///
 /// ⛔ 上限取 `PlaybackCapacity.streamLimit`，不再写死 3。写死 3 时「坞 4 + 前台 1」必然
@@ -487,6 +530,7 @@ final class RemuxStore: @unchecked Sendable {
     }
     func session(_ id: String) -> RemuxSession? { lock.withLock { sessions[id] as? RemuxSession } }
     func segmented(_ id: String) -> HLSRemuxSession? { lock.withLock { sessions[id] as? HLSRemuxSession } }
+    func stream(_ id: String) -> (any SegmentedStream)? { lock.withLock { sessions[id] as? any SegmentedStream } }
     func contains(_ id: String) -> Bool { lock.withLock { sessions[id] != nil } }
     func remove(_ id: String) -> (any RemuxStored)? {
         lock.withLock {
@@ -572,7 +616,7 @@ actor RemuxServer {
         let head = fields[0] == "HEAD"
         let parts = String(fields[1]).components(separatedBy: "?")[0].split(separator: "/").map(String.init)
         guard parts.count == 3, parts[0] == token else { return send(connection, status: 404) }
-        if let stream = RemuxStore.shared.segmented(parts[1]) { return serve(connection, file: parts[2], head: head, of: stream) }
+        if let stream = RemuxStore.shared.stream(parts[1]) { return serve(connection, file: parts[2], head: head, of: stream) }
         guard let session = RemuxStore.shared.session(parts[1]) else { return send(connection, status: 404) }
         let file = parts[2], name = (file as NSString).deletingPathExtension
         switch (file as NSString).pathExtension {
@@ -594,9 +638,9 @@ actor RemuxServer {
         }
     }
 
-    /// An HLS stream's playlists, and its segments once repackaged (`HLSRemuxSession`): `<track>-<segment>.mp4` is the
+    /// An HLS stream's playlists, and its segments once repackaged (`SegmentedStream`): `<track>-<segment>.mp4` is the
     /// initialization segment of the discontinuity beginning there, `<track>-<segment>.m4s` the segment.
-    private nonisolated static func serve(_ connection: NWConnection, file: String, head: Bool, of stream: HLSRemuxSession) {
+    private nonisolated static func serve(_ connection: NWConnection, file: String, head: Bool, of stream: any SegmentedStream) {
         let name = (file as NSString).deletingPathExtension
         switch (file as NSString).pathExtension {
         case "m3u8":

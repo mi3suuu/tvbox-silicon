@@ -23,6 +23,9 @@ struct GlobalSearchView: View {
     @AppStorage("searchShowsActivity") private var showsActivity = false
     /// Whether the end of the results is on screen, so finished pages can ask for the next.
     @State private var endVisible = false
+    /// The loosely related results of this search are on the page too, after "Show Other Results".
+    @State private var othersShownFor: String?
+    private var showsOthers: Bool { othersShownFor == model.keyword }
     #if !os(tvOS)
     /// Results as rows of a small cover beside the whole title, instead of the poster grid: long or similar titles
     /// are cut to one line under a poster (#426).
@@ -40,17 +43,27 @@ struct GlobalSearchView: View {
     private var model: SearchModel { store.searchModel }
     private var history: [String] { store.searchHistory }
     /// First pages in source order, then later pages as they arrive, so loading more only adds at the end.
-    private var posters: [SearchPoster] {
+    private var posters: [SearchPoster] { listing.posters }
+    /// The results on the page, and how many loosely related ones are kept behind "Show Other Results".
+    private var listing: (posters: [SearchPoster], others: Int) {
         let shown = model.matches.filter { model.selectedSource == nil || $0.id == model.selectedSource }
         let sites = Dictionary(shown.map { ($0.id, $0.site) }) { first, _ in first }
         var seen = Set<String>()
-        // The titles that are what was searched for lead (#374); the rest follow, none hidden. Later pages still only
-        // add at the end, so the grid doesn't move under a scrolling thumb.
-        let first = TitleMatch.ordered(
+        // The titles that are what was searched for lead (#374). Later pages still only add at the end, so the grid
+        // doesn't move under a scrolling thumb.
+        let first = TitleMatch.split(
             shown.flatMap { result in (result.page?.videos ?? []).map { SearchPoster(site: result.site, video: $0) } },
             keyword: model.keyword, title: { $0.video.name })
         let later = model.batches.flatMap { batch in sites[batch.source].map { site in batch.videos.map { SearchPoster(site: site, video: $0) } } ?? [] }
-        return (first + later).filter { seen.insert($0.id).inserted }
+        // Plenty of sources pad their answer with loosely related titles. While some titles do match, only those
+        // show and the rest wait behind one button (#770, #773). A search no title matches (an actor's name, say)
+        // shows everything, as before.
+        if !showsOthers, !first.matching.isEmpty, !first.other.isEmpty {
+            let more = TitleMatch.split(later, keyword: model.keyword, title: { $0.video.name })
+            let posters = (first.matching + more.matching).filter { seen.insert($0.id).inserted }
+            return (posters, (first.other + more.other).filter { seen.insert($0.id).inserted }.count)
+        }
+        return ((first.matching + first.other + later).filter { seen.insert($0.id).inserted }, 0)
     }
     /// Built-in sources can be selected while their first search is still in flight. One the viewer
     /// hid, or one paused for failing, isn't asked and gets no chip.
@@ -151,9 +164,11 @@ struct GlobalSearchView: View {
                         #endif
                     }
                     else {
+                        // Once per update: it checks every result's title against the keyword.
+                        let listing = listing
                         if model.total == 0 {
                             EmptyResults(symbol: "magnifyingglass", title: L10n.text("No searchable sources are available on this device."))
-                        } else if posters.isEmpty {
+                        } else if listing.posters.isEmpty {
                             if model.busy {
                                 VStack(spacing: 18) {
                                     ProgressView()
@@ -166,14 +181,22 @@ struct GlobalSearchView: View {
                         } else {
                             LazyVGrid(columns: listed ? Self.rowColumns : Layout.posterColumns,
                                       spacing: listed ? Layout.gridSpacing : Layout.gridRowSpacing) {
-                                resultLinks(config)
+                                resultLinks(listing.posters, config)
                             }.scrollTargetLayout()
                             // A single row of results leaves nothing under the right of the rows above; as a section the
                             // remote still moves Down onto it (#481).
                             // [mi3s] 二开：单行结果时 tvOS 遥控器 Down 落不下来（#481）
                             .tvFocusSection()
                             // Scrolling the end into view asks for the next page; while it stays in view each new page asks again.
-                            if model.canLoadMore(model.selectedSource) || model.loadingMore {
+                            if listing.others > 0 {
+                                // The sources have started answering with other titles: their further pages wait with them.
+                                Button { othersShownFor = model.keyword } label: {
+                                    searchActionLabel(L10n.text("Show %lld Other Results", listing.others), symbol: "ellipsis")
+                                }
+                                .searchAction()
+                                .frame(maxWidth: .infinity).padding(.vertical, 12)
+                                .accessibilityIdentifier("search.showOthers")
+                            } else if model.canLoadMore(model.selectedSource) || model.loadingMore {
                                 ProgressView().frame(maxWidth: .infinity).padding(.vertical, 24)
                                     .onScrolledIntoView(threshold: 0.2) { visible in
                                         endVisible = visible
@@ -196,20 +219,17 @@ struct GlobalSearchView: View {
     /// Separates "nothing matched" from "most sources never answered" so the empty state does not blame the keyword.
     private func emptyResults(_ config: Subscription) -> some View {
         let mostlyFailed = model.failures.count * 2 > model.completed
-        return ContentUnavailableView {
-            Label(L10n.text(mostlyFailed ? "Most Sources Unavailable" : "No Videos"),
-                  systemImage: mostlyFailed ? "wifi.exclamationmark" : "magnifyingglass")
-        } description: {
-            Text(mostlyFailed
-                 ? L10n.text("%lld of %lld sources didn't respond, so results may be incomplete.", model.failures.count, model.total)
-                 : L10n.text("Try another keyword."))
-        } actions: {
-            if !model.failures.isEmpty || !model.paused.isEmpty {
-                HStack(spacing: 16) {
-                    Button(L10n.text("Retry failed sources")) { model.resume(config: config, retryFailures: true) }
-                        .controlButton(prominent: true)
-                    Button(L10n.text("Show Details")) { showFailures = true }.controlButton()
-                }
+        let canRetry = !model.failures.isEmpty || !model.paused.isEmpty
+        return EmptyResults(symbol: mostlyFailed ? "wifi.exclamationmark" : "magnifyingglass",
+                            title: L10n.text(mostlyFailed ? "Most Sources Unavailable" : "No Videos"),
+                            message: mostlyFailed
+                                ? L10n.text("%lld of %lld sources didn't respond, so results may be incomplete.", model.failures.count, model.total)
+                                : L10n.text("Try another keyword."),
+                            hasActions: canRetry) {
+            if canRetry {
+                Button(L10n.text("Retry failed sources")) { model.resume(config: config, retryFailures: true) }
+                    .controlButton(prominent: true)
+                Button(L10n.text("Show Details")) { showFailures = true }.controlButton()
             }
         }
         .frame(maxWidth: .infinity, minHeight: 420)
@@ -269,6 +289,7 @@ struct GlobalSearchView: View {
 
     private func searchHeader(_ config: Subscription) -> some View {
         @Bindable var model = model
+        let sourceItems = sourceItems
         return VStack(alignment: .leading, spacing: 14) {
             if !model.keyword.isEmpty {
                 ViewThatFits(in: .horizontal) {
@@ -288,7 +309,7 @@ struct GlobalSearchView: View {
                 .focusSection()
                 #endif
                 if model.busy {
-                    SearchActivityList(origin: config.origin, completed: model.completed, total: model.total, runStart: model.runStart,
+                    SearchActivityList(origin: config.origin, sources: model.activeSources, waiting: model.waitingSources, completed: model.completed, total: model.total, runStart: model.runStart,
                                        showsSources: showsActivity)
                         .transition(.opacity)
                 }
@@ -403,7 +424,7 @@ struct GlobalSearchView: View {
         }
     }
 
-    @ViewBuilder private func resultLinks(_ config: Subscription) -> some View {
+    @ViewBuilder private func resultLinks(_ posters: [SearchPoster], _ config: Subscription) -> some View {
         ForEach(posters) { item in
             RouteLink {
                 CatalogDestination(video: item.video, client: CatalogClient(site: item.site, origin: config.origin, jarURL: config.spiderURL))
@@ -654,21 +675,32 @@ struct GlobalSearchView: View {
         }
     }
 }
-/// What a running search is doing: overall progress, a time estimate, and one row per plugin
-/// source in flight. A first search can spend minutes building plugin components, and the
+/// What a running search is doing: overall progress, a time estimate, and one row per
+/// source in flight across every runtime and subscribed document. A first search can spend minutes building plugin components, and the
 /// summary count alone looks stuck.
 private struct SearchActivityList: View {
     let origin: URL
+    let sources: [SearchSourceActivity]
+    /// The sources still to be asked, next first; they fill the rows the running ones leave.
+    let waiting: [Site]
     let completed: Int
     let total: Int
     let runStart: (date: Date, completed: Int)?
     /// The progress bar always shows; the sources being searched fold behind the chevron.
     let showsSources: Bool
-    /// The on-device plugin worker runs at most this many searches at once.
+    /// Five rows: the sources in flight, then the next ones in line. Each runtime asks at most four at a time, so
+    /// in flight alone there were often only four.
     private let limit = 5
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
-            let active = Array(PluginPreparation.active(origin: origin).prefix(limit))
+            let active = Array(sources.prefix(limit))
+            let next = Array(waiting.prefix(limit - active.count))
+            // The list keeps the height of all its rows until the search ends. A source that answers leaves its row a
+            // moment before the next one starts, and the chips and results under the list jumped up and back each time.
+            let blank = max(0, min(limit, total) - active.count - next.count)
+            let snapshots = Dictionary(active.compactMap { item in
+                PluginPreparation.snapshot(site: item.site, origin: item.site.origin(or: origin)).map { (item.id, $0) }
+            }, uniquingKeysWith: { first, _ in first })
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 14) {
                     #if os(tvOS)
@@ -686,7 +718,7 @@ private struct SearchActivityList: View {
                             .foregroundStyle(.secondary).monospacedDigit().fixedSize()
                     }
                 }
-                if active.contains(where: { $0.snapshot.stage == .converting || $0.snapshot.converted > 0 }) {
+                if snapshots.values.contains(where: { $0.stage == .converting || $0.converted > 0 }) {
                     Label(L10n.text("Preparing plugins for first use. Later searches are much faster."), systemImage: "hourglass")
                         .foregroundStyle(.secondary)
                 }
@@ -694,14 +726,25 @@ private struct SearchActivityList: View {
                     Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                         ForEach(active) { item in
                             GridRow {
-                                Text(item.name).fontWeight(.semibold).lineLimit(1)
-                                Text(status(item.snapshot)).foregroundStyle(.secondary).lineLimit(1)
+                                Text(item.site.name).fontWeight(.semibold).lineLimit(1)
+                                Text(snapshots[item.id].map(status) ?? L10n.text("Searching…")).foregroundStyle(.secondary).lineLimit(1)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                Text(Duration.seconds(max(0, Int(timeline.date.timeIntervalSince(item.snapshot.started))))
+                                Text(Duration.seconds(max(0, Int(timeline.date.timeIntervalSince(item.started))))
                                         .formatted(.time(pattern: .minuteSecond)))
                                     .monospacedDigit().foregroundStyle(.secondary)
                                     .gridColumnAlignment(.trailing)
                             }
+                        }
+                        ForEach(next) { site in
+                            GridRow {
+                                Text(site.name).fontWeight(.semibold).lineLimit(1)
+                                Text(L10n.text("Waiting")).foregroundStyle(.tertiary).lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(verbatim: "")
+                            }
+                        }
+                        ForEach(0..<blank, id: \.self) { _ in
+                            GridRow { Text(verbatim: " ").hidden() }
                         }
                     }
                     .transition(.opacity)
@@ -709,7 +752,7 @@ private struct SearchActivityList: View {
             }
             .font(.subheadline)
             .accessibilityElement(children: .combine)
-            .animation(.smooth(duration: 0.25), value: active.map(\.id))
+            .animation(.smooth(duration: 0.25), value: active.map(\.id) + next.map(\.id))
         }
     }
     /// While searching, the plugin's "loading" stage is the search itself.
@@ -786,8 +829,10 @@ private struct QuietPillStyle: ButtonStyle {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.primary)
             .padding(.horizontal, 12).frame(height: SourceStrip.controlSize - 2)
-            .background(Color.primary.opacity(configuration.isPressed ? 0.14 : 0.07), in: Capsule())
+            // Liquid Glass where the system draws it, as the source chips under them.
+            .glassOrFill(.regular.interactive(), Color.primary.opacity(configuration.isPressed ? 0.14 : 0.07), in: Capsule())
             .contentShape(Capsule())
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }
 #endif
@@ -844,7 +889,8 @@ struct RecommendationsView: View {
         }
         return sites.first(where: { !SourceHealth.shared.paused($0, origin: config.origin) }) ?? sites.first
     }
-    private var requestID: String { "\(config.origin)|\(config.importedAt)|\(site?.key ?? "")|\(revision)" }
+    /// `model.resets`: the store resets the model when it rebuilds the subscription, which drops a load in flight.
+    private var requestID: String { "\(config.origin)|\(config.importedAt)|\(site?.key ?? "")|\(revision)|\(model.resets)" }
 
     private var recommendationControls: some View {
         HStack(spacing: 12) {
@@ -1194,15 +1240,15 @@ struct RecommendationsView: View {
     /// categories, as on Apple TV. A category's heading opens the source's page.
     private var phoneRails: some View {
         VStack(alignment: .leading, spacing: 30) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Text(L10n.text("Recommendations")).font(.system(size: DiscoverLayout.heading, weight: .semibold)).lineLimit(1)
-                    Spacer(minLength: 8)
-                    recommendationControls.fixedSize()
-                }
+            // One line: the source and its switch stand in for the heading (#997), with Refresh at the end.
+            HStack(spacing: 8) {
                 if fixedSite == nil, let site, sites.count > 1, openRoute != nil {
                     sourcePickerButton(site)
+                } else {
+                    Text(L10n.text("Recommendations")).font(.system(size: DiscoverLayout.heading, weight: .semibold)).lineLimit(1)
                 }
+                Spacer(minLength: 8)
+                recommendationControls.fixedSize()
             }
             .padding(.horizontal, DiscoverLayout.gutter)
             // Every category row starts loading with the heading, not when it scrolls on screen.
@@ -1464,6 +1510,14 @@ struct ScrollStrip<Content: View>: View {
                 proxy.scrollTo(scrollTo, anchor: .center)
                 #endif
             }
+            #if os(iOS)
+            // A choice made away from the strip (swiping the Sources page, #1052) brings its chip into view; one
+            // already in view stays put.
+            .onChange(of: scrollTo) { _, id in
+                guard let id else { return }
+                withAnimation(.snappy(duration: 0.3)) { proxy.scrollTo(id) }
+            }
+            #endif
         }
     }
 

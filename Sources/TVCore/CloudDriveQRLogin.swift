@@ -4,14 +4,17 @@ import Foundation
 /// code yields a service ticket, which the drive exchanges for the same cookie its web sign-in
 /// sets. Baidu Netdisk: the passport's QR login sets BDUSS, STOKEN and PTOKEN. Aliyun Drive:
 /// the approved code carries the account's refresh token. 115: the approved code signs in a client, which
-/// gets the UID, CID, SEID and KID cookies.
+/// gets the UID, CID, SEID and KID cookies. Tianyi Cloud: the TV app's code yields the account's access token. 123pan:
+/// the web app's code yields its Bearer token. Guangya: a device sign-in (OAuth 2), approved in its app, gets tokens.
 public struct CloudDriveQRLogin: Sendable {
-    public enum Drive: String, Sendable { case quark, uc, baidu, aliyun, pan115 }
+    public enum Drive: String, Sendable { case quark, uc, baidu, aliyun, pan115, tianyi, pan123, guangya }
     public struct Credentials: Sendable, Equatable {
         public let cookie: String
         public let serviceTicket: String?
-        /// Aliyun Drive's refresh token.
+        /// Aliyun Drive's and Guangya's refresh token.
         public var refreshToken: String? = nil
+        /// Tianyi Cloud's access token, 123pan's Bearer token, Guangya's access token.
+        public var accessToken: String? = nil
     }
     public enum Status: Sendable, Equatable { case waiting, expired, signedIn(Credentials) }
 
@@ -34,6 +37,9 @@ public struct CloudDriveQRLogin: Sendable {
         case .baidu: return try await startBaidu()
         case .aliyun: return try await startAliyun()
         case .pan115: return try await start115()
+        case .tianyi: return try await startTianyi()
+        case .pan123: return try await start123()
+        case .guangya: return try await startGuangya()
         case .quark, .uc: break
         }
         let members = try await members(drive, "getTokenForQrcodeLogin", [:])
@@ -46,6 +52,9 @@ public struct CloudDriveQRLogin: Sendable {
         case .baidu: return try await pollBaidu()
         case .aliyun: return try await pollAliyun()
         case .pan115: return try await poll115()
+        case .tianyi: return try await pollTianyi()
+        case .pan123: return try await poll123()
+        case .guangya: return try await pollGuangya()
         case .quark, .uc: break
         }
         let (status, members) = try await Self.call(drive, "getServiceTicketByQrcodeToken", ["token": token])
@@ -320,6 +329,166 @@ public struct CloudDriveQRLogin: Sendable {
         request.setValue("https://115.com/", forHTTPHeaderField: "Referer")
         return request
     }
+
+    // MARK: Tianyi Cloud
+
+    /// The TV app's code: its text is an address the Tianyi Cloud phone app opens when it scans it.
+    private static func startTianyi() async throws -> CloudDriveQRLogin {
+        let (data, _) = try await URLSession.shared.data(for: TianyiFiles.appRequest("/family/manage/getQrCodeUUID.action", []))
+        guard let uuid = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["uuid"] as? String, !uuid.isEmpty else {
+            throw TVError.unsupported(L10n.text("Couldn't get a sign-in code. Try again."))
+        }
+        return CloudDriveQRLogin(drive: .tianyi, code: uuid, token: uuid, state: ["started": "\(Date().timeIntervalSince1970)"])
+    }
+
+    private func pollTianyi() async throws -> Status {
+        let (data, _) = try await URLSession.shared.data(for: TianyiFiles.appRequest("/family/manage/qrcodeLoginResult.action", [("uuid", token)]))
+        switch Self.tianyiStatus(data) {
+        case .signedIn(let credentials):
+            // The token is good only if it opens a session.
+            let session = URLSession(configuration: .ephemeral)
+            defer { session.finishTasksAndInvalidate() }
+            _ = try await TianyiFiles.session(for: credentials.accessToken ?? "", using: session)
+            return .signedIn(credentials)
+        case .expired: return .expired
+        case .waiting:
+            // The code lasts a few minutes; the server only says it hasn't been approved.
+            let started = Double(state["started"] ?? "") ?? Date().timeIntervalSince1970
+            return Date().timeIntervalSince1970 - started > 300 ? .expired : .waiting
+        }
+    }
+
+    /// An approved code's `{"accessToken": "…", "expiresIn": …}`. Until then the answer is an error, HTTP 400 with
+    /// `res_code` "QrCodeRollLoginFail"; a code the server no longer knows says so in another `res_code`.
+    static func tianyiStatus(_ data: Data) -> Status {
+        let answer = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        if let token = answer["accessToken"] as? String, !token.isEmpty {
+            return .signedIn(Credentials(cookie: "", serviceTicket: nil, accessToken: token))
+        }
+        let code = "\(answer["res_code"] ?? "")"
+        if ["expire", "invalid", "notexist", "timeout"].contains(where: code.lowercased().contains) { return .expired }
+        return .waiting
+    }
+
+    // MARK: 123pan
+
+    private static let pan123Login = "https://login.123pan.com/api"
+
+    private static func start123() async throws -> CloudDriveQRLogin {
+        let (data, response) = try await URLSession.shared.data(for: pan123Request(pan123Login + "/user/qr-code/generate"))
+        try check(response)
+        guard let (code, id) = pan123Code(data) else { throw TVError.unsupported(L10n.text("Couldn't get a sign-in code. Try again.")) }
+        return CloudDriveQRLogin(drive: .pan123, code: code, token: id)
+    }
+
+    /// The code's text: the page the 123pan app (or WeChat) opens, with the code's id; `{"code": 0, "data": {"url": …, "uniID": …}}`.
+    static func pan123Code(_ data: Data) -> (code: String, id: String)? {
+        let answer = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let fields = answer?["data"] as? [String: Any]
+        guard (answer?["code"] as? NSNumber)?.intValue == 0, let id = fields?["uniID"] as? String, !id.isEmpty,
+              var page = URLComponents(string: (fields?["url"] as? String) ?? ""), page.scheme != nil else { return nil }
+        page.queryItems = (page.queryItems ?? []).filter { !["env", "uniID", "source", "type"].contains($0.name) }
+            + [("env", "production"), ("uniID", id), ("source", "123pan"), ("type", "login")].map { URLQueryItem(name: $0.0, value: $0.1) }
+        return page.url.map { ($0.absoluteString, id) }
+    }
+
+    private func poll123() async throws -> Status {
+        var components = URLComponents(string: Self.pan123Login + "/user/qr-code/result")!
+        components.queryItems = [URLQueryItem(name: "uniID", value: token)]
+        let (data, response) = try await URLSession.shared.data(for: Self.pan123Request(components.url!.absoluteString))
+        try Self.check(response)
+        switch Self.pan123Status(data) {
+        case .some(.signedIn(let credentials)): return .signedIn(credentials)
+        case .some(.expired): return .expired
+        case .some(.waiting): return .waiting
+        case nil:
+            // Approved in WeChat: the token comes from a code WeChat hands over.
+            return .signedIn(try await Self.complete123WeChat(token))
+        }
+    }
+
+    /// `{"code": 0, "data": {"loginStatus": 0 waiting, 1 scanned, 2 refused, 3 approved, 4 expired, "scanPlatform": …,
+    /// "token": …}}`. Nil for a code approved in WeChat (scan platform 4), whose token takes another step.
+    static func pan123Status(_ data: Data) -> Status? {
+        let answer = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let fields = answer["data"] as? [String: Any] ?? [:]
+        if let token = pan123Token(fields) { return .signedIn(Credentials(cookie: "", serviceTicket: nil, accessToken: token)) }
+        let code = (answer["code"] as? NSNumber)?.intValue ?? -1
+        guard let status = (fields["loginStatus"] as? NSNumber)?.intValue else { return code == 0 ? .waiting : .expired }
+        switch status {
+        case 2, 4: return .expired
+        case 3: return (fields["scanPlatform"] as? NSNumber)?.intValue == 4 ? nil : .expired
+        default: return .waiting
+        }
+    }
+
+    /// `token` or `accessToken`, without a "Bearer " in front.
+    static func pan123Token(_ fields: [String: Any]) -> String? {
+        let token = ((fields["token"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? fields["accessToken"] as? String)?
+            .replacingOccurrences(of: "Bearer ", with: "").trimmingCharacters(in: .whitespaces)
+        return token?.isEmpty == false ? token : nil
+    }
+
+    private static func complete123WeChat(_ id: String) async throws -> Credentials {
+        var request = pan123Request(pan123Login + "/user/qr-code/wx_code")
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["uniID": id])
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let fields = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["data"] as? [String: Any] ?? [:]
+        guard let code = ["wxCode", "WxCode", "code"].lazy.compactMap({ fields[$0] as? String }).first(where: { !$0.isEmpty }) else {
+            throw TVError.unsupported(L10n.text("Sign-in was approved, but the drive didn't return a login. Try again."))
+        }
+        var signIn = pan123Request(pan123Login + "/user/sign_in")
+        signIn.httpMethod = "POST"
+        signIn.httpBody = try JSONSerialization.data(withJSONObject: ["from": "web", "wechat_code": code, "type": 4] as [String: Any])
+        let (answer, _) = try await URLSession.shared.data(for: signIn)
+        guard let token = (((try? JSONSerialization.jsonObject(with: answer)) as? [String: Any])?["data"] as? [String: Any]).flatMap(pan123Token) else {
+            throw TVError.unsupported(L10n.text("Sign-in was approved, but the drive didn't return a login. Try again."))
+        }
+        return Credentials(cookie: "", serviceTicket: nil, accessToken: token)
+    }
+
+    private static func pan123Request(_ address: String) -> URLRequest {
+        var request = URLRequest(url: URL(string: address)!, timeoutInterval: 15)
+        for (field, value) in [("Content-Type", "application/json;charset=UTF-8"), ("platform", "web"), ("app-version", "3"),
+                               ("Origin", "https://login.123pan.com"), ("Referer", "https://login.123pan.com/"), ("User-Agent", browser)] {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        return request
+    }
+
+    // MARK: Guangya
+
+    /// A device code: its address goes in the QR code, which the Guangya app opens and approves. It lasts two minutes.
+    private static func startGuangya() async throws -> CloudDriveQRLogin {
+        let request = GuangyaFiles.request(URL(string: GuangyaFiles.accountAPI + "/v1/auth/device/code")!,
+                                           body: ["scope": "user", "client_id": GuangyaFiles.clientID])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response)
+        let answer = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        guard let device = answer?["device_code"] as? String, let code = answer?["verification_uri_complete"] as? String,
+              !device.isEmpty, !code.isEmpty else {
+            throw TVError.unsupported(L10n.text("Couldn't get a sign-in code. Try again."))
+        }
+        // The account service keeps answering "authorization_pending" for a code past its time.
+        let lifetime = (answer?["expires_in"] as? NSNumber)?.doubleValue ?? 120
+        return CloudDriveQRLogin(drive: .guangya, code: code, token: device,
+                                 state: ["expires": String(Date().timeIntervalSince1970 + lifetime)])
+    }
+
+    private func pollGuangya() async throws -> Status {
+        if let expires = state["expires"].flatMap(Double.init), Date().timeIntervalSince1970 > expires { return .expired }
+        let answer: [String: Any]
+        do { answer = try await GuangyaFiles.token(["grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": token]) }
+        catch let failure as GuangyaTokenError { return Self.guangyaWaits(failure.code) ? .waiting : .expired }
+        guard let access = answer["access_token"] as? String, let refresh = answer["refresh_token"] as? String, !refresh.isEmpty else {
+            throw TVError.unsupported(L10n.text("Sign-in was approved, but the drive didn't return a login. Try again."))
+        }
+        return .signedIn(Credentials(cookie: "", serviceTicket: nil, refreshToken: refresh, accessToken: access))
+    }
+
+    /// The device code is still waiting for approval; any other error ("expired_token", "access_denied") ends it.
+    static func guangyaWaits(_ error: String) -> Bool { error == "authorization_pending" || error == "slow_down" }
 
     private static let browser = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
     private static func milliseconds() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }

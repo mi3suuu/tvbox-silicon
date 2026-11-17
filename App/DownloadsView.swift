@@ -57,7 +57,7 @@ struct DownloadsView: View {
         }
         .onAppear { if visibleItems.isEmpty && hasMusic { kind = .music } }
         .screenBackdrop()
-        .tabTitle(L10n.text("Downloads"))
+        .tabTitle(L10n.text("Offline Cache"))
         .task { await library.measure() }
         .onChange(of: visibleItems.filter { $0.status == .completed }.count) { Task { await library.measure() } }
         #if os(macOS)
@@ -68,18 +68,10 @@ struct DownloadsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await library.measure() }
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { NSWorkspace.shared.open(hasMusic && kind == .music ? MusicDownloadLibrary.shared.root : library.root) } label: {
-                    Label(L10n.text("Show in Finder"), systemImage: "folder")
-                }
-                .help(L10n.text("Show in Finder"))
-            }
-        }
         #endif
-        .confirmationDialog(L10n.text("Delete all downloaded episodes of %@?", deleting?.title ?? ""),
+        .confirmationDialog(L10n.text("Delete all cached episodes of %@?", deleting?.title ?? ""),
                             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
-            Button(L10n.text("Delete Downloads"), role: .destructive) {
+            Button(L10n.text("Delete Cached Items"), role: .destructive) {
                 if let deleting { library.remove(deleting.items.map(\.id)) }
                 deleting = nil
             }
@@ -148,7 +140,7 @@ struct DownloadsView: View {
 
     #if os(macOS)
     private var storageSummary: String {
-        let used = L10n.text("%@ used by downloads", DownloadFormat.size(library.usage.downloads + MusicDownloadLibrary.shared.size))
+        let used = L10n.text("%@ used by the cache", DownloadFormat.size(library.usage.downloads + MusicDownloadLibrary.shared.size))
         guard let free = library.usage.available else { return used }
         return used + " · " + L10n.text("%@ free", DownloadFormat.size(free))
     }
@@ -184,6 +176,64 @@ struct DownloadsView: View {
                 }
             }.pageContainer()
         }
+        // TMDB's art for the shows this device hasn't matched yet, one at a time while the page is open.
+        .task(id: shows.map(\.id)) { await DownloadArtwork.shared.load(shows) }
+    }
+
+    /// A show with several episodes opens its page; a film (one download) plays at once.
+    @ViewBuilder private func card(_ show: DownloadShow) -> some View {
+        let label = DownloadShowCard(show: show, details: DownloadArtwork.shared.details(for: show))
+        Group {
+            if show.items.count == 1, let item = show.items.first {
+                Button { store.playing = store.savedChannel(item) } label: { label }
+                    .accessibilityLabel(L10n.text("Play %@", show.title))
+            } else {
+                RouteLink { DownloadShowPage(id: show.id) } label: { label }
+            }
+        }
+        .downloadCardButton()
+        .contextMenu {
+            Button(L10n.text("Delete Cached Items"), systemImage: "trash", role: .destructive) { deleting = show }
+        }
+    }
+
+    /// "Cached", how many shows, then how they are sorted and 倒序, as glass controls.
+    private func downloadedHeader(count: Int) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            SectionHeader(title: L10n.text("Cached")).fixedSize().layoutPriority(1)
+            Text("\(count)").font(.headline).monospacedDigit().foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            #if os(macOS)
+            Menu {
+                Picker(L10n.text("Sort By"), selection: $sort) {
+                    ForEach(DownloadSort.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.inline).labelsHidden()
+            } label: {
+                Text(sort.title)
+            }
+            .menuStyle(.button).buttonStyle(.borderless).fixedSize()
+            .help(L10n.text("Sort By"))
+            ReverseOrderButton(reversed: $reversed).accessibilityIdentifier("downloads.reverse")
+            #else
+            GlassGroup(spacing: 8) {
+                HStack(spacing: 8) {
+                    Menu {
+                        Picker(L10n.text("Sort By"), selection: $sort) {
+                            ForEach(DownloadSort.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                    } label: {
+                        FittingLabel(title: sort.title, symbol: "line.3.horizontal.decrease")
+                    }
+                    .controlButton()
+                    .accessibilityLabel(L10n.text("Sort By"))
+                    // Filled while the list runs the other way round.
+                    ReverseOrderButton(reversed: $reversed).accessibilityIdentifier("downloads.reverse")
+                }
+            }
+            .environment(\.glassControls, true)
+            #endif
+        }
     }
 
     #if os(macOS)
@@ -192,7 +242,7 @@ struct DownloadsView: View {
         let paused = pending.filter { $0.status == .paused || $0.status == .failed }
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(L10n.text("Downloading")).font(.title3.weight(.semibold))
+                Text(L10n.text("Caching")).font(.title3.weight(.semibold))
                 Text("\(pending.count)").font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
                 Spacer(minLength: 12)
                 SpeedMenu(compact: true)
@@ -221,7 +271,7 @@ struct DownloadsView: View {
         let paused = pending.filter { $0.status == .paused || $0.status == .failed }
         return VStack(alignment: .leading, spacing: Layout.headerSpacing) {
             HStack(alignment: .center, spacing: 12) {
-                SectionHeader(title: L10n.text("Downloading"))
+                SectionHeader(title: L10n.text("Caching")).fixedSize().layoutPriority(1)
                 Text("\(pending.count)").font(.headline).monospacedDigit().foregroundStyle(.secondary)
                 Spacer(minLength: 12)
                 SpeedMenu(compact: false)
@@ -289,7 +339,7 @@ private struct DownloadKindBar: ViewModifier {
     }
 
     private var picker: some View {
-        Picker(L10n.text("Downloads"), selection: $kind) {
+        Picker(L10n.text("Offline Cache"), selection: $kind) {
             Text(L10n.text("Videos")).tag(DownloadsView.Kind.videos)
             Text(L10n.text("Music")).tag(DownloadsView.Kind.music)
         }
@@ -307,6 +357,22 @@ enum DownloadMetrics {
     #endif
 }
 
+/// How the downloaded shows are listed (#653).
+enum DownloadSort: String, CaseIterable {
+    /// Most recently finished first.
+    case date
+    case name
+    /// Largest first.
+    case size
+    var title: String {
+        switch self {
+        case .date: L10n.text("Date Cached")
+        case .name: L10n.text("Name")
+        case .size: L10n.text("Size")
+        }
+    }
+}
+
 /// Finished episodes of one video from one source.
 struct DownloadShow: Identifiable {
     let id: String
@@ -322,8 +388,8 @@ struct DownloadShow: Identifiable {
         return groups.map { key, items in
             let first = items[0]
             return DownloadShow(id: key, title: first.title, poster: first.poster, posterHeaders: first.posterHeaders,
-                                sourceName: first.source.siteName,
-                                items: items.sorted { $0.episode.localizedStandardCompare($1.episode) == .orderedAscending })
+                                siteKey: first.source.siteKey, videoID: first.source.videoID, sourceName: first.source.siteName,
+                                items: DownloadItem.inEpisodeOrder(items))
         }
         .sorted { ($0.items.compactMap(\.finished).max() ?? .distantPast) > ($1.items.compactMap(\.finished).max() ?? .distantPast) }
     }
@@ -346,12 +412,9 @@ private struct EmptyDownloads: View {
     let available: Int64?
     let browse: () -> Void
     var body: some View {
-        // One 的空态文案：「暂无下载内容」+「点一下直接播放，不用联网。」
-        // 第二句比原来那句「去详情页点下载」多给了**为什么值得下** ——
-        // 空态页是用户第一次来到这个 tab 的地方，只教操作不解释价值，
-        // 大多数人都不会去点。两句都保留。
-        EmptyPage(symbol: "arrow.down", title: L10n.text("No Downloads"),
-                  message: L10n.text("Choose Download on a video's page to save episodes for watching offline. Tap one to play it straight away, no network needed."),
+        EmptyPage(symbol: "arrow.down", title: L10n.text("Nothing Cached"),
+                  // [mi3s] 空态第二句解释「为什么值得缓存」：空态是用户第一次来这里的地方。
+                  message: L10n.text("Choose Cache on a video's page to keep episodes for watching offline. Tap one to play it straight away, no network needed."),
                   action: L10n.text("Browse Sources"), actionSymbol: AppSection.sites.icon, perform: browse) {
             if let available {
                 Label(L10n.text("%@ available on this device", DownloadFormat.size(available)), systemImage: "internaldrive")
@@ -381,7 +444,7 @@ private struct StorageCard: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(DownloadFormat.size(downloads)).font(.system(.title, design: .rounded).weight(.bold)).monospacedDigit()
-                Text(L10n.text("used by downloads")).font(.subheadline).foregroundStyle(.secondary)
+                Text(L10n.text("used by the cache")).font(.subheadline).foregroundStyle(.secondary)
             }
             if capacity > 0 {
                 GeometryReader { proxy in
@@ -397,14 +460,14 @@ private struct StorageCard: View {
                 .frame(height: DownloadMetrics.thumb > 60 ? 16 : 10)
                 .accessibilityHidden(true)
                 HStack(spacing: 18) {
-                    legend(Brand.cyan, L10n.text("Downloads"), downloads)
+                    legend(Brand.cyan, L10n.text("Offline Cache"), downloads)
                     legend(Color.primary.opacity(0.28), L10n.text("Other"), other)
                     legend(Color.primary.opacity(0.12), L10n.text("Free"), free)
                 }
                 .font(.caption)
             }
             #if os(tvOS)
-            Text(L10n.text("tvOS may remove downloads when Apple TV runs low on storage.")).font(.caption).foregroundStyle(.secondary)
+            Text(L10n.text("tvOS may remove cached videos when Apple TV runs low on storage.")).font(.caption).foregroundStyle(.secondary)
             #endif
         }
         .padding(DownloadMetrics.thumb > 60 ? 28 : 18)
@@ -522,9 +585,9 @@ private struct QueueRow: View {
 
     @ViewBuilder private var menu: some View {
         if item.status == .queued, (position ?? 1) > 1 {
-            Button(L10n.text("Download Next"), systemImage: "arrow.up.to.line") { library.prioritize(item.id) }
+            Button(L10n.text("Cache Next"), systemImage: "arrow.up.to.line") { library.prioritize(item.id) }
         }
-        Button(L10n.text("Cancel Download"), systemImage: "xmark", role: .destructive) { library.remove([item.id]) }
+        Button(L10n.text("Cancel Caching"), systemImage: "xmark", role: .destructive) { library.remove([item.id]) }
     }
 
     #if os(macOS)
@@ -565,7 +628,7 @@ private struct QueueRow: View {
                 default:
                     roundControl("pause.circle.fill", L10n.text("Pause")) { library.pause(item.id) }
                 }
-                roundControl("xmark.circle.fill", L10n.text("Cancel Download")) { library.remove([item.id]) }
+                roundControl("xmark.circle.fill", L10n.text("Cancel Caching")) { library.remove([item.id]) }
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
@@ -613,7 +676,7 @@ private struct QueueRow: View {
                 default:
                     control("pause.fill", L10n.text("Pause")) { library.pause(item.id) }
                 }
-                control("xmark", L10n.text("Cancel Download")) { library.remove([item.id]) }
+                control("xmark", L10n.text("Cancel Caching")) { library.remove([item.id]) }
             }
         }
         .padding(DownloadMetrics.thumb > 60 ? 18 : 12)
@@ -640,7 +703,7 @@ private struct QueueRow: View {
             return parts.joined(separator: " · ")
         case .finishing: return L10n.text("Finishing…")
         case .paused: return L10n.text("Paused") + " · \(percent)%" + (compact ? "" : " · " + amount)
-        case .failed: return item.failure ?? L10n.text("Download failed")
+        case .failed: return item.failure ?? L10n.text("Caching failed")
         case .completed: return ""
         }
     }
@@ -662,18 +725,38 @@ private struct ShowPanel: View {
     let delete: () -> Void
     private var library: DownloadLibrary { .shared }
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Color.clear.aspectRatio(2.0 / 3.0, contentMode: .fit).frame(width: DownloadMetrics.showPoster)
-                .overlay { PosterImage(url: show.poster, headers: show.posterHeaders) }
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(show.title).font(.headline).lineLimit(2)
-                    Text([SourceLabel(show.sourceName).text, show.items.count == 1 ? L10n.text("1 episode") : L10n.text("%lld episodes", show.items.count), DownloadFormat.size(show.size)].joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                EpisodeGrid(minimum: DownloadMetrics.episodeMin, spacing: 8, rowSpacing: DownloadMetrics.thumb > 60 ? 12 : 4).callAsFunction {
-                    ForEach(show.items) { item in episode(item) }
+        let show = DownloadShow.group(library.items.filter { $0.status == .completed && DownloadShow.key(for: $0) == id }).first
+        Group {
+            if let show { content(show) } else { Color.clear }
+        }
+        .screenBackdrop()
+        .screenTitle(show.map { artwork.details(for: $0)?.name ?? $0.title } ?? "")
+        // Its last episode deleted: back to Downloads.
+        .onChange(of: show == nil) { _, gone in if gone { dismiss() } }
+        .task { if let show { await artwork.load([show]) } }
+        .confirmationDialog(L10n.text("Delete all cached episodes of %@?", show?.title ?? ""), isPresented: $deleting, titleVisibility: .visible) {
+            Button(L10n.text("Delete Cached Items"), role: .destructive) {
+                if let show { library.remove(show.items.map(\.id)) }
+            }
+        }
+    }
+
+    private func content(_ show: DownloadShow) -> some View {
+        let details = artwork.details(for: show)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: Layout.sectionSpacing) {
+                VStack(alignment: .leading, spacing: Layout.headerSpacing) {
+                    banner(show, details)
+                    // Under TMDB's banner: what is saved, then the story.
+                    if let details {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(summary(show)).font(.subheadline.weight(.semibold)).monospacedDigit()
+                            if !details.story.isEmpty {
+                                Text(details.story).font(.callout).foregroundStyle(.secondary).lineLimit(4)
+                            }
+                        }
+                        .frame(maxWidth: TMDBBannerMetrics.textWidth, alignment: .leading)
+                    }
                 }
                 .tvFocusSection()
                 Button(role: .destructive, action: delete) {
@@ -688,11 +771,30 @@ private struct ShowPanel: View {
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func episode(_ item: DownloadItem) -> some View {
-        Button { play(item) } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "play.fill").font(.system(size: DownloadMetrics.thumb > 60 ? 18 : 10)).foregroundStyle(.secondary)
-                Text(item.episode).lineLimit(1)
+    /// Play from the first episode, or delete them all: Liquid Glass over the banner.
+    private func actions(_ show: DownloadShow) -> some View {
+        HStack(spacing: 10) {
+            if let first = show.items.first {
+                Button { store.playing = store.savedChannel(first) } label: {
+                    Label(L10n.text("Play"), systemImage: "play.fill").lineLimit(1).fixedSize()
+                }
+                .controlButton(prominent: true)
+            }
+            Button(role: .destructive) { deleting = true } label: {
+                Label(L10n.text("Delete Cached Items"), systemImage: "trash").lineLimit(1).fixedSize()
+            }
+            .controlButton()
+        }
+        .environment(\.glassControls, true)
+    }
+
+    private func episodes(_ show: DownloadShow, _ details: TMDBMatch.Details?) -> some View {
+        let infos = artwork.episodes(of: show), backdrops = artwork.backdrops(for: show)
+        let items = reversed ? Array(show.items.reversed()) : show.items
+        return VStack(alignment: .leading, spacing: Layout.headerSpacing) {
+            HStack(alignment: .center, spacing: 10) {
+                SectionHeader(title: L10n.text("Episodes"))
+                Text("\(show.items.count)").font(.headline).monospacedDigit().foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 if let quality = item.quality { Text(quality).font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
                 Text(DownloadFormat.size(item.size)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
@@ -706,15 +808,17 @@ private struct ShowPanel: View {
             #endif
             .contentShape(Rectangle())
         }
-        .glassRow()
+    }
+
+    private func tile(_ item: DownloadItem, info: TMDBMatch.EpisodeInfo?, backdrops: [URL]) -> some View {
+        let detail = [item.quality, DownloadFormat.size(item.size)].compactMap { $0 }.joined(separator: " · ")
+        return Button { store.playing = store.savedChannel(item) } label: {
+            TMDBEpisodeTile(name: EpisodeRow.title(item.episode), info: info, detail: detail, width: nil, backdrops: backdrops)
+        }
+        .cardButton()
         .accessibilityLabel(L10n.text("Play %@", item.episode))
         .contextMenu {
-            #if os(macOS)
-            if let file = library.file(for: item) {
-                Button(L10n.text("Show in Finder"), systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
-            }
-            #endif
-            Button(L10n.text("Delete Download"), systemImage: "trash", role: .destructive) { library.remove([item.id]) }
+            Button(L10n.text("Delete from Cache"), systemImage: "trash", role: .destructive) { library.remove([item.id]) }
         }
     }
 }
@@ -767,7 +871,7 @@ struct DownloadedBadge: View {
             .font(.system(size: DownloadMetrics.thumb > 60 ? 22 : 12, weight: .semibold))
             .foregroundStyle(Brand.onAccent, Brand.accent)
             .offset(x: 4, y: -4)
-            .accessibilityLabel(L10n.text("Downloaded"))
+            .accessibilityLabel(L10n.text("Cached"))
     }
 }
 
@@ -783,9 +887,9 @@ struct DownloadState: View {
         Group {
             switch status {
             case .completed:
-                Image(systemName: "arrow.down.circle.fill").foregroundStyle(Brand.accent).accessibilityLabel(L10n.text("Downloaded"))
+                Image(systemName: "arrow.down.circle.fill").foregroundStyle(Brand.accent).accessibilityLabel(L10n.text("Cached"))
             case .failed:
-                Image(systemName: "exclamationmark.circle").foregroundStyle(Brand.rose).accessibilityLabel(L10n.text("Download failed"))
+                Image(systemName: "exclamationmark.circle").foregroundStyle(Brand.rose).accessibilityLabel(L10n.text("Caching failed"))
             case .downloading, .finishing:
                 ZStack {
                     Circle().stroke(Color.primary.opacity(0.15), lineWidth: 2)
@@ -793,7 +897,7 @@ struct DownloadState: View {
                         .rotationEffect(.degrees(-90))
                 }
                 .frame(width: size, height: size)
-                .accessibilityLabel(L10n.text("Downloading"))
+                .accessibilityLabel(L10n.text("Caching"))
             case .queued, .paused:
                 Image(systemName: "arrow.down.circle").foregroundStyle(.secondary).accessibilityLabel(L10n.text("In Queue"))
             }
@@ -847,7 +951,7 @@ struct DownloadPicker: View {
                     .overlay { PosterImage(url: video.poster, headers: video.posterHeaders) }
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(L10n.text("Download Episodes")).font(.title2.weight(.bold))
+                    Text(L10n.text("Cache Episodes")).font(.title2.weight(.bold))
                     Text(video.name).font(.headline).lineLimit(2)
                     if !flag.isEmpty { Text(SourceLabel(flag).text).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
                 }
@@ -919,7 +1023,7 @@ struct DownloadPicker: View {
             added(chosen.count)
             dismiss()
         } label: {
-            Label(selection.isEmpty ? L10n.text("Download") : L10n.text("Download %lld", selection.count), systemImage: "arrow.down.circle.fill")
+            Label(selection.isEmpty ? L10n.text("Cache") : L10n.text("Cache %lld", selection.count), systemImage: "arrow.down.circle.fill")
         }
         .controlButton(prominent: true).disabled(selection.isEmpty)
     }
@@ -935,7 +1039,7 @@ struct DownloadPicker: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay { RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.primary.opacity(0.1)) }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(L10n.text("Download Episodes")).font(.title3.weight(.semibold))
+                    Text(L10n.text("Cache Episodes")).font(.title3.weight(.semibold))
                     Text(video.name).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(macSubtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -1039,7 +1143,7 @@ struct DownloadPicker: View {
         }
         .buttonStyle(.plain)
         .disabled(locked)
-        .help(existing.flatMap { locked ? ($0.status == .completed ? L10n.text("Downloaded") : L10n.text("In Queue")) : nil } ?? episode.name)
+        .help(existing.flatMap { locked ? ($0.status == .completed ? L10n.text("Cached") : L10n.text("In Queue")) : nil } ?? episode.name)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
@@ -1052,7 +1156,7 @@ struct DownloadPicker: View {
     }
 
     private func stateLabel(_ item: DownloadItem) -> some View {
-        Text(item.status == .completed ? L10n.text("Downloaded") : L10n.text("In Queue"))
+        Text(item.status == .completed ? L10n.text("Cached") : L10n.text("In Queue"))
             .font(.caption).foregroundStyle(.secondary).lineLimit(1).fixedSize()
     }
 
@@ -1082,7 +1186,7 @@ struct DownloadPicker: View {
                 Text(episode.name).lineLimit(1)
                 Spacer(minLength: 6)
                 if let existing, locked {
-                    Text(existing.status == .completed ? L10n.text("Downloaded") : L10n.text("In Queue")).font(.caption).foregroundStyle(.secondary)
+                    Text(existing.status == .completed ? L10n.text("Cached") : L10n.text("In Queue")).font(.caption).foregroundStyle(.secondary)
                 }
             }
             #if !os(tvOS)
@@ -1192,10 +1296,19 @@ extension View {
         return false
     }
     /// The continued-processing task ended: the queue emptied, or the system (or the person, from its progress)
-    /// stopped it. Off screen, stop as the grace period's end would.
+    /// stopped it. Off screen, stop as the grace period's end would; the downloads carry on when the app returns.
+    /// Stopped while the app is in front (or just under Notification Center), it can only be the person pressing
+    /// Stop: pause everything, as Pause All does, so the next download or the return to the app doesn't start
+    /// them again (#947).
     static func continuedEnded(expired: Bool) {
-        guard UIApplication.shared.applicationState != .active else { return }
-        if expired { suspend() }
+        let state = UIApplication.shared.applicationState
+        if expired, state != .background {
+            Diagnostics.shared.record(.info, "download", "continued task stopped in front: pausing downloads")
+            DownloadLibrary.shared.pauseAll()
+            MusicDownloadLibrary.shared.pauseAll()
+        }
+        guard state != .active else { return }
+        if expired, state == .background { suspend() }
         end()
     }
     #endif
@@ -1230,7 +1343,7 @@ extension View {
             Diagnostics.shared.record(.warning, "download", "continued task not permitted")
             return
         }
-        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: L10n.text("Downloading"), subtitle: name)
+        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: L10n.text("Caching"), subtitle: name)
         request.strategy = .fail
         do {
             try BGTaskScheduler.shared.submit(request)
@@ -1274,7 +1387,7 @@ extension View {
         task.progress.completedUnitCount = Int64(done * 1000)
         if let name = current(), name != subtitle {
             subtitle = name
-            task.updateTitle(L10n.text("Downloading"), subtitle: name)
+            task.updateTitle(L10n.text("Caching"), subtitle: name)
         }
         return true
     }

@@ -28,6 +28,10 @@ public struct LivePlatform: Hashable, Identifiable, Sendable {
     public let chat: String?
     /// Hosts whose FLV addresses the script can turn into HLS (`play("relay", address)`).
     let relayHosts: [String]
+    /// The installed AngelLive plugin behind the platform (`LivePlugins`), instead of a script of Yingxia's own.
+    public let plugin: String?
+    /// The plugin's icon file.
+    public let icon: URL?
 
     init?(json: [String: JSONValue]) {
         guard let id = json["id"]?.string, !id.isEmpty, let scheme = json["scheme"]?.string, !scheme.isEmpty,
@@ -43,10 +47,25 @@ public struct LivePlatform: Hashable, Identifiable, Sendable {
         searchNeedsAccount = json["searchNeedsAccount"].map { if case .bool(true) = $0 { true } else { false } } ?? false
         chat = json["chat"]?.string
         relayHosts = (json["relayHosts"]?.array ?? []).compactMap { $0.string?.lowercased() }
+        plugin = nil; icon = nil
+    }
+
+    /// An installed plugin as a platform: `<id>-plugin-live://room/<room>` addresses, its icon as the mark.
+    init(plugin record: LivePlugins.Installed) {
+        let slug = record.pluginId.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == ".") }
+        // A URL scheme starts with a letter. For an ID like "9xiu", "9xiu-plugin-live://rooms" isn't a URL, and
+        // `source` trapped on every launch.
+        id = "plugin." + record.pluginId; scheme = "\(slug.first?.isLetter == true ? slug : "p" + slug)-plugin-live"; api = ""
+        names = [:]; fallbackName = record.name
+        tint = record.tint ?? "#5E5CE6"
+        mark = "plugin"; glyph = String(record.name.prefix(1)); split = false
+        account = nil; searchNeedsAccount = false; chat = nil; relayHosts = []
+        plugin = record.pluginId
+        icon = LivePlugins.shared.iconFile(record)
     }
 
     /// The platforms of the latest copy of Yingxia's own subscription, in its order.
-    public static var all: [LivePlatform] { CloudSources.platforms }
+    public static var all: [LivePlatform] { CloudSources.platforms + LivePlugins.shared.platforms }
 
     public init?(scheme: String?) {
         guard let scheme = scheme?.lowercased(), let platform = Self.all.first(where: { $0.scheme == scheme }) else { return nil }
@@ -57,7 +76,7 @@ public struct LivePlatform: Hashable, Identifiable, Sendable {
         self = platform
     }
 
-    public var name: String { names[L10n.resolvedLanguage()] ?? L10n.text(fallbackName) }
+    public var name: String { plugin != nil ? fallbackName : names[L10n.resolvedLanguage()] ?? L10n.text(fallbackName) }
     public var source: LiveSource { LiveSource(name: name, url: URL(string: "\(scheme)://rooms")!) }
     /// Some platforms answer searches only for signed-in accounts.
     public var searchable: Bool { !searchNeedsAccount || SourceAccounts.signedIn(account) }
@@ -95,7 +114,14 @@ public struct LiveRoom: Identifiable, Hashable, Sendable {
     public let online: Int
     public let area: String
     public var id: String { platform.id + ":" + roomID }
-    public var url: URL { URL(string: "\(platform.scheme)://room/\(roomID)")! }
+    /// The streamer, for plugins that find a room by both (`?u=` in the address).
+    public var userID = ""
+    public var url: URL {
+        var parts = URLComponents()
+        parts.scheme = platform.scheme; parts.host = "room"; parts.path = "/" + roomID
+        if !userID.isEmpty { parts.queryItems = [URLQueryItem(name: "u", value: userID)] }
+        return parts.url ?? URL(string: "\(platform.scheme)://room/\(roomID)")!
+    }
     /// The room as a playable channel; its stream is resolved when it plays.
     public var channel: Channel {
         Channel(name: [host, title].filter { !$0.isEmpty }.joined(separator: " · "), group: area, url: url, logo: cover)
@@ -116,6 +142,7 @@ public struct LiveRoom: Identifiable, Hashable, Sendable {
 
 public enum LiveCatalog {
     public static func areas(_ platform: LivePlatform) async throws -> [LiveArea] {
+        if let plugin = platform.plugin { return try await LivePluginCatalog.areas(plugin) }
         let reply = try await platform.call([:])
         return (reply["areas"]?.array ?? []).compactMap(\.object).compactMap { area in
             guard let id = area["id"]?.string, let name = area["name"]?.string, !name.isEmpty else { return nil }
@@ -123,14 +150,24 @@ public enum LiveCatalog {
         }
     }
 
+    /// Whether `area` is a plugin platform's home page ("Recommended"), which `homeFeed` lays out.
+    public static func isHome(_ area: LiveArea) -> Bool { area.id == LivePluginCatalog.homeArea }
+
+    /// A plugin platform's home page: banners and titled sections of rooms.
+    public static func homeFeed(_ platform: LivePlatform) async throws -> LivePluginCatalog.HomeFeed {
+        try await LivePluginCatalog.homeFeed(platform)
+    }
+
     /// One page (from 1) of an area's rooms, busiest first; empty past the last page.
     public static func rooms(_ platform: LivePlatform, area: LiveArea, page: Int) async throws -> [LiveRoom] {
-        rooms(platform, try await platform.call(["t": area.id, "pg": String(page)]))
+        if platform.plugin != nil { return try await LivePluginCatalog.rooms(platform, area: area, page: page) }
+        return rooms(platform, try await platform.call(["t": area.id, "pg": String(page)]))
     }
 
     /// Rooms whose title or streamer matches `keyword`.
     public static func search(_ platform: LivePlatform, keyword: String, page: Int = 1) async throws -> [LiveRoom] {
-        rooms(platform, try await platform.call(["wd": keyword, "pg": String(page)]))
+        if platform.plugin != nil { return try await LivePluginCatalog.search(platform, keyword: keyword, page: page) }
+        return rooms(platform, try await platform.call(["wd": keyword, "pg": String(page)]))
     }
 
     private static func rooms(_ platform: LivePlatform, _ reply: [String: JSONValue]) -> [LiveRoom] {
@@ -168,6 +205,7 @@ public enum LiveCatalog {
     /// with the room's qualities and the one served; any other channel is returned unchanged.
     public static func resolve(_ channel: Channel) async throws -> (channel: Channel, qualities: [StreamQuality], current: Int?) {
         guard let (platform, id) = room(channel.url) else { return (channel, [], nil) }
+        if platform.plugin != nil { return try await LivePluginCatalog.resolve(channel, platform: platform, room: id) }
         let asked = URLComponents(url: channel.url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value.flatMap(Int.init)
         let reply = try await platform.call(["play": id, "flag": asked.map(String.init) ?? ""])
         guard var url = reply["url"]?.string.flatMap({ try? WebAddress.resolve($0) }) else {
@@ -277,7 +315,7 @@ enum LiveText {
         text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
             .replacingOccurrences(of: "&amp;", with: "&").replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">").replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&#39;", with: "'").replacingOccurrences(of: "&nbsp;", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     static func imageURL(_ text: String) -> URL? {

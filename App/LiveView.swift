@@ -7,13 +7,13 @@ struct LiveView: View {
     private var trimmed: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
     var body: some View {
         Group {
-            if let config = store.subscription, !config.lives.isEmpty {
+            if case let sources = store.liveSources, !sources.isEmpty {
                 ScrollView {
                     Group {
                         if trimmed.isEmpty {
-                            LiveSourceGrid(sources: config.lives)
+                            LiveSourceGrid(sources: sources)
                         } else {
-                            LiveSearchResults(query: trimmed, sources: config.lives)
+                            LiveSearchResults(query: trimmed, sources: sources)
                         }
                     }.pageContainer()
                 }
@@ -24,7 +24,7 @@ struct LiveView: View {
                 #endif
             } else {
                 EmptyPage(symbol: AppSection.live.icon, title: L10n.text("Connect a Live Subscription"),
-                          message: L10n.text("In Settings, add a TVBox subscription with live playlists, or an M3U or TXT live playlist by its address or from a file."),
+                          message: L10n.text("In Settings, add a TVBox subscription with live playlists, an M3U or TXT live playlist, or live plugins."),
                           action: AppSection.settings.title, actionSymbol: AppSection.settings.icon, perform: { store.section = .settings })
             }
         }
@@ -115,6 +115,7 @@ struct LiveSourceCard: View {
 
 struct ChannelListView: View {
     let source: LiveSource
+    @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var channels: [Channel] = []
     @State private var query = ""
@@ -122,6 +123,10 @@ struct ChannelListView: View {
     @State private var loading = false
     @State private var loaded = false
     @State private var error: String?
+    /// The guide the playlist's header names, and the guide in use (#802).
+    @State private var playlistGuide: String?
+    @State private var guide: LiveGuide?
+    @State private var editingGuide = false
     private var waiting: Bool { channels.isEmpty && error == nil && (loading || !loaded) }
     private var groups: [String] { Array(Set(channels.map(\.group))).sorted() }
     private var filtered: [Channel] {
@@ -131,7 +136,9 @@ struct ChannelListView: View {
         #if os(tvOS)
         TVChannelGuide(source: source, channels: channels, query: $query, group: $group,
                        loading: waiting, refreshing: loading, error: error,
-                       reload: { Task { await load() } })
+                       reload: { Task { await load() } }, editGuide: { editingGuide = true })
+            .environment(guide)
+            .modifier(GuideAddressAlert(isPresented: $editingGuide, source: source, automatic: source.guide ?? playlistGuide, saved: applyGuide))
             .task(id: source.id) { if !loaded { await load() } }
         #else
         ScrollView {
@@ -149,7 +156,7 @@ struct ChannelListView: View {
                     ChannelSkeletonGrid()
                 }
                 if let error {
-                    ErrorStateCard(
+                    ErrorState(
                         title: L10n.text("Unable to Load Channels"),
                         message: L10n.text("Try again, or choose another source to keep watching."),
                         details: error,
@@ -159,18 +166,23 @@ struct ChannelListView: View {
                     ).padding(.vertical, 24).tvFocusSection()
                 }
                 if !waiting && error == nil && filtered.isEmpty {
-                    ContentUnavailableView(L10n.text("No Matching Channels"), systemImage: "magnifyingglass").frame(maxWidth: .infinity)
+                    EmptyResults(symbol: "magnifyingglass", title: L10n.text("No Matching Channels"))
                 }
                 if !filtered.isEmpty {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: Layout.cardMin), spacing: 12)], spacing: 12) {
-                        ForEach(filtered) { ChannelCard(channel: $0) }
+                        ForEach(filtered) { ChannelCard(channel: $0, play: watch) }
                     }
                 }
             }.pageContainer()
         }
         .screenBackdrop()
         .catalogSearchable(text: $query, prompt: L10n.text("Search channels")).screenTitle(source.name)
-        .toolbar { Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }.disabled(loading).accessibilityLabel(L10n.text("Refresh")) }
+        .toolbar {
+            Button { editingGuide = true } label: { Image(systemName: "calendar") }.accessibilityLabel(L10n.text("Program Guide"))
+            Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }.disabled(loading).accessibilityLabel(L10n.text("Refresh"))
+        }
+        .environment(guide)
+        .modifier(GuideAddressAlert(isPresented: $editingGuide, source: source, automatic: source.guide ?? playlistGuide, saved: applyGuide))
         .task(id: source.id) { if !loaded { await load() } }
         #endif
     }
@@ -189,11 +201,29 @@ struct ChannelListView: View {
             Text(L10n.text("Channels: %lld", filtered.count)).font(.caption).foregroundStyle(.secondary)
         }
     }
+    /// Plays a channel with the whole playlist to switch through in the player (#1010), and its guide (#802).
+    private func watch(_ channel: Channel) { store.watch(channel, in: LiveLineup(title: source.name, channels: channels), guide: guide) }
+
+    /// Uses the guide the viewer typed in, the subscription names or the playlist names, and loads it if it's XMLTV.
+    private func applyGuide() {
+        let address = LiveGuide.address(for: source, playlist: playlistGuide, in: store)
+        if address != guide?.address { guide = address.map(LiveGuide.init) }
+        if let guide, !channels.isEmpty, case .xmltv = guide.address {
+            let channels = channels
+            Task { await guide.load(channels) }
+        }
+    }
+
     private func load() async {
         guard !loading else { return }
         loading = true; error = nil
         defer { loading = false; if !Task.isCancelled { loaded = true } }
-        do { channels = try await HTTPClient().channels(source); if let group, !groups.contains(group) { self.group = nil } }
+        do {
+            let playlist = try await HTTPClient().playlist(source)
+            channels = playlist.channels; playlistGuide = playlist.guide
+            if let group, !groups.contains(group) { self.group = nil }
+            applyGuide()
+        }
         catch is CancellationError { }
         catch {
             guard !Task.isCancelled else { return }
@@ -204,7 +234,7 @@ struct ChannelListView: View {
 }
 
 #if os(tvOS)
-/// Channel-only adaptation of a living-room guide. Programme data is not supplied by playlists.
+/// A living-room channel guide, with what's on now and next when the playlist has a program guide (#802).
 private struct TVChannelGuide: View {
     let source: LiveSource
     let channels: [Channel]
@@ -214,6 +244,7 @@ private struct TVChannelGuide: View {
     let refreshing: Bool
     let error: String?
     let reload: () -> Void
+    let editGuide: () -> Void
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focusedChannel: String?
@@ -237,6 +268,8 @@ private struct TVChannelGuide: View {
                     Button { query = "" } label: { Image(systemName: "xmark") }
                         .controlButton().accessibilityLabel(L10n.text("Clear search"))
                 }
+                Button(action: editGuide) { Image(systemName: "calendar") }
+                    .controlButton().accessibilityLabel(L10n.text("Program Guide"))
                 Button(action: reload) { Image(systemName: "arrow.clockwise") }
                     .controlButton().disabled(refreshing).accessibilityLabel(L10n.text("Refresh"))
             }.tvFocusSection()
@@ -251,11 +284,12 @@ private struct TVChannelGuide: View {
                             Text(channel.displayGroup)
                             if store.isFavorite(channel) { Image(systemName: "heart.fill") }
                         }.font(.system(size: 24)).foregroundStyle(.secondary)
+                        NowAndNext(channel: channel).font(.system(size: 24))
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     TVGuideLogo(channel: channel, size: 112)
                         .frame(width: 350, height: 198)
                         .background(TVStyle.surface, in: RoundedRectangle(cornerRadius: 10))
-                }.frame(height: 218)
+                }.frame(minHeight: 218)
             }
 
             if !channels.isEmpty {
@@ -273,13 +307,12 @@ private struct TVChannelGuide: View {
                 LoadingCard(maxWidth: LoadingCard.compact) { .server(source.url.host(), title: L10n.text("Loading channels…")) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let error {
-                ErrorStateCard(title: L10n.text("Unable to Load Channels"),
+                ErrorState(title: L10n.text("Unable to Load Channels"),
                                message: L10n.text("Try again, or choose another source to keep watching."),
                                details: error, retry: reload, goBack: { dismiss() }, busy: refreshing)
                 Spacer()
             } else if filtered.isEmpty {
-                ContentUnavailableView(L10n.text("No Matching Channels"), systemImage: "magnifyingglass")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyResults(symbol: "magnifyingglass", title: L10n.text("No Matching Channels"), fills: true)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -308,7 +341,7 @@ private struct TVChannelGuide: View {
                         ForEach(filtered) { channel in
                             Button {
                                 showingSearch = false
-                                store.playing = channel
+                                watch(channel)
                             } label: {
                                 HStack(spacing: 24) {
                                     TVGuideLogo(channel: channel, size: 54)
@@ -333,14 +366,17 @@ private struct TVChannelGuide: View {
             .accessibilityAddTraits(group == value ? [.isSelected] : [])
     }
 
+    /// Plays a channel with the whole playlist to switch through in the player (#1010).
+    private func watch(_ channel: Channel) { store.watch(channel, in: LiveLineup(title: source.name, channels: channels)) }
+
     private func channelRow(_ channel: Channel) -> some View {
-        Button { store.playing = channel } label: {
+        Button { watch(channel) } label: {
             HStack(spacing: 26) {
                 TVGuideLogo(channel: channel, size: 52).frame(width: 100)
                 Rectangle().fill(.primary.opacity(0.12)).frame(width: 1, height: 48)
                 Text(channel.name).font(.system(size: 28, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 20)
-                Text(channel.displayGroup).font(.system(size: 22)).opacity(0.65).lineLimit(1)
+                NowOnText(channel: channel, otherwise: channel.displayGroup).font(.system(size: 22)).opacity(0.65).lineLimit(1)
                 if store.isFavorite(channel) { Image(systemName: "heart.fill").font(.system(size: 20)) }
                 Image(systemName: "play.fill").font(.system(size: 20)).frame(width: 44)
             }.padding(.horizontal, 22).frame(height: 90)
@@ -486,7 +522,12 @@ struct FavoritesView: View {
         VStack(alignment: .leading, spacing: Layout.headerSpacing) {
             SectionHeader(title: L10n.text("Live TV"))
             LazyVGrid(columns: [GridItem(.adaptive(minimum: Layout.cardMin), spacing: 12)], spacing: 12) {
-                ForEach(visibleLive) { ChannelCard(channel: $0) }
+                // [mi3s] 保留 `visibleLive`：它经保险库与隐藏源过滤，上游直读 favorites 会绕过这两层。
+                // 采纳上游 #1010：卡片带 `play` 回调，播放器里可横向切收藏频道。
+                ForEach(visibleLive) { channel in
+                    // The other favorite channels are the ones to switch through in the player (#1010).
+                    ChannelCard(channel: channel) { store.watchFavorite($0) }
+                }
             }
         }
         .tvFocusSection()
@@ -755,15 +796,21 @@ struct ChannelCard: View {
     @Environment(Store.self) private var store
     @Environment(\.stripDrag) private var drag
     let channel: Channel
+    /// How the card plays its channel, when it is one of a list to switch through (#1010).
+    var play: ((Channel) -> Void)? = nil
     var body: some View {
         let favorite = store.isFavorite(channel)
         HStack(spacing: 10) {
-            Button { if drag?.active != true { store.playing = channel } } label: {
+            Button {
+                guard drag?.active != true else { return }
+                if let play { play(channel) } else { store.playing = channel }
+            } label: {
                 HStack(spacing: 14) {
                     ChannelLogo(channel: channel)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(channel.name).font(.headline).foregroundStyle(.primary).lineLimit(1)
-                        Text(channel.displayGroup).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        // What's on now, when the playlist has a guide (#802).
+                        NowOnText(channel: channel, otherwise: channel.displayGroup).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())

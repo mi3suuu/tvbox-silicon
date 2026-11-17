@@ -832,15 +832,12 @@ struct BilibiliRelatedRow: View {
         VStack(alignment: .leading, spacing: 10) {
             if !videos.isEmpty {
                 Text(L10n.text("Related Videos")).font(.headline)
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: railSpacing) {
-                        ForEach(videos) { video in
-                            RouteLink { CatalogDestination(video: video, client: client) } label: { BilibiliVideoTile(video: video) }
-                                .cardButton()
-                        }
-                    }
-                    .padding(.vertical, 12)
-                }
+                #if os(macOS)
+                // A mouse wheel can't scroll sideways: without the rail's arrows and dragging, the videos past the
+                // window's edge could only be reached by widening the window (#881).
+                DiscoverRail(arrowCenter: 12 + BilibiliMetrics.tile * 9 / 32) { tiles }
+                #else
+                ScrollView(.horizontal) { tiles }
                 .scrollIndicators(.never)
                 .scrollClipDisabled()
                 #if os(iOS)
@@ -849,9 +846,20 @@ struct BilibiliRelatedRow: View {
                 .padding(.horizontal, -16)
                 #endif
                 .tvFocusSection()
+                #endif
             }
         }
         .task(id: bvid) { videos = (try? await BilibiliAPI.related(bvid: bvid)) ?? [] }
+    }
+
+    private var tiles: some View {
+        LazyHStack(alignment: .top, spacing: railSpacing) {
+            ForEach(videos) { video in
+                RouteLink { CatalogDestination(video: video, client: client) } label: { BilibiliVideoTile(video: video) }
+                    .cardButton()
+            }
+        }
+        .padding(.vertical, 12)
     }
 
     private var railSpacing: CGFloat {
@@ -1202,8 +1210,8 @@ struct BilibiliPhoneVideoPage<Parts: View, Status: View>: View {
             .accessibilityLabel(L10n.text("Favorite")).accessibilityIdentifier("bilibili.favorite")
             .frame(maxWidth: .infinity)
             if let download {
-                Button(action: download) { WatchPlateLabel(symbol: "arrow.down.circle", caption: L10n.text("Download")) }
-                    .accessibilityLabel(L10n.text("Download")).accessibilityIdentifier("detail.download")
+                Button(action: download) { WatchPlateLabel(symbol: "arrow.down.circle", caption: L10n.text("Cache")) }
+                    .accessibilityLabel(L10n.text("Cache")).accessibilityIdentifier("detail.download")
                     .frame(maxWidth: .infinity)
             }
             // A sheet of choices rather than a menu: iOS draws a menu's own glass around its label, a second, larger plate.
@@ -1416,7 +1424,7 @@ struct BilibiliMacVideoPage<Play: View, Parts: View, Status: View>: View {
                 }
                 MacPlate(symbol: "star", caption: caption(state?.favorites, L10n.text("Favorite")), on: state?.favorited == true,
                          tint: BilibiliMark.pink, id: "bilibili.favorite") { Task { await actions.favorite() } }
-                MacPlate(symbol: "arrow.down.circle", caption: L10n.text("Download"), id: "detail.download", action: download)
+                MacPlate(symbol: "arrow.down.circle", caption: L10n.text("Cache"), id: "detail.download", action: download)
                 MacPlateMenu(symbol: saved ? "heart" : "ellipsis", caption: saved ? L10n.text("Saved") : L10n.text("More"), on: saved,
                              title: L10n.text("More"), id: "bilibili.more") {
                     Button { Task { await actions.watchLater() } } label: { Label(L10n.text("Watch Later"), systemImage: "clock") }
@@ -1495,18 +1503,18 @@ struct BilibiliMacVideoPage<Play: View, Parts: View, Status: View>: View {
                 .buttonStyle(.plain).foregroundStyle(.secondary)
                 .accessibilityLabel(L10n.text("All Comments")).accessibilityIdentifier("bilibili.comments.all")
             }
-            ScrollView(.horizontal) {
+            // The rail's arrows and dragging: a mouse wheel can't scroll the cards sideways (#881).
+            DiscoverRail {
                 LazyHStack(alignment: .top, spacing: 14) {
                     ForEach(hotComments) { comment in
-                        Button { showsComments = true } label: { BilibiliMacCommentCard(comment: comment) }
+                        DiscoverButton { showsComments = true } label: { BilibiliMacCommentCard(comment: comment) }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("bilibili.comment")
                     }
                 }
-                .padding(.vertical, 4)
+                // Room for the glass to swell under the pointer, as the related videos' rail leaves its tiles.
+                .padding(.vertical, 12)
             }
-            .scrollIndicators(.never)
-            .scrollClipDisabled()
         }
     }
 }
@@ -1727,7 +1735,7 @@ struct BilibiliTVVideoPage<Play: View, Parts: View, Status: View>: View {
                     Button { Task { await actions.watchLater() } } label: { Label(L10n.text("Watch Later"), systemImage: "clock") }
                     Button { Task { await actions.triple() } } label: { Label(L10n.text("Like, Coin and Favorite"), systemImage: "sparkles") }
                     Divider()
-                    Button(action: download) { Label(L10n.text("Download"), systemImage: "arrow.down.circle") }
+                    Button(action: download) { Label(L10n.text("Cache"), systemImage: "arrow.down.circle") }
                     Button(action: toggleSaved) {
                         Label(saved ? L10n.text("Remove from Yingxia Favorites") : L10n.text("Add to Yingxia Favorites"),
                               systemImage: saved ? "heart.slash" : "heart")

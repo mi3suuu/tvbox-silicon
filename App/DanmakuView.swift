@@ -10,30 +10,54 @@ struct DanmakuOverlay: View {
     let comments: [Danmaku]
     var opacity = 0.9
     var revision = ""
+    @State private var jumps = 0
+
+    var body: some View {
+        DanmakuCanvas(comments: comments, revision: revision, opacity: opacity, jumps: jumps) { player.currentTime().seconds }
+            .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.timeJumpedNotification)) { notification in
+                guard let item = notification.object as? AVPlayerItem, item === player.currentItem else { return }
+                jumps += 1
+            }
+    }
+}
+
+/// Comments drawn at the moment `clock` gives, in the look and with the filters chosen in Settings › Danmaku and the
+/// player's danmaku menus: one set for every track (matched or imported comments, Bilibili videos, live rooms). Both
+/// the player's overlay and that page's moving preview, so the preview shows exactly what the player will draw.
+struct DanmakuCanvas: View {
+    let comments: [Danmaku]
+    var revision = ""
+    var opacity = DanmakuStyle.standardOpacity
+    /// Changes when the player says its time jumped: that catches small seeks that look like ordinary frames. AVPlayer
+    /// also says so when only its rate changes (play, a held speed boost and its release), which the engine tells apart.
+    var jumps = 0
+    let clock: () -> Double
     @AppStorage(DanmakuArea.key) private var area = DanmakuArea.standard
     @AppStorage(DanmakuStyle.fontSizeKey) private var fontSize = DanmakuStyle.standardFontSize
-    /// ⛔ 速度与屏蔽词必须各自声明成 `@AppStorage`，不是为了读值（`BiliDanmakuSpeed.current` /
-    /// `BiliDanmakuFilter.words` 已经能从 UserDefaults 取），而是为了**建立 SwiftUI 依赖** ——
-    /// 两者原来都只被 `DanmakuEngine` 在内部读一次，改 key 不会让这个视图重算，
-    /// 于是「速度」「屏蔽词」两个旋钮拨了没反应（复核 B1 指出）：
-    ///   · 速度的读点在 `restart()`（`:160`），而 `restart()` 只在 layout/size/area/textScale/
-    ///     时间跳变时触发，**没有一项由速度驱动** ⇒ 改速度不重排；
-    ///   · 屏蔽词只在 `load()`（`:84/86`）读，`load()` 由下面 `.task(id:)` 驱动，
-    ///     而那个 id 不含屏蔽词 ⇒ 改词不重载。
-    /// 声明成 `@AppStorage` 之后再分别并入两处触发条件，两条链才真的通。
-    @AppStorage(BiliDanmakuSpeed.key) private var speedRaw = BiliDanmakuSpeed.normal.rawValue
-    @AppStorage(BiliDanmakuFilter.wordsKey) private var blockWordsRaw = ""
+    @AppStorage(DanmakuStyle.speedKey) private var speed = DanmakuStyle.standardSpeed
+    @AppStorage(DanmakuStyle.scrollKey) private var scroll = true
+    @AppStorage(DanmakuStyle.topKey) private var top = true
+    @AppStorage(DanmakuStyle.bottomKey) private var bottom = true
+    @AppStorage(DanmakuFilter.colorsKey) private var colors = true
+    @AppStorage(DanmakuFilter.wordsKey) private var blockedWords = ""
     @State private var engine = DanmakuEngine()
     @Environment(\.displayScale) private var scale
+
+    private struct Load: Equatable {
+        let revision: String, count: Int, filter: DanmakuFilter
+    }
+
+    private var filter: DanmakuFilter { DanmakuFilter(colors: colors, words: DanmakuFilter.words(blockedWords)) }
 
     var body: some View {
         TimelineView(.animation) { timeline in
             Canvas { context, size in
-                // Reading the timeline's date makes every tick a new drawing; the clock itself is the player's.
+                // Reading the timeline's date makes every tick a new drawing; the clock itself is the caller's.
                 _ = timeline.date
-                let time = player.currentTime().seconds
+                let time = clock()
                 guard time.isFinite else { return }
-                for sprite in engine.frame(time: time, size: size, scale: scale, area: area, textScale: DanmakuStyle.textScale(fontSize)) {
+                for sprite in engine.frame(time: time, size: size, scale: scale, area: area, textScale: DanmakuStyle.textScale(fontSize),
+                                           speed: speed, scroll: scroll, top: top, bottom: bottom) {
                     context.draw(Image(decorative: sprite.image, scale: scale), in: sprite.frame)
                 }
             }
@@ -42,35 +66,89 @@ struct DanmakuOverlay: View {
         // No `ignoresSafeArea` here: it would win over the caller's, and the iPhone keeps comments below the Dynamic Island.
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-        // 屏蔽词进 id：改词必须重新 load 一遍（`load` 内部按 `BiliDanmakuFilter` 过滤）。
-        // `comments.count` 是**未过滤**的原始条数，它不会随屏蔽词变，所以单靠它不够。
-        .task(id: "\(revision):\(comments.count):\(blockWordsRaw)") { engine.load(comments) }
-        // 速度进重排条件：`restart()` 是唯一读 `scrollDuration` 的地方，而它只在这个 id 变化时
-        // 被 `engine` 重新走到 —— 把速度串进来，拨档位才会真的改变横穿时间。
-        // 拨速度：屏上弹幕继续飘（清屏会闪），后续新弹幕按新速度进。
-        .task(id: "speed:\(speedRaw)") { engine.invalidateLayout(preservingOnScreen: true) }
+        .task(id: Load(revision: revision, count: comments.count, filter: filter)) {
+            // Filtering keeps the order and drops comments in place, so a live track still only grows at the end.
+            let filter = filter
+            engine.load(filter.apply(comments), revision: "\(revision)|\(filter.colors)|\(DanmakuFilter.stored(filter.words))")
+        }
+        .onChange(of: jumps) { engine.jumped(to: clock()) }
     }
 }
 
 /// Whether comments are shown, from Settings and the player's own toggle.
 enum DanmakuPreference {
     static let key = "danmakuEnabled"
+    /// The player's danmaku button: scrolling text, not a speech bubble, which beside Subtitle Files' captions bubble
+    /// read as the same button twice. It has no filled form; the menu's Show Danmaku tick says whether comments show.
+    static let symbol = "text.line.first.and.arrowtriangle.forward"
 }
 
 #if !os(tvOS)
-/// Text size and opacity for the player's danmaku menu, next to the area, for whatever comments are playing.
+// The player's menus and sheets on iPhone, iPad and Mac; the TV has its transport menu and Settings › Danmaku.
+/// Rows shared by global settings and the playback panel; no comment track needs to be loaded.
+struct DanmakuDisplaySettings: View {
+    @AppStorage(DanmakuArea.key) private var area = DanmakuArea.standard
+    @AppStorage(DanmakuStyle.fontSizeKey) private var fontSize = DanmakuStyle.standardFontSize
+    @AppStorage(DanmakuStyle.opacityKey) private var opacity = DanmakuStyle.standardOpacity
+
+    var body: some View {
+        Picker(selection: $area) {
+            ForEach(DanmakuArea.allCases, id: \.self) { Text($0.title).tag($0) }
+        } label: { Label(L10n.text("Danmaku Area"), systemImage: "rectangle.tophalf.inset.filled") }
+        .pickerStyle(.menu)
+        .accessibilityIdentifier("danmaku.area")
+        DanmakuTextStylePickers(fontSize: $fontSize, opacity: $opacity)
+        DanmakuMotionPickers()
+    }
+}
+
+#if !os(tvOS)
+/// Display controls beside the area in the player's menu, for whatever comments are playing.
 struct DanmakuStylePickers: View {
     @Bindable var model: CatalogDanmakuModel
 
     var body: some View {
-        Picker(selection: $model.fontSize) {
-            ForEach(DanmakuStyle.fontSizes(including: model.fontSize), id: \.self) { Text(verbatim: "\(Int($0.rounded()))").tag($0) }
+        DanmakuTextStylePickers(fontSize: $model.fontSize, opacity: $model.opacity)
+        DanmakuMotionPickers()
+    }
+}
+#endif
+
+private struct DanmakuTextStylePickers: View {
+    @Binding var fontSize: Double
+    @Binding var opacity: Double
+
+    var body: some View {
+        Picker(selection: $fontSize) {
+            ForEach(DanmakuStyle.fontSizes(including: fontSize), id: \.self) { Text(verbatim: "\(Int($0.rounded()))").tag($0) }
         } label: { Label(L10n.text("Text Size"), systemImage: "textformat.size") }
         .pickerStyle(.menu)
-        Picker(selection: $model.opacity) {
-            ForEach(DanmakuStyle.opacities(including: model.opacity), id: \.self) { Text(verbatim: "\(Int(($0 * 100).rounded()))%").tag($0) }
+        .accessibilityIdentifier("danmaku.fontSize")
+        Picker(selection: $opacity) {
+            ForEach(DanmakuStyle.opacities(including: opacity), id: \.self) { Text(verbatim: "\(Int(($0 * 100).rounded()))%").tag($0) }
         } label: { Label(L10n.text("Opacity"), systemImage: "circle.lefthalf.filled") }
         .pickerStyle(.menu)
+        .accessibilityIdentifier("danmaku.opacity")
+    }
+}
+
+private struct DanmakuMotionPickers: View {
+    @AppStorage(DanmakuStyle.speedKey) private var speed = DanmakuStyle.standardSpeed
+    @AppStorage(DanmakuStyle.scrollKey) private var scroll = true
+    @AppStorage(DanmakuStyle.topKey) private var top = true
+    @AppStorage(DanmakuStyle.bottomKey) private var bottom = true
+    @AppStorage(DanmakuFilter.colorsKey) private var colors = true
+
+    var body: some View {
+        Picker(selection: Binding(get: { DanmakuStyle.clampedSpeed(speed) }, set: { speed = $0 })) {
+            ForEach(DanmakuStyle.speeds(including: speed), id: \.self) { Text(verbatim: "\($0.formatted(.number.precision(.fractionLength(0...2))))×").tag($0) }
+        } label: { Label(L10n.text("Scroll Speed"), systemImage: "speedometer") }
+        .pickerStyle(.menu)
+        .accessibilityIdentifier("danmaku.speed")
+        Toggle(L10n.text("Scrolling Comments"), isOn: $scroll).settingsSwitch().accessibilityIdentifier("danmaku.scroll")
+        Toggle(L10n.text("Top Comments"), isOn: $top).settingsSwitch().accessibilityIdentifier("danmaku.top")
+        Toggle(L10n.text("Bottom Comments"), isOn: $bottom).settingsSwitch().accessibilityIdentifier("danmaku.bottom")
+        Toggle(L10n.text("Colored Comments"), isOn: $colors).settingsSwitch().accessibilityIdentifier("danmaku.colors")
     }
 }
 #endif
@@ -80,103 +158,83 @@ final class DanmakuEngine: @unchecked Sendable {
     private struct Active { let placement: DanmakuLayout.Placement; let image: CGImage; let size: CGSize }
     private let lock = NSLock()
     private var comments: [Danmaku] = []
+    private var revision = ""
     private var layout: DanmakuLayout?
     private var size = CGSize.zero
     private var area = DanmakuArea.standard
     private var textScale = 1.0
+    private var speed = DanmakuStyle.standardSpeed
+    private var scroll = true, top = true, bottom = true
     private var fontSize: CGFloat = 24
     private var next = 0
     private var active: [Active] = []
     private var lastTime = -1.0
-    /// 下一次 `restart()` 是否保留屏上弹幕。由 `invalidateLayout(preservingOnScreen:)` 设置，
-    /// `restart()` 消费后立即复位 —— 它只描述「这次作废」的意图，不能泄漏到之后任何一次重建。
-    private var preserveOnRestart = false
+    /// When (system uptime) the clock last moved more than `step` between two frames: a seek, which the player's
+    /// time-jump notification reports a few frames later.
+    private var lastStep = -Double.infinity
+    private static let step = 0.25
     /// Rendered text, reused: busy tracks repeat the same few words, and drawing text is the costly part.
     private var images: [String: CGImage] = [:]
     /// Dense tracks (Dandanplay merges several sites, up to 30,000 comments) would otherwise measure and draw
     /// dozens of comments in one frame and stall it; the rest wait a frame, and those a second late are dropped.
     private static let perFrame = 4, onScreen = 150
 
-    /// 丢掉已算好的排布，让下一帧的 `frame(...)` 重新走 `restart()`。
-    ///
-    /// 只有 `restart()` 会读 `BiliDanmakuSpeed.current.scrollDuration`（`:199`），
-    /// 而 `restart()` 的触发条件里没有任何一项由速度驱动 —— 所以拨档位时必须在外部
-    /// 主动作废 layout，否则那一行永远按第一次建布局时的值走。
-    ///
-    /// ⛔ `preservingOnScreen` 必须由**调用方显式说明意图**，不能让 `frame()` 去猜。
-    ///
-    /// 因为置空 layout 有两种来源，用户预期完全相反：
-    ///   · 拨速度档位 → 屏上的弹幕应当继续飘（清屏会闪一下），只是后续按新速度；
-    ///   · 改屏蔽词   → 被新词过滤掉的弹幕应当**立刻消失**，保留反而是错的。
-    /// 我上一版让 `frame()` 用「size/area/textScale 都没变」自己推断，结果把这两种
-    /// 混成一种：改词时被过滤的弹幕还挂在屏上画 6–13 秒，比没修更糟（复核 N1b）。
-    func invalidateLayout(preservingOnScreen: Bool) {
+    func load(_ comments: [Danmaku], revision: String = "") {
         lock.withLock {
-            layout = nil
-            preserveOnRestart = preservingOnScreen
+            // Live comments only grow at the end: keep the layout and what is already on screen.
+            // A new track or time offset supplies a new revision even when its first comment is unchanged.
+            if revision == self.revision, !self.comments.isEmpty, comments.count > self.comments.count,
+               comments.first == self.comments.first, comments[self.comments.count - 1] == self.comments.last {
+                self.comments = comments; return
+            }
+            self.comments = comments; self.revision = revision; layout = nil
         }
     }
 
-    func load(_ comments: [Danmaku]) {
-        // 屏蔽词过滤（二进制实证 `danmaku_filter` / `danmaku_block_switch`）。
-        // 在**入口处**过滤，之后所有路径（布局、缓存）都不用再判，
-        // 也避免屏蔽词改了要重排时漏掉。
-        let visible = BiliDanmakuFilter.words.isEmpty
-            ? comments
-            : comments.filter { !BiliDanmakuFilter.isBlocked($0.text) }
-
+    /// The player's time-jump notification catches small seeks that look like ordinary frame advances. AVPlayer posts it
+    /// for every rate change too, with no jump at all: playing after a pause, and the start and end of a held speed
+    /// boost. Those keep the comments on screen (#1056); only a clock that moved now, or a moment ago, clears them.
+    func jumped(to time: Double) {
         lock.withLock {
-            // ⛔ 快路径（实时弹幕只往后追加时，保住 layout 与 `next`，不重排）必须**只对真追加**生效。
-            //
-            // 原条件只有「条数变多 + 首条相同」。它当年只可能被「实时弹幕增长」走到，
-            // 所以够用。但 `blockWordsRaw` 接进 `.task(id:)` 之后，**「移除屏蔽词」第一次能走到这里**
-            // —— 而这恰好也是「条数变多 + 首条通常不变」⇒ 命中快路径 ⇒ `next` 仍指向
-            // 旧（已过滤）数组的索引，而 `comments` 已是新的更长数组 ⇒ **索引错位、弹幕重放**。
-            // 复核 t5 的 O1 指出：屏蔽「哈哈」这类已消费的早期高频短词再移除，会重放约 9 条。
-            //
-            // 收紧条件：`visible` 必须**以旧 `comments` 为前缀**（即旧数组的每一条都原样在
-            // 新数组的同一位置）。只有真追加才满足；移除屏蔽词会让旧数组的中间冒出条目，
-            // 前缀关系立刻破裂，于是落到下面「重排」路径。
-            //
-            // 逐条比较而不是比 count/首元素：屏蔽词命中数组中间时，首元素与长度都可能不变
-            // 或看起来像追加，只有前缀比较能可靠区分「追加」与「插回」。
-            let isAppend = !self.comments.isEmpty && visible.count > self.comments.count
-                && visible.starts(with: self.comments)
-            if isAppend {
-                self.comments = visible; return
-            }
-            // ⛔ 这里必须把 `preserveOnRestart` 一起复位成 false。
-            //
-            // 改屏蔽词走的就是这条路径（`.task(id:)` 里 `blockWordsRaw` 变了 → `load`）：
-            // 被新词过滤掉的弹幕必须**立刻消失**，保留屏上那批是错的（复核 N1b）。
-            // 而 `preserveOnRestart` 是上一次「拨速度」可能留下的 true ——
-            // 若正好在它被 `frame()` 消费之前用户又改了屏蔽词，两个信号会串在一起。
-            // 置 layout=nil 的每一条路径都必须显式说明自己的意图，不许继承上一条。
-            self.comments = visible; layout = nil; preserveOnRestart = false
+            let moved = !time.isFinite || abs(time - lastTime) > Self.step || ProcessInfo.processInfo.systemUptime - lastStep < 0.5
+            if moved { layout = nil }
         }
     }
 
-    func frame(time: Double, size: CGSize, scale: CGFloat, area: DanmakuArea = .standard, textScale: Double = 1) -> [Sprite] {
+    func frame(time: Double, size: CGSize, scale: CGFloat, area: DanmakuArea = .standard, textScale: Double = 1,
+               speed: Double = DanmakuStyle.standardSpeed, scroll: Bool = true, top: Bool = true, bottom: Bool = true) -> [Sprite] {
         lock.withLock {
-            guard !comments.isEmpty, size.width > 0, size.height > 0 else { return [] }
-            // A new size, area or text size, or a seek (any jump the clock would not make by itself), starts over at `time`.
-            if layout == nil || size != self.size || area != self.area || textScale != self.textScale
-                || time < lastTime - 0.3 || time > lastTime + 2 {
-                // 是否保留屏上弹幕，只认调用方显式设置的意图，**不自己推断**：
-                // 换尺寸/换区域/换字号/进度跳变这些情况旧位置确实失效，一律清空重排，
-                // 所以那几种情况下 `preserveOnRestart` 一律按 false 处理。
-                let geometryChanged = size != self.size || area != self.area
-                    || textScale != self.textScale || time < lastTime - 0.3 || time > lastTime + 2
-                let keep = preserveOnRestart && !geometryChanged
-                preserveOnRestart = false
-                restart(at: time, size: size, area: area, textScale: textScale, keepOnScreen: keep)
+            guard time.isFinite, !comments.isEmpty, size.width > 0, size.height > 0 else { return [] }
+            let speed = DanmakuStyle.clampedSpeed(speed)
+            // Changes restart at the player's current time; past comments never replay with a new style.
+            // Moving back more than a moment, or a large forward jump between frames, also clears the old placements; the
+            // player's clock can step back a few milliseconds after a stall or a rate change, and seeks reset it anyway.
+            let restarted = layout == nil || size != self.size || area != self.area || textScale != self.textScale
+                || speed != self.speed || scroll != self.scroll || top != self.top || bottom != self.bottom
+                || time < lastTime - 0.3 || time > lastTime + 2
+            if restarted {
+                restart(at: time, size: size, area: area, textScale: textScale, speed: speed, scroll: scroll, top: top, bottom: bottom)
             }
+            // Repeated paused frames draw the same placements without draining a dense track's queue.
+            let advances = restarted || time > lastTime
+            if !advances, next < comments.count, comments[next].time <= time {
+                // Discard the rest of a burst while paused, so resuming cannot replay that backlog.
+                next = comments.partitioningIndex { $0.time > time }
+            }
+            if abs(time - lastTime) > Self.step { lastStep = ProcessInfo.processInfo.systemUptime }
             lastTime = time
             var budget = Self.perFrame
-            while next < comments.count, comments[next].time <= time {
+            while advances, next < comments.count, comments[next].time <= time {
                 let comment = comments[next]
+                let shown: Bool
+                switch comment.position {
+                case .scroll: shown = scroll
+                case .top: shown = top
+                case .bottom: shown = bottom
+                }
+                // Filtering precedes measurement, drawing and the frame budget, so hidden types reserve no lanes.
                 // Comments passed over (a stall, a skipped frame, a burst) are not shown late.
-                guard time - comment.time < 1, active.count < Self.onScreen, var layout else { next += 1; continue }
+                guard shown, time - comment.time < 1, active.count < Self.onScreen, var layout else { next += 1; continue }
                 guard budget > 0 else { break }
                 budget -= 1; next += 1
                 let font = fontSize * comment.scale
@@ -192,18 +250,35 @@ final class DanmakuEngine: @unchecked Sendable {
             let lane = layout.laneHeight
             let top = size.height * 0.04
             // Bottom comments rest at the foot of the picture, or of the area when it stops above the lower quarter.
-            let bottom = area.share < DanmakuArea.threeQuarters.share ? top + size.height * 0.96 * area.share : size.height * 0.92
+            // A few counted lines have no foot apart from their rows, which bottom comments share with top ones.
+            let bottom = area.share < DanmakuArea.threeQuarters.share ? top + max(lane, size.height * 0.96 * area.share) : size.height * 0.92
             return active.map { item in
                 let placement = item.placement
                 let x: Double, y: Double
                 switch placement.comment.position {
                 case .scroll: x = layout.width - (time - placement.start) * placement.speed; y = top + Double(placement.lane) * lane
-                case .top: x = (layout.width - item.size.width) / 2; y = top + Double(placement.lane) * lane
-                case .bottom: x = (layout.width - item.size.width) / 2; y = bottom - Double(placement.lane + 1) * lane
+                case .bottom where !layout.bottomSharesTop:
+                    x = (layout.width - item.size.width) / 2; y = bottom - Double(placement.lane + 1) * lane
+                case .top, .bottom: x = (layout.width - item.size.width) / 2; y = top + Double(placement.lane) * lane
                 }
                 return Sprite(image: item.image, frame: CGRect(x: x, y: y + (lane - item.size.height) / 2, width: item.size.width, height: item.size.height))
             }
         }
+    }
+
+    /// About 43pt on a 1080p TV, 22pt in a small Mac window. From the shorter side: an upright iPhone's full-screen
+    /// player is tall and narrow, and its height made the text twice the size it is when the phone is turned.
+    /// The chosen text size scales that, and the lanes with it, so larger comments don't overlap.
+    static func fontSize(in size: CGSize, textScale: Double) -> CGFloat {
+        min(44, max(15, min(size.width, size.height) * 0.04)) * textScale
+    }
+
+    /// The part of a picture `size` big that comments use in `area`: from just under the top edge down through its
+    /// rows. Settings › Danmaku outlines it on the preview.
+    static func areaFrame(in size: CGSize, area: DanmakuArea, textScale: Double) -> CGRect {
+        let lane = fontSize(in: size, textScale: textScale) * 1.35, top = size.height * 0.04, height = size.height * 0.96
+        let rows = area.lines ?? max(1, Int(height * area.share / lane))
+        return CGRect(x: 0, y: top, width: size.width, height: min(height, CGFloat(rows) * lane))
     }
 
     private func image(_ comment: Danmaku, size: CGFloat, scale: CGFloat) -> CGImage? {
@@ -215,36 +290,14 @@ final class DanmakuEngine: @unchecked Sendable {
         return image
     }
 
-    /// `keepOnScreen`：换布局时**保留正在飘的那批**。
-    ///
-    /// 拨速度档位只改 `scrollDuration`，画面尺寸/区域/字号都没变 ——
-    /// 这时若照常 `active = []`，屏上的弹幕会先全部消失、再从此刻重新排，
-    /// 用户看到的是「一拨速度，弹幕闪一下」。而 `Active` 里存的是 `DanmakuLayout.Placement`
-    /// （含 `start` 与 `speed`），换布局后按新 `speed` 继续算 x 即可，不需要重建。
-    /// 尺寸/区域/字号变化、以及进度跳变，仍然走原来的清空重建（那些情况下旧位置确实失效）。
     private func restart(at time: Double, size: CGSize, area: DanmakuArea, textScale: Double,
-                         keepOnScreen: Bool = false) {
+                         speed: Double, scroll: Bool, top: Bool, bottom: Bool) {
         self.size = size; self.area = area; self.textScale = textScale
-        // About 43pt on a 1080p TV, 22pt in a small Mac window. From the shorter side: an upright iPhone's full-screen
-        // player is tall and narrow, and its height made the text twice the size it is when the phone is turned.
-        // The chosen text size scales that, and the lanes with it, so larger comments don't overlap.
-        fontSize = min(44, max(15, min(size.width, size.height) * 0.04)) * textScale
-        // 弹幕速度（二进制实证 `danmaku_speed`）：`scrollDuration` 是「横穿屏幕所需秒数」，
-        // 越小越快。之前硬编码默认 9，界面上没有入口。
-        // 旧布局的三张碰撞表在下面被整个换掉，先把它要保留下来的那些 placement 抓出来。
-        let carried: [DanmakuLayout.Placement] = keepOnScreen ? active.map(\.placement) : []
-        layout = DanmakuLayout(width: size.width, height: size.height * 0.96,
-                               laneHeight: fontSize * 1.35, scrollArea: area.share,
-                               scrollDuration: BiliDanmakuSpeed.current.scrollDuration)
-        if keepOnScreen {
-            // ⛔ 光保住 `active` 不够（我曾以为够，错了）。`active` 只决定「画什么」，
-            //    位置分配只查 `scrolling`/`top`/`bottom` 三张表 —— 表若留空，
-            //    `place()` 看到每行都是 nil，新弹幕全部挤进 lane 0，与屏上旧弹幕叠同一行。
-            //    所以必须把旧 placement 播种进新布局（复核 N1）。
-            layout?.adopt(carried)
-        } else {
-            active = []
-        }
+        self.speed = speed; self.scroll = scroll; self.top = top; self.bottom = bottom
+        fontSize = Self.fontSize(in: size, textScale: textScale)
+        layout = DanmakuLayout(width: size.width, height: size.height * 0.96, laneHeight: fontSize * 1.35, scrollArea: area.share,
+                               lines: area.lines, scrollDuration: 9 * DanmakuStyle.scrollDurationMultiplier(speed))
+        active = []
         var low = 0, high = comments.count
         while low < high { let mid = (low + high) / 2; if comments[mid].time < time { low = mid + 1 } else { high = mid } }
         next = low
@@ -483,7 +536,7 @@ struct DanmakuListView: View {
             .onScrollByHand { following = false }
             .overlay {
                 if items.isEmpty {
-                    ContentUnavailableView.search(text: query)
+                    EmptyResults.search(query)
                 }
             }
             .overlay(alignment: .bottom) {

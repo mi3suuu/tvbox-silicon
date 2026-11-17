@@ -52,7 +52,13 @@ def builds(app, version):
     res = call(f"/builds?filter[app]={app}&filter[preReleaseVersion.version]={version}&sort=-uploadedDate&limit=50&include=buildBetaDetail")
     details = {i["id"]: i["attributes"] for i in res.get("included", []) if i["type"] == "buildBetaDetails"}
     for b in res["data"]:
-        b["beta"] = details.get(b["relationships"]["buildBetaDetail"]["data"]["id"], {})
+        # Processing builds can be listed before Apple creates their beta details.
+        detail = b.get("relationships", {}).get("buildBetaDetail", {}).get("data") or {}
+        b["beta"] = details.get(detail.get("id"), {})
+        # Apple can omit relationship linkage even after the detail endpoint is ready.
+        if not b["beta"] and b["attributes"]["processingState"] == "VALID":
+            response = call(f"/builds/{b['id']}/buildBetaDetail", ok=(404,))
+            b["beta"] = (response.get("data") or {}).get("attributes", {})
     return res["data"]
 
 
@@ -60,8 +66,10 @@ def wait_processed(platform, app, version, build):
     for _ in range(120):  # up to an hour
         match = [b for b in builds(app, version) if b["attributes"]["version"] == build]
         state = match[0]["attributes"]["processingState"] if match else "NOT_YET_LISTED"
-        if state == "VALID":
+        if state == "VALID" and match[0]["beta"]:
             return match[0]
+        if state == "VALID":
+            state = "BETA_DETAILS_PENDING"
         if state in ("FAILED", "INVALID"):
             raise RuntimeError(f"{platform} {version} ({build}) processing {state}")
         print(f"   {platform}: {state}, waiting", flush=True)

@@ -60,11 +60,23 @@ public enum ImportedFiles {
     public static func add(_ file: URL) throws -> URL {
         let name = file.lastPathComponent.replacingOccurrences(of: "/", with: "_").trimmingCharacters(in: CharacterSet(charactersIn: ". "))
         guard !name.isEmpty else { throw TVError.invalidURL }
-        let data = try Data(contentsOf: file)
+        let data = try read(file)
         guard data.count <= 20_000_000 else { throw TVError.unsupported(L10n.text("The playlist exceeds 20 MB. Use a smaller subscription.")) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try data.write(to: directory.appending(path: name), options: .atomic)
         return address(name)
+    }
+
+    /// Reads a picked or opened file through a file coordinator, which first downloads an iCloud Drive file
+    /// that is only a placeholder on this device; a plain read fails on those.
+    public static func read(_ file: URL) throws -> Data {
+        var coordination: NSError?
+        var result: Result<Data, Error> = .failure(TVError.invalidURL)
+        NSFileCoordinator().coordinate(readingItemAt: file, options: .withoutChanges, error: &coordination) { url in
+            result = Result { try Data(contentsOf: url) }
+        }
+        if let coordination { throw coordination }
+        return try result.get()
     }
 
     /// Deletes the copy behind an address on the reserved host; any other address is left alone.
@@ -92,7 +104,24 @@ public enum ImportedFiles {
     /// What an address on the reserved host holds; nil for every other address, which loads as usual.
     static func data(at url: URL) throws -> Data? {
         guard let file = file(for: url) else { return nil }
-        guard let data = try? Data(contentsOf: file) else { throw TVError.unsupported(L10n.text("This file is no longer on this device. Add it again.")) }
+        guard let data = try? Data(contentsOf: file) else {
+            // A config added as a file can name files beside it (`./py/x.py`), and only the config itself was added.
+            // That isn't a file from another device, so it says what is missing instead.
+            guard url.pathComponents.filter({ $0 != "/" }).count > 1 else { throw TVError.unsupported(missingMessage) }
+            throw TVError.unsupported(L10n.text("This source needs %@, a file next to its config. Only the config file itself was added, so add the config by its web address instead.", "." + url.path(percentEncoded: false)))
+        }
         return data
+    }
+
+    /// What a file's address says when its copy isn't here. The subscription list follows the viewer to their other
+    /// devices through iCloud and a file's copy doesn't, so this is nearly always a file added on another device (#842).
+    public static var missingMessage: String {
+        L10n.text("This file is on the device it was added on, not on this one. Files don't sync to other devices; use a web address instead.")
+    }
+
+    /// An address on the reserved host whose copy isn't on this device.
+    public static func isMissing(_ address: String) -> Bool {
+        guard let url = URL(string: address), let file = file(for: url) else { return false }
+        return !FileManager.default.fileExists(atPath: file.path)
     }
 }

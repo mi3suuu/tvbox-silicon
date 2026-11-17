@@ -46,7 +46,7 @@ import TVCore
         library.resolver = { _ in
             guard target.hasPrefix("bili:") else { return Channel(name: "probe", url: URL(string: target)!) }
             let parts = target.split(separator: ":").map(String.init)
-            let client = CatalogClient(site: try await cloudSite(\.isBilibili), origin: CloudSources.address)
+            let client = CatalogClient(site: try await cloudSite(\.isBilibili), origin: try CloudSources.address)
             let video = try await client.detail(parts[1])
             let channel = try await client.playback(video.episodes[min(parts.count > 2 ? Int(parts[2]) ?? 0 : 0, video.episodes.count - 1)])
             print("resolved \(channel.url.absoluteString.prefix(100))")
@@ -152,8 +152,19 @@ import TVCore
         return try await HTTPClient().subscription(WebAddress.resolve(address))
     }
     /// One of Yingxia's own sources, from its subscription (fetched once).
+    static func sourcesAddress() throws -> URL {
+        guard let text = ProcessInfo.processInfo.environment["SOURCES_URL"], let url = URL(string: text) else {
+            throw TVError.unsupported("Set SOURCES_URL to the subscription to test.")
+        }
+        return url
+    }
     static func cloudSite(_ matches: @Sendable (Site) -> Bool) async throws -> Site {
-        if CloudSources.current == nil { CloudSources.current = try await CloudSources.fetch(http: HTTPClient()) }
+        // SOURCES_URL: another copy of the recommended sources' subscription (a local Worker), never cached.
+        if CloudSources.current == nil, let address = ProcessInfo.processInfo.environment["SOURCES_URL"].flatMap(URL.init(string:)) {
+            let (data, _) = try await URLSession.shared.data(for: URLRequest(url: address, cachePolicy: .reloadIgnoringLocalCacheData))
+            CloudSources.current = try Subscription.parse(data, origin: address)
+        }
+        if CloudSources.current == nil { CloudSources.current = try await CloudSources.fetch(http: HTTPClient(), address: Self.sourcesAddress()) }
         guard let site = CloudSources.site(where: matches) else { throw TVError.invalidConfiguration }
         return site
     }
@@ -791,8 +802,9 @@ import TVCore
     static func main() async throws {
         let args = CommandLine.arguments
         // Yingxia's own sources and live platforms come from its subscription.
+        // [mi3s] 二开：我方多一个 `--bench-download` 探针子命令。
         if args.count >= 2, args[1] == "--live" || args[1] == "--cloud-site" || args[1].hasPrefix("--bili") || args[1] == "--download" || args[1] == "--bench-download" {
-            CloudSources.current = try await CloudSources.fetch(http: HTTPClient())
+            CloudSources.current = try await CloudSources.fetch(http: HTTPClient(), address: Self.sourcesAddress())
         }
         guard args.count >= 2 else {
             print("Usage: TVBoxProbe <jar path> [class descriptor] [static int method]")
@@ -854,6 +866,27 @@ import TVCore
             // --manga <source .js URL or file> [keyword]: a Venera comic source end to end.
             setvbuf(stdout, nil, _IONBF, 0)
             try await manga(args[2], keyword: args.count > 3 ? args[3] : nil)
+            return
+        }
+        if args[1] == "--novel-check", args.count >= 3 {
+            // --novel-check <Legado list URL or file> [keyword] [--limit N] [--offset N] [--jobs N]: every source searched,
+            // and the keyword's book read through to its first chapter.
+            setvbuf(stdout, nil, _IONBF, 0)
+            try await novelCheck(Array(args[2...]))
+            return
+        }
+        if args[1] == "--novel-bench", args.count >= 3 {
+            // --novel-bench <list> [sessions]: runtime boot time, memory, and load() time over the list.
+            setvbuf(stdout, nil, _IONBF, 0)
+            novelProfiles()
+            let sources = try await novelList(args[2])
+            for line in try await NovelRuntime.benchmark(sources, sessions: args.count > 3 ? Int(args[3]) ?? 16 : 16) { print(line) }
+            return
+        }
+        if args[1] == "--novel-read", args.count >= 5 {
+            // --novel-read <list> <source key or name> <keyword>: one Legado source, verbosely.
+            setvbuf(stdout, nil, _IONBF, 0)
+            try await novelRead(args[2], args[3], keyword: args[4])
             return
         }
         if args[1] == "--download", args.count >= 4 {
@@ -946,15 +979,150 @@ import TVCore
             let live = try await LiveCatalog.resolve(Channel(name: "", url: address))
             print("resolved \(live.channel.name) \(live.channel.url.absoluteString.prefix(110))")
             print("qualities \(live.qualities.map { "\($0.id) \($0.label)" }) current \(live.current ?? -1)")
-            let item = AVPlayerItem(asset: LiveRepair.asset(for: live.channel.url)
+            if let folder = ProcessInfo.processInfo.environment["LIVE_DUMP"], live.channel.url.lastPathComponent == "master.m3u8" {
+                // The local HLS files as the player gets them.
+                let base = live.channel.url.deletingLastPathComponent()
+                for name in ["master.m3u8", "0.m3u8", "0-0.mp4", "0-0.m4s", "0-1.m4s"] {
+                    let (data, _) = try await URLSession.shared.data(from: base.appending(path: name))
+                    try data.write(to: URL(fileURLWithPath: folder).appending(path: name))
+                    print("dumped \(name) \(data.count)")
+                }
+            }
+            let item = AVPlayerItem(asset: CENCStreams.asset(for: live.channel.url) ?? LiveRepair.asset(for: live.channel.url)
                 ?? AVURLAsset(url: live.channel.url, options: ["AVURLAssetHTTPHeaderFieldsKey": live.channel.headers]))
+            // As a player layer would: a video-only HLS item without any video output never starts.
+            item.add(AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]))
             let player = AVPlayer(playerItem: item); player.isMuted = true; player.play()
-            for second in 1...10 {
+            for second in 1...(Int(ProcessInfo.processInfo.environment["LIVE_SECONDS"] ?? "") ?? 10) {
                 try await Task.sleep(for: .seconds(1))
+                CENCStreams.updatePosition(for: live.channel.url, seconds: player.currentTime().seconds)
+                if ProcessInfo.processInfo.environment["LIVE_DUMP"] != nil {
+                    let buffered = item.loadedTimeRanges.map { String(format: "%.1f+%.1f", $0.timeRangeValue.start.seconds, $0.timeRangeValue.duration.seconds) }
+                    print("  rate=\(player.rate) waiting=\(player.reasonForWaitingToPlay?.rawValue ?? "-") buffered=\(buffered) errors=\(item.errorLog()?.events.map { "\($0.errorStatusCode) \($0.errorComment ?? "")" } ?? [])")
+                }
                 print("t=\(second) status=\(item.status.rawValue) time=\(String(format: "%.1f", player.currentTime().seconds)) size=\(Int(item.presentationSize.width))x\(Int(item.presentationSize.height)) error=\(item.error.map { "\($0)" } ?? "-")")
             }
             // Recoverable problems too, such as a playlist contradicting an earlier reload (-12312).
             for event in item.errorLog()?.events ?? [] { print("errorlog \(event.errorStatusCode) \(event.errorComment ?? "-")") }
+            // As the player does before it opens the room again: the next run reads this server through the loader.
+            if (item.error as NSError?)?.code == -12312 { LiveRepair.noteContradiction(live.channel.url); print("noted contradiction") }
+            return
+        }
+        if args[1] == "--plugin-call", args.count > 3 {
+            // --plugin-call <pluginId> <method> [JSON payload]: one call into an installed live plugin, its reply as JSON.
+            setvbuf(stdout, nil, _IONBF, 0)
+            let payload = args.count > 4 ? try JSONDecoder().decode([String: JSONValue].self, from: Data(args[4].utf8)) : [:]
+            do {
+                let reply = try await LivePluginRuntime.shared.call(args[2], args[3], payload)
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                print(String(decoding: try encoder.encode(reply), as: UTF8.self))
+            } catch { print("error \(error)") }
+            return
+        }
+        // --plugin-qr <plugin> [seconds]: a QR sign-in up to the code and a few polls (scan it to go all the way).
+        if args[1] == "--plugin-qr", args.count > 2 {
+            guard let plan = await LivePlugins.shared.qrLogin(args[2]) else { print("no QR sign-in"); return }
+            print("plan poll=\(plan.pollInterval)s timeout=\(plan.timeout)s refreshes=\(plan.maxRefreshes) verifies=\(plan.verifies) hint=\(plan.hint)")
+            let session = LivePluginQRSession(plugin: args[2], plan: plan)
+            let challenge = try await session.start()
+            print("code \(challenge.content.prefix(70))… (\(challenge.content.count) chars) expires=\(challenge.expires.map { Int($0.timeIntervalSinceNow) } ?? -1)s poll=\(challenge.pollInterval)s")
+            if let folder = ProcessInfo.processInfo.environment["QR_SAVE"] { try challenge.content.write(toFile: folder + "/qr.txt", atomically: true, encoding: .utf8) }
+            let end = Date().addingTimeInterval(args.count > 3 ? Double(args[3]) ?? 8 : 8)
+            try await Task.sleep(for: .seconds(challenge.firstPollDelay))
+            while Date() < end {
+                try await Task.sleep(for: .seconds(challenge.pollInterval))
+                let state = try await session.poll()
+                print("state \(state)")
+                if state == .confirmed || state == .expired { break }
+                if case .failed = state { break }
+            }
+            await session.cancel()
+            print("signed in: \(LivePluginAccounts.isSignedIn(args[2]))")
+            return
+        }
+        // --plugin-device <plugin> [seconds]: a device-code sign-in up to the code and a few polls.
+        if args[1] == "--plugin-device", args.count > 2 {
+            guard await LivePlugins.shared.signsInByDeviceCode(args[2]) else { print("no device-code sign-in"); return }
+            let session = LivePluginDeviceSession(plugin: args[2])
+            let code = try await session.start()
+            print("code length=\(code.code.count) page=\(code.page.host() ?? "-")\(code.page.path()) carriesCode=\(code.page.query()?.contains(code.code) ?? false) expires=\(Int(code.expires.timeIntervalSinceNow))s interval=\(code.interval)s")
+            let end = Date().addingTimeInterval(args.count > 3 ? Double(args[3]) ?? 12 : 12)
+            while Date() < end {
+                try await Task.sleep(for: .seconds(code.interval))
+                let state = try await session.poll()
+                print("state \(state)")
+                if state != .waiting { break }
+            }
+            await session.cancel()
+            print("signed in: \(LivePluginAccounts.isSignedIn(args[2]))")
+            return
+        }
+        if args[1] == "--plugin-danmaku", args.count > 2 {
+            // --plugin-danmaku <pluginId> [roomId [userId]] [seconds]: listens to a room's chat through the plugin's danmaku
+            // driver and prints each comment; without a room, the first room of the plugin's first area.
+            setvbuf(stdout, nil, _IONBF, 0)
+            guard let platform = LivePlatform(rawValue: "plugin." + args[2]) else { print("plugin \(args[2]) isn't installed"); return }
+            var room = args.count > 3 ? args[3] : "", user = args.count > 4 ? args[4] : ""
+            if room.isEmpty {
+                guard let area = try await LiveCatalog.areas(platform).first else { print("no areas"); return }
+                let first = try await LiveCatalog.rooms(platform, area: area, page: 1).first
+                room = first?.roomID ?? ""; user = first?.userID ?? ""
+                print("room \(room) user \(user) \(first?.host ?? "") \(first?.title ?? "")")
+            }
+            let seconds = args.count > 5 ? Int(args[5]) ?? 30 : 30
+            let chat = LivePluginChat(plugin: args[2], room: room, user: user)
+            let count = ManagedAtomicCounter()
+            chat.start { text, color, _ in print(String(format: "  #%06X %@", color, text)); count.add() }
+            try await Task.sleep(for: .seconds(seconds))
+            chat.stop()
+            print("comments \(count.value) in \(seconds) s")
+            try await Task.sleep(for: .seconds(1))
+            return
+        }
+        if args[1] == "--plugin-install", args.count > 2 {
+            // --plugin-install <source address, angellive:// link or key> [pluginId ...]: installs live plugins
+            // (all of the source's without ids); then `--live plugin.<id> [keyword|room:<id>]` tries one.
+            setvbuf(stdout, nil, _IONBF, 0)
+            guard let address = LivePlugins.sourceAddress(args[2]) else { throw LivePlugins.Failure.notASource }
+            let (name, entries) = try await LivePlugins.shared.index(address)
+            print("source \(name): \(entries.map { "\($0.pluginId) \($0.version)" }.joined(separator: ", "))")
+            LivePlugins.shared.addSource(address, name: name)
+            let wanted = Set(args.dropFirst(3))
+            for entry in entries where wanted.isEmpty || wanted.contains(entry.pluginId) {
+                do {
+                    try await LivePlugins.shared.install(entry, from: address)
+                    let record = LivePlugins.shared.installed(entry.pluginId)
+                    print("installed \(entry.pluginId) \(record?.version ?? "-") tint=\(record?.tint ?? "-")")
+                } catch {
+                    print("failed \(entry.pluginId): \(error.localizedDescription)")
+                }
+            }
+            print("platforms \(LivePlugins.shared.platforms.map { "\($0.id) \($0.scheme)" })")
+            return
+        }
+        if args[1] == "--flv-live", args.count > 2 {
+            // --flv-live <url> [Name: value ...]: plays a live FLV stream through FLVLive for 20 s.
+            setvbuf(stdout, nil, _IONBF, 0)
+            var headers: [String: String] = [:]
+            for field in args.dropFirst(3) {
+                let parts = field.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count == 2 { headers[parts[0]] = parts[1] }
+            }
+            let began = Date()
+            let address = try await FLVLive.open(URL(string: args[2])!, headers: headers)
+            print("open ms=\(Int(Date().timeIntervalSince(began) * 1000)) \(address)")
+            let master = try await URLSession.shared.data(from: address).0
+            print(String(decoding: master, as: UTF8.self))
+            let media = try await URLSession.shared.data(from: address.deletingLastPathComponent().appending(path: "0.m3u8")).0
+            print(String(decoding: media, as: UTF8.self))
+            let item = AVPlayerItem(url: address)
+            let player = AVPlayer(playerItem: item); player.isMuted = true; player.play()
+            for second in 1...20 {
+                try await Task.sleep(for: .seconds(1))
+                print("t=\(second) status=\(item.status.rawValue) time=\(String(format: "%.1f", player.currentTime().seconds)) rate=\(player.rate) size=\(Int(item.presentationSize.width))x\(Int(item.presentationSize.height)) error=\(item.error.map { "\($0)" } ?? "-")")
+            }
+            for event in item.errorLog()?.events ?? [] { print("errorlog \(event.errorStatusCode) \(event.errorComment ?? "-")") }
+            for event in (item.accessLog()?.events ?? []).suffix(1) { print("access stalls=\(event.numberOfStalls) dropped=\(event.numberOfDroppedVideoFrames) indicated=\(Int(event.indicatedBitrate))") }
             return
         }
         if args[1] == "--cast-listen" {
@@ -973,7 +1141,7 @@ import TVCore
             // --drama-check xifan|hema [keyword]: home, search, a detail and two seconds of its first episode.
             setvbuf(stdout, nil, _IONBF, 0)
             let site = try await cloudSite { $0.key == (args[2] == "hema" ? "builtin.hema" : "builtin.xifan") }
-            let client = CatalogClient(site: site, origin: CloudSources.address)
+            let client = CatalogClient(site: site, origin: try CloudSources.address)
             let home = try await client.home()
             print("home categories=\(home.categories.count) videos=\(home.videos.count) first=\(home.categories.prefix(3).map(\.name))")
             let search = try await client.list(category: nil, query: args.count > 3 ? args[3] : "总裁", page: 1)
@@ -992,13 +1160,60 @@ import TVCore
             guard player.currentTime().seconds >= 2 else { throw TVError.emptyPlaylist }
             return
         }
-        if args[1] == "--hongguo-check" || args[1] == "--hongguo-play" {
-            // --hongguo-play <series id> [episode number] isolates playback from catalog/search availability.
-            // --hongguo-check [series id] [episode number] also checks the catalog, search and rankings.
+        if args[1] == "--music-channel" {
+            // --music-channel <channel> <platform> <song id> [lossless|high|standard] [subscription address]
+            // asks one of the subscription's music channels for a song and probes what it answers. The address
+            // is for a copy of the subscription served somewhere else (a local `wrangler dev`).
+            guard args.count >= 5, let platform = MusicPlatform(rawValue: args[3]) else { throw TVError.invalidConfiguration }
+            if args.count > 6, let address = URL(string: args[6]) {
+                // Never a cached copy: it would name the script of an earlier build.
+                let (data, _) = try await URLSession.shared.data(for: URLRequest(url: address, cachePolicy: .reloadIgnoringLocalCacheData))
+                CloudSources.current = try Subscription.parse(data, origin: address)
+            } else { CloudSources.current = try await CloudSources.fetch(http: HTTPClient(), address: Self.sourcesAddress()) }
+            guard let listing = CloudMusic.current else { print("the subscription lists no music channels"); return }
+            print("channels: " + listing.channels.map { "\($0.id.rawValue)[\($0.platforms.map(\.rawValue).sorted().joined(separator: ","))]" }.joined(separator: " "))
+            print("order: " + listing.routes.order.map { "\($0.provider.rawValue)·\($0.platform.rawValue)" }.joined(separator: " ") + " primaries=\(listing.routes.primaries)")
+            guard let channel = listing.channel(MusicProviderID(rawValue: args[2])) else { print("no such channel"); return }
+            let quality = args.count > 5 ? MusicAudioQuality(rawValue: args[5]) ?? .lossless : .lossless
+            let started = Date()
+            do {
+                let stream = try await CloudMusicProvider(channel: channel, api: listing.api, health: MusicHealth(file: nil)).resolve(args[4], platform: platform, quality: quality)
+                print(String(format: "resolved in %.1fs host=%@ claimed=%@ upstream=%@", Date().timeIntervalSince(started), stream.url.host() ?? "-", stream.claimedQuality ?? "-", stream.upstream ?? "-"))
+                let probe = try await MusicProber().probe(stream, expected: nil)
+                print("probe: \(probe.format.label) \(probe.completeness.rawValue) duration=\(probe.duration.map { String(format: "%.1f", $0) } ?? "-")")
+            } catch { print(String(format: "failed in %.1fs: ", Date().timeIntervalSince(started)) + MusicProviderError(error).detail) }
+            return
+        }
+        if args[1] == "--account", args.count > 3 {
+            // --account <site key> start | poll <token> | check: a recommended source's sign-in, as Settings runs it.
+            // Never prints the sign-in itself.
+            _ = try await cloudSite { $0.key == args[2] }
+            guard let signIn = SourceSignIn.all.first(where: { $0.site.key == args[2] }) else { print("no sign-in for \(args[2])"); return }
+            print("sign-in \(signIn.id) name=\(signIn.name) note=\(signIn.note ?? "-")")
+            switch args[3] {
+            case "start":
+                let code = try await signIn.start()
+                print("code=\(code.code)")
+                for _ in 0..<(Int(ProcessInfo.processInfo.environment["POLLS"] ?? "") ?? 3) {
+                    try await Task.sleep(for: .seconds(2))
+                    let status = try await signIn.poll(code)
+                    if case .signedIn(let account) = status { print("signedIn name=\(account.name) cookie=\(account.cookie.count) chars"); return }
+                    print("status=\(status)")
+                }
+            default:
+                let account = SourceAccount.load(signIn.id)
+                guard account.signedIn else { print("not signed in"); return }
+                print("check: \((await signIn.refreshed(account)).map { "valid name=\($0.name)" } ?? "no longer accepted")")
+            }
+            return
+        }
+        if args[1] == "--site-check" || args[1] == "--site-play", args.count > 2, case let key = args[2], case let args = Array(args[...1] + args[3...]) {
+            // --site-play <site key> <series id> [episode number] isolates playback from catalog/search availability.
+            // --site-check <site key> [series id] [episode number] also checks the catalog, search and rankings.
             setvbuf(stdout, nil, _IONBF, 0)
-            let client = CatalogClient(site: try await cloudSite { $0.key == "builtin.hongguo" }, origin: CloudSources.address)
+            let client = CatalogClient(site: try await cloudSite { $0.key == key }, origin: try CloudSources.address)
             var defaultID: String?
-            if args[1] == "--hongguo-check" {
+            if args[1] == "--site-check" {
                 let home = try await client.home()
                 defaultID = home.videos.first?.id
                 print("home categories=\(home.categories.count) videos=\(home.videos.count)")
@@ -1009,49 +1224,59 @@ import TVCore
             }
             guard let id = args.count > 2 ? args[2] : defaultID else { throw TVError.emptyPlaylist }
             let video = try await client.detail(id)
+            if args.count > 4 {
+                // Several episodes in one process, as the app asks for them: resolve only.
+                for number in args[3...].compactMap({ Int($0) }) where video.episodes.indices.contains(number - 1) {
+                    do {
+                        let channel = try await client.playback(video.episodes[number - 1])
+                        print("episode \(number) streaming=\(channel.url.scheme == CENCStreams.scheme) host=\(channel.url.host ?? "-")")
+                    } catch { print("episode \(number) failed: \(error)") }
+                }
+                return
+            }
             let index = args.count > 3 ? (Int(args[3]) ?? 4) - 1 : 3
             guard video.episodes.indices.contains(index) else { throw TVError.emptyPlaylist }
             print("detail episodes=\(video.episodes.count) selected=\(index + 1)")
             let started = Date()
             let channel = try await client.playback(video.episodes[index])
-            print("resolve seconds=\(Date().timeIntervalSince(started)) streaming=\(channel.url.scheme == HongguoStreams.scheme)")
-            let asset = HongguoStreams.asset(for: channel.url) ?? AVURLAsset(url: channel.url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+            print("resolve seconds=\(Date().timeIntervalSince(started)) streaming=\(channel.url.scheme == CENCStreams.scheme)")
+            let asset = CENCStreams.asset(for: channel.url) ?? AVURLAsset(url: channel.url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
             let item = AVPlayerItem(asset: asset), player = AVPlayer()
-            item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration
+            item.preferredForwardBufferDuration = CENCStreams.forwardBufferDuration
             player.replaceCurrentItem(with: item); player.isMuted = true; player.play()
             let positionUpdates = Task {
                 while !Task.isCancelled {
-                    HongguoStreams.updatePosition(for: channel.url, seconds: player.currentTime().seconds)
+                    CENCStreams.updatePosition(for: channel.url, seconds: player.currentTime().seconds)
                     try? await Task.sleep(for: .milliseconds(200))
                 }
             }
-            defer { positionUpdates.cancel(); HongguoStreams.stop(channel.url) }
+            defer { positionUpdates.cancel(); CENCStreams.stop(channel.url) }
             var firstFrame = false
             for _ in 0..<100 {
                 try await Task.sleep(for: .milliseconds(200))
                 if item.status == .failed { throw item.error ?? TVError.emptyPlaylist }
                 if !firstFrame, player.currentTime().seconds > 0.05 {
                     firstFrame = true
-                    let stats = await HongguoStreams.statistics(for: channel.url)
+                    let stats = await CENCStreams.statistics(for: channel.url)
                     print("first frame seconds=\(Date().timeIntervalSince(started)) bytes=\(stats?.received ?? 0)/\(stats?.total ?? 0)")
                 }
                 if player.currentTime().seconds > 2 { break }
             }
             let duration = try await asset.load(.duration).seconds
             print("play status=\(item.status.rawValue) time=\(player.currentTime().seconds) size=\(item.presentationSize) duration=\(duration)")
-            if let stats = await HongguoStreams.statistics(for: channel.url) {
+            if let stats = await CENCStreams.statistics(for: channel.url) {
                 print("startup seconds=\(Date().timeIntervalSince(started)) bytes=\(stats.received)/\(stats.total) cache=\(stats.cached) requests=\(stats.requests)")
             }
             guard player.currentTime().seconds > 2 else { throw TVError.emptyPlaylist }
             player.pause()
             try await Task.sleep(for: .seconds(3))
-            let beforePause = await HongguoStreams.statistics(for: channel.url)
+            let beforePause = await CENCStreams.statistics(for: channel.url)
             try await Task.sleep(for: .seconds(3))
-            let afterPause = await HongguoStreams.statistics(for: channel.url)
+            let afterPause = await CENCStreams.statistics(for: channel.url)
             if let beforePause, let afterPause {
                 print("paused bytes=\(afterPause.received)/\(afterPause.total) additional=\(afterPause.received - beforePause.received) cache=\(afterPause.cached) bufferedThrough=\(afterPause.bufferedThrough)s")
                 guard afterPause.received == beforePause.received else { throw TVError.emptyPlaylist }
-                guard afterPause.bufferedThrough <= player.currentTime().seconds + HongguoStreams.forwardBufferDuration + 10 else { throw TVError.emptyPlaylist }
+                guard afterPause.bufferedThrough <= player.currentTime().seconds + CENCStreams.forwardBufferDuration + 10 else { throw TVError.emptyPlaylist }
                 if duration > 90 { guard afterPause.received < afterPause.total else { throw TVError.emptyPlaylist } }
             }
             player.play()
@@ -1064,11 +1289,11 @@ import TVCore
             print("seek back time=\(player.currentTime().seconds) status=\(item.status.rawValue)")
             guard item.status == .readyToPlay, (5...10).contains(player.currentTime().seconds) else { throw TVError.emptyPlaylist }
             player.pause()
-            HongguoStreams.stop(channel.url)
+            CENCStreams.stop(channel.url)
             return
         }
-        if args[1] == "--hongguo-bench" {
-            // --hongguo-bench <stream|file> <seconds> [series id] [episode number]: this process's CPU time,
+        if args[1] == "--site-bench", args.count > 4, case let key = args[2], case let args = Array(args[...1] + args[3...]) {
+            // --site-bench <site key> <stream|file> <seconds> [series id] [episode number]: this process's CPU time,
             // wakeups and network activity while an episode plays, streamed or from a prepared local file.
             setvbuf(stdout, nil, _IONBF, 0)
             let mode = args[2], seconds = Double(args[3]) ?? 60
@@ -1079,7 +1304,7 @@ import TVCore
                 _ = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_POWER_INFO), $0, &count) } }
                 return (cpu, info.task_interrupt_wakeups + info.task_platform_idle_wakeups)
             }
-            let client = CatalogClient(site: try await cloudSite { $0.key == "builtin.hongguo" }, origin: CloudSources.address)
+            let client = CatalogClient(site: try await cloudSite { $0.key == key }, origin: try CloudSources.address)
             let id: String
             if args.count > 4 { id = args[4] } else { guard let first = try await client.home().videos.first?.id else { throw TVError.emptyPlaylist }; id = first }
             let video = try await client.detail(id)
@@ -1089,28 +1314,28 @@ import TVCore
             guard let url = URL(string: plan.choices[0].address) else { throw TVError.emptyPlaylist }
             let prepared = usage()
             print("prepare seconds=\(String(format: "%.1f", Date().timeIntervalSince(started))) cpu=\(String(format: "%.3f", prepared.cpu - before.cpu)) series=\(id) episode=\(index + 1)")
-            let asset = HongguoStreams.asset(for: url) ?? AVURLAsset(url: url)
+            let asset = CENCStreams.asset(for: url) ?? AVURLAsset(url: url)
             let item = AVPlayerItem(asset: asset), player = AVPlayer()
-            item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration
+            item.preferredForwardBufferDuration = CENCStreams.forwardBufferDuration
             player.replaceCurrentItem(with: item); player.isMuted = true; player.play()
             for _ in 0..<150 where player.currentTime().seconds < 0.5 && item.status != .failed { try await Task.sleep(for: .milliseconds(100)) }
             guard player.currentTime().seconds >= 0.5 else { throw item.error ?? TVError.emptyPlaylist }
             let duration = try await asset.load(.duration).seconds
             print("playing size=\(item.presentationSize) duration=\(Int(duration))s")
-            let start = usage(), startStats = await HongguoStreams.statistics(for: url)
+            let start = usage(), startStats = await CENCStreams.statistics(for: url)
             var last = startStats?.received ?? 0, active = 0
             for _ in 0..<Int(seconds) {
                 try await Task.sleep(for: .seconds(1))
-                HongguoStreams.updatePosition(for: url, seconds: player.currentTime().seconds)
-                if let stats = await HongguoStreams.statistics(for: url) { if stats.received > last { active += 1 }; last = stats.received }
+                CENCStreams.updatePosition(for: url, seconds: player.currentTime().seconds)
+                if let stats = await CENCStreams.statistics(for: url) { if stats.received > last { active += 1 }; last = stats.received }
                 if item.status == .failed { throw item.error ?? TVError.emptyPlaylist }
             }
-            let end = usage(), endStats = await HongguoStreams.statistics(for: url)
+            let end = usage(), endStats = await CENCStreams.statistics(for: url)
             let played = player.currentTime().seconds
             print("bench mode=\(mode) played=\(String(format: "%.1f", played))s cpu=\(String(format: "%.3f", end.cpu - start.cpu))s cpu%=\(String(format: "%.2f", (end.cpu - start.cpu) / seconds * 100)) wakeups/s=\((end.wakeups - start.wakeups) / UInt64(max(1, seconds))) requests=\((endStats?.requests ?? 0) - (startStats?.requests ?? 0)) bytes=\((endStats?.received ?? 0) - (startStats?.received ?? 0)) networkActiveSeconds=\(active) total=\(endStats?.total ?? 0)")
             print("whole run cpu=\(String(format: "%.3f", end.cpu - before.cpu))s fetched=\(endStats?.received ?? 0) requests=\(endStats?.requests ?? 0)")
             player.pause()
-            HongguoStreams.stop(url)
+            CENCStreams.stop(url)
             return
         }
         if args[1] == "--cloud-site", args.count >= 3 {
@@ -1118,7 +1343,7 @@ import TVCore
             // home's first video), details, the first episode's stream through AVPlayer for a few seconds.
             setvbuf(stdout, nil, _IONBF, 0)
             let site = try await cloudSite { $0.key == args[2] }
-            let client = CatalogClient(site: site, origin: CloudSources.address)
+            let client = CatalogClient(site: site, origin: try CloudSources.address)
             let home = try await client.home()
             print("home \(site.name) categories=\(home.categories.map(\.name).joined(separator: ",")) videos=\(home.videos.count)")
             var videos = home.videos
@@ -1131,7 +1356,7 @@ import TVCore
             let channel = try await client.playback(episode)
             print("channel \(channel.url.absoluteString.prefix(120)) qualities=\(DashStreams.qualities(for: channel.url).map(\.label))")
             print("danmaku \(DanmakuSource.has(channel.url) ? (await DanmakuSource.comments(for: channel.url))?.count ?? 0 : -1)")
-            let asset = DashStreams.asset(for: channel.url) ?? HongguoStreams.asset(for: channel.url)
+            let asset = DashStreams.asset(for: channel.url) ?? CENCStreams.asset(for: channel.url)
                 ?? AVURLAsset(url: channel.url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
             let item = AVPlayerItem(asset: asset)
             let player = AVPlayer(playerItem: item); player.isMuted = true; player.play()
@@ -1144,7 +1369,7 @@ import TVCore
         if args[1] == "--bili-categories" {
             // --bili-categories [filter]: every category of the built-in Bilibili source with its first page's size.
             setvbuf(stdout, nil, _IONBF, 0)
-            let client = CatalogClient(site: try await cloudSite(\.isBilibili), origin: CloudSources.address)
+            let client = CatalogClient(site: try await cloudSite(\.isBilibili), origin: try CloudSources.address)
             let home = try await client.home()
             print("home categories=\(home.categories.count) videos=\(home.videos.count)")
             for category in home.categories where args.count < 3 || category.id.contains(args[2]) || category.name.contains(args[2]) {
@@ -1161,7 +1386,7 @@ import TVCore
             // --bili-play <BV id | season_N> [part index] [seconds]: the built-in Bilibili source end to end,
             // through its script port, playback resolution and AVPlayer.
             setvbuf(stdout, nil, _IONBF, 0)
-            let client = CatalogClient(site: try await cloudSite(\.isBilibili), origin: CloudSources.address)
+            let client = CatalogClient(site: try await cloudSite(\.isBilibili), origin: try CloudSources.address)
             let video = try await client.detail(args[2])
             let episode = video.episodes[min(args.count > 3 ? Int(args[3]) ?? 0 : 0, video.episodes.count - 1)]
             print("detail \(video.name) parts=\(video.episodes.count) playing=\(episode.name) \(episode.address)")
@@ -1543,4 +1768,158 @@ import TVCore
         print(String(decoding: json, as: UTF8.self))
         if report.status != 0 { exit(1) }
     }
+}
+
+
+/// A counter the chat's handler bumps from any thread.
+final class ManagedAtomicCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func add() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
+}
+
+// MARK: - Novels (Legado book sources)
+
+extension Probe {
+    static func novelList(_ target: String) async throws -> [NovelSource] {
+        let data: Data
+        if target.hasPrefix("http") {
+            var request = URLRequest(url: URL(string: target)!)
+            request.timeoutInterval = 60
+            data = try await URLSession.shared.data(for: request).0
+        } else { data = try Data(contentsOf: URL(filePath: target)) }
+        guard let sources = NovelSource.list(from: data) else { throw TVError.unsupported("not a Legado book source list") }
+        return sources
+    }
+
+    /// One source end to end: search → details → table of contents → the first chapter's text.
+    static func novelRun(_ source: NovelSource, keyword: String, verbose: Bool) async -> (stage: String, line: String) {
+        let runtime = NovelRuntime.shared
+        let began = Date()
+        func took() -> String { String(format: "%.1fs", Date().timeIntervalSince(began)) }
+        func short(_ error: Error) -> String { error.localizedDescription.replacingOccurrences(of: "\n", with: " ").prefix(160).description }
+        guard source.searchable else { return ("no-search", "no searchUrl") }
+        var books: [NovelBook]
+        do { books = try await runtime.search(source, keyword: keyword, page: 1) } catch { return ("search-error", "search: \(short(error)) \(took())") }
+        // Niche sources don't have every book: then the source's own test word (ruleSearch.checkKeyWord).
+        let object = (try? JSONSerialization.jsonObject(with: Data(source.json.utf8))) as? [String: Any]
+        let rules = (object?["ruleSearch"] as? [String: Any]) ?? ((object?["ruleSearch"] as? String).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any])
+        if books.isEmpty, let check = (rules?["checkKeyWord"] as? String)?.trimmingCharacters(in: .whitespaces), !check.isEmpty, check != keyword {
+            do { books = try await runtime.search(source, keyword: check, page: 1) } catch { return ("search-error", "search \(check): \(short(error)) \(took())") }
+        }
+        if verbose { for book in books.prefix(5) { print("  book: \(book.name) / \(book.author) | \(book.kind) | \(book.lastChapter) | \(book.url) | cover \(book.cover.prefix(80))") } }
+        let wanted = novelKey(keyword)
+        // The keyword's book, or else the first result (niche sources don't have every book).
+        guard let picked = books.first(where: { novelKey($0.name) == wanted }) ?? books.first(where: { novelKey($0.name).contains(wanted) }) ?? books.first else {
+            return ("search-empty", "search: no results \(took())")
+        }
+        var book = picked
+        do { book = try await runtime.details(source, book: picked) } catch { return ("info-error", "search \(books.count) → info: \(short(error)) \(took())") }
+        if verbose { print("  info: \(book.name) / \(book.author) | kind \(book.kind) | words \(book.wordCount) | last \(book.lastChapter) | toc \(book.tocURL) | cover \(book.cover.prefix(100))\n  intro: \(book.intro.prefix(160))") }
+        let chapters: [NovelChapter]
+        do { chapters = try await runtime.chapters(source, book: book) } catch { return ("toc-error", "search \(books.count) → toc: \(short(error)) \(took())") }
+        if verbose { for chapter in chapters.prefix(4) + chapters.suffix(2) { print("  chapter \(chapter.index): \(chapter.title) \(chapter.isVolume ? "[volume] " : "")\(chapter.isVip ? "[vip] " : "")\(chapter.url.prefix(100))") } }
+        let readable = chapters.filter { !$0.isVolume }
+        guard let first = readable.first else { return ("toc-empty", "search \(books.count) → toc empty \(took())") }
+        let next = readable.dropFirst().first
+        do {
+            let content = try await runtime.content(source, book: book, chapter: first, next: next)
+            let characters = content.paragraphs.reduce(0) { $0 + $1.count }
+            if verbose { print("  content \(content.title): \(content.paragraphs.count) paragraphs, \(characters) characters"); for line in content.paragraphs.prefix(5) { print("    " + line.prefix(120)) } }
+            if characters < 200 { return ("content-short", "search \(books.count) → toc \(chapters.count) → content only \(characters) chars: \(content.paragraphs.joined(separator: " ").prefix(100)) \(took())") }
+            return ("ok", "search \(books.count) → toc \(chapters.count) → content \(content.paragraphs.count)¶ \(characters) chars \(took())")
+        } catch { return ("content-error", "search \(books.count) → toc \(chapters.count) → content: \(short(error)) \(took())") }
+    }
+
+    /// Whether the source's site answers from here: "up", "down" (no answer), or "blocked" (403/5xx, a bot check, a parked domain).
+    static func novelReach(_ source: NovelSource) async -> String {
+        let address = String(source.key.split(separator: "#").first ?? "").trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: address), url.scheme?.hasPrefix("http") == true else { return "up" }
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        request.setValue("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request), let http = response as? HTTPURLResponse else { return "down" }
+        let text = String(decoding: data.prefix(6000), as: UTF8.self)
+        if http.statusCode == 403 || http.statusCode == 451 || http.statusCode >= 500 || text.contains("Just a moment...") || text.contains("region has been denied") { return "blocked" }
+        return "up"
+    }
+
+    static func novelKey(_ text: String) -> String { text.lowercased().filter { !$0.isWhitespace && !$0.isPunctuation && !$0.isSymbol } }
+
+    static func novelProfiles() {
+        NovelRuntime.profilesRoot = FileManager.default.temporaryDirectory.appendingPathComponent("novel-probe-profiles", isDirectory: true)
+    }
+
+    /// --novel-check <list URL or file> [keyword] [--limit N] [--offset N] [--jobs N]
+    static func novelCheck(_ args: [String]) async throws {
+        novelProfiles()
+        func option(_ name: String) -> Int? { args.firstIndex(of: name).flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } }
+        var plain: [String] = [], skip = false
+        for value in args { if skip { skip = false } else if value.hasPrefix("--") { skip = true } else { plain.append(value) } }
+        let keyword = plain.count > 1 ? plain[1] : "斗破苍穹"
+        let all = try await novelList(plain[0])
+        let offset = option("--offset") ?? 0, limit = option("--limit") ?? all.count, jobs = max(1, option("--jobs") ?? 6)
+        var sources = Array(all.dropFirst(offset).prefix(limit))
+        if let sample = option("--sample"), sample < sources.count {
+            // The same sample every run: a fixed-seed shuffle.
+            var seed: UInt64 = 0x9E3779B97F4A7C15
+            var generator = AnyRandom { seed &+= 0x9E3779B97F4A7C15; var z = seed; z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9; z = (z ^ (z >> 27)) &* 0x94D049BB133111EB; return z ^ (z >> 31) }
+            sources = Array(sources.filter { !$0.disabledByList }.shuffled(using: &generator).prefix(sample))
+        }
+        print("\(all.count) sources in the list; checking \(sources.count) with \(keyword), \(jobs) at a time")
+        var stages: [String: Int] = [:]
+        var index = 0
+        await withTaskGroup(of: (Int, NovelSource, String, String).self) { group in
+            func add() {
+                guard index < sources.count else { return }
+                let (n, source) = (index, sources[index]); index += 1
+                group.addTask {
+                    async let reach = novelReach(source)
+                    let result = await novelRun(source, keyword: keyword, verbose: false)
+                    await NovelRuntime.shared.reset(source.key)
+                    let site = await reach
+                    return (n, source, result.stage == "ok" || site == "up" ? result.stage : result.stage + "/" + site, result.line)
+                }
+            }
+            for _ in 0..<jobs { add() }
+            while let (n, source, stage, line) = await group.next() {
+                stages[stage, default: 0] += 1
+                print("[\(n + offset)] \(stage.padding(toLength: 14, withPad: " ", startingAt: 0)) \(source.name) <\(source.key.prefix(60))>\(source.disabledByList ? " (off in list)" : "") — \(line)")
+                add()
+            }
+        }
+        print("summary:", stages.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+        // Sources whose site is down or refuses this network can't pass anywhere from here.
+        let reachable = stages.filter { !$0.key.contains("/") }.values.reduce(0, +)
+        print(String(format: "ok %d of %d (%.0f%%); of the %d whose site answers from here: %.0f%%", stages["ok"] ?? 0, sources.count, Double(stages["ok"] ?? 0) * 100 / Double(max(sources.count, 1)),
+                     reachable, Double(stages["ok"] ?? 0) * 100 / Double(max(reachable, 1))))
+    }
+
+    /// --novel-read <list> <source key or name> <keyword>: one source, verbosely.
+    static func novelRead(_ list: String, _ which: String, keyword: String) async throws {
+        novelProfiles()
+        let sources = try await novelList(list)
+        guard let source = sources.first(where: { $0.key == which }) ?? sources.first(where: { $0.name == which }) ?? sources.first(where: { $0.name.contains(which) || $0.key.contains(which) }) else {
+            throw TVError.unsupported("no source \(which)")
+        }
+        print("source \(source.name) <\(source.key)> searchable=\(source.searchable) explorable=\(source.explorable)")
+        if source.explorable {
+            do {
+                let kinds = try await NovelRuntime.shared.exploreKinds(source)
+                print("explore: \(kinds.count) kinds: \(kinds.prefix(8).map { $0.title + ($0.url.isEmpty ? "" : "→") }.joined(separator: ", "))")
+                if let kind = kinds.first(where: { !$0.url.isEmpty }) {
+                    let books = try await NovelRuntime.shared.explore(source, url: kind.url, page: 1)
+                    print("explore \(kind.title): \(books.count) books: \(books.prefix(5).map(\.name).joined(separator: ", "))")
+                }
+            } catch { print("explore failed: \(error.localizedDescription)") }
+        }
+        let result = await novelRun(source, keyword: keyword, verbose: true)
+        print(result.stage, result.line)
+    }
+}
+
+struct AnyRandom: RandomNumberGenerator {
+    let make: () -> UInt64
+    init(_ make: @escaping () -> UInt64) { self.make = make }
+    mutating func next() -> UInt64 { make() }
 }

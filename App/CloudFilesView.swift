@@ -1,7 +1,7 @@
 import SwiftUI
 import TVCore
 
-/// Cloud Files: the Quark, UC and 115 drives signed in under Cloud Drive Accounts and the saved AList
+/// Cloud Files: the Quark, UC, 115 and Baidu Netdisk drives signed in under Cloud Drive Accounts and the saved AList
 /// servers, WebDAV shares and Emby or Jellyfin servers. Open folders and play their videos; the rest of the folder plays
 /// after the one chosen.
 struct CloudFilesView: View {
@@ -17,20 +17,20 @@ struct CloudFilesView: View {
     var body: some View {
         FilesList {
             FilesSection(title: L10n.text("Cloud Drives"),
-                         footer: signedIn.count < 3 ? L10n.text("Sign in to Quark, UC or 115 under Cloud Drive Accounts to browse their files here.") : nil) {
+                         footer: signedIn.count < 4 ? L10n.text("Sign in to Quark, UC, 115 or Baidu Netdisk under Cloud Drive Accounts to browse their files here.") : nil) {
                 ForEach(signedIn) { drive in
                     FolderLink(drive: drive, folder: drive.root, name: drive.name) {
                         FileRowLabel(symbol: drive.symbol, tint: drive.tint, title: drive.name, chevron: true)
                     }
                 }
-                if signedIn.count < 3 {
+                if signedIn.count < 4 {
                     RouteLink { CloudDriveView() } label: {
                         FileRowLabel(symbol: "person.crop.circle.badge.plus", tint: .gray, title: L10n.text("Cloud Drive Accounts"), chevron: true)
                     }
                     .glassRow()
                 }
             }
-            FilesSection(title: "AList · WebDAV · Emby", footer: L10n.text("Add an AList or OpenList server, a NAS's WebDAV share, or an Emby or Jellyfin server, by the address you open it at. Pasting an AList address, or a TVBox AList configuration, in Add Subscription adds servers too.")) {
+            FilesSection(title: "AList · WebDAV · Emby", footer: L10n.text("Add an AList or OpenList server, a NAS's WebDAV share, an Emby or Jellyfin server, or an fnOS NAS's media library, by the address you open it at. Pasting an AList address, or a TVBox AList configuration, in Add Subscription adds servers too.")) {
                 ForEach(servers) { server in
                     FolderLink(drive: .alist(server), folder: server.root, name: server.name) {
                         FileRowLabel(symbol: CloudFilesDrive.alist(server).symbol, tint: .teal, title: server.name,
@@ -234,7 +234,7 @@ struct AListServerForm: View {
                 Section {
                     fields
                 } footer: {
-                    Text(L10n.text("The server's address, such as http://192.168.1.10:5244 for AList, http://192.168.1.10:8096 for Emby or Jellyfin, or the WebDAV address your NAS shows. Add a folder after an AList or WebDAV address to start there. Emby and Jellyfin always want the user name; the others only when they don't let guests browse."))
+                    Text(L10n.text("The server's address, such as http://192.168.1.10:5244 for AList, http://192.168.1.10:8096 for Emby or Jellyfin, http://192.168.1.10:5666 for fnOS, or the WebDAV address your NAS shows. Add a folder after an AList or WebDAV address to start there. Emby, Jellyfin and fnOS always want the user name; the others only when they don't let guests browse."))
                 }
                 if let error { Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Brand.amber) } }
             }
@@ -282,12 +282,13 @@ struct AListServerForm: View {
             do {
                 let url = try WebAddress.resolve(address)
                 let username = server.username.trimmingCharacters(in: .whitespaces)
-                // An AList server, else an Emby or Jellyfin server, else a WebDAV share such as a NAS's.
+                // An AList server, else an Emby or Jellyfin server, else a 飞牛 fnOS NAS, else a WebDAV share such as a NAS's.
                 var probed = await AList.probe(url)
                 if probed == nil { probed = await Emby.probe(url) }
+                if probed == nil { probed = await FnOS.probe(url) }
                 if probed == nil { probed = try await WebDAV.shared.probe(url, username: username, password: server.password) }
                 guard var found = probed else {
-                    error = L10n.text("No AList, WebDAV, Emby or Jellyfin server answered at this address.")
+                    error = L10n.text("No AList, WebDAV, Emby, Jellyfin or fnOS server answered at this address.")
                     return
                 }
                 found.id = server.id
@@ -297,6 +298,7 @@ struct AListServerForm: View {
                 found.folderPassword = server.folderPassword
                 if found.isWebDAV { try await WebDAV.shared.check(found) }
                 else if found.isEmby { try await Emby.shared.check(found) }
+                else if found.isFnOS { try await FnOS.shared.check(found) }
                 else { try await AList.shared.check(found) }
                 if isNew { try AListServers.add([found]) } else { try AListServers.update(found) }
                 saved()
@@ -420,14 +422,7 @@ private struct FilesMessage<Actions: View>: View {
     var message: String? = nil
     @ViewBuilder var actions: Actions
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: symbol).font(.system(size: 44, weight: .semibold)).foregroundStyle(.secondary)
-            Text(title).font(.title3.weight(.semibold))
-            if let message { Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520) }
-            HStack(spacing: 14) { actions }.padding(.top, 6)
-        }
-        .padding(Layout.gutter)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyResults(symbol: symbol, title: title, message: message, fills: true, hasActions: Actions.self != EmptyView.self) { actions }
     }
 }
 
@@ -444,7 +439,11 @@ extension CloudFilesDrive {
         case .quark: CloudProvider.quark.symbol
         case .uc: CloudProvider.uc.symbol
         case .pan115: CloudProvider.pan115.symbol
-        case .alist(let server): server.isEmby ? "play.tv" : server.isWebDAV ? "externaldrive.connected.to.line.below" : "server.rack"
+        case .baidu: CloudProvider.baidu.symbol
+        case .tianyi: CloudProvider.tianyi.symbol
+        case .pan123: CloudProvider.pan123.symbol
+        case .guangya: CloudProvider.guangya.symbol
+        case .alist(let server): server.isEmby || server.isFnOS ? "play.tv" : server.isWebDAV ? "externaldrive.connected.to.line.below" : "server.rack"
         }
     }
     var tint: Color {
@@ -452,6 +451,10 @@ extension CloudFilesDrive {
         case .quark: CloudProvider.quark.tint
         case .uc: CloudProvider.uc.tint
         case .pan115: CloudProvider.pan115.tint
+        case .baidu: CloudProvider.baidu.tint
+        case .tianyi: CloudProvider.tianyi.tint
+        case .pan123: CloudProvider.pan123.tint
+        case .guangya: CloudProvider.guangya.tint
         case .alist: .teal
         }
     }

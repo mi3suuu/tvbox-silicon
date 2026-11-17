@@ -71,7 +71,7 @@ import TVCore
     private var resumeTask: Task<Void, Never>?
     /// The debounced keychain-backup write, cancelled and restarted on every change.
     @ObservationIgnored private var keychainBackupTask: Task<Void, Never>?
-    /// Every enabled subscription merged in list order, plus the built-in sources.
+    /// Every enabled subscription merged in list order, plus the built-in sources and configured cloud drives.
     var subscription: Subscription?
     /// The address being typed in to add a subscription.
     var subscriptionAddress: String
@@ -384,6 +384,8 @@ import TVCore
     /// Whether the vault lets this source be listed, searched or opened right now. `origin` is the merged
     /// subscription's, used only where the source carries no origin of its own.
     func maySee(_ site: Site, origin: URL) -> Bool { vault.permits(site: site, fallback: origin) }
+    /// The series followed from Discover (追剧, #1186).
+    let followedShows: FollowedShows
     var importing = false
     /// How many subscriptions of the current import/refresh have answered, of `importTotal`. `0` while
     /// nothing is importing; the UI shows "N of M" from these so a refresh reads as progress, not a wait.
@@ -613,6 +615,33 @@ import TVCore
     }
     /// Set while a listening source's episode goes to the video player on purpose.
     @ObservationIgnored private var playsAsVideo = false
+    /// The channels the live channel playing was picked from, in order (its playlist, or the favorites): the player's
+    /// Previous and Next Channel and its channel list go through them (#1010).
+    var liveLineup: LiveLineup?
+    /// The program guide of the playlist `liveLineup` is (#802).
+    private(set) var liveGuide: LiveGuide?
+    /// Plays a live channel picked from `lineup`, with its playlist's guide.
+    func watch(_ channel: Channel, in lineup: LiveLineup, guide: LiveGuide? = nil) {
+        liveLineup = lineup
+        liveGuide = guide
+        playing = channel
+    }
+    /// Plays a favorite live channel with the other favorite channels to switch through, wherever it was picked: the
+    /// Live page, Watch Now or the Favorites page (#1172).
+    func watchFavorite(_ channel: Channel) {
+        watch(channel, in: LiveLineup(title: L10n.text("Favorites"), channels: favorites.liveChannels))
+    }
+    /// The guide of the list the channel was picked from.
+    func guide(for channel: Channel) -> LiveGuide? { lineup(for: channel) != nil ? liveGuide : nil }
+    /// Program guide addresses the viewer typed in for live playlists, by playlist address (#802).
+    var guideAddresses: [String: String] {
+        didSet { if persistsChanges { defaults.set(guideAddresses, forKey: "liveGuideAddresses") } }
+    }
+    /// The list the channel was picked from, when it holds others to switch to.
+    func lineup(for channel: Channel) -> LiveLineup? {
+        guard let lineup = liveLineup, lineup.channels.count > 1, lineup.position(of: channel) != nil else { return nil }
+        return lineup
+    }
     /// The videos whose iPhone watch page is on screen (`PlaybackHistoryContext.id`): their episodes play at the top
     /// of the page instead of in the full-screen player.
     var watchPageScopes: Set<String> = []
@@ -709,7 +738,19 @@ import TVCore
     private var episodeTask: Task<Void, Never>?
     /// Loads the end-of-series suggestions; cancelled when the screen is dismissed.
     private var seriesEndTask: Task<Void, Never>?
+    /// The next episode's stream, resolved while a short episode plays (#1021, #900): Next, the end of the episode and
+    /// the queue start it without asking the source again, so the cover no longer waits on the source each time.
+    @ObservationIgnored private var nextAhead: (episode: Episode, resolved: Channel, at: Date)?
+    @ObservationIgnored private var nextAheadTask: (episode: Episode, task: Task<Void, Never>)?
+    /// Signed links expire: one resolved longer ago than this is asked for again.
+    static let nextAheadLifetime: TimeInterval = 5 * 60
+    /// Episodes this long or shorter (short dramas, clips) have the next one resolved while they play. A longer one's
+    /// is resolved 30 seconds before its end for the queue, as before.
+    static let nextAheadLength: Double = 10 * 60
     var section: AppSection = .home
+    /// The Mac sidebar folds away while the manga reader fills the window, and comes back when it closes.
+    /// macOS 26 floats the sidebar over the page, so it covered the left part of every comic page.
+    var hidesSidebar = false
     /// Every build shows the built-in services (Music, Bilibili, Douyin), the default subscription and
     /// the plugin pages only once a subscription that works has been added: one that is on and whose
     /// copy has sources or live playlists.
@@ -721,10 +762,11 @@ import TVCore
     @ObservationIgnored private var cloudFetchedAt: Date?
     @ObservationIgnored private var cloudFetch: Task<Void, Never>?
     /// Sections kept out of the tab bar and sidebar until then.
-    /// [mi3s] 二开融合：上游 1.8.11 新增 Manga 分区；无 Venera 漫画源订阅时隐藏。
+    /// [mi3s] 二开融合：上游 1.8.11 新增 Manga 分区，上游 1.8.23 新增 Novels；无对应源时隐藏。
     var hiddenSections: [AppSection] {
         var hidden: [AppSection] = extrasUnlocked ? [] : [.music]
         if MangaStore.shared.repositories.isEmpty { hidden.append(.manga) }
+        if NovelStore.shared.lists.isEmpty { hidden.append(.novels) }
         return hidden
     }
     /// The app's preference store. Internal (not private) so the full-backup extension can snapshot
@@ -736,6 +778,15 @@ import TVCore
     /// Not observed: views fill these while drawing, and a write would draw every reader again.
     @ObservationIgnored private var siteListStamp = ""
     @ObservationIgnored private var cloudDrivesObserver: NSObjectProtocol?
+    @ObservationIgnored private var livePluginsObserver: NSObjectProtocol?
+    /// The installed live plugins' platforms, shown in Live TV even without a subscription.
+    private(set) var livePluginPlatforms = LivePlugins.shared.platforms
+    /// The installed live plugins and the LX Music sources, listed under Settings › Subscriptions with the subscriptions.
+    private(set) var livePlugins = LivePlugins.shared.installed
+    private(set) var lxSources = LXSourceLibrary.shared.sources
+    @ObservationIgnored private var lxSourcesObserver: NSObjectProtocol?
+    /// Live TV's sources: the subscription's (with the plugins' platforms), or the plugins' alone.
+    var liveSources: [LiveSource] { subscription?.lives ?? livePluginPlatforms.map(\.source) }
     @ObservationIgnored private var automaticCache: [Site]?
     @ObservationIgnored private var orderedCache: [Site]?
     @ObservationIgnored private var recommendationCache: [Site]?
@@ -872,7 +923,9 @@ import TVCore
            let saved = try? JSONDecoder().decode(PrivacyVault.self, from: blob) {
             vault = saved
         }
+        followedShows = FollowedShows(defaults: defaults)
         autoPlayNext = defaults.object(forKey: "autoPlayNextEpisode") == nil || defaults.bool(forKey: "autoPlayNextEpisode")
+        guideAddresses = defaults.dictionary(forKey: "liveGuideAddresses") as? [String: String] ?? [:]
         let saved = defaults.data(forKey: "subscriptions").flatMap { try? JSONDecoder().decode([SubscriptionEntry].self, from: $0) }
         var entries = saved ?? [], copies: [String: Subscription] = [:]
         for entry in entries {
@@ -962,6 +1015,18 @@ import TVCore
                 // A sign-in changed the account files that the lightweight iCloud backup carries.
                 self?.cloudSync?.changed("cloudBackup")
             }
+        }
+        // Installing or removing a live plugin adds or takes away its platform.
+        livePluginsObserver = NotificationCenter.default.addObserver(forName: LivePlugins.changed, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.livePluginPlatforms = LivePlugins.shared.platforms
+                self.livePlugins = LivePlugins.shared.installed
+                self.rebuildSubscription(resetting: false)
+            }
+        }
+        lxSourcesObserver = NotificationCenter.default.addObserver(forName: LXSourceLibrary.changed, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.lxSources = LXSourceLibrary.shared.sources }
         }
         searchModel.order = sourceOrder
         // Search's group priority needs the same grouping the page draws; ask this store rather than
@@ -1072,7 +1137,7 @@ import TVCore
         let config = subscription
         guard let found = config?.sites.first(where: { $0.key == item.source.siteKey })
                 ?? cloudDocument?.sites.first(where: { $0.key == item.source.siteKey }) else {
-            throw TVError.unsupported(L10n.text("%@ is no longer in your subscription, so this download can't continue.", item.source.siteName))
+            throw TVError.unsupported(L10n.text("%@ is no longer in your subscription, so caching can't continue.", item.source.siteName))
         }
         let origin = config?.origin ?? URL(string: "https://example.invalid/")!
         let site = config == nil ? found : resolvedSite(found, origin: origin)
@@ -1110,6 +1175,7 @@ import TVCore
         #endif
     }
     private static var legacyFile: URL { subscriptionDirectory.appending(path: "subscription.json") }
+    /// [mi3s] 二开：推荐源（服务元数据）的本地副本，离线也能出内置源。
     private static var cloudFile: URL { subscriptionDirectory.appending(path: "cloud-sources.json") }
     private static func file(for entry: SubscriptionEntry) -> URL {
         subscriptionDirectory.appending(path: "subscriptions").appending(path: entry.cacheName)
@@ -1294,7 +1360,9 @@ import TVCore
         await beginImport()
         importing = true; importError = nil; notice = nil
         defer { importing = false; endImport() }
-        let typed = (address ?? subscriptionAddress).trimmingCharacters(in: .whitespacesAndNewlines)
+        var typed = (address ?? subscriptionAddress).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Legado's one-tap import links (legado://import/bookSource?src=…) carry the list's address.
+        if let link = URL(string: typed), let inner = NovelSources.importAddress(link) { typed = inner.absoluteString }
         do {
             let url = try WebAddress.resolve(typed)
             switch try await http.subscriptionImport(url) {
@@ -1319,6 +1387,21 @@ import TVCore
                 // [mi3s] 二开融合：上游 1.8.11 新增。漫画源列表进 Manga（Venera），不进 Watch Now。
                 MangaStore.shared.addRepository(url)
                 notice = L10n.text("Added a Venera comic source list (%lld sources). Choose the ones to install in Comic Sources.", count)
+            case .novelSources(let count, let data):
+                // Book source lists feed Novels (and show it); they are listed under Subscriptions too.
+                try NovelStore.shared.addList(url, data: data)
+                notice = L10n.text("Added a Legado book source list (%lld sources). Search and read in Novels.", count)
+            case .novelIndex(let offers):
+                // A page of lists (or a Legado subscription source that opens one): Book Sources offers them one by one.
+                NovelStore.shared.offer(offers)
+                notice = L10n.text("This page lists %lld Legado book source lists. Choose the ones to add in Settings › Novels › Book Sources.", offers.count)
+            case .lxMusicSource(let script):
+                // An LX Music source plays music, so it joins Music's own sources (#1177). A file's copy has no address
+                // to fetch it again from.
+                let added = Set(LXSourceLibrary.shared.sources.map(\.id))
+                let source = try await LXSourceLibrary.shared.add(script: script, origin: ImportedFiles.isImported(url.absoluteString) ? nil : url)
+                notice = added.contains(source.id) ? L10n.text("“%@” is already added.", source.info.name)
+                    : L10n.text("Added the LX Music source “%@”. Music plays songs through it; manage it in Music Settings › LX Music Sources.", source.info.name)
             case .alist(let servers):
                 // AList servers are browsed in Cloud Files, not merged as sources.
                 let saved = try AListServers.add(servers)
@@ -1333,6 +1416,24 @@ import TVCore
             importError = L10n.text("Import failed: %@", error.localizedDescription)
         }
     }
+    /// Adds a subscription, or one spider script, from a file the viewer picked. The file is copied
+    /// into the app (see `ImportedFiles`) and then added like an address.
+    func importSubscriptionFile(_ file: URL) async {
+        let scoped = file.startAccessingSecurityScopedResource()
+        let copied = Result { try ImportedFiles.add(file) }
+        if scoped { file.stopAccessingSecurityScopedResource() }
+        guard case .success(let url) = copied else {
+            if case .failure(let error) = copied {
+                Diagnostics.shared.failure("subscription", "import file ext=\(file.pathExtension)", error)
+                importError = L10n.text("Import failed: %@", error.localizedDescription)
+            }
+            return
+        }
+        let address = url.absoluteString, known = subscriptions.contains { $0.address == address }
+        await importSubscription(address: address)
+        // A file that added no subscription of its own leaves no copy behind.
+        if !known, !subscriptions.contains(where: { $0.address == address }) { ImportedFiles.remove(address) }
+    }
     /// Fetches every enabled subscription again; one that fails keeps its last good copy.
     func refreshSubscriptions() async {
         await beginImport()
@@ -1340,7 +1441,8 @@ import TVCore
         defer { importing = false; endImport() }
         await fetch(environmentSubscriptions.filter(\.enabled))
         refreshCloudSources(force: true)
-        let failed = environmentSubscriptions.filter { $0.enabled && subscriptionErrors[$0.address] != nil }.count
+        await NovelStore.shared.refreshLists()
+        let failed = environmentSubscriptions.filter { $0.enabled && subscriptionErrors[$0.address] != nil && !ImportedFiles.isMissing($0.address) }.count
         if failed > 0 { notice = L10n.text("%lld subscriptions could not be refreshed; their last copies stay in use.", failed) }
     }
     func setSubscription(_ entry: SubscriptionEntry, enabled: Bool) async {
@@ -1354,6 +1456,60 @@ import TVCore
         guard let index = index(of: entry), subscriptions[index].name != name else { return }
         subscriptions[index].name = name
         saveSubscriptionList()
+    }
+    /// Points a subscription at another address: a mirror, or where it moved (#982). The new address must answer with a
+    /// subscription. The entry keeps its name, place and switch, and what was saved against its sources (pins, hides,
+    /// the source order, source health, Continue Watching, favorites, intro and outro times) follows it. Nil when it
+    /// worked, else why not; nothing changes then.
+    func changeSubscriptionAddress(_ entry: SubscriptionEntry, to typed: String) async -> String? {
+        let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text != entry.address, !importing else { return nil }
+        importing = true
+        defer { importing = false }
+        let url: URL, value: Subscription
+        do {
+            url = try WebAddress.resolve(typed: text)
+            guard url.absoluteString != entry.address else { return nil }
+            guard !subscriptions.contains(where: { $0.address == url.absoluteString }) else {
+                return L10n.text("Another subscription already uses this address.")
+            }
+            guard case .subscription(let fetched) = try await http.subscriptionImport(url) else {
+                return L10n.text("This address doesn't hold a subscription. Add it as a new one instead.")
+            }
+            value = fetched
+        } catch {
+            Diagnostics.shared.failure("subscription", "change address host=\((try? WebAddress.resolve(typed: text))?.host() ?? "-")", error)
+            return L10n.text("Couldn't load this address: %@", error.localizedDescription)
+        }
+        // The list may have changed while the address loaded.
+        guard let index = subscriptions.firstIndex(where: { $0.address == entry.address }) else { return nil }
+        guard !subscriptions.contains(where: { $0.address == url.absoluteString }) else {
+            return L10n.text("Another subscription already uses this address.")
+        }
+        let old = documents[entry.address]?.origin ?? URL(string: entry.address)
+        var moved = subscriptions[index]
+        moved.address = url.absoluteString
+        subscriptions[index] = moved
+        documents[entry.address] = nil; subscriptionErrors[entry.address] = nil
+        if persistsChanges { try? FileManager.default.removeItem(at: Self.file(for: entry)) }
+        keep(value, for: moved)
+        // Another subscription answering from the same place keeps what was saved there.
+        if let old, old.absoluteString != value.origin.absoluteString,
+           !documents.values.contains(where: { $0.origin.absoluteString == old.absoluteString }) {
+            moveSavedState(from: old, to: value.origin)
+        }
+        saveSubscriptionList()
+        rebuildSubscription()
+        return nil
+    }
+    private func moveSavedState(from old: URL, to new: URL) {
+        pinnedSources.moveOrigin(from: old, to: new)
+        hiddenSources.moveOrigin(from: old, to: new)
+        sourceOrder.moveOrigin(from: old, to: new)
+        SourceHealth.shared.moveOrigin(from: old, to: new)
+        playbackHistory.moveOrigin(from: old, to: new)
+        favorites.moveOrigin(from: old, to: new)
+        EpisodeSkipSettings.moveOrigin(from: old, to: new, defaults: playbackDefaults)
     }
     func removeSubscription(_ entry: SubscriptionEntry) { removeSubscriptions([entry.address]) }
     /// Removes several subscriptions and their saved copies, then merges what is left once.
@@ -1609,6 +1765,13 @@ import TVCore
     /// sources appear one by one instead of waiting for the slowest subscription (a dead host would
     /// otherwise hold up every result for its whole timeout).
     private func fetch(_ entries: [SubscriptionEntry]) async {
+        // A file added on another device has no copy here to read. Its row says so; it is not fetched, counted or
+        // reported as a failed refresh (#842).
+        let entries = entries.filter { entry in
+            guard ImportedFiles.isMissing(entry.address) else { return true }
+            subscriptionErrors[entry.address] = ImportedFiles.missingMessage
+            return false
+        }
         let http = http
         var rebuilt = false
         importTotal = entries.count
@@ -1732,7 +1895,9 @@ import TVCore
         let favorites = favorites, history = playbackHistory, pinned = pinnedSources, hidden = hiddenSources, order = sourceOrder
         let routing = sourceRouting, overrides = sourceOverrides, lines = lineSettings, reassignment = sourceReassignment
         let deleted = deletedSources
+        let followed = followedShows
         sync.register("favorites", current: { favorites.syncValues }, apply: { favorites.adopt($0) })
+        sync.register("followedShows", current: { followed.syncValues }, apply: { followed.adopt($0) })
         sync.register("history", delay: .seconds(30), current: { Dictionary(history.entries.map { ($0.environmentKey, $0) }, uniquingKeysWith: { first, _ in first }) },
                       apply: { history.adopt($0.map(\.value)) })
         sync.register("subscriptions", current: { [weak self] in self?.syncedSubscriptions ?? [:] }, apply: { [weak self] in self?.adoptSubscriptions($0) })
@@ -1778,6 +1943,7 @@ import TVCore
         })
         favorites.onChange = { sync.changed("favorites"); self.persistKeychainBackup() }
         history.onChange = { sync.changed("history"); self.persistKeychainBackup() }
+        followed.onChange = { sync.changed("followedShows") }
         pinned.onChange = { sync.changed("pinnedSources") }
         hidden.onChange = { sync.changed("hiddenSources") }
         // 没有这一行，上面那条 `register("deletedSources")` 永远不会被推上去：
@@ -1837,7 +2003,15 @@ import TVCore
     /// Not private: the grouping and routing batches in Store+SourceGrouping write through it.
     func rebuildSubscription(resetting: Bool = true) {
         if resetting { searchModel.reset(); recommendationModel.reset() }
-        subscription = Subscription.merge(environmentSubscriptions.filter(\.enabled).compactMap { documents[$0.address] })?.withCloudSources(extrasUnlocked ? cloudDocument : nil)
+        let enabled = environmentSubscriptions.filter(\.enabled).compactMap { documents[$0.address] }
+        // [mi3s] 二开融合：上游 1.8.23 改了口径 —— 服务元数据只由**观众自己启用**的订阅提供，
+        // 不再有内置地址、也不再自动抓取（`CloudSources` 头注释：「No subscription address is bundled
+        // or fetched automatically」）。`withCloudSources(_:)` 随之取消，改成 `withCloudFiles()` +
+        // `withLivePlugins()`。我方 `cloudDocument` 保留为「那份被接受的服务订阅的本地副本」，
+        // 由 `refreshCloudSources()` 从启用订阅里认领，不再走网络。
+        CloudSources.current = enabled.first(where: CloudSources.accepts)
+        subscription = Subscription.merge(enabled)?.withCloudFiles().withLivePlugins()
+        refreshCloudSources()
         if let subscription { applySourceRouting(subscription) }
         refreshCloudSources()
         if let subscription {
@@ -2032,32 +2206,38 @@ import TVCore
     }
     /// Fetches Yingxia's own subscription while a subscription works: at once when there is no copy, else
     /// every ten minutes at most. A failed fetch keeps the last copy.
+    /// [mi3s] 二开融合：认领那份「被接受的服务订阅」作为内置源的来源。
+    ///
+    /// 上游 1.8.23 起不再有内置地址、也不再自动抓取（`CloudSources`：No subscription address is
+    /// bundled or fetched automatically），服务元数据只由观众自己启用的订阅提供。所以这里不再是
+    /// 「去网上取一份」，而是「从已启用的订阅里认出那份」：`CloudSources.accepts` 为真就有，
+    /// 认到就落盘一份，下次冷启动离线也有内置源可用。
+    ///
+    /// `force` 保留形参只为不惊动调用点（刷新订阅时给 true）；本函数已无节流，无需分支。
     private func refreshCloudSources(force: Bool = false) {
-        guard extrasUnlocked, cloudFetch == nil else { return }
+        _ = force
+        guard extrasUnlocked else { return }
         #if DEBUG
         // [mi3s] 二开融合：上游 1.8.11 新增 QA 开关，`-qaNoCloudSources 1` 只保留 QA 订阅的源，供数结果的 UI 测试使用。
         if UserDefaults.standard.bool(forKey: "qaNoCloudSources") { return }
         #endif
-        if !force, cloudDocument != nil, let fetched = cloudFetchedAt, Date.now.timeIntervalSince(fetched) < 600 { return }
-        let http = http, persists = persistsChanges
-        cloudFetch = Task { [weak self] in
-            let result: Result<Subscription, any Error>
-            do { result = .success(try await CloudSources.fetch(http: http)) } catch { result = .failure(error) }
-            guard let self else { return }
-            self.cloudFetch = nil
-            self.cloudFetchedAt = .now
-            switch result {
-            case .success(let document):
-                if persists, let data = try? JSONEncoder().encode(document) { try? Self.save(data, to: Self.cloudFile) }
-                CloudSources.current = document
-                let changed = (try? JSONEncoder().encode(document.raw)) != (try? JSONEncoder().encode(self.cloudDocument?.raw))
-                self.cloudDocument = document
-                if changed { self.rebuildSubscription() }
-            case .failure(let error):
-                Diagnostics.shared.failure("subscription", "built-in sources", error)
-            }
+        let accepted = environmentSubscriptions
+            .filter(\.enabled)
+            .compactMap { documents[$0.address] }
+            .first(where: CloudSources.accepts)
+        let changed = (try? JSONEncoder().encode(accepted?.raw)) != (try? JSONEncoder().encode(cloudDocument?.raw))
+        cloudDocument = accepted
+        CloudSources.current = accepted
+        if persistsChanges, let accepted, let data = try? JSONEncoder().encode(accepted) {
+            try? Self.save(data, to: Self.cloudFile)
+        }
+        if changed {
+            // 认到的服务订阅变了：内置源要重算。只更新状态，不回头调 `rebuildSubscription` ——
+            // 本函数正是它调的，回环一次能终止但没必要，且下次 rebuild 自然会用上新值。
+            Diagnostics.shared.record(.info, "subscription", "recommended sources: \(accepted == nil ? "none" : "adopted")")
         }
     }
+
     private func refreshCloudFilesSources() {
         guard let subscription, subscription.sites.filter(\.isCloudFiles) != CloudFilesSource.sites() else { return }
         rebuildSubscription()
@@ -2891,13 +3071,16 @@ import TVCore
     /// auto-play is off, there is no next episode, or the source can't resolve it now.
     func upcomingEpisode(after channel: Channel) async -> Channel? {
         // Only while `channel` still plays: once the queue moves on, this was asked about the one before.
-        if CloudFiles.isFile(channel.url) { return autoPlayNext && playing == channel ? nextFile(after: channel) : nil }
+        if CloudFiles.isFile(channel.url) || channel.url.scheme == DownloadLibrary.scheme {
+            return autoPlayNext && playing == channel ? nextFile(after: channel) : nil
+        }
         // Do not prefetch the next episode of a source the vault now hides: resolving it would query a
         // hidden source even though `advance` would refuse to play the result.
         guard mayContinuePlaying(channel) else { return nil }
         guard autoPlayNext, let catalog = catalog(for: channel), let next = nextEpisode(after: channel) else { return nil }
         do {
-            let resolved = try await catalog.client.playback(next)
+            let resolved: Channel
+            if let ahead = await nextAhead(for: next) { resolved = ahead } else { resolved = try await catalog.client.playback(next) }
             guard !Task.isCancelled, playing == channel else { return nil }
             return episodeChannel(resolved, video: catalog.video, episode: next, client: catalog.client)
         } catch {
@@ -2906,9 +3089,40 @@ import TVCore
         }
     }
 
+    /// Resolves the episode after `channel` while it plays, when it lasts `nextAheadLength` or less, once per episode.
+    func resolveNextAhead(after channel: Channel, duration: Double) {
+        guard duration > 0, duration <= Self.nextAheadLength, playing == channel,
+              let catalog = catalog(for: channel), let next = nextEpisode(after: channel) else { return }
+        if nextAheadTask?.episode == next { return }
+        if let ahead = nextAhead, ahead.episode == next, Date().timeIntervalSince(ahead.at) < Self.nextAheadLifetime { return }
+        nextAheadTask?.task.cancel()
+        let task = Task { [weak self] in
+            do {
+                let resolved = try await catalog.client.playback(next)
+                guard !Task.isCancelled, let self else { return }
+                self.nextAhead = (next, resolved, Date())
+                Diagnostics.shared.record(.info, "catalog", "next episode resolved ahead flag=\(next.flag)")
+            } catch {
+                if !(error is CancellationError) {
+                    Diagnostics.shared.record(.warning, "catalog", "next episode not resolved ahead \(Diagnostics.describe(error))")
+                }
+            }
+            if self?.nextAheadTask?.episode == next { self?.nextAheadTask = nil }
+        }
+        nextAheadTask = (next, task)
+    }
+
+    /// The stream resolved ahead for `episode`, waiting for one still on its way; nil when there is none, or it is too
+    /// old to trust.
+    private func nextAhead(for episode: Episode) async -> Channel? {
+        if let pending = nextAheadTask, pending.episode == episode { await pending.task.value }
+        guard let ahead = nextAhead, ahead.episode == episode, Date().timeIntervalSince(ahead.at) < Self.nextAheadLifetime else { return nil }
+        return ahead.resolved
+    }
+
     /// The queued episode started playing by itself: it becomes the one playing, as if it had been chosen.
     func advance(to next: Channel, from channel: Channel) {
-        if CloudFiles.isFile(next.url), playing == channel { playing = next; return }
+        if CloudFiles.isFile(next.url) || next.url.scheme == DownloadLibrary.scheme, playing == channel { playing = next; return }
         // The unlock may have lapsed while this title was on screen: stop before the next episode of a
         // now-hidden source plays on in the locked state.
         guard mayContinuePlaying(channel) else { stopForHiddenSource(); return }
@@ -3062,7 +3276,9 @@ import TVCore
             guard let self else { return }
             defer { if self.episodeRequest == request { self.resolvingEpisode = nil; self.episodeTask = nil } }
             do {
-                let resolved = try await catalog.client.playback(episode)
+                // Resolved ahead while a short episode played, Next starts it at once.
+                let resolved: Channel
+                if let ahead = await self.nextAhead(for: episode) { resolved = ahead } else { resolved = try await catalog.client.playback(episode) }
                 guard !Task.isCancelled, self.episodeRequest == request, self.playing == channel else { return }
                 self.playing = self.catalogChannel(resolved, video: catalog.video, episode: episode, client: catalog.client)
                 success?()
@@ -3155,6 +3371,13 @@ import TVCore
             return
         }
         let site = client.site
+        // An episode saved on this device plays from it, where it stopped, with no request to the source (#960).
+        let savedEpisode = Episode(id: entry.context.episodeID, name: entry.context.episodeName, address: "", flag: entry.context.episodeFlag)
+        if !entry.completed, let saved = DownloadLibrary.shared.item(for: DownloadSource(site: site, videoID: entry.context.videoID, episode: savedEpisode)),
+           saved.status == .completed {
+            playing = savedChannel(saved)
+            return
+        }
         let previousPlayback = playing
         do {
             // Plugin/API sources resolve an episode again. Direct-file APIs must refresh
@@ -3260,6 +3483,15 @@ extension Store {
         playing = saved.map { CloudFiles.channel(file, in: folder.drive, folder: folder.id, folderName: folder.name, resumePosition: $0.resumePosition, subtitles: folder.subtitles) } ?? channel
     }
 
+    /// A saved episode, under the history entry it has online: its progress and Continue Watching are the same
+    /// whether it streams or plays from the device, and it opens where it stopped (#960).
+    func savedChannel(_ item: DownloadItem) -> Channel {
+        guard var context = item.historyContext(in: subscription) else { return DownloadLibrary.shared.channel(for: item) }
+        let entry = playbackHistory.entries.first { $0.id == context.id }
+        if context.year == nil { context.year = entry?.context.year }
+        return DownloadLibrary.shared.channel(for: item, context: context, resumePosition: entry?.resumePosition(for: item.source.episode))
+    }
+
     func nextFile(after channel: Channel) -> Channel? { file(1, from: channel, in: filesFolder) }
     func previousFile(before channel: Channel) -> Channel? { file(-1, from: channel, in: filesFolder) }
 
@@ -3275,11 +3507,15 @@ extension Store {
     }
 
     /// The file `offset` places from the playing one in its folder, for the player's Previous and Next.
+    /// A saved episode steps through the others saved from its show (#835, #820).
     ///
     /// `folder` 由调用方给（前台给 `filesFolder`，坞里的任务给自己的那一份）。
     /// 三重比对（`drive.key` / `folder.id` / 文件名都在同一个 context 里）保证
     /// **拿错目录只会返回 nil，绝不会播到别的目录里的片子**。
     private func file(_ offset: Int, from channel: Channel, in folder: CloudFilesFolder?) -> Channel? {
+        if channel.url.scheme == DownloadLibrary.scheme {
+            return DownloadLibrary.shared.neighbor(of: channel.url, offset: offset).map(savedChannel)
+        }
         guard let context = channel.historyContext, context.sourceKey == CloudFiles.sourceKey, let folder,
               folder.drive.key == context.episodeFlag, folder.id == context.videoID,
               let index = folder.files.firstIndex(where: { $0.id == context.episodeID }),

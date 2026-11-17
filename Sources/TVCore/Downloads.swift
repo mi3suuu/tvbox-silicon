@@ -50,6 +50,20 @@ public struct DownloadSource: Codable, Hashable, Sendable {
     }
 }
 
+extension DownloadItem {
+    /// The history entry the episode has when it streams from its source, so playing the saved copy records the
+    /// same progress and the same Continue Watching (#960). Nil once the source is no longer in the subscription.
+    public func historyContext(in subscription: Subscription?) -> PlaybackHistoryContext? {
+        guard let subscription, let site = subscription.sites.first(where: { $0.key == source.siteKey }) else { return nil }
+        var context = PlaybackHistoryContext(origin: site.origin(or: subscription.origin), sourceKey: site.sourceKey, sourceName: site.name,
+                                             videoID: source.videoID, videoName: title, poster: poster,
+                                             episodeID: source.episodeID, episodeName: source.episodeName, episodeFlag: source.flag)
+        context.posterHeaders = posterHeaders.isEmpty ? nil : posterHeaders
+        context.officialPage = OfficialVideoPage.validated(source.address)
+        return context
+    }
+}
+
 public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     public enum Status: String, Codable, Sendable {
         /// Waiting for a free slot in the queue.
@@ -103,6 +117,17 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
     public var isActive: Bool { status == .downloading || status == .finishing }
     /// Not finished: running, waiting, paused or failed.
     public var isPending: Bool { status != .completed }
+
+    /// One show's episodes in episode order, by name without what drive sources put around it: a size tag first
+    /// ("[2.3GB]Show.S09E16.mkv" sorted before "[2.9GB]Show.S09E15.mkv", so 14 played on into 16, #1022), the share's tag
+    /// and the file extension. Each name is cleaned once.
+    public static func inEpisodeOrder(_ items: [DownloadItem]) -> [DownloadItem] {
+        items.map { (key: EpisodeLabels.clean($0.episode), item: $0) }.sorted { a, b in
+            let order = a.key.localizedStandardCompare(b.key)
+            if order != .orderedSame { return order == .orderedAscending }
+            return a.item.episode.localizedStandardCompare(b.item.episode) == .orderedAscending
+        }.map(\.item)
+    }
 }
 
 /// Downloaded episodes and the queue that fetches them. A fixed number of downloads run at once
@@ -488,22 +513,35 @@ public struct DownloadItem: Codable, Identifiable, Hashable, Sendable {
 
     // MARK: Playback
 
-    /// What the player opens for a finished download.
-    public func channel(for item: DownloadItem) -> Channel {
-        Channel(name: "\(item.title) · \(item.episode)", group: L10n.text("Downloads"), url: URL(string: "\(Self.scheme)://\(item.id)")!)
+    /// The finished download `offset` places from the one `url` plays, among its show's saved episodes in the
+    /// order Downloads lists them: what the player's Previous and Next reach, and what plays on after it.
+    public func neighbor(of url: URL, offset: Int) -> DownloadItem? {
+        guard url.scheme == Self.scheme, let id = url.host(), let current = item(id: id) else { return nil }
+        let show = DownloadItem.inEpisodeOrder(items.filter {
+            $0.status == .completed && $0.source.siteKey == current.source.siteKey && $0.source.videoID == current.source.videoID
+        })
+        guard let index = show.firstIndex(where: { $0.id == id }), show.indices.contains(index + offset) else { return nil }
+        return show[index + offset]
+    }
+
+    /// What the player opens for a finished download: under the episode's history entry when there is one
+    /// (`DownloadItem.historyContext(in:)`), so it records progress and opens where it stopped.
+    public func channel(for item: DownloadItem, context: PlaybackHistoryContext? = nil, resumePosition: Double? = nil) -> Channel {
+        Channel(name: "\(item.title) · \(item.episode)", group: L10n.text("Offline Cache"), url: URL(string: "\(Self.scheme)://\(item.id)")!,
+                skipScope: context?.id, historyContext: context, resumePosition: resumePosition)
     }
 
     /// The file (or, for HLS, the loopback address) that plays a `tvbox-download://` address. An HDR MKV saved
     /// before downloads became MP4s is rewrapped first, which `progress` follows (0...1).
     public func playbackAddress(for url: URL, progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> URL {
         guard url.scheme == Self.scheme, let id = url.host(), let item = item(id: id), item.status == .completed, var media = item.media else {
-            throw TVError.unsupported(L10n.text("This download is no longer on this device."))
+            throw TVError.unsupported(L10n.text("This cached video is no longer on this device."))
         }
         var file = folder(id).appending(path: media)
         guard FileManager.default.fileExists(atPath: file.path) else {
             // Deleted or moved away in Finder: stop listing it as downloaded.
             remove([id])
-            throw TVError.unsupported(L10n.text("This download is no longer on this device."))
+            throw TVError.unsupported(L10n.text("This cached video is no longer on this device."))
         }
         if Remux.handles(name: media) {
             let rewrapped = await Self.rewrap(media, in: folder(id), progress: progress)

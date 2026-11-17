@@ -3,7 +3,7 @@ import Foundation
 /// LX Music (洛雪音乐) custom sources: scripts a listener imports that turn a catalog song ID into an
 /// audio address, as in LX Music's "custom source" setting. Yingxia ships none. Each runs on QuickJS
 /// with the `lx` object of LX Music desktop's user API (ScriptAssets/lx/lx.js), and the enabled ones
-/// are one more channel, `MusicProviderID.lx`, tried after the built-in channels. Nothing runs until
+/// are one more channel, `MusicProviderID.lx`, tried after the subscription's channels. Nothing runs until
 /// a source is imported, and a source's runtime starts only when a song first needs it.
 
 /// The comment LX Music reads at the top of a source: `@name`, `@description`, `@version`, `@author`, `@homepage`.
@@ -126,6 +126,8 @@ public struct LXSource: Codable, Identifiable, Hashable, Sendable {
 /// The imported sources: a small list in user defaults and each script in a file.
 public final class LXSourceLibrary: @unchecked Sendable {
     public static let shared = LXSourceLibrary(folder: LXSourceLibrary.defaultFolder, defaults: .standard)
+    /// Posted on the main queue after a source is added, switched on or off, or removed.
+    public static let changed = Notification.Name("LXSourcesChanged")
     static var defaultFolder: URL {
         #if os(tvOS)
         // tvOS only permits Caches; a cleared script is fetched again from where it came from.
@@ -137,6 +139,15 @@ public final class LXSourceLibrary: @unchecked Sendable {
     static let defaultsKey = "musicLXSources"
     /// LX Music refuses larger scripts too.
     static let scriptLimit = 9_000_000
+
+    /// The text of `data` when it reads as an LX Music source: a script that opens with the comment LX Music reads, naming
+    /// the source (published ones all do, obfuscated ones too). A Listenify music extension can open with the same
+    /// comment; it defines `getSongInfo`.
+    public static func script(in data: Data) -> String? {
+        guard data.count <= scriptLimit, let script = String(data: data, encoding: .utf8),
+              MusicExtension.header(script)["name"] != nil, !script.contains("getSongInfo") else { return nil }
+        return script
+    }
 
     private let folder: URL
     private let defaults: UserDefaults
@@ -160,8 +171,17 @@ public final class LXSourceLibrary: @unchecked Sendable {
     @discardableResult
     public func add(script: String, origin: URL?, runtime: LXSourceRuntime = .shared) async throws -> LXSource {
         guard !script.isEmpty, script.utf8.count <= Self.scriptLimit else { throw TVError.unsupported(L10n.text("This file is not an LX Music source.")) }
+        // Adding a source again keeps one entry (#1177: people added the same file three times). The same text only turns
+        // it back on; a newer text from the address it came from replaces it in its place.
+        let previous = existing(script: script, origin: origin)
+        if let previous, (try? Data(contentsOf: file(previous.id))) == Data(script.utf8) {
+            if !previous.enabled { setEnabled(previous.id, true) }
+            return sources.first { $0.id == previous.id } ?? previous
+        }
         let info = LXSourceInfo(script: script)
-        var source = LXSource(info: info, sources: [:], origin: origin)
+        var source = LXSource(id: previous?.id ?? UUID().uuidString, info: info, sources: [:], origin: origin ?? previous?.origin,
+                              added: previous?.added ?? Date())
+        if let previous { await runtime.close(previous.id) }
         let declared = try await runtime.start(source, script: script)
         source.sources = declared.filter { LXSourceKey.platform($0.key) != nil }
         guard !source.sources.isEmpty else {
@@ -170,7 +190,9 @@ public final class LXSourceLibrary: @unchecked Sendable {
         }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try Data(script.utf8).write(to: file(source.id), options: .atomic)
-        update { $0.append(source) }
+        update { list in
+            if let index = list.firstIndex(where: { $0.id == source.id }) { list[index] = source } else { list.append(source) }
+        }
         Diagnostics.shared.record(.info, "music", "lx source added: \(source.sources.keys.sorted().joined(separator: ","))")
         return source
     }
@@ -180,6 +202,14 @@ public final class LXSourceLibrary: @unchecked Sendable {
             if let index = list.firstIndex(where: { $0.id == id }) { list[index].enabled = enabled }
         }
         if !enabled { Task { await LXSourceRuntime.shared.close(id) } }
+    }
+
+    /// The source `script` was already added as: the same text, or a script fetched from the same address.
+    func existing(script: String, origin: URL?) -> LXSource? {
+        let text = Data(script.utf8)
+        return sources.first { source in
+            (origin != nil && source.origin == origin) || (try? Data(contentsOf: file(source.id))) == text
+        }
     }
 
     public func remove(_ id: String) {
@@ -218,6 +248,8 @@ public final class LXSourceLibrary: @unchecked Sendable {
             cached = list
             if let data = try? JSONEncoder().encode(list) { defaults.set(data, forKey: Self.defaultsKey) }
         }
+        // Settings › Subscriptions lists the sources too.
+        DispatchQueue.main.async { NotificationCenter.default.post(name: Self.changed, object: nil) }
     }
 }
 
@@ -282,7 +314,7 @@ public actor LXSourceRuntime {
 }
 
 /// The enabled LX sources as one channel: each source that covers the catalog is asked in turn.
-public struct LXMusicProvider: MusicStreamProvider {
+public struct LXMusicProvider: MusicStreamAlternatives {
     public let id = MusicProviderID.lx
     public let platforms: Set<MusicPlatform>
     let sources: [LXSource]
@@ -301,19 +333,27 @@ public struct LXMusicProvider: MusicStreamProvider {
     }
 
     public func resolve(_ songID: String, platform: MusicPlatform, track: MusicTrack?, quality: MusicAudioQuality) async throws -> ResolvedMusicStream {
+        try await resolve(songID, platform: platform, track: track, quality: quality, skipping: [])
+    }
+
+    /// The first address a source gives, leaving out the sources named in `skipping` (by `upstream`).
+    func resolve(_ songID: String, platform: MusicPlatform, track: MusicTrack?, quality: MusicAudioQuality,
+                 skipping: Set<String>) async throws -> ResolvedMusicStream {
         let key = LXSourceKey.key(platform)
         let info = LXSourceKey.musicInfo(songID: songID, platform: platform, track: track)
         var failure = MusicProviderError.noResource
-        for source in sources {
+        for source in sources where !skipping.contains(Self.upstream(source)) {
             guard let declared = source.sources[key],
                   let tier = LXSourceKey.quality(from: declared, for: quality) else { continue }
             try Task.checkCancellation()
             try await health.admit("lx")
             do {
                 let url = try await runtime.musicURL(source, library: library, key: key, quality: tier, musicInfo: info)
-                return ResolvedMusicStream(url: url, claimedQuality: tier, upstream: "lx:" + source.info.name)
+                return ResolvedMusicStream(url: url, claimedQuality: tier, upstream: Self.upstream(source))
             } catch { failure = MusicProviderError(error) }
         }
         throw failure
     }
+
+    static func upstream(_ source: LXSource) -> String { "lx:" + source.info.name }
 }

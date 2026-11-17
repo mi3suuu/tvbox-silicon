@@ -103,6 +103,14 @@ public final class MediaCache: @unchecked Sendable {
         }
         deleteBlobs(keys)
     }
+    /// Remove one category in a work's scope, invalidating downloads started before the deletion.
+    public func remove(kind: Kind, scope: String) {
+        lock.withLock {
+            generation &+= 1
+            for key in entries.keys.filter({ entries[$0]?.scope == scope && entries[$0]?.kind == kind }) { erase(key) }
+            persist()
+        }
+    }
     public func remove(_ key: String, kind: Kind, scope: String = "") {
         let keys = lock.withLock {
             generation &+= 1
@@ -130,6 +138,13 @@ public final class MediaCache: @unchecked Sendable {
                     catalogs: entries.values.filter { $0.kind == .catalog }.count)
         }
     }
+    /// 上游 1.8.23 用 `erase` 做「立即删条目 + 删 blob」，本文件是我方版（用 `deleteBlobs` 批量删）。
+    /// 合并后上游的 `remove(kind:scope:)` 调用点仍指向 `erase`，这里补上等价实现。
+    private func erase(_ key: String) {
+        entries[key] = nil
+        try? FileManager.default.removeItem(at: root.appending(path: key))
+    }
+
     private func deleteBlobs(_ keys: [String]) {
         for key in keys { try? FileManager.default.removeItem(at: root.appending(path: key)) }
     }

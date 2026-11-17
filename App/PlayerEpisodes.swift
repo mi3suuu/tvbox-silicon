@@ -25,7 +25,20 @@ extension View {
     /// The episodes sheet, on a view that stays while the player's controls come and go: on the button itself, the
     /// sheet closed whenever its row did.
     func playerEpisodesSheet(isPresented: Binding<Bool>, channel: Channel) -> some View {
-        sheet(isPresented: isPresented) { PlayerEpisodesSheet(channel: channel).playerSheet() }
+        modifier(PlayerSheetPresentation(isPresented: isPresented) { PlayerEpisodesSheet(channel: channel).playerSheet() })
+    }
+}
+
+/// A sheet over the player with the store handed in: the iPad app on a Mac presents a sheet from inside the player's
+/// full-screen cover without the presenter's environment objects, and 选集 stopped the app there ("No Observable
+/// object of type Store found", #1163).
+struct PlayerSheetPresentation<Sheet: View>: ViewModifier {
+    @Binding var isPresented: Bool
+    @ViewBuilder let sheet: () -> Sheet
+    @Environment(Store.self) private var store
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: $isPresented) { sheet().environment(store) }
     }
 }
 
@@ -93,6 +106,11 @@ struct PlayerEpisodesSheet: View {
         let current = playing.historyContext?.episode(in: episodes)
         let flag = selectedFlag.flatMap { flags.contains($0) ? $0 : nil } ?? current?.flag ?? flags.first ?? ""
         let items = episodes.filter { $0.flag == flag }
+        // TMDB's stills when its season lines up with most of the episodes and it has pictures, as on the page. While
+        // TMDB hasn't answered, tiles with the episodes' numbers, also as on the page, so its stills fade into the same
+        // tiles: even the answer this device kept arrives a moment after the sheet opens, and rows turning into tiles
+        // then drew every tile at a row's width, shrinking, over the others.
+        let tiles = !tmdb.episodeTiles(items).isEmpty || (tmdbPending(catalog) && items.count <= 60)
         return ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -109,11 +127,13 @@ struct PlayerEpisodesSheet: View {
                             .font(.footnote).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    grid(items, labels: catalog.labels, details: catalog.details, current: current?.id)
+                    grid(items, tiles: tiles, labels: catalog.labels, details: catalog.details, current: current?.id)
                 }
                 .padding(16)
             }
             .onAppear { if let id = current?.id { proxy.scrollTo(id, anchor: .center) } }
+            // The layout changed under the episode playing (TMDB had nothing to show): back to it.
+            .onChange(of: tiles) { _, _ in if let id = current?.id { proxy.scrollTo(id, anchor: .center) } }
         }
     }
 
@@ -137,17 +157,25 @@ struct PlayerEpisodesSheet: View {
         }
     }
 
-    private func grid(_ items: [Episode], labels: [Episode.ID: String], details: [Episode.ID: String], current: Episode.ID?) -> some View {
-        // TMDB's stills when its season lines up with most of the episodes and it has pictures, as on the page.
+    /// TMDB hasn't answered yet, or is still looking: the first moment of every sheet for a title it may know.
+    private func tmdbPending(_ catalog: PlaybackCatalog) -> Bool {
+        tmdb.phase == .looking || (tmdb.phase == .idle && TMDBLookup.applies(to: catalog.client.site))
+    }
+
+    private func grid(_ items: [Episode], tiles showsStills: Bool, labels: [Episode.ID: String], details: [Episode.ID: String],
+                      current: Episode.ID?) -> some View {
         let stills = tmdb.episodes(items)
-        let showsStills = !tmdb.episodeTiles(items).isEmpty
         let titles = Dictionary(items.map { ($0.id, labels[$0.id] ?? EpisodeRow.title($0.name)) }, uniquingKeysWith: { first, _ in first })
-        // 第1集, 01, 4K国语: small tiles. File names and long titles: two-line cards.
+        // 第1集, 01, 4K国语: small tiles. Longer titles: two-line cards. File names a card would cut short: a row
+        // each, the whole name, because what tells two files of a film apart (HDR, the audio, the subtitles) is at the
+        // end of the name, where a card's … was (#897).
         let short = (titles.values.map(\.count).max() ?? 0) <= 6
+        let rows = !showsStills && !short && titles.contains { Self.overflowsCard($0.value, withDetail: details[$0.key] != nil) }
         let minimum: CGFloat = showsStills ? Self.stillTile : short ? Self.shortTile : Self.longTile
         let shown = reversesEpisodes ? items.reversed() : items
-        return LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum), spacing: showsStills ? 12 : 8, alignment: .top)],
-                         spacing: showsStills ? 14 : 8) {
+        let columns = rows ? [GridItem(.flexible(), alignment: .top)]
+            : [GridItem(.adaptive(minimum: minimum), spacing: showsStills ? 12 : 8, alignment: .top)]
+        return LazyVGrid(columns: columns, spacing: showsStills ? 14 : 8) {
             ForEach(shown) { episode in
                 let title = titles[episode.id] ?? episode.name
                 let isCurrent = episode.id == current
@@ -162,7 +190,7 @@ struct PlayerEpisodesSheet: View {
                         TMDBEpisodeTile(name: title, info: stills[episode.id], detail: details[episode.id], current: isCurrent, loading: loading, width: nil,
                                         backdrops: tmdb.episodeBackdrops)
                     } else {
-                        EpisodeCell(title: title, detail: details[episode.id], current: isCurrent, loading: loading, compact: short)
+                        EpisodeCell(title: title, detail: details[episode.id], current: isCurrent, loading: loading, compact: short, whole: rows)
                     }
                 }
                 .buttonStyle(.plain)
@@ -172,7 +200,8 @@ struct PlayerEpisodesSheet: View {
                 .contextMenu { if labels[episode.id] != nil { Text(episode.name) } }
             }
         }
-        .animation(.smooth(duration: 0.4), value: showsStills)
+        // Tiles that turn into rows or cards change at once: morphing, each tile shrank or grew across the others.
+        .animation(nil, value: showsStills)
     }
 
     #if os(macOS)
@@ -180,6 +209,12 @@ struct PlayerEpisodesSheet: View {
     #else
     private static let stillTile: CGFloat = 160, shortTile: CGFloat = 76, longTile: CGFloat = 220
     #endif
+
+    /// Whether a card at its narrowest shows less than the whole title: one line above the file's detail, two without
+    /// it. A card's line holds about 26 Latin letters or digits, or 13 Chinese characters.
+    static func overflowsCard(_ title: String, withDetail: Bool) -> Bool {
+        title.unicodeScalars.reduce(0) { $0 + ($1.isASCII ? 1 : 2) } > (withDetail ? 26 : 52)
+    }
 
     /// TMDB's details as the video's page has them: the answer this device kept, else the same lookup the page runs.
     private func lookUp() async {
@@ -189,7 +224,7 @@ struct PlayerEpisodesSheet: View {
         let key = TMDBMatchStore.key(source: site.key, video: catalog.video.id)
         let request = TMDBMatch.Request(video: catalog.video, listVideo: catalog.video,
                                         source: TMDBMatch.SourceRef(key: site.key, name: site.name))
-        guard !TMDBMatch.labeledNotOnTMDB(request) else { return }
+        guard !TMDBMatch.labeledNotOnTMDB(request) else { tmdb.skip(); return }
         await tmdb.run(key: key, request: request)
     }
 }
@@ -202,19 +237,29 @@ private struct EpisodeCell: View {
     let current: Bool
     let loading: Bool
     let compact: Bool
+    /// A row of its own with the whole name, however many lines that takes (within reason), for file names.
+    var whole = false
+    /// A file name that wraps where its parts end. Left alone, Movie.2025.2160p.WEB-DL.H265 is one word that breaks
+    /// only at its hyphen, leaving most of a line empty: a line may end after a dot or an underscore, and not at a hyphen.
+    static func breakable(_ name: String) -> String {
+        name.replacingOccurrences(of: ".", with: ".\u{200B}").replacingOccurrences(of: "_", with: "_\u{200B}")
+            .replacingOccurrences(of: "-", with: "\u{2011}")
+    }
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         HStack(spacing: 6) {
             if loading { ProgressView().appControlSize(.small) }
-            VStack(alignment: compact ? .center : .leading, spacing: 1) {
-                Text(title).lineLimit(compact || detail != nil ? 1 : 2).multilineTextAlignment(compact ? .center : .leading)
+            VStack(alignment: compact ? .center : .leading, spacing: whole ? 3 : 1) {
+                Text(whole ? Self.breakable(title) : title).lineLimit(whole ? 4 : compact || detail != nil ? 1 : 2)
+                    .multilineTextAlignment(compact ? .center : .leading)
+                    .fixedSize(horizontal: false, vertical: whole)
                 if let detail { EpisodeFileDetail(text: detail) }
             }
         }
         .font(.subheadline.weight(current ? .semibold : .regular))
         .foregroundStyle(current ? Brand.onAccent : Color.primary)
         .tint(current ? Brand.onAccent : nil)
-        .padding(.horizontal, compact ? 8 : 12)
+        .padding(.horizontal, compact ? 8 : 12).padding(.vertical, whole ? 10 : 0)
         .frame(maxWidth: .infinity, minHeight: compact ? 44 : 54, alignment: compact ? .center : .leading)
         .glassOrFill(current ? GlassStyle.regular.tint(Brand.accent).interactive() : .regular.interactive(),
                      current ? Brand.accent : Color.primary.opacity(0.06), in: shape)

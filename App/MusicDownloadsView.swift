@@ -27,10 +27,10 @@ struct MusicDownloadsView: View {
             // Files may have been deleted or moved in Finder while the app was in the background.
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in library.forgetMissing() }
             #endif
-            .confirmationDialog(L10n.text("Delete all downloaded songs?"), isPresented: $confirmsDeleteAll, titleVisibility: .visible) {
-                // 只删本环境的歌：按钮由「本环境有歌」控制显隐，删的却曾是全库 ——
-                // 在 B 环境点一次会把 A 环境的歌一起删掉。两个作用域必须一致。
-                Button(L10n.text("Delete Downloads"), role: .destructive) { library.remove(library.visibleItems.map(\.id)) }
+            .confirmationDialog(L10n.text("Delete all cached songs?"), isPresented: $confirmsDeleteAll, titleVisibility: .visible) {
+                // [mi3s] 二开：只删本环境的歌。按钮由「本环境有歌」控制显隐，
+                // 若删全库，在 B 环境点一次会把 A 环境的歌一起删掉。两个作用域必须一致。
+                Button(L10n.text("Delete Cached Items"), role: .destructive) { library.remove(library.visibleItems.map(\.id)) }
             }
             #if DEBUG
             // `-qaPlayDownloaded 1` plays the newest saved song as soon as there is one.
@@ -46,12 +46,6 @@ struct MusicDownloadsView: View {
             page.screenTitle(Self.title)
                 #if os(macOS)
                 .toolbar(removing: .title)
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button { NSWorkspace.shared.open(library.root) } label: { Label(L10n.text("Show in Finder"), systemImage: "folder") }
-                            .help(L10n.text("Show in Finder"))
-                    }
-                }
                 #endif
         }
     }
@@ -61,10 +55,10 @@ struct MusicDownloadsView: View {
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: MusicLayout.rowSpacing) {
                 header(tracks).padding(.bottom, 20)
+                // [mi3s] 判据取 visible*：只看本环境。
                 if library.visibleItems.isEmpty {
-                    ContentUnavailableView(L10n.text("No Downloaded Songs"), systemImage: "arrow.down.circle",
-                                           description: Text(L10n.text("Download a song, album or playlist from its menu to listen without a connection.")))
-                        .frame(maxWidth: .infinity).padding(.vertical, 60)
+                    EmptyResults(symbol: "arrow.down.circle", title: L10n.text("No Cached Songs"),
+                                 message: L10n.text("Cache a song, album or playlist from its menu to listen without a connection."))
                 }
                 if !pending.isEmpty {
                     // Its own stack: a song that finishes moves to the list below under the same ID,
@@ -73,12 +67,12 @@ struct MusicDownloadsView: View {
                         // The buttons go under the title when a phone has no room beside it.
                         ViewThatFits(in: .horizontal) {
                             HStack(alignment: .center, spacing: 8) {
-                                SectionHeader(title: L10n.text("Downloading"))
+                                SectionHeader(title: L10n.text("Caching"))
                                 Spacer(minLength: 8)
                                 MusicPendingActions(pending: pending)
                             }
                             VStack(alignment: .leading, spacing: 10) {
-                                SectionHeader(title: L10n.text("Downloading"))
+                                SectionHeader(title: L10n.text("Caching"))
                                 MusicPendingActions(pending: pending)
                             }
                         }
@@ -91,7 +85,7 @@ struct MusicDownloadsView: View {
                 shelf(L10n.text("Albums"), library.visibleCollections.filter { $0.collection.kind == .album })
                 if !saved.isEmpty {
                     if !pending.isEmpty || !library.visibleCollections.isEmpty {
-                        SectionHeader(title: L10n.text(library.visibleCollections.isEmpty ? "Downloaded" : "Songs")).padding(.top, 24).padding(.bottom, 8)
+                        SectionHeader(title: L10n.text(library.visibleCollections.isEmpty ? "Cached" : "Songs")).padding(.top, 24).padding(.bottom, 8)
                     }
                     ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
                         MusicTrackRow(track: track) { store.music.play(MusicQueue(tracks: tracks, start: index, source: Self.title)) }
@@ -102,7 +96,7 @@ struct MusicDownloadsView: View {
         }
     }
 
-    static var title: String { L10n.text("Downloaded Songs") }
+    static var title: String { L10n.text("Cached Songs") }
     #if os(macOS)
     static let tile: CGFloat = 150, tileSpacing: CGFloat = 16
     #elseif os(tvOS)
@@ -114,6 +108,14 @@ struct MusicDownloadsView: View {
     /// Albums or playlists downloaded from their pages, as covers in a row; each opens its saved songs.
     @ViewBuilder private func shelf(_ title: String, _ collections: [MusicDownloadedCollection]) -> some View {
         if !collections.isEmpty {
+            #if os(tvOS)
+            // Watch Now's rail, out to the page's edge as on the Music page.
+            WatchNowTVRail(title: title, gutter: Layout.gutter) {
+                ForEach(collections) { MusicDownloadedTile(entry: $0, size: Self.tile) }
+            }
+            .padding(.horizontal, -Layout.gutter)
+            .padding(.top, 24)
+            #else
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeader(title: title)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -124,7 +126,7 @@ struct MusicDownloadsView: View {
                 .scrollClipDisabled()
             }
             .padding(.top, 24)
-            .tvFocusSection()
+            #endif
         }
     }
 
@@ -150,9 +152,9 @@ struct MusicDownloadsView: View {
                 .disabled(tracks.isEmpty)
                 // In plain sight rather than in the toolbar: it also clears songs still on their way.
                 if !library.visibleItems.isEmpty {
-                    Button { confirmsDeleteAll = true } label: { Label(L10n.text("Delete Downloads"), systemImage: "trash").labelStyle(.iconOnly) }
+                    Button { confirmsDeleteAll = true } label: { Label(L10n.text("Delete Cached Items"), systemImage: "trash").labelStyle(.iconOnly) }
                         .controlButton()
-                        .help(L10n.text("Delete Downloads"))
+                        .help(L10n.text("Delete Cached Items"))
                 }
             }
             .fixedSize()
@@ -215,14 +217,14 @@ struct MusicDownloadedCollectionView: View {
             #else
             .toolbar {
                 Button { confirmsRemove = true } label: { Image(systemName: "trash") }
-                    .help(L10n.text("Remove Download")).accessibilityLabel(L10n.text("Remove Download"))
+                    .help(L10n.text("Remove from Cache")).accessibilityLabel(L10n.text("Remove from Cache"))
             }
             #endif
             .confirmationDialog(collection.title, isPresented: $confirmsRemove, titleVisibility: .visible) {
-                Button(L10n.text("Remove Download"), role: .destructive) { library.remove(collection: id); dismiss() }
+                Button(L10n.text("Remove from Cache"), role: .destructive) { library.remove(collection: id); dismiss() }
             }
         } else {
-            ContentUnavailableView(L10n.text("No Downloaded Songs"), systemImage: "arrow.down.circle").screenBackdrop()
+            EmptyResults(symbol: "arrow.down.circle", title: L10n.text("No Cached Songs"), fills: true).screenBackdrop()
         }
     }
 
@@ -252,7 +254,7 @@ struct MusicDownloadedCollectionView: View {
                 #if os(tvOS)
                 // Apple TV hides the navigation bar, and the toolbar's trash with it.
                 Button(role: .destructive) { confirmsRemove = true } label: {
-                    Label(L10n.text("Remove Download"), systemImage: "trash")
+                    Label(L10n.text("Remove from Cache"), systemImage: "trash")
                 }
                 .controlButton()
                 #endif
@@ -272,6 +274,13 @@ private struct MusicDownloadedTile: View {
     var body: some View {
         let collection = entry.collection
         let saved = MusicDownloadLibrary.shared.items(in: entry).filter { $0.status == .completed }.count
+        #if os(tvOS)
+        RouteLink { MusicDownloadedCollectionView(id: entry.id) } label: {
+            WatchNowTVCover(title: collection.title, detail: L10n.text("%lld songs", saved), poster: collection.artwork,
+                            square: true, symbol: collection.kind == .album ? "square.stack" : "music.note.list")
+        }
+        .cardButton()
+        #else
         let link = RouteLink { MusicDownloadedCollectionView(id: entry.id) } label: {
             VStack(alignment: .leading, spacing: 7) {
                 MusicArtwork(url: collection.artwork, size: size, symbol: collection.kind == .album ? "square.stack" : "music.note.list")
@@ -281,23 +290,17 @@ private struct MusicDownloadedTile: View {
                     Text(collection.title).font(Self.titleFont).foregroundStyle(.primary).lineLimit(1)
                     Text(L10n.text("%lld songs", saved)).font(Self.subtitleFont).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
                 }
-                .cardCaption()
             }
             .frame(width: size, alignment: .leading)
             .contentShape(.rect)
         }
-        #if os(tvOS)
-        link.cardButton()
-        #else
         link.buttonStyle(.plain)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.15), value: hovering)
         #endif
     }
 
-    #if os(tvOS)
-    private static let titleFont = Font.system(size: 24, weight: .semibold), subtitleFont = Font.system(size: 20)
-    #else
+    #if !os(tvOS)
     private static let titleFont = Font.subheadline.weight(.medium), subtitleFont = Font.caption
     #endif
 }
@@ -347,7 +350,7 @@ private struct MusicPendingRow: View {
             .glassRow()
             .confirmationDialog(item.track.title, isPresented: $choosing, titleVisibility: .visible) {
                 if item.status == .failed { Button(L10n.text("Retry")) { MusicDownloadLibrary.shared.retry(item.id) } }
-                Button(L10n.text("Cancel Download"), role: .destructive) { MusicDownloadLibrary.shared.remove([item.id]) }
+                Button(L10n.text("Cancel Caching"), role: .destructive) { MusicDownloadLibrary.shared.remove([item.id]) }
             }
         #else
         row
@@ -378,7 +381,7 @@ private struct MusicPendingRow: View {
                 Image(systemName: "xmark").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                     .frame(width: 30, height: 30).contentShape(.rect)
             }
-            .buttonStyle(.borderless).help(L10n.text("Cancel Download")).accessibilityLabel(L10n.text("Cancel Download"))
+            .buttonStyle(.borderless).help(L10n.text("Cancel Caching")).accessibilityLabel(L10n.text("Cancel Caching"))
             #endif
         }
         .padding(.vertical, 6)
@@ -392,11 +395,11 @@ private struct MusicPendingRow: View {
             if let expected = item.expected, expected > 0 {
                 L10n.text("%@ of %@", DownloadFormat.size(item.received), DownloadFormat.size(expected))
             } else {
-                L10n.text("Downloading")
+                L10n.text("Caching")
             }
         case .finishing: L10n.text("Finishing…")
-        case .failed: item.failure ?? L10n.text("Download failed")
-        case .completed: L10n.text("Downloaded")
+        case .failed: item.failure ?? L10n.text("Caching failed")
+        case .completed: L10n.text("Cached")
         }
     }
 }
@@ -438,7 +441,7 @@ struct MusicDownloadsLink: View {
         var parts = [L10n.text("%lld songs", library.visibleCompleted.count)]
         // Failed songs wait for Retry on the page; only those on their way count here.
         let running = library.visiblePending.filter { $0.status != .failed }.count
-        if running > 0 { parts.append(L10n.text("%lld downloading", running)) }
+        if running > 0 { parts.append(L10n.text("%lld caching", running)) }
         if library.visibleSize > 0 { parts.append(DownloadFormat.size(library.visibleSize)) }
         return parts.joined(separator: " · ")
     }
@@ -457,15 +460,8 @@ struct MusicDownloadMenuItems: View {
             // A source's episode (#289) downloads from its video page.
             EmptyView()
         } else if !tracks.isEmpty, saved.count == tracks.count {
-            #if os(iOS)
-            if tracks.count == 1, let file = library.file(for: tracks[0]) {
-                Button { DownloadSharing.share(file, named: MusicDownloadLibrary.exportName(for: tracks[0])) } label: {
-                    Label(L10n.text("Save or Share"), systemImage: "square.and.arrow.up")
-                }
-            }
-            #endif
             Button(role: .destructive) { library.remove(saved.map(\.id)) } label: {
-                Label(L10n.text(saved.allSatisfy { $0.status == .completed } ? "Remove Download" : "Cancel Download"), systemImage: "trash")
+                Label(L10n.text(saved.allSatisfy { $0.status == .completed } ? "Remove from Cache" : "Cancel Caching"), systemImage: "trash")
             }
         } else if tracks.contains(where: { library.isSavedInAnotherEnvironment($0) }) {
             // 一首歌全机只存一份（见 `visibleItems`）：另一个环境已经存过时，`download` 会直接
@@ -475,7 +471,7 @@ struct MusicDownloadMenuItems: View {
             }
             .disabled(true)
         } else {
-            Button { library.download(tracks) } label: { Label(L10n.text("Download"), systemImage: "arrow.down.circle") }
+            Button { library.download(tracks) } label: { Label(L10n.text("Cache"), systemImage: "arrow.down.circle") }
         }
     }
 }
@@ -496,11 +492,11 @@ struct MusicDownloadButton: View {
         let kept = collection.map { library.collection(id: $0.id) != nil } ?? true
         let queued = kept && !tracks.isEmpty && items.count == tracks.count && !items.contains { $0.status == .failed }
         let done = queued && items.allSatisfy { $0.status == .completed }
-        // 整张专辑的歌都已经在另一个环境里存过：这里既不该显示 Download（点了什么都不会发生，
-        // 还会在本环境插一张 0 首歌的空专辑卡片），也不该装作 Downloaded。
+        // [mi3s] 二开：整张专辑的歌都已存在另一个环境里 —— 既不该显示 Cache（点了什么都不发生，
+        // 还会在本环境插一张 0 首歌的空专辑卡片），也不该装作 Cached。
         let elsewhere = !tracks.isEmpty && items.isEmpty && tracks.allSatisfy { library.isSavedInAnotherEnvironment($0) }
-        let label = L10n.text(done ? "Downloaded" : elsewhere ? "Saved in another environment"
-                                  : queued ? "Downloading" : "Download")
+        let label = L10n.text(done ? "Cached" : elsewhere ? "Saved in another environment"
+                                  : queued ? "Caching" : "Cache")
         Button { library.download(tracks, from: collection) } label: {
             Label(label, systemImage: done ? "checkmark.circle" : queued ? "arrow.down.circle.dotted" : "arrow.down.circle")
                 #if !os(tvOS)

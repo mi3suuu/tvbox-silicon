@@ -215,6 +215,12 @@ import Testing
         await #expect(throws: TVError.self) { try await client.probe(URL(string: "http://dav.test/NAS")!, username: "me", password: "no") }
         // A web server that doesn't speak WebDAV isn't a share.
         #expect(try await client.probe(URL(string: "http://dav.test/site")!) == nil)
+        // Nor is an address nothing answers at; but a certificate the device doesn't trust says so (#864).
+        #expect(try await client.probe(URL(string: "http://dav.test/offline")!) == nil)
+        do {
+            _ = try await client.probe(URL(string: "https://dav.test/selfsigned/Movies%20Library")!, username: "me", password: "pw")
+            Issue.record("an untrusted certificate went unreported")
+        } catch { #expect(error.localizedDescription.contains("dav.test") && error.localizedDescription.contains("http://")) }
     }
 
     @Test func aWebDAVFilePlaysByRangedReadsWithTheAccount() async throws {
@@ -264,13 +270,13 @@ import Testing
         let client = Emby(session: EmbyStub.session)
         let libraries = try await client.list(server, id: server.root)
         // Live TV isn't a folder of files.
-        #expect(libraries.map(\.name) == ["Shows"] && libraries[0].isFolder && libraries[0].id == "shows")
+        #expect(libraries.map(\.name) == ["Shows", "Films", "Home Videos"] && libraries[0].isFolder && libraries[0].id == "shows")
         #expect(libraries[0].artwork?.absoluteString == "http://emby.test/emby/Items/shows/Images/Primary?tag=t1&maxHeight=240")
         let episodes = CloudFile.arranged(try await client.list(server, id: "season"))
         #expect(episodes.map(\.name) == ["2. Pilot.mp4", "10. Finale.mkv", "Film (2024).mkv"])
         #expect(episodes.allSatisfy { CloudFilesDrive.alist(server).plays($0) })
         #expect(EmbyStub.calls == ["POST /emby/Users/AuthenticateByName -", "GET /emby/Users/u1/Views tok-1",
-                                   "GET /emby/Users/u1/Items?Fields=Path&ParentId=season&SortBy=SortName tok-1"])
+                                   "GET /emby/Users/u1/Items?Fields=Path,Container&ParentId=season&SortBy=SortName tok-1"])
         // The server restarted and forgot the token: sign in again, once.
         EmbyStub.forgetTokens()
         _ = try await client.list(server, id: server.root)
@@ -284,6 +290,28 @@ import Testing
         }
     }
 
+    /// A film or series library lists every film or series in it, however its folders nest them, as the
+    /// server's own apps do; other libraries list folder by folder (#1063).
+    @Test func embyFilmAndSeriesLibrariesListAllTheirTitles() async throws {
+        EmbyStub.reset()
+        let server = AListServer(id: "e", name: "Home", address: "http://emby.test/emby", username: "me", password: "pw", kind: .emby)
+        let client = Emby(session: EmbyStub.session)
+        // Opened before the root (a page brought back), the libraries are looked up first, once.
+        let films = CloudFile.arranged(try await client.list(server, id: "films"))
+        #expect(films.map(\.name) == ["Arrival (2016).mkv", "Heat (1995).mp4"] && films[0].artwork != nil)
+        let wide = "EnableImageTypes=Primary&EnableUserData=false&Fields=Path,Container&ImageTypeLimit=1"
+        #expect(EmbyStub.calls.suffix(2) == ["GET /emby/Users/u1/Views tok-1",
+                                             "GET /emby/Users/u1/Items?\(wide)&IncludeItemTypes=Movie&ParentId=films&Recursive=true&SortBy=SortName tok-1"])
+        _ = try await client.list(server, id: "shows")
+        #expect(EmbyStub.calls.last == "GET /emby/Users/u1/Items?\(wide)&IncludeItemTypes=Series&ParentId=shows&Recursive=true&SortBy=SortName tok-1")
+        // Home videos, and a series' seasons, keep their folders.
+        _ = try await client.list(server, id: "home")
+        #expect(EmbyStub.calls.last == "GET /emby/Users/u1/Items?Fields=Path,Container&ParentId=home&SortBy=SortName tok-1")
+        _ = try await client.list(server, id: "crime")
+        #expect(EmbyStub.calls.last == "GET /emby/Users/u1/Items?Fields=Path,Container&ParentId=crime&SortBy=SortName tok-1")
+        #expect(EmbyStub.calls.filter { $0.contains("/Views") }.count == 1)
+    }
+
     @Test func anEmbyFilePlaysAsTheServerStoresIt() async throws {
         EmbyStub.reset()
         let server = AListServer(id: "e", name: "Home", address: "http://emby.test/emby", username: "me", password: "pw", kind: .emby)
@@ -294,6 +322,26 @@ import Testing
         let channel = CloudFiles.channel(CloudFile(id: "e2", name: "2. Pilot.mp4", isFolder: false), in: .alist(server), folder: "season", folderName: "Season 1")
         #expect(channel.historyContext?.episodeFlag == "alist.e" && channel.historyContext?.videoID == "season")
         #expect(Emby.type(path: nil, container: "mov,mp4,m4a,3gp,3g2,mj2") == "mp4" && Emby.type(path: "/a/b.strm", container: "matroska,webm") == "mkv")
+    }
+
+    /// Episodes kept as .strm files, or whose files the server doesn't show this user, list and play (#764).
+    @Test func embyVideosWithoutAFileExtensionStillPlay() async throws {
+        EmbyStub.reset()
+        let server = AListServer(id: "e", name: "Home", address: "http://emby.test/emby", username: "me", password: "pw", kind: .emby)
+        let client = Emby(session: EmbyStub.session)
+        let files = CloudFile.arranged(try await client.list(server, id: "remote"))
+        #expect(files.map(\.name) == ["1. Remote.mp4", "2. Hidden.mkv", "3. Probed.mp4", "Booklet"])
+        #expect(files.map { CloudFilesDrive.alist(server).plays($0) } == [true, true, true, false])
+        // A .strm's media source has the .strm's own size; the server's stream of the address it names has the file's.
+        let source = try await client.source(server, id: "e3", name: "1. Remote.mp4")
+        #expect(source.url.absoluteString == "http://emby.test/emby/Videos/e3/stream?static=true&MediaSourceId=ms3" && source.length == 734_003_200)
+        #expect(EmbyStub.calls.suffix(2) == ["GET /emby/Users/u1/Items/e3 tok-1", "GET /emby/Videos/e3/stream?static=true&MediaSourceId=ms3 tok-1"])
+        // Found by a search, its type comes from the address, query and all, and the .strm's size isn't shown.
+        let found = try #require(Emby.file(["Id": "e3", "Name": "Remote", "MediaType": "Video",
+                                            "MediaSources": [["Protocol": "Http", "Size": 31, "Container": "strm", "Path": "http://nas:5244/d/Remote.mkv?sign=a.b"]]],
+                                           server: server))
+        #expect(found.name == "Remote.mkv" && found.size == 0)
+        #expect(Emby.type(path: "/media/Show/S01E01.strm", container: "strm") == nil)
     }
 
     /// A real Emby or Jellyfin server: TVBOX_EMBY_URL and the account TVBOX_EMBY_USER/PASSWORD.
@@ -486,6 +534,8 @@ final class WebDAVStub: URLProtocol, @unchecked Sendable {
         let folder = #"<D:response><D:href>/NAS/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype><D:getlastmodified>Fri, 30 Oct 2026 07:40:00 GMT</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"#
         let file = #"<D:response><D:href>http://dav.test/NAS/S01E01%20%231.mp4</D:href><D:propstat><D:prop><D:resourcetype/><D:getcontentlength>1048576</D:getcontentlength><D:getlastmodified>Fri, 30 Oct 2026 07:40:00 GMT</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat><D:propstat><D:prop><D:quota/></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response>"#
         let subfolder = #"<D:response><D:href>/NAS/%E5%89%A7%E9%9B%86/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"#
+        if path.hasPrefix("/selfsigned") { client.urlProtocol(self, didFailWithError: URLError(.serverCertificateUntrusted)); return }
+        if path.hasPrefix("/offline") { client.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost)); return }
         let status: Int, responses: [String]
         if path.hasPrefix("/site") { (status, responses) = (405, []) }
         else if account != "Basic bWU6cHc=" { (status, responses) = (401, []) }
@@ -526,6 +576,17 @@ final class EmbyStub: URLProtocol, @unchecked Sendable {
             while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; data.append(buffer, count: count) }
             body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         }
+        // A .strm's stream: the file it names, by ranges.
+        if url.path == "/emby/Videos/e3/stream" {
+            Self.lock.withLock { Self.log.append("\(request.httpMethod ?? "-") \(target) \(token ?? "-")") }
+            let ranged = request.value(forHTTPHeaderField: "Range") == "bytes=0-0"
+            client.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: ranged ? 206 : 200, httpVersion: "HTTP/1.1",
+                                                                  headerFields: ranged ? ["Content-Range": "bytes 0-0/734003200"] : [:])!,
+                               cacheStoragePolicy: .notAllowed)
+            client.urlProtocol(self, didLoad: Data([0x1A]))
+            client.urlProtocolDidFinishLoading(self)
+            return
+        }
         let (status, answer): (Int, Any) = Self.lock.withLock {
             Self.log.append("\(request.httpMethod ?? "-") \(target) \(token ?? "-")")
             let signedIn = token.flatMap { Int($0.dropFirst(4)) }.map { $0 > Self.valid && $0 <= Self.issued } ?? false
@@ -538,7 +599,25 @@ final class EmbyStub: URLProtocol, @unchecked Sendable {
             case _ where !signedIn: return (401, [:])
             case "/emby/Users/u1/Views":
                 return (200, ["Items": [["Id": "shows", "Name": "Shows", "IsFolder": true, "CollectionType": "tvshows", "ImageTags": ["Primary": "t1"]],
-                                        ["Id": "tv", "Name": "Live TV", "IsFolder": true, "CollectionType": "livetv"]]])
+                                        ["Id": "tv", "Name": "Live TV", "IsFolder": true, "CollectionType": "livetv"],
+                                        ["Id": "films", "Name": "Films", "IsFolder": true, "CollectionType": "movies"],
+                                        ["Id": "home", "Name": "Home Videos", "IsFolder": true, "CollectionType": "homevideos"]]])
+            case "/emby/Users/u1/Items" where url.query?.contains("ParentId=films") == true:
+                // Films in folders of their own (Crime/Heat/Heat.mp4): only a recursive listing reaches them.
+                guard url.query?.contains("Recursive=true") == true else { return (200, ["Items": [["Id": "crime", "Name": "Crime", "Type": "Folder", "IsFolder": true]]]) }
+                return (200, ["Items": [["Id": "m1", "Name": "Arrival", "Type": "Movie", "ProductionYear": 2016, "IsFolder": false, "Container": "mkv",
+                                         "ImageTags": ["Primary": "p1"]],
+                                        ["Id": "m2", "Name": "Heat", "Type": "Movie", "ProductionYear": 1995, "IsFolder": false, "Path": "/m/Crime/Heat/Heat.mp4"]]])
+            case "/emby/Users/u1/Items" where url.query?.contains("ParentId=remote") == true:
+                return (200, ["Items": [["Id": "e3", "Name": "Remote", "Type": "Episode", "IndexNumber": 1, "IsFolder": false, "MediaType": "Video",
+                                         "Path": "/media/Show/S01E01.strm"],
+                                        ["Id": "e4", "Name": "Hidden", "Type": "Episode", "IndexNumber": 2, "IsFolder": false, "MediaType": "Video", "Container": "mkv"],
+                                        ["Id": "e5", "Name": "Probed", "Type": "Episode", "IndexNumber": 3, "IsFolder": false, "MediaType": "Video",
+                                         "Path": "/media/Show/S01E03.strm", "Container": "strm"],
+                                        ["Id": "b", "Name": "Booklet", "Type": "Book", "IsFolder": false, "MediaType": "Book"]]])
+            case "/emby/Users/u1/Items/e3":
+                return (200, ["Id": "e3", "MediaType": "Video", "MediaSources": [["Id": "ms3", "Size": 31, "Container": "strm", "Protocol": "Http",
+                                                                                 "Path": "http://nas:5244/d/S01E01.mkv?sign=abc"]]])
             case "/emby/Users/u1/Items":
                 return (200, ["Items": [["Id": "e10", "Name": "Finale", "Type": "Episode", "IndexNumber": 10, "IsFolder": false, "Path": "/media/Show/S01E10.mkv"],
                                         ["Id": "e2", "Name": "Pilot", "Type": "Episode", "IndexNumber": 2, "IsFolder": false, "Container": "mov,mp4,m4a,3gp,3g2,mj2"],

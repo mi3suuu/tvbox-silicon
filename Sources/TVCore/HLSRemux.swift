@@ -8,10 +8,13 @@ import TVMedia
 /// repackager's loopback server under the playlist's own durations and discontinuities. AES-128 keys are applied
 /// here. A live stream's playlist is read again as AVPlayer reloads the repackaged one, which then lists the same
 /// segments (an IPTV channel in 4K, #361). An HDR picture is tone mapped to SDR on a device that doesn't show HDR
-/// now, as a repackaged file's is: AVPlayer refuses its HDR variant there (#345).
+/// now, as a repackaged file's is: AVPlayer refuses its HDR variant there (#345). Sound AVPlayer can't decode in
+/// MPEG-TS, the MPEG-1 Layer II of many IPTV channels, is converted to AAC, the picture copied: such a stream fails
+/// at once ('fmt?') and opens again here.
 public enum HLSRemux {
     /// Opens the stream behind `url` (a master or media playlist) and returns the address of its repackaged master
-    /// playlist. Throws when its first segment isn't MPEG-TS carrying HEVC, or the playlist is one this doesn't handle.
+    /// playlist. Throws when its first segment isn't MPEG-TS carrying HEVC or sound to convert, or the playlist is one
+    /// this doesn't handle.
     public static func open(_ url: URL, headers: [String: String]) async throws -> URL {
         try await open(url, headers: headers, network: HLSRemuxSession.network, device: RemuxSession.device())
     }
@@ -135,6 +138,10 @@ public enum HLSRemux {
         /// The source's picture codec, and the one the segments carry (`hevc` or `h264` once tone mapped).
         var video = "", picture = "", toneMapped = false
         var audio: String?, audioProfile = 0
+        /// The source's sound is converted to AAC: Apple devices don't decode it (MP2, MP3, DTS, ...).
+        var audioConverted = false
+        /// The source's picture is interlaced and made progressive (`RemuxPlan.Device.deinterlace`).
+        var deinterlaced = false
         var width = 0, height = 0, transfer = 0
         var bytes = 0
         var initializations: [Int: Data] = [:]
@@ -162,10 +169,17 @@ public enum HLSRemux {
             let codec = withUnsafeBytes(of: raw.codec) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
             if raw.kind == Int32(TVMKindVideo), video == nil, raw.width > 0, ["h264", "hevc"].contains(codec) {
                 let stream = RemuxSession.stream(raw, index: Int(index))
-                let track = RemuxPlan.videoTrack(stream, device: device)
+                var track = RemuxPlan.videoTrack(stream, device: device)
+                // Interlaced H.264 (CCTV's 1080i) is converted, deinterlaced, where AVPlayer would show it woven.
+                let deinterlace = device.deinterlace && stream.interlaced && codec == "h264" && track.mode == .copy
+                if deinterlace {
+                    track.mode = .h264
+                    track.bitRate = RemuxPlan.videoBitRate(stream, hevc: false)
+                }
                 video = TVMTrack(stream: index, mode: track.mode.rawValue, bitRate: Int32(track.bitRate), channels: 0,
                                  dolbyVision: Int32(TVMDolbyVisionDrop), toneMap: track.toneMap ? 1 : 0,
-                                 width: Int32(track.width), height: Int32(track.height))
+                                 width: Int32(track.width), height: Int32(track.height), deinterlace: deinterlace ? 1 : 0)
+                output.deinterlaced = deinterlace
                 output.video = codec
                 output.picture = track.mode == .copy ? codec : track.mode == .hevc ? "hevc" : "h264"
                 output.toneMapped = track.toneMap
@@ -176,8 +190,10 @@ public enum HLSRemux {
             } else if raw.kind == Int32(TVMKindAudio), audio == nil, raw.channels > 0 {
                 let copy = ["aac", "ac3", "eac3"].contains(codec)
                 audio = TVMTrack(stream: index, mode: Int32(copy ? TVMModeCopy : TVMModeAAC), bitRate: 192_000,
-                                 channels: raw.channels >= 6 ? 6 : raw.channels == 1 ? 1 : 2, dolbyVision: 0, toneMap: 0, width: 0, height: 0)
+                                 channels: raw.channels >= 6 ? 6 : raw.channels == 1 ? 1 : 2, dolbyVision: 0, toneMap: 0, width: 0, height: 0,
+                                 deinterlace: 0)
                 output.audio = copy ? codec : "aac"
+                output.audioConverted = !copy
                 output.audioProfile = copy ? Int(raw.profile) : 1
             }
         }
@@ -207,10 +223,10 @@ public enum HLSRemux {
     }
 }
 
-/// One HLS stream played through `HLSRemux`. Segments are made as AVPlayer asks for them, the next one ahead, and
-/// the last few are kept for both tracks' requests. A segment is named by its position: its place in a VOD
+/// One HLS stream played through `HLSRemux`. Segments are made as AVPlayer asks for them, the next one ahead (a live
+/// stream's as soon as they're listed), and the last few are kept for both tracks' requests. A segment is named by its position: its place in a VOD
 /// playlist, or in the order a live one listed it, so a live stream's names stay put as its playlist moves on.
-final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
+final class HLSRemuxSession: SegmentedStream, @unchecked Sendable {
     static let network: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
@@ -219,6 +235,14 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
         return URLSession(configuration: configuration)
     }()
     static let kept = 6
+    /// A live stream's segments are made as soon as its playlist lists them, four at a time, the earliest first, and
+    /// stay listed a few more after the source drops them, and while AVPlayer still plays them: IPTV servers often
+    /// send each connection slower than the stream plays (a 4 s CCTV segment took 16 s), which several at once keep
+    /// up with, further behind the live edge.
+    static let liveKept = 12
+    static let liveBehind = 3
+    static let liveLongest = 30
+    static let liveFetches = 4
 
     let id = UUID().uuidString.lowercased()
     /// The playlist has no end: it is read again as AVPlayer reloads the repackaged one (#361).
@@ -251,6 +275,9 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
     private var order: [Int] = []
     private var keys: [URL: Task<Data, Error>] = [:]
     private var closed = false
+    /// The segment AVPlayer asked for last (its picture), kept listed while a slow server holds it far behind.
+    private var playing: Int?
+    private let gate = FetchGate(limit: liveFetches)
 
     private init(segments: [HLSRemux.Segment], source: URL, live: Bool, target: Int, headers: [String: String],
                  network: URLSession, device: RemuxPlan.Device) {
@@ -260,7 +287,7 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
     }
 
     /// Reads the playlist (the variant with the highest bandwidth of a master one) and repackages one segment, which
-    /// must be MPEG-TS carrying HEVC: a VOD stream's first, a live one's newest.
+    /// must be MPEG-TS carrying HEVC or sound to convert: a VOD stream's first, a live one's newest.
     static func make(_ url: URL, headers: [String: String], network: URLSession, device: RemuxPlan.Device) async throws -> HLSRemuxSession {
         let began = Date()
         var source = url
@@ -278,14 +305,21 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
         let session = HLSRemuxSession(segments: segments, source: source, live: live, target: target, headers: headers,
                                       network: network, device: device)
         let probe = live ? segments.count - 1 : 0
+        if live {
+            // Those AVPlayer starts with, three target durations from the end, beside the probe.
+            session.lock.withLock { for position in max(0, segments.count - Self.liveFetches)..<probe { _ = try? session.start(position) } }
+        }
         let first: HLSRemux.Output
         do { first = try await session.output(probe) } catch { session.close(); throw error }
-        guard first.format == "mpegts", first.video == "hevc" else {
+        guard first.format == "mpegts", first.video == "hevc" || first.audioConverted || first.deinterlaced else {
             session.close()
-            throw TVError.unsupported("not HEVC in MPEG-TS: \(first.format) \(first.video)")
+            throw TVError.unsupported("nothing to repackage in \(first.format): \(first.video) \(first.audio ?? "-")")
         }
         session.describe(first, at: probe)
-        Diagnostics.shared.record(.info, "remux", "hls open host=\(address.host() ?? "-") segments=\(segments.count) live=\(live) audio=\(first.audio ?? "-") size=\(first.width)x\(first.height) transfer=\(first.transfer) hdr=\(device.hdr) sdr=\(first.toneMapped) discontinuities=\(segments.filter(\.discontinuity).count) ms=\(Int(Date().timeIntervalSince(began) * 1000))")
+        // AVPlayer first sees the playlist made so far: read again now, it would list segments that came out while
+        // these were fetched, and start with one of them, not yet made (57 s to the picture from a slow server).
+        session.lock.withLock { session.refreshed = Date() }
+        Diagnostics.shared.record(.info, "remux", "hls open host=\(address.host() ?? "-") segments=\(segments.count) live=\(live) audio=\(first.audio ?? "-") size=\(first.width)x\(first.height) transfer=\(first.transfer) hdr=\(device.hdr) sdr=\(first.toneMapped) deinterlaced=\(first.deinterlaced) discontinuities=\(segments.filter(\.discontinuity).count) ms=\(Int(Date().timeIntervalSince(began) * 1000))")
         return session
     }
 
@@ -388,7 +422,9 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
         let start = first + listed.count
         listed += added
         runs += Self.runs(added, start: start, run: runs.last ?? start)
-        let drop = max(0, listed.count - fresh.count)
+        var drop = max(0, listed.count - fresh.count - Self.liveBehind)
+        if let playing { drop = min(drop, max(0, playing - 1 - first)) }
+        drop = max(drop, listed.count - Self.liveLongest)
         if drop > 0 {
             discontinuities += listed.prefix(drop).filter(\.discontinuity).count
             listed.removeFirst(drop); runs.removeFirst(drop); first += drop
@@ -396,6 +432,8 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
             initializations = initializations.filter { current.contains($0.key) }
         }
         if let longest = added.map(\.duration).max() { target = max(target, Int(longest.rounded(.up))) }
+        let end = first + listed.count
+        for position in end - added.count..<end { _ = try? self.start(position) }
     }
 
     /// The position of the segment beginning each one's discontinuity: `run` until one of them begins another.
@@ -411,6 +449,7 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
         let running: [Task<HLSRemux.Output, Error>] = lock.withLock {
             closed = true
             refreshing?.cancel()
+            gate.drain()
             defer { made = [:]; order = []; keys = [:] }
             return Array(made.values)
         }
@@ -437,7 +476,10 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
     }
 
     func segment(track: Int, index: Int) async throws -> Data {
-        lock.withLock { if !closed, segment(at: index + 1) != nil { _ = try? start(index + 1) } }
+        lock.withLock {
+            if track == 0 { playing = index }
+            if !closed, segment(at: index + 1) != nil { _ = try? start(index + 1) }
+        }
         guard let data = try await output(index).media[track] else { throw TVError.unsupported("segment \(index) has no track \(track)") }
         return data
     }
@@ -462,7 +504,7 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
         guard let segment = segment(at: index) else { throw TVError.unsupported("no such segment") }
         order.append(index)
         let task = Task { [self] in
-            do { return try await make(segment) }
+            do { return try await make(segment, at: index) }
             catch {
                 // Made again when AVPlayer asks again.
                 lock.withLock { _ = made.removeValue(forKey: index); order.removeAll { $0 == index } }
@@ -471,12 +513,18 @@ final class HLSRemuxSession: RemuxStored, @unchecked Sendable {
             }
         }
         made[index] = task
-        while order.count > Self.kept { made.removeValue(forKey: order.removeFirst()) }
+        while order.count > (live ? Self.liveKept : Self.kept) { made.removeValue(forKey: order.removeFirst()) }
         return task
     }
 
-    private func make(_ segment: HLSRemux.Segment) async throws -> HLSRemux.Output {
+    private func make(_ segment: HLSRemux.Segment, at position: Int) async throws -> HLSRemux.Output {
+        let gated = live
+        if gated { await gate.enter(position) }
+        defer { if gated { gate.leave() } }
+        try Task.checkCancellation()
+        let began = Date()
         var data = try await fetch(segment.url)
+        Diagnostics.shared.record(.debug, "remux", "hls fetched sequence=\(segment.sequence) bytes=\(data.count) seconds=\(String(format: "%.1f", segment.duration)) ms=\(Int(Date().timeIntervalSince(began) * 1000))")
         if let key = segment.key {
             data = try HLSRemux.decrypt(data, key: try await keyData(key.url), iv: key.iv ?? HLSRemux.iv(segment.sequence))
         }
@@ -536,4 +584,48 @@ private let memoryInterrupted: TVMInterruptFunction = { _ in 0 }
 private let memoryWrite: TVMWriteFunction = { context, track, bytes, size in
     guard let bytes, size > 0 else { return }
     memory(context).written[Int(track), default: Data()].append(bytes, count: Int(size))
+}
+
+/// Lets a few of a live stream's segments download at once, the earliest first: the one AVPlayer needs next doesn't
+/// share a slow server with every newer one.
+final class FetchGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var running = 0
+    private var drained = false
+    private var waiting: [(position: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    init(limit: Int) { self.limit = limit }
+
+    func enter(_ position: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let now: Bool = lock.withLock {
+                if drained || running < limit { running += 1; return true }
+                waiting.append((position, continuation))
+                waiting.sort { $0.position < $1.position }
+                return false
+            }
+            if now { continuation.resume() }
+        }
+    }
+
+    /// A download finished: its place goes to the earliest waiting.
+    func leave() {
+        let next = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            guard !waiting.isEmpty else { running = max(0, running - 1); return nil }
+            return waiting.removeFirst().continuation
+        }
+        next?.resume()
+    }
+
+    /// The stream closed: every waiting one goes on (and stops, cancelled).
+    func drain() {
+        let all = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            drained = true
+            running += waiting.count
+            defer { waiting = [] }
+            return waiting.map(\.continuation)
+        }
+        all.forEach { $0.resume() }
+    }
 }

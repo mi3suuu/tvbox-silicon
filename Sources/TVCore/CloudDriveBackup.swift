@@ -36,6 +36,11 @@ public enum CloudDriveBackup {
         case .alist(let server):
             let target = try await ensureAlistFolder(server)
             try await uploadAlist(server, folder: target, name: name, data: data)
+        // 上游 1.8.23 新增四个网盘（baidu / tianyi / pan123 / guangya）。它们的取流在
+        // CloudFiles 里已有，但**没有 write 通道**（无 upload/mkdir 实现）。
+        // 显式拒绝而不是静默 no-op：全量备份写到这四个盘上会失败，用户要知道原因。
+        case .baidu, .tianyi, .pan123, .guangya:
+            throw TVError.unsupported(L10n.text("This cloud drive can't store a backup yet."))
         }
     }
 
@@ -49,6 +54,11 @@ public enum CloudDriveBackup {
         case .alist(let server):
             if server.isWebDAV { return try await WebDAV.shared.download(server, path: id) }
             return try await AList.shared.download(server, path: id)
+        // 上游 1.8.23 新增四个网盘（baidu / tianyi / pan123 / guangya）。它们的取流在
+        // CloudFiles 里已有，但**没有 write 通道**（无 upload/mkdir 实现）。
+        // 显式拒绝而不是静默 no-op：全量备份写到这四个盘上会失败，用户要知道原因。
+        case .baidu, .tianyi, .pan123, .guangya:
+            throw TVError.unsupported(L10n.text("This cloud drive can't read a backup yet."))
         }
     }
 
@@ -74,6 +84,8 @@ public enum CloudDriveBackup {
         case .uc: return try await QuarkFiles.uc.mkdir(name, parent: drive.root)
         case .pan115: return try await Pan115Files.shared.mkdir(name, parent: drive.root)
         case .alist: throw TVError.unsupported(L10n.text("Folders can't be created here."))
+        case .baidu, .tianyi, .pan123, .guangya:
+            throw TVError.unsupported(L10n.text("Folders can't be created here."))
         }
     }
 

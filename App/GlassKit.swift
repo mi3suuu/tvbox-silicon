@@ -49,6 +49,61 @@ struct GlassGroup<Content: View>: View {
     }
 }
 
+#if !os(tvOS)
+private struct ChromeGroupedKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    /// Inside a player's button group (`chromeGroup`): the group draws the glass, so `chromeButton()` draws none.
+    var chromeGrouped: Bool {
+        get { self[ChromeGroupedKey.self] }
+        set { self[ChromeGroupedKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// A row of player buttons in one glass capsule, as a toolbar groups its items. A glass circle for each button
+    /// read as a string of loose bubbles.
+    func chromeGroup(inset: CGFloat = 0) -> some View {
+        padding(inset).glassSurface(.regular, in: Capsule()).environment(\.chromeGrouped, true)
+    }
+}
+#endif
+
+#if os(macOS)
+/// `chromeButton()` on the Mac: the bordered glass circle alone, or a plain button in a group's capsule.
+private struct MacChromeButton: ViewModifier {
+    @Environment(\.chromeGrouped) private var grouped
+    @ViewBuilder func body(content: Content) -> some View {
+        if grouped {
+            content.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+                .fixedSize()
+                .frame(width: 34, height: 34)
+                .playerBarButton()
+        } else {
+            content.controlButton().buttonBorderShape(.circle).appControlSize(.large)
+        }
+    }
+}
+#endif
+
+#if os(macOS)
+/// A button in the Mac player's top bar. The bar draws one glass capsule around all of them, so a button has no glass
+/// of its own; a soft circle shows which one is under the pointer.
+private struct PlayerBarButton: ViewModifier {
+    @State private var hovering = false
+    func body(content: Content) -> some View {
+        content
+            .background { Circle().fill(.white.opacity(hovering ? 0.16 : 0)) }
+            .contentShape(Circle())
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+extension View {
+    func playerBarButton() -> some View { modifier(PlayerBarButton()) }
+}
+#endif
+
 extension View {
     /// Apple TVs without Liquid Glass on tvOS 26 take the material path too: there the glass dropped its tint, so a
     /// focused chip's white plate never showed and its black label sat on a dark capsule (#214).
@@ -98,8 +153,9 @@ extension View {
     #endif
 
     #if os(iOS)
-    @ViewBuilder func minimizesTabBarOnScroll() -> some View {
-        if #available(iOS 26, *) { tabBarMinimizeBehavior(.onScrollDown) } else { self }
+    /// iOS 26: the tab bar shrinks to the current tab while scrolling down, unless switched off in Settings.
+    @ViewBuilder func minimizesTabBarOnScroll(_ enabled: Bool) -> some View {
+        if #available(iOS 26, *) { tabBarMinimizeBehavior(enabled ? .onScrollDown : .never) } else { self }
     }
 
     /// Hides or shows a bar managed by SwiftUI. `.toolbarVisibility(_:for:)` (iOS 18+) is the
@@ -224,8 +280,6 @@ extension View {
             .scrollContentBackground(.hidden)
             #endif
             .background(Brand.pageBackground)
-    }
-}
 
 /// Shared opaque surfaces keep content and controls legible in both appearances.
 /// 画布本色，不带 `ignoresSafeArea`。
@@ -239,21 +293,25 @@ extension View {
 struct CanvasColor: View {
     @Environment(\.colorScheme) private var scheme
     var body: some View {
-        (scheme == .dark ? Color(red: 0.020, green: 0.035, blue: 0.090) : Color(red: 0.955, green: 0.965, blue: 0.985))
+        // Flat canvas in the colour theme (Classic: navy / cool white); artwork supplies the rest of the colour.
+        ThemeCanvas(palette: ColorThemes.shared.current.palette, dark: scheme == .dark)
     }
 }
 
+// [mi3s] 二开：上游改用 `ThemeCanvas(...).ignoresSafeArea()` 直接铺底，不再有 `Backdrop`。
+// 我方多处仍在引用 `Backdrop`（`screenBackdrop()` 等），保留为薄封装，颜色仍走同一主题画布。
 struct Backdrop: View {
+    @Environment(\.colorScheme) private var scheme
     var body: some View {
-        // Flat canvas (the icon's navy / cool white); artwork supplies the rest of the colour.
-        CanvasColor().ignoresSafeArea()
+        ThemeCanvas(palette: ColorThemes.shared.current.palette, dark: scheme == .dark).ignoresSafeArea()
     }
 }
 
 struct Surface: View {
     @Environment(\.colorScheme) private var scheme
     var body: some View {
-        (scheme == .dark ? Color(red: 0.075, green: 0.105, blue: 0.19) : Color(red: 0.915, green: 0.935, blue: 0.965))
+        let palette = ColorThemes.shared.current.palette
+        scheme == .dark ? palette.surfaceDark : palette.surfaceLight
     }
 }
 
@@ -353,7 +411,9 @@ extension View {
     func posterClip<S: Shape>(_ shape: S) -> some View { modifier(PosterClip(shape: shape)) }
 
     /// Captions under the cover of a `cardButton`: on Apple TV they move down as the cover lifts, as on Discover.
-    func cardCaption() -> some View { modifier(CardCaption()) }
+    /// `drop` is how far, as a share of the cover's height: the system grows a cover by about 40 pt along its longer
+    /// side (220x330 to 246x370, 220x220 to 260x260), so a poster's bottom moves 6% of its height and a square's 9%.
+    func cardCaption(drop: CGFloat = 0.06) -> some View { modifier(CardCaption(drop: drop)) }
 
     /// An overlay on a cover, such as a progress bar or a badge, on the view that holds its `PosterImage`. On Apple TV
     /// the image paints it into its own bitmap, so the focus lift grows, moves and tilts it with the artwork, as Rex's
@@ -490,13 +550,14 @@ private struct CoverLift: ViewModifier {
 }
 
 private struct CardCaption: ViewModifier {
+    let drop: CGFloat
     #if os(tvOS)
     @Environment(\.isFocused) private var focused
     @Environment(\.cardCoverHeight) private var cover
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func body(content: Content) -> some View {
-        // 6% of the cover's height, as Rex's captions and DiscoverTVNativeShelf.Cell's move.
-        content.offset(y: focused ? cover * 0.06 : 0)
+        // A share of the cover's height: 6% for posters, as Rex's captions and DiscoverTVNativeShelf.Cell's move.
+        content.offset(y: focused ? cover * drop : 0)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: focused)
     }
     #else
@@ -606,8 +667,9 @@ struct SearchQueryButton: View {
 /// Set by `ScrollStrip` while the user drags it, so the chip under the pointer ignores the mouse-up.
 @MainActor final class StripDrag { var active = false }
 extension EnvironmentValues { @Entry var stripDrag: StripDrag? = nil }
-/// Draws `controlButton()` and the source chips as Liquid Glass, on the iPhone watch page (#293).
-extension EnvironmentValues { @Entry var glassControls = false }
+/// Draws `controlButton()` and the source chips as Liquid Glass where the system has it. On by default; a page turns it
+/// off for controls that sit on a surface of their own, where a flat fill reads better than glass on glass.
+extension EnvironmentValues { @Entry var glassControls = true }
 
 /// A horizontal chip row: a `ScrollStrip` (drag and arrows on Mac), or a plain focus-driven
 /// scroll view on tvOS.
@@ -741,6 +803,11 @@ enum PosterPalette {
     static func image(_ url: URL, headers: [String: String] = [:]) async -> CGImage? {
         try? await PosterLoader.shared.load(PosterResource(url: url, headers: headers)).image
     }
+
+    /// The cover if it is already decoded in memory, read at once, so a view made again can draw it in its first frame.
+    static func cachedImage(_ url: URL, headers: [String: String] = [:]) -> CGImage? {
+        PosterLoader.shared.cached(PosterResource(url: url, headers: headers))?.image
+    }
 }
 
 private final class PosterBitmap: @unchecked Sendable {
@@ -753,11 +820,19 @@ private actor PosterLoader {
     /// Caps how many posters decode at once while a grid is moving. Scrolling competes with
     /// decoding for the same cores, so a fast fling that asks for twenty posters is slower than one
     /// that asks for two — the gate turns that into a policy instead of a hope.
+    ///
+    /// [mi3s] 二开：上游此处无 gate（只有 `nonisolated(unsafe) let cache`）。
+    /// 两者不冲突：gate 控并发解码数，`nonisolated(unsafe)` 声明 cache 可从任意线程读。
     private let gate = ImageLoadGate()
-    private let cache = NSCache<NSString, PosterBitmap>()
+    /// NSCache is safe to use from any thread, which `cached` does.
+    private nonisolated(unsafe) let cache = NSCache<NSString, PosterBitmap>()
     private var pending: [PosterResource: Task<PosterBitmap, Error>] = [:]
     private var revision = MediaCache.shared.revision
     init() { cache.countLimit = 96; cache.totalCostLimit = 48 * 1024 * 1024 }
+
+    /// A cover already decoded in memory, read at once: a view made again for a cover it showed before draws it in its
+    /// first frame, instead of the placeholder until `load` answers.
+    nonisolated func cached(_ resource: PosterResource) -> PosterBitmap? { cache.object(forKey: resource.cacheKey as NSString) }
 
     func load(_ resource: PosterResource) async throws -> PosterBitmap {
         let current = MediaCache.shared.revision
@@ -851,8 +926,10 @@ struct PosterImage: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #endif
     private var resource: PosterResource? { url.map { PosterResource(url: $0, headers: headers) } }
+    /// The loaded image or, until it arrives, the one the loader already holds for this address (#857).
+    private var shown: PosterBitmap? { bitmap ?? resource.flatMap { PosterLoader.shared.cached($0) } }
     var body: some View {
-        artwork
+        artwork(shown)
         .contentShape(.rect)
         .task(id: resource) {
             bitmap = nil
@@ -867,7 +944,7 @@ struct PosterImage: View {
     #if os(tvOS)
     /// One image, cropped to the frame and never clipped: a borderless button lifts the first image in its label and
     /// draws the glass rim around it, which a clip would cut off, as on Discover's covers.
-    private var artwork: some View {
+    private func artwork(_ bitmap: PosterBitmap?) -> some View {
         GeometryReader { proxy in
             Image(decorative: baked(Self.cover(bitmap?.image, proxy.size), proxy.size), scale: 1).resizable()
                 .overlay { if bitmap == nil { Image(systemName: symbol).font(.title2).foregroundStyle(.white.opacity(0.55)) } }
@@ -906,7 +983,7 @@ struct PosterImage: View {
         return image.cropping(to: rect.integral) ?? image
     }
     #else
-    private var artwork: some View {
+    private func artwork(_ bitmap: PosterBitmap?) -> some View {
         ZStack {
             Color(white: 0.20)
             Image(systemName: symbol).font(.title2).foregroundStyle(.white.opacity(0.55))
@@ -994,11 +1071,137 @@ private struct LoadingFocus: ViewModifier {
 }
 #endif
 
+struct DetailSkeleton: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 10) {
+                SkeletonBlock(cornerRadius: 6).frame(height: 14)
+                SkeletonBlock(cornerRadius: 6).frame(height: 14)
+                SkeletonBlock(cornerRadius: 6).frame(maxWidth: 260).frame(height: 14)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                SkeletonBlock(cornerRadius: 6).frame(width: 110, height: 18)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: Layout.episodeMin), spacing: 10)], spacing: 10) {
+                    ForEach(0..<10, id: \.self) { _ in SkeletonBlock(cornerRadius: 20).frame(height: 40) }
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore).accessibilityLabel(L10n.text("Loading details…"))
+    }
+}
+
+/// What a loading card shows. `reason` explains a slow load and appears after `LoadingCard.patience`.
+struct LoadingProgress {
+    var title: String
+    var detail: String? = nil
+    var fraction: Double? = nil
+    var reason: String? = nil
+    /// The last steps taken, newest last; the card shows the latest two under the detail.
+    var steps: [String] = []
+}
+
+extension LoadingProgress {
+    /// A source request: the plugin's live stage and the server it waits on, or the site's server.
+    static func source(_ site: Site, origin: URL, title: String) -> LoadingProgress {
+        if site.runtime == .jar {
+            guard let state = PluginPreparation.snapshot(site: site, origin: origin) else { return LoadingProgress(title: title) }
+            return LoadingProgress(title: state.stage == .loading ? title : state.stage.title,
+                                   detail: state.detail, fraction: state.fraction, reason: state.reason)
+        }
+        return server(URL(string: site.api)?.host(), title: title)
+    }
+
+    /// A plain request to one server.
+    static func server(_ host: String?, title: String) -> LoadingProgress {
+        guard let host, !host.isEmpty else { return LoadingProgress(title: title) }
+        return LoadingProgress(title: title, detail: L10n.text("Waiting for %@", host),
+                               reason: L10n.text("%@ is responding slowly. The server may be busy or far away; you can keep waiting or try another source.", host))
+    }
+}
+
+/// Time since this view appeared, for inline waits too small for a `LoadingCard`.
+struct ElapsedTime: View {
+    @State private var started = Date()
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            Text(Duration.seconds(max(0, Int(timeline.date.timeIntervalSince(started)))).formatted(.time(pattern: .minuteSecond)))
+                .monospacedDigit().foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Every wait starts as a spinner; after `quiet` seconds the card takes its place with what it waits on and how
+/// long it has run, and past `patience` seconds why it is still loading. A card across the page column, like the
+/// rows around it, re-polled twice a second.
+struct LoadingCard: View {
+    static let quiet: TimeInterval = 1.5
+    static let patience: TimeInterval = 10
+    /// The width of a compact card, for one over a video or alone in an empty page.
+    static let compact: CGFloat = 620
+    /// Hides the card for waits shorter than this, such as the brief stall after every seek.
+    var appearAfter: TimeInterval = 0
+    var maxWidth: CGFloat = .infinity
+    let progress: () -> LoadingProgress
+    @State private var started = Date()
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+            let elapsed = max(0, timeline.date.timeIntervalSince(started))
+            let speaks = elapsed >= appearAfter + Self.quiet
+            Group {
+                if speaks {
+                    card(progress(), elapsed: Int(elapsed)).transition(.opacity)
+                } else if elapsed >= appearAfter {
+                    ProgressView().frame(maxWidth: maxWidth).padding(.vertical, 14).transition(.opacity)
+                }
+            }
+            .animation(.smooth(duration: 0.3), value: speaks)
+        }
+    }
+
+    private func card(_ state: LoadingProgress, elapsed: Int) -> some View {
+        let explains = Double(elapsed) >= Self.patience && state.reason != nil
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                ProgressView().appControlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(state.title).font(.callout.weight(.semibold)).lineLimit(1)
+                    if let detail = state.detail {
+                        Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    ForEach(Array(state.steps.suffix(2).enumerated()), id: \.offset) { _, step in
+                        Text(step).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 16)
+                Text(Duration.seconds(elapsed).formatted(.time(pattern: .minuteSecond)))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            if let fraction = state.fraction {
+                ProgressView(value: fraction).progressViewStyle(.linear).tint(Brand.accent)
+            }
+            if explains, let reason = state.reason {
+                // Not `fixedSize`: asked how small it can be, a text fixed that way answers with its height at no width,
+                // hundreds of points, and on the Mac the window's content then grew past the window (the sidebar slid
+                // up and the card left the bottom) ten seconds into a slow load.
+                Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(4).multilineTextAlignment(.leading)
+            }
+        }
+        .padding(.horizontal, 18).padding(.vertical, 14)
+        .frame(maxWidth: maxWidth, alignment: .leading)
+        .glassSurface(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .animation(.smooth(duration: 0.25), value: state.title)
+        .animation(.smooth(duration: 0.25), value: explains)
+    }
+}
+
 #if os(tvOS)
+/// Apple TV's surfaces, in the colour theme.
 enum TVStyle {
-    static let background = Color(red: 0.020, green: 0.035, blue: 0.090)
-    static let surface = Color(red: 0.09, green: 0.125, blue: 0.22)
-    static let raised = Color(red: 0.13, green: 0.175, blue: 0.29)
+    static var background: Color { ColorThemes.shared.current.palette.backdropDark }
+    static var surface: Color { ColorThemes.shared.current.palette.tvSurface }
+    static var raised: Color { ColorThemes.shared.current.palette.tvRaised }
 }
 /// Tiles that draw their own surface and light it up on focus (`\.isFocused` reaches the label),
 /// so there is no second plate around them: just the lift.
@@ -1052,6 +1255,8 @@ extension View {
     @ViewBuilder func chromeButton() -> some View {
         #if os(iOS)
         buttonStyle(ChromeButtonStyle())
+        #elseif os(macOS)
+        modifier(MacChromeButton())
         #else
         controlButton().buttonBorderShape(.circle).controlSize(.large)
         #endif
@@ -1141,11 +1346,14 @@ extension View {
 /// capsules too wide for a phone's player bar.
 private struct ChromeButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.chromeGrouped) private var grouped
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.headline).foregroundStyle(.white)
             .frame(width: 44, height: 44)
-            .glassSurface(.regular.interactive(), in: Circle())
+            // In a button group the group's capsule is the glass; a pressed button lights up inside it.
+            .background { if grouped { Circle().fill(.white.opacity(configuration.isPressed ? 0.2 : 0)) } }
+            .glassSurface(grouped ? .identity : .regular.interactive(), in: Circle())
             .contentShape(Circle())
             .opacity(enabled ? (configuration.isPressed ? 0.72 : 1) : 0.38)
     }

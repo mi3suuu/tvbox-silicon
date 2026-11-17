@@ -74,9 +74,10 @@ import TVCore
     private(set) var restoredPosition: Double?
     private(set) var requestedResumePosition: Double?
     private(set) var skipSettings = EpisodeSkipSettings()
-    /// [mi3s] 二开融合（N-W5-03）：上游 1.8.11 #547 的字幕外观管线。播放器自绘层用 `Mi3sSubtitleOverlay`，
+    /// [mi3s] 二开融合（N-W5-03）：上游 #547 的字幕外观管线。播放器自绘层用 `Mi3sSubtitleOverlay`，
     /// 这个对象只负责「AVPlayer 自己画的那份」（画中画里尤其），并下发 `textStyleRules`。
-    let subtitles = SubtitleCues()
+    /// **声明在下方「字幕」段的 `externalSubtitles` 旁边**（与上游 1.8.23 同处），这里只留说明，
+    /// 避免同一成员声明两次。
     /// 采样得到的播放位置（每秒抄一次 `currentTime()`）。**界面不要直接读它** —— 读 `position`。
     private var sampledPosition: Double = 0
     /// 一次 seek 已经发出、播放器还没到位时的**乐观位置**。
@@ -163,8 +164,111 @@ import TVCore
     private var editingSkip = false
     private var resumeAfterEditing = false
     private var seekingSegment = false
-    /// Whether the player was paused before a quality switch, so the resumed position stays paused too.
-    private var resumePausedAfterQualitySwitch = false
+    /// The source's opening and ending credits for this episode (the play result's `skips`), and the one playing now,
+    /// which the player offers to skip.
+    private(set) var sourceSkips: [PlaybackSkip] = []
+    private(set) var skipOffer: PlaybackSkip?
+    private var skippedSource = Set<PlaybackSkip>()
+    /// What the player says about the viewer's intro and outro times (#1003): the intro it just skipped, which Undo
+    /// plays after all, or the seconds left before it skips the outro, which Cancel keeps.
+    enum SkipNotice: Equatable {
+        case introSkipped(from: Double)
+        case outroIn(seconds: Int)
+    }
+    private(set) var skipNotice: SkipNotice?
+    private var introNoticeUntil: Date?
+    /// How long the intro's notice stays.
+    private static let introNoticeLength: TimeInterval = 6
+    /// The episode's chapters (Bilibili's 分段章节), for the player's Chapters menu and Apple TV's chapter markers.
+    private(set) var chapters: [PlaybackChapter] = []
+    /// The Bilibili part playing, whose progress goes back to the signed-in account.
+    private var bilibiliPart: BilibiliAPI.Part?
+
+    /// Skips the source's credits playing now: to their end, or for ending credits that run out the video, to the end.
+    func skipSourceSegment() {
+        guard let skip = skipOffer, let item, item.status == .readyToPlay else { return }
+        skippedSource.insert(skip)
+        skipOffer = nil
+        let length = item.duration.seconds
+        let target = length.isFinite && skip.end >= length - 1 ? max(0, length - 0.05) : skip.end
+        Diagnostics.shared.record(.info, "player", "skip source \(skip.kind.rawValue) to=\(Int(target))")
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Plays the intro after all, from where it was skipped.
+    func undoIntroSkip() {
+        guard case .introSkipped(let from) = skipNotice else { return }
+        skipNotice = nil; introNoticeUntil = nil
+        Diagnostics.shared.record(.info, "player", "skip intro undone")
+        jump(to: from)
+    }
+
+    /// Plays this episode's outro rather than skipping it.
+    func keepOutro() {
+        skipPass.keepOutro()
+        skipNotice = nil
+        Diagnostics.shared.record(.info, "player", "skip outro kept")
+    }
+
+    private func showIntroSkipped(from time: Double) {
+        skipNotice = .introSkipped(from: time)
+        introNoticeUntil = Date().addingTimeInterval(Self.introNoticeLength)
+    }
+
+    /// The intro's notice until it times out, else the outro's countdown; assigned only when it changes.
+    private func updateSkipNotice(time: Double, duration: Double) {
+        var notice = skipNotice
+        if case .introSkipped = notice, (introNoticeUntil ?? .distantPast) <= Date() { notice = nil; introNoticeUntil = nil }
+        if case .introSkipped = notice {} else {
+            notice = skipPass.outroCountdown(time: time, duration: duration, settings: skipSettings)
+                .map { .outroIn(seconds: max(1, Int($0.rounded(.up)))) }
+        }
+        if notice != skipNotice { skipNotice = notice }
+    }
+
+    /// Plays from `seconds`, as a chapter in the Chapters menu does.
+    func jump(to seconds: Double) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// The source's credits: skipped by themselves when the viewer has intros and outros skipped and set no times of
+    /// their own for this video; otherwise offered while they play.
+    private func updateSourceSkip(time: Double) {
+        let current = PlaybackSkip.current(sourceSkips, at: time).flatMap { skippedSource.contains($0) ? nil : $0 }
+        if current != skipOffer { skipOffer = current }
+        guard current != nil, player.rate > 0, skipSettings.enabled, skipSettings.introEnd == 0, skipSettings.outroLength == 0 else { return }
+        skipSourceSegment()
+    }
+
+    /// A Bilibili part's chapters and subtitle files, asked for once its picture is on its way so its start never waits.
+    private func loadPartExtras(_ channel: Channel, generation activeGeneration: UUID) {
+        guard let part = channel.bilibiliPart else { return }
+        Task { [weak self] in
+            guard let info = try? await BilibiliAPI.playerInfo(part), let self, self.generation == activeGeneration else { return }
+            self.chapters = info.chapters
+            #if os(tvOS)
+            if let item = self.item { Self.mark(info.chapters, on: item) }
+            #endif
+            if !info.subtitles.isEmpty { self.externalSubtitles.offer(info.subtitles, automatic: info.uploaded) }
+        }
+    }
+
+    #if os(tvOS)
+    /// Chapters as AVKit's own chapter markers, which the Apple TV's scrubber shows and steps through.
+    private static func mark(_ chapters: [PlaybackChapter], on item: AVPlayerItem) {
+        guard !chapters.isEmpty else { return }
+        let markers = chapters.map { chapter in
+            let title = AVMutableMetadataItem()
+            title.identifier = .commonIdentifierTitle
+            title.value = chapter.title as NSString
+            title.extendedLanguageTag = "und"
+            return AVTimedMetadataGroup(items: [title], timeRange: CMTimeRange(start: CMTime(seconds: chapter.start, preferredTimescale: 600),
+                                                                                  end: CMTime(seconds: chapter.end, preferredTimescale: 600)))
+        }
+        item.navigationMarkerGroups = [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: markers)]
+    }
+    #endif
 
     func beginEditingSkip() {
         editingSkip = true
@@ -502,6 +606,17 @@ import TVCore
         applySkipSettings(settings)
     }
 
+    /// Whether this video keeps skip times: one from a source, not a live channel or a lone address.
+    var canSkip: Bool { skipScope != nil }
+
+    /// The intro ends, or the outro starts, where the picture is now (#808): Apple TV has no keyboard for a time.
+    /// A place the rules refuse (an intro past five minutes, say) changes nothing.
+    func markSkip(intro: Bool) {
+        guard let item = player.currentItem,
+              let settings = skipSettings.marking(intro: intro, at: player.currentTime().seconds, duration: item.duration.seconds) else { return }
+        applySkipSettings(settings)
+    }
+
     private func updateSkipping(_ item: AVPlayerItem) {
         let time = player.currentTime().seconds
         let sampled = time.isFinite ? max(0, time) : 0
@@ -526,6 +641,8 @@ import TVCore
         duration = length.isFinite ? max(0, length) : 0
         guard skipScope != nil, !editingSkip, !seekingSegment, pendingResume == nil, !restoringPosition,
               item.status == .readyToPlay else { return }
+        updateSourceSkip(time: time)
+        updateSkipNotice(time: time, duration: length)
         var pass = skipPass
         guard let target = pass.target(time: time, duration: length, playing: player.rate > 0,
                                        settings: skipSettings, blocksAds: skipsAds,
@@ -546,6 +663,8 @@ import TVCore
             lastSkippedAdRange = skippedAd
         }
         skipPass = pass
+        // The intro skipped says so, with Undo, rather than jump without a word; the outro had its countdown.
+        if time < skipSettings.introEnd, target == skipSettings.introEnd { showIntroSkipped(from: time) } else { skipNotice = nil }
         seekingSegment = true
         Diagnostics.shared.record(.info, "player", "skip segment from=\(Int(time)) to=\(Int(target))")
         seekGuarded(to: target, label: "segment")
@@ -557,13 +676,16 @@ import TVCore
     var buffering = false
     /// Whether the picture has started moving: the waiting screen stays until then, so no black frame shows between.
     private(set) var showsPicture = false
+    /// When this episode (or line) began to open: the waiting screen counts from here until the first frame.
+    private(set) var openedAt = Date()
     /// The SF Symbol that names the latest failure for the error screen.
     private(set) var errorSymbol = "play.slash.fill"
     /// Bullet comments for the media, when its source has them.
     private var sourceDanmaku: [Danmaku] = []
-    var danmaku: [Danmaku] { sourceDanmaku.isEmpty ? catalogDanmaku.renderedComments : sourceDanmaku }
+    private var usesCatalogDanmaku: Bool { sourceDanmaku.isEmpty || catalogDanmaku.overridesSourceComments }
+    var danmaku: [Danmaku] { usesCatalogDanmaku ? catalogDanmaku.renderedComments : sourceDanmaku }
     var danmakuOpacity: Double { catalogDanmaku.opacity }
-    var danmakuRevision: String { sourceDanmaku.isEmpty ? catalogDanmaku.renderedRevision : "" }
+    var danmakuRevision: String { usesCatalogDanmaku ? catalogDanmaku.renderedRevision : "" }
     var onPlaybackEnded: (() -> Void)?
     /// Plays another line of the same episode when this file can't play here (an MKV original);
     /// returns that line's name, or nil when there is none.
@@ -586,9 +708,8 @@ import TVCore
     private var upcomingObservation: NSKeyValueObservation?
     /// Whether this episode has already tried to queue the next one (once each, even when that failed).
     private var upcomingAttempted = false
-    /// Picture in Picture is active: AVKit's queued advance is unreliable there, so skip the
-    /// queue and fall back to the ordinary end-of-episode switch, which always works in PiP.
-    var queueingDisabled = false { didSet { if queueingDisabled { discardUpcoming() } } }
+    /// The queued episode was moved past its intro before it played: it says so once it does.
+    private var upcomingSkippedIntro = false
     /// The queue moves past this episode because the next one was asked for, not because it ended.
     private var skipsToUpcoming = false
     /// The episode the queue moved on to, which `start` then finds already playing.
@@ -602,6 +723,16 @@ import TVCore
     private var switchNotice: String?
     /// Qualities the stream can switch between (Bilibili), and the one chosen; nil is automatic.
     private(set) var qualities: [StreamQuality] = []
+    /// A live channel's lines (#679), the one playing, and those tried since the channel or the line was chosen. Empty
+    /// for a channel of one address.
+    private(set) var lines: [Channel] = []
+    private(set) var line = 0
+    private var triedLines: Set<Int> = []
+    /// When the line playing became ready. One that isn't ready after `lineWait` gives way to the next, as one that
+    /// fails does: a dead IPTV address can keep AVPlayer waiting a minute before it says so.
+    private var lineReadyAt: ContinuousClock.Instant?
+    private var lineWatch: Task<Void, Never>?
+    static let lineWait: Duration = .seconds(15)
     /// The sound tracks of a file that groups none of them (`UngroupedAudio`), for the player's Audio choice, and the
     /// one playing. Empty when AVFoundation offers the choice itself, or there is none.
     private(set) var audioChoices: [UngroupedAudio.Choice] = []
@@ -905,6 +1036,9 @@ import TVCore
         let played = liveReadyAt.map { ContinuousClock.now - $0 }
         guard let room = liveRoom, liveReopen.shouldReopen(after: failure, playedFor: played) else { return false }
         liveRetrying = true; loading = true
+        if failure.map({ ($0 as NSError).domain == "CoreMediaErrorDomain" && ($0 as NSError).code == -12312 }) == true {
+            LiveRepair.noteContradiction((player.currentItem?.asset as? AVURLAsset)?.url)
+        }
         detachItem(); observation = nil
         let active = generation
         Diagnostics.shared.record(.warning, "player", "live retry room=\(room.url.absoluteString) played=\(played.map { "\(Int($0.components.seconds))s" } ?? "-")")
@@ -1058,6 +1192,7 @@ import TVCore
     /// -17223, "cannot be played on this device"). The file opens again with its picture converted to SDR,
     /// and so do the files opened after it. A mirrored or recorded screen refuses HDR the same way, but only
     /// while it lasts: then this file alone converts. Dolby Vision 5 can't convert, so it isn't tried again.
+    /// A live room's stream is the repackaged one just stopped, so the room is asked for its stream again (#941).
     private func retryHDR(after failure: Error?, channel: Channel, url: URL, generation active: UUID) -> Bool {
         // A repackaged HLS stream's HDR variant is refused before any segment loads: -1002 or -12927 (#345).
         let refused = Self.refusedContent(failure) || Remux.isSegmented(url) && Self.refusedVariant(failure)
@@ -1068,10 +1203,15 @@ import TVCore
         detachItem(); observation = nil
         Diagnostics.shared.record(.warning, "player", "hdr refused captured=\(captured); converting to sdr \(failure.map(Self.describe) ?? "-")")
         Remux.stop(url)
+        let room = liveRoom
         preparation = Task { [weak self] in
             guard let self else { return }
+            var channel = channel
             let prepared: Prepared
-            do { prepared = try await self.prepare(channel) }
+            do {
+                if let room { channel = try await LiveCatalog.resolve(room).channel }
+                prepared = try await self.prepare(channel)
+            }
             catch {
                 guard self.generation == active, !Task.isCancelled else { return }
                 self.error = error.localizedDescription; self.loading = false; return
@@ -1079,6 +1219,37 @@ import TVCore
             guard self.generation == active, !Task.isCancelled, !prepared.matroska else { return Self.stopAdapter(prepared) }
             self.configure(channel, url: prepared.url, generation: active)
             self.automatic = prepared.url
+        }
+        return true
+    }
+
+    /// MPEG-TS HLS whose sound AVPlayer can't decode, the MPEG-1 Layer II of many IPTV channels, fails at once with
+    /// 'fmt?'. It opens again repackaged (`HLSRemux`): the picture copied, the sound converted to AAC. When that doesn't
+    /// work either, the channel's next line, or the error.
+    private func retryConvertingAudio(after failure: Error?, channel: Channel, url: URL, generation active: UUID) -> Bool {
+        guard Self.unsupportedFormat(failure), !Remux.isRemuxed(url), ["http", "https"].contains(url.scheme) else { return false }
+        detachItem(); observation = nil
+        Diagnostics.shared.record(.warning, "player", "format refused; repackaging host=\(url.host() ?? "-") \(Self.describe(failure!))")
+        note(L10n.text("Repackaging the video for this device"))
+        loading = true
+        preparation = Task { [weak self] in
+            var remuxed: URL?
+            do { remuxed = try await HLSRemux.open(url, headers: channel.headers) }
+            catch { if !Task.isCancelled { Diagnostics.shared.record(.info, "player", "hls not repackaged \(Self.describe(error))") } }
+            guard let self, self.generation == active, !Task.isCancelled else {
+                if let remuxed { Remux.stop(remuxed) }
+                return
+            }
+            guard let remuxed else {
+                if self.tryNextLine(after: failure) { return }
+                self.loading = false
+                self.errorSymbol = "play.slash.fill"
+                self.error = failure?.localizedDescription ?? L10n.text("This media cannot be played. Try another channel or source.")
+                return
+            }
+            self.configure(channel, url: remuxed, generation: active)
+            self.externalSubtitles.playing(remuxed)
+            self.automatic = remuxed
         }
         return true
     }
@@ -1170,6 +1341,76 @@ import TVCore
                 self?.subtitles.follow(self?.player.currentItem)
             }
         }
+        // A style chosen while a video plays (the Mac shows Settings beside the player) also reaches AVPlayer's own
+        // subtitles, drawn in Picture in Picture.
+        styleObserver = NotificationCenter.default.addObserver(forName: SubtitleStyle.changed, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let rules = Self.subtitleRules()
+                for item in self.player.items() { item.textStyleRules = rules }
+            }
+        }
+        delayObserver = NotificationCenter.default.addObserver(forName: SubtitleDelay.changed, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.followSubtitleDelay() }
+        }
+        externalSubtitles.cues = subtitles
+        externalSubtitles.player = player
+        externalSubtitles.changed = { [weak self] in self?.followSubtitleDelay() }
+        externalSubtitles.fileChosen = { [weak self] in self?.subtitleChoice = nil }
+        subtitles.nativeChosen = { [weak self] in self?.externalSubtitles.nativeChosen() }
+        subtitles.clockChanged = { [weak self] in self?.followSubtitleDelay() }
+        followSubtitleDelay()
+    }
+    private var styleObserver: NSObjectProtocol?
+    @ObservationIgnored private var delayObserver: NSObjectProtocol?
+    /// Shows delayed subtitle lines at the player's clock (`SubtitleCues.advance`), only while a delay is set.
+    @ObservationIgnored private var subtitleTimeObserver: Any?
+    /// Delayed subtitles (#599) reach the screen on a quarter-second clock rather than on the once-a-second sample.
+    /// A subtitle file the app shows itself (#576) has a twentieth-of-a-second one, so its lines are on time to a
+    /// frame or so. Otherwise the lines go up as AVPlayer hands them over, so no clock runs: it would only wake the
+    /// main thread.
+    private func followSubtitleDelay() {
+        let interval: Double? = subtitles.needsClock ? 0.05 : SubtitleDelay.load() > 0 ? 0.25 : nil
+        guard interval != subtitleClockInterval else { return }
+        if let observer = subtitleTimeObserver { player.removeTimeObserver(observer); subtitleTimeObserver = nil }
+        subtitleClockInterval = interval
+        guard let interval else { return }
+        subtitleTimeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: interval, preferredTimescale: 600), queue: .main) { [weak self] time in
+            MainActor.assumeIsolated { self?.subtitles.advance(to: time.seconds) }
+        }
+    }
+    @ObservationIgnored private var subtitleClockInterval: Double?
+    /// The subtitle track picked in the player's menu, for the next episodes of the same title (#779).
+    @ObservationIgnored private var subtitleChoice: SubtitleChoice?
+    /// The title the playing item belongs to (`Channel.skipScope`).
+    @ObservationIgnored private var subtitleScope: String?
+
+    /// The viewer picked one of the item's own subtitle tracks, or Off (nil), in the player's menu.
+    func choseSubtitle(_ option: AVMediaSelectionOption?) {
+        subtitleChoice = option.flatMap { option in
+            subtitleScope.map { SubtitleChoice(scope: $0, name: option.displayName, language: option.extendedLanguageTag) }
+        }
+    }
+
+    /// Picks the remembered track in an item that is ready, once the system has made its own choice.
+    /// Returns whether it found the track there.
+    @discardableResult
+    private func restoreSubtitleChoice(_ item: AVPlayerItem, channel: Channel) async -> Bool {
+        guard let choice = subtitleChoice, choice.scope == channel.skipScope,
+              let group = try? await item.asset.loadMediaSelectionGroup(for: .legible), subtitleChoice == choice else { return false }
+        let options = group.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
+        guard let index = choice.index(among: options.map { ($0.displayName, $0.extendedLanguageTag) }) else { return false }
+        if item.currentMediaSelection.selectedMediaOption(in: group) != options[index] { item.select(options[index], in: group) }
+        return true
+    }
+
+    /// Subtitle files beside the video, or added while it plays, that the app shows itself (#576).
+    let externalSubtitles = ExternalSubtitles()
+    /// The subtitle lines the player's overlay draws (`SubtitleOverlay`).
+    let subtitles = SubtitleCues()
+    /// The saved subtitle style as the rule AVPlayer lays over every subtitle cue it draws itself.
+    private static func subtitleRules() -> [AVTextStyleRule] {
+        AVTextStyleRule(textMarkupAttributes: SubtitleStyle.load().attributes).map { [$0] } ?? []
     }
     private var observation: NSKeyValueObservation?
     private var failureObserver: NSObjectProtocol?
@@ -1183,8 +1424,36 @@ import TVCore
         Self.current = self
         // The queue has already moved on to this episode by itself.
         if let advanced, advanced == channel { self.advanced = nil; return }
+        lines = channel.alternates.isEmpty ? [] : channel.lines
+        line = 0; triedLines = [0]
+        open(channel)
+    }
+
+    /// Plays line `index` of the live channel, as the viewer chose: the others are there to fall back on again.
+    func choose(line index: Int) {
+        guard lines.indices.contains(index), index != line else { return }
+        Diagnostics.shared.record(.info, "player", "line \(index + 1)/\(lines.count) chosen")
+        line = index; triedLines = [index]
+        open(lines[index])
+    }
+
+    /// The channel's next line not tried since it was chosen, when this one failed or hasn't started (#679); false when
+    /// there is none left. A line that played a while before it dropped leaves every line to try again.
+    private func tryNextLine(after failure: Error?) -> Bool {
+        guard lines.count > 1 else { return false }
+        if let readyAt = lineReadyAt, readyAt.duration(to: .now) > .seconds(60) { triedLines = [line] }
+        guard let next = (1..<lines.count).map({ (line + $0) % lines.count }).first(where: { !triedLines.contains($0) }) else { return false }
+        Diagnostics.shared.record(.warning, "player", "line \(line + 1)/\(lines.count) \(failure.map(Self.describe) ?? "not ready"); trying line \(next + 1)")
+        let failed = line
+        line = next; triedLines.insert(next)
+        open(lines[next])
+        note(L10n.text("Line %@ didn't play. Trying line %@.", "\(failed + 1)", "\(next + 1)"))
+        return true
+    }
+
+    private func open(_ channel: Channel) {
         savedDownload = channel.url.scheme == DownloadLibrary.scheme
-        stop(); error = nil; errorSymbol = "play.slash.fill"; loading = true; showsPicture = false; sourceDanmaku = []; qualities = []; quality = nil; switchNotice = nil
+        stop(); error = nil; errorSymbol = "play.slash.fill"; loading = true; showsPicture = false; openedAt = .now; sourceDanmaku = []; qualities = []; quality = nil; switchNotice = nil
         begin(channel)
         isLive = LiveCatalog.isRoom(channel.url) || channel.group == L10n.text("Bilibili Live")
         liveRoom = LiveCatalog.isRoom(channel.url) ? channel : nil; liveReopen = LiveReopen(); liveRetrying = false; liveReadyAt = nil
@@ -1192,6 +1461,14 @@ import TVCore
                                     danmaku: UserDefaults.standard.object(forKey: DanmakuPreference.key) == nil || UserDefaults.standard.bool(forKey: DanmakuPreference.key),
                                     sharper: UserDefaults.standard.bool(forKey: VideoEnhancement.upscaleKey))
         let activeGeneration = generation
+        lineReadyAt = nil
+        if lines.count > 1 {
+            lineWatch = Task { [weak self] in
+                try? await Task.sleep(for: Self.lineWait)
+                guard let self, !Task.isCancelled, self.generation == activeGeneration, self.lineReadyAt == nil, self.error == nil else { return }
+                _ = self.tryNextLine(after: nil)
+            }
+        }
         Diagnostics.shared.record(.info, "player", "start name=\(channel.name) group=\(channel.group) url=\(channel.url.absoluteString) headers=\(channel.headers.keys.sorted().joined(separator: ","))")
         preparation = Task { [weak self] in
             guard let self else { return }
@@ -1199,6 +1476,7 @@ import TVCore
             var channel = channel
             var liveQualities: [StreamQuality] = [], liveQuality: Int?
             if let (platform, id) = LiveCatalog.room(channel.url), platform.chat == "bilibili", let room = Int(id) { self.listen(room: room, generation: activeGeneration) }
+            if let (platform, id) = LiveCatalog.room(channel.url), let chat = LiveChats.make(platform, room: id, address: channel.url) { self.listen(chat, generation: activeGeneration) }
             if LiveCatalog.isRoom(channel.url) {
                 self.note(L10n.text("Finding the live stream"))
                 do { (channel, liveQualities, liveQuality) = try await LiveCatalog.resolve(channel) }
@@ -1215,6 +1493,7 @@ import TVCore
             do { prepared = try await self.prepare(channel) }
             catch {
                 guard self.generation == activeGeneration, !Task.isCancelled else { return }
+                if self.tryNextLine(after: error) { return }
                 self.error = error.localizedDescription; self.loading = false; return
             }
             guard self.generation == activeGeneration, !Task.isCancelled else { return Self.stopAdapter(prepared) }
@@ -1318,7 +1597,14 @@ import TVCore
     }
 
     /// The item for a prepared stream, with the request headers and buffer its source needs.
-    private func makeItem(_ channel: Channel, url: URL) -> AVPlayerItem {        // Some providers require request headers. AVURLAsset's HTTP-header option is
+    /// The item for a prepared stream, with the request headers and buffer its source needs.
+    ///
+    /// 合并 1.8.23：上游这轮加了 `assetOptions`（iOS/tvOS 下 User-Agent 走专用键，否则被系统挡成 403）、
+    /// `CloudStreams.setDuration`（按实际时长定预读，见 #702）、`textStyleRules`（画中画里的字幕外观）
+    /// 与 `-qaSubtitle` 截图深链；我方有出站分流（`EgressRouter`，直连优先、被掐才走回环中继）。
+    /// 两者互补，这里合成一份。
+    private func makeItem(_ channel: Channel, url: URL) -> AVPlayerItem {
+        // Some providers require request headers. AVURLAsset's HTTP-header option is
         // best-effort and is not a guarantee for every redirected HLS segment.
         //
         // When the viewer assigned this source (or this line) a custom HTTP/HTTPS/SOCKS5 proxy, the
@@ -1326,38 +1612,18 @@ import TVCore
         // — TLS and all. The relay is what makes an `https` source work: AVPlayer would only ever
         // see plain `http://127.0.0.1`, so the TLS handshake happens inside the relay, not here.
         //
-        // `baseSync` is nil until the listener is up. Rather than silently going direct — which
-        // looked like the proxy simply did nothing — ask for it to start and log that this item
-        // played direct, so the reason is in the diagnostic log afterwards.
         // ★ 2026-11-15：配了代理时，relay 必须**优先于**下面四个 asset 工厂。
-        //
-        // 原写法把 `assetURL` 只放在回退链的**最后一支**：
-        //     CloudStreams.asset(for:) ?? HongguoStreams.asset(for:) ?? DashStreams.asset(for:)
-        //     ?? LiveRepair.asset(for:) ?? AVURLAsset(url: assetURL, ...)
-        // 而前四个工厂（tvbox-cloud / tvbox-hongguo / tvbox-dash / tvbox-live-repair）各自
-        // 收下 `url` 就返回 asset，**根本看不到 `assetURL`**。真机上能出画面的源全部命中前四支
-        // ⇒ 观察者配了自定义代理，在主流源上完全不生效，而且没有任何一行日志说明为什么。
-        // 设备实证：runtime-0.jsonl 里 `relay listening` 出现 85 次（每次播放起一个端口），
-        // `relay upstream` / `relay done` 各 0 次 —— relay 起来了，但一次请求都没收到。
-        //
-        // 因此改成：代理生效时先看 relay。
         // 走哪条腿由 `EgressRouter` 按 **host 的实测结论** 决定，不再按「源被标成什么」一刀切：
-        //
-        //   · 直连能通 → 源地址原样交给 AVPlayer（零中继、零额外 TLS，也就是观众验证过能播的
-        //     「直连 + Loon」那条路）；
+        //   · 直连能通 → 源地址原样交给 AVPlayer（零中继、零额外 TLS）；
         //   · 直连被掐 → 换成回环中继 + 代理。
-        //
-        // ⛔ 旧写法是「这个源设了代理 ⇒ 视频也经中继」，于是标成代理的源必然比直连慢：
-        //    每个清单/分片都要新建一条到节点的 TLS（中继不复用连接，见 LocalProxyServer），
-        //    而真实情况往往是这台 CDN 直连就好好的。
+        // ⛔ 旧写法是「这个源设了代理 ⇒ 视频也经中继」，于是标成代理的源必然比直连慢。
         let leg = EgressRouter.shared.leg(for: url, purpose: .media)
         var relayURL: URL?
         let context0 = channel.historyContext
         if leg.isProxy {
             // ⛔ 只有 http/https 目标能走 relay：`LocalProxyServer.encode` 把目标拼成
-            // `/p/<id>/<scheme>/<host>/<port><path>`，再按 `<scheme>` 决定是否开 TLS；
-            // 而 `tvbox-hongguo:` / `tvbox-dash:` 这些自造 scheme 是由上面几个工厂自己的
-            // resourceLoader 就地解析密钥流，交给 relay 只会拼出一个打不开的地址。
+            // `/p/<id>/<scheme>/<host>/<port><path>`；而 `tvbox-hongguo:` / `tvbox-dash:` 这些自造
+            // scheme 是由上面几个工厂自己的 resourceLoader 就地解析密钥流，交给 relay 只会拼出打不开的地址。
             // 换句话说：自造 scheme 必须留给对应工厂，这是**能力边界**，不是优先级问题。
             let scheme = url.scheme?.lowercased() ?? ""
             let relayable = scheme == "http" || scheme == "https"
@@ -1384,19 +1650,37 @@ import TVCore
         if let relayURL {
             // 代理已生效：字节由 relay 搬运，四个工厂必须让路。
             // headers 仍然传下去 —— relay 把请求原样转给源站，源站该看到的头不能丢。
-            asset = AVURLAsset(url: relayURL, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+            asset = AVURLAsset(url: relayURL, options: Self.assetOptions(headers: channel.headers))
         } else {
-            asset = CloudStreams.asset(for: url) ?? HongguoStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
-                ?? AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": channel.headers])
+            // 上游 1.8.23 用 `CENCStreams` 取代了已删除的 `HongguoStreams`（整族随
+            // 「Source-neutral app: generic CENC playback」下线）；回退链顺序与上游一致。
+            asset = CloudStreams.asset(for: url) ?? CENCStreams.asset(for: url) ?? DashStreams.asset(for: url) ?? LiveRepair.asset(for: url)
+                ?? AVURLAsset(url: url, options: Self.assetOptions(headers: channel.headers))
         }
         let item = AVPlayerItem(asset: asset)
-        // 小窗限制解码分辨率：`.zero` 时不写，跟随源（前台/全屏走这条）。
-        if preferredMaximumResolution != .zero {
-            item.preferredMaximumResolution = preferredMaximumResolution
+        if url.scheme == CloudStreams.scheme {
+            // The duration sets how far ahead the file is read, on this device and for this bitrate (#702).
+            Task { if let seconds = try? await asset.load(.duration).seconds { CloudStreams.setDuration(seconds, for: url) } }
         }
-        if url.scheme == HongguoStreams.scheme { item.preferredForwardBufferDuration = HongguoStreams.forwardBufferDuration }
-        // [mi3s] 二开融合（N-W5-03）：给每个可能播放的 item 挂上字幕管线，见 App/SubtitleCues+Mi3s.swift。
+        if url.scheme == CENCStreams.scheme { item.preferredForwardBufferDuration = CENCStreams.forwardBufferDuration }
+        // 小窗限制解码分辨率：`.zero` 时不写，跟随源（前台/全屏走这条）。
+        if preferredMaximumResolution != .zero { item.preferredMaximumResolution = preferredMaximumResolution }
+        // 上游 #547：字幕外观要同时给 AVPlayer 自己的字幕（画中画靠它）。
+        item.textStyleRules = Self.subtitleRules()
+        // [mi3s] 二开融合（N-W5-03）：给每个可能播放的 item 挂上我方字幕管线，见 App/SubtitleCues+Mi3s.swift。
         subtitles.prepare(item)
+        #if DEBUG
+        // `-qaSubtitle <n>` turns on the item's nth subtitle track, for screenshots of how subtitles look.
+        if let index = UserDefaults.standard.string(forKey: "qaSubtitle").flatMap(Int.init) {
+            // Or the system's own choice (subtitles off) replaces it once the item loads.
+            player.appliesMediaSelectionCriteriaAutomatically = false
+            Task { @MainActor in
+                if let group = try? await asset.loadMediaSelectionGroup(for: .legible), group.options.indices.contains(index) {
+                    item.select(group.options[index], in: group)
+                }
+            }
+        }
+        #endif
         return item
     }
 
@@ -1424,11 +1708,11 @@ import TVCore
     /// A file AVPlayer reads by itself and `Remux` can read too: not HLS, and not already repackaged.
     private static func repackagable(_ url: URL) -> Bool {
         !Remux.isRemuxed(url) && url.pathExtension.lowercased() != "m3u8"
-            && ["http", "https", "file", CloudStreams.scheme].contains(url.scheme)
+            && ["http", "https", "file", CloudStreams.scheme, CENCStreams.scheme].contains(url.scheme)
     }
 
-    /// A file whose picture AVPlayer can't decode plays its sound alone: HEVC that an MP4 tags `hev1`, or VP9
-    /// (#215). It opens again repackaged as HLS (`Remux.showsPicture`) and resumes where it was asked to. When it
+    /// A file whose picture AVPlayer can't decode plays its sound alone: HEVC that an MP4 tags `hev1`, VP9 (#215), or
+    /// Hongguo's ByteVC2 (#957, read clear through its decrypting stream). It opens again repackaged as HLS (`Remux.showsPicture`) and resumes where it was asked to. When it
     /// can't be repackaged, the sound plays on as before.
     private func repackage(_ item: AVPlayerItem, channel: Channel, url: URL, generation active: UUID) {
         player.pause(); loading = true
@@ -1437,6 +1721,7 @@ import TVCore
         preparation = Task { [weak self] in
             let source: RemuxSource?
             if url.scheme == CloudStreams.scheme { source = await CloudStreams.remuxSource(for: url) }
+            else if url.scheme == CENCStreams.scheme { source = await CENCStreams.remuxSource(for: url) }
             else if url.isFileURL { source = try? Remux.fileSource(url) }
             else {
                 do { source = try await Remux.httpSource(url, headers: channel.headers) }
@@ -1510,7 +1795,8 @@ import TVCore
     /// Follows the episode's item (ready, failed, ended), the player's state, and the transfer, for this playback.
     private func watch(_ item: AVPlayerItem, channel: Channel, url: URL, generation activeGeneration: UUID) {
         self.item = item
-        audioChoices = []; audioChoice = nil
+        audioChoices = []; audioChoice = nil; liveReadyAt = nil
+        subtitleScope = channel.skipScope
         hasTimeline = item.status == .readyToPlay && item.duration.isNumeric
         observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let status = item.status
@@ -1526,12 +1812,19 @@ import TVCore
                 if status == .readyToPlay {
                     // [mi3s] 二开融合（M1）：记下直播首次就绪时刻，供 LiveReopen 判「地址到期」还是「这条源根本播不动」。
                     if self.isLive { self.liveReadyAt = .now }
+                    self.lineReadyAt = .now; self.lineWatch?.cancel(); self.lineWatch = nil
                     if UngroupedAudio.playOne(item) { Diagnostics.shared.record(.info, "player", "ungrouped audio tracks; playing the first") }
                     Task { [weak self] in
                         let choices = await UngroupedAudio.choices(item)
                         guard let self, self.generation == activeGeneration, self.item === item else { return }
                         self.audioChoices = choices
                         self.audioChoice = choices.isEmpty ? nil : UngroupedAudio.playing(item)
+                    }
+                    Task { [weak self] in
+                        // The track picked in the last episode, in place of a subtitle file that came on by itself.
+                        guard let self, await self.restoreSubtitleChoice(item, channel: channel),
+                              self.generation == activeGeneration, self.item === item else { return }
+                        self.externalSubtitles.nativeChosen()
                     }
                     self.checkingPicture = Self.repackagable(url)
                     self.restorePositionIfNeeded(item)
@@ -1573,11 +1866,13 @@ import TVCore
                        self.retryEgress(failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.retryRange(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.retryHDR(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
+                    if self.retryConvertingAudio(after: failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.recoverLoopback(Self.urlErrorCode(failure), channel: channel, url: url, generation: activeGeneration) { return }
                     if self.reopenedAfterDrop, self.resumeAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
                     if self.recoverLiveAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
                     Diagnostics.shared.record(.error, "player", "failed host=\(self.transfer.host ?? channel.url.host() ?? "-") \(self.transfer.failure.map { "upstream=\($0) " } ?? "")\(detail) \(self.failureContext(channel, url: url, item: item))")
                     if self.retryLive(after: failure) { return }
+                    if self.tryNextLine(after: failure) { return }
                     // A refused link is usually an expired one: say so in plain words rather than the system's.
                     let expired = refused || [401, 403, 404, 410].contains(self.transfer.httpStatus ?? 0)
                     self.loading = false
@@ -1598,6 +1893,7 @@ import TVCore
                 if self.recoverLiveAfterDrop(failure, channel: channel, url: url, generation: activeGeneration) { return }
                 Diagnostics.shared.record(.error, "player", "interrupted host=\(self.transfer.host ?? channel.url.host() ?? "-") at=\(Int(self.player.currentTime().seconds.isFinite ? self.player.currentTime().seconds : -1))s \(failure.map(Self.describe) ?? "-") \(self.failureContext(channel, url: url, item: item))")
                 if self.retryLive(after: failure) { return }
+                if self.tryNextLine(after: failure) { return }
                 self.error = message ?? L10n.text("Playback was interrupted."); self.loading = false
             }
         }
@@ -1656,7 +1952,7 @@ import TVCore
         throttleBoost(item)
         catchUpLive(item)
         queueUpcomingIfDue(item)
-        if let url = playing?.url { HongguoStreams.updatePosition(for: url, seconds: pendingResume ?? player.currentTime().seconds) }
+        if let url = playing?.url { CENCStreams.updatePosition(for: url, seconds: pendingResume ?? player.currentTime().seconds) }
         if tick % 5 == 0 { saveHistory() }
         let events = item.accessLog()?.events ?? []
         let now = Date()
@@ -1761,6 +2057,8 @@ import TVCore
         let via = ["http", "https"].contains(scheme) ? (["127.0.0.1", "localhost"].contains(url.host() ?? "") ? "local-proxy" : "direct") : scheme
         let format = channel.url.pathExtension.isEmpty ? "-" : String(channel.url.pathExtension.lowercased().prefix(5))
         var text = "source=\(channel.historyContext?.sourceKey ?? "-") live=\(isLive) via=\(via) format=\(format)"
+        // A repackaged file: what its playlist told AVPlayer, which may refuse it on that alone (#769).
+        if let variant = Remux.variant(url) { text += " variant=\(variant)" }
         if let event = item?.errorLog()?.events.last {
             text += " log=\(event.errorStatusCode) \(event.errorDomain) \(event.errorComment ?? "-")"
         }
@@ -1777,7 +2075,7 @@ import TVCore
         discardUpcoming()
         upcomingAttempted = false; skipsToUpcoming = false; advanced = nil
         upcomingEpisode = nil; onAdvance = nil; playsOn = { false }; clearBoost()
-        if let url = playing?.url { HongguoStreams.stop(url) }
+        if let url = playing?.url { CENCStreams.stop(url) }
         if let automatic { CloudStreams.stop(automatic); Remux.stop(automatic) }
         if playing != nil { ErrorReports.shared.stoppedPlaying() }
         playing = nil
@@ -1793,6 +2091,10 @@ import TVCore
         lastSkippedAd = nil
         sampledPosition = 0; pendingSeekPosition = nil; duration = 0
         editingSkip = false; resumeAfterEditing = false; seekingSegment = false
+
+        skipNotice = nil; introNoticeUntil = nil
+        position = 0; duration = 0; editingSkip = false; resumeAfterEditing = false; seekingSegment = false
+        sourceSkips = []; skipOffer = nil; skippedSource = []; chapters = []; bilibiliPart = nil
         onPlaybackEnded = nil; onUnplayableFile = nil
         if player.currentItem != nil {
             let seconds = player.currentTime().seconds
@@ -1801,6 +2103,7 @@ import TVCore
         generation = UUID()
         chat?.stop(); chat = nil
         preparation?.cancel(); preparation = nil
+        lineWatch?.cancel(); lineWatch = nil
         sampler?.cancel(); sampler = nil
         transfer = Transfer(); steps = []
         #if os(macOS)
@@ -1854,18 +2157,17 @@ import TVCore
         skipScope = channel.skipScope
         skipSettings = skipScope.map { EpisodeSkipSettings.load(scope: $0, defaults: skipDefaults) } ?? EpisodeSkipSettings()
         skipPass = EpisodeSkipPass(); seekingSegment = false
-        sampledPosition = 0; pendingSeekPosition = nil; duration = 0
+        skipNotice = nil; introNoticeUntil = nil
+        sourceSkips = channel.skips; skipOffer = nil; skippedSource = []; chapters = []
+        bilibiliPart = channel.bilibiliPart
+        position = 0; duration = 0
         upcomingAttempted = false
-        // Per-episode recovery state resets here so a retry that fired for the episode before doesn't
-        // suppress this one's own retry, or leave a stale drop/loopback/live state behind on auto-advance.
-        liveReopen = LiveReopen(); liveRetrying = false; rangeRetried = false
-        loopbackRecovered = nil; dropRecovery = PlaybackDropRecovery(); reopenedAfterDrop = false
-        egressFlipped.removeAll()
-        // A drive's folder and file names don't name a show to find comments for.
+        // Keep the context even when native comments win, so an explicit service/platform chosen in Settings can
+        // rematch the playing episode. A drive's folder and file names still do not identify a show automatically.
         let source = channel.historyContext?.sourceKey
-        if !DanmakuSource.has(channel.url), source != Bilibili.siteKey, source != CloudFiles.sourceKey {
-            catalogDanmaku.startAutomatic(channel.historyContext)
-        }
+        catalogDanmaku.startAutomatic(channel.historyContext,
+            usesSourceComments: DanmakuSource.has(channel.url) || source == Bilibili.siteKey,
+            allowsAutomatic: source != CloudFiles.sourceKey)
     }
 
     private func restorePositionIfNeeded(_ item: AVPlayerItem) {
@@ -1875,7 +2177,11 @@ import TVCore
         let pattern: Duration.TimeFormatStyle.Pattern = target >= 3600 ? .hourMinuteSecond : .minuteSecond
         note(L10n.text("Jumping to %@", Duration.seconds(Int(target)).formatted(.time(pattern: pattern))))
         let activeGeneration = generation
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+        let drive = (item.asset as? AVURLAsset)?.url
+        // Up to 10 s early, at the keyframe before the saved place: the player shows it without first reading and
+        // decoding the frames up to the exact second (half a second and more from a cloud drive).
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: CMTime(seconds: 10, preferredTimescale: 600),
+                    toleranceAfter: .zero) { [weak self] finished in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == activeGeneration else { return }
                 self.restoringPosition = false; self.pendingResume = nil; self.loading = false
@@ -1885,12 +2191,17 @@ import TVCore
                 }
                 self.restoredPosition = self.player.currentTime().seconds
                 Diagnostics.shared.record(.info, "player", "history resume requested=\(requested) restored=\(self.restoredPosition ?? -1)")
-                // A quality switch keeps the pause state it started from, instead of always resuming.
+                // A drive bringing in several times what the video needs: play now, without AVPlayer's wait for a
+                // cushion first (1–1.5 s). It still waits if the bytes fall behind later.
+                let quick = if let drive { await CloudStreams.keepsUp(drive) } else { false }
+                guard self.generation == activeGeneration else { return }
+                // 合并：画质切换要保持原来的暂停状态（[mi3s]），不能一律 play；
+                // 其余情况走上游的 quick-play（快速起播）。
                 if self.resumePausedAfterQualitySwitch {
                     self.resumePausedAfterQualitySwitch = false
                     self.player.pause()
                 } else if !self.editingSkip {
-                    self.player.play()
+                    quick ? self.player.playImmediately(atRate: self.player.defaultRate) : self.player.play()
                 }
                 self.saveHistory()
             }
@@ -1965,11 +2276,11 @@ extension PlaybackSession {
         }
         // A downloaded episode plays from disk: its file, or its HLS through a loopback server.
         if address.scheme == DownloadLibrary.scheme {
-            note(L10n.text("Opening the saved download"))
+            note(L10n.text("Opening the cached video"))
             do {
                 address = try await DownloadLibrary.shared.playbackAddress(for: address) { fraction in
                     Task { @MainActor [weak self] in
-                        self?.note(L10n.text("Preparing the saved download for this device · %lld%%", Int(fraction * 100)), replacing: "rewrap")
+                        self?.note(L10n.text("Preparing the cached video for this device · %lld%%", Int(fraction * 100)), replacing: "rewrap")
                     }
                 }
             }
@@ -1979,9 +2290,23 @@ extension PlaybackSession {
             }
             prepared.url = address
         }
-        // A link or saved file whose name says MKV and the like is repackaged too; when that fails AVPlayer
-        // tries it as it is.
-        if Remux.handles(name: address.lastPathComponent), ["http", "https", "file"].contains(address.scheme) {
+        // A plugin's own loopback server names no file (`/chunk?…`), so its first bytes say whether it is an MKV
+        // or the like to repackage (#776); anything else goes to AVPlayer as before.
+        if !prepared.pluginProxy, channel.url.scheme == "http", Remux.hidesName(address),
+           let source = await Remux.sniffedSource(address, headers: channel.headers) {
+            if Task.isCancelled { await source.close(); throw CancellationError() }
+            note(L10n.text("Repackaging the video for this device"))
+            Diagnostics.shared.record(.info, "player", "plugin server sends a file to repackage")
+            if let url = try await Self.remux(source, channel: channel) {
+                prepared.url = url
+                return prepared
+            }
+            try Task.checkCancellation()
+        }
+        // A link or saved file whose name says MKV, a disc image and the like is repackaged too; when that fails
+        // AVPlayer tries it as it is.
+        if Remux.handles(name: address.lastPathComponent) || DiscImage.handles(name: address.lastPathComponent),
+           ["http", "https", "file"].contains(address.scheme) {
             note(L10n.text("Repackaging the video for this device"))
             let source: RemuxSource?
             if address.isFileURL { source = try? Remux.fileSource(address) }
@@ -2150,9 +2475,11 @@ extension PlaybackSession {
                     } else if status == .readyToPlay {
                         // Before it plays, so a file with ungrouped dubs starts with one of them.
                         UngroupedAudio.playOne(queued)
+                        Task { [weak self] in await self?.restoreSubtitleChoice(queued, channel: next) }
                         if let intro, intro.enabled, intro.introEnd > 0,
                            intro.validationError(duration: queued.duration.seconds) == nil, queued.currentTime().seconds < intro.introEnd {
                             queued.seek(to: CMTime(seconds: intro.introEnd, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: nil)
+                            self.upcomingSkippedIntro = true
                         }
                     }
                 }
@@ -2164,7 +2491,7 @@ extension PlaybackSession {
     /// The episode then ends paused and switches the ordinary way.
     fileprivate func discardUpcoming() {
         upcomingTask?.cancel(); upcomingTask = nil
-        upcomingObservation = nil
+        upcomingObservation = nil; upcomingSkippedIntro = false
         player.actionAtItemEnd = .pause
         guard let upcoming else { return }
         self.upcoming = nil
@@ -2174,7 +2501,7 @@ extension PlaybackSession {
 
     /// Stops the streams a prepared episode opened.
     fileprivate static func release(_ channel: Channel, _ prepared: Prepared) {
-        HongguoStreams.stop(channel.url)
+        CENCStreams.stop(channel.url)
         CloudStreams.stop(prepared.url)
         stopAdapter(prepared)
     }
@@ -2197,7 +2524,7 @@ extension PlaybackSession {
         let channel = upcoming.channel
         Diagnostics.shared.record(.info, "player", "advance name=\(channel.name) ready=\(upcoming.item.status == .readyToPlay)")
         // Let go of the finished episode's stream; the queued one's becomes the session's.
-        if let url = playing?.url { HongguoStreams.stop(url) }
+        if let url = playing?.url { CENCStreams.stop(url) }
         if let automatic { CloudStreams.stop(automatic); Remux.stop(automatic) }
         #if os(macOS)
         if let proxy { Task { await proxy.stop() } }
@@ -2228,6 +2555,8 @@ extension PlaybackSession {
                 self.sourceDanmaku = comments
             }
         }
+        if upcomingSkippedIntro { showIntroSkipped(from: 0) }
+        upcomingSkippedIntro = false
         advanced = channel
         onAdvance?(channel)
     }
@@ -2313,6 +2642,16 @@ extension PlaybackSession {
         var current = error as NSError?
         while let error = current {
             if error.domain == "CoreMediaErrorDomain", [-1002, -12927].contains(error.code) { return true }
+            current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    /// AVPlayer can't decode what the stream carries: CoreMedia's 'fmt?' (1718449215), as for MP2 sound in MPEG-TS.
+    nonisolated static func unsupportedFormat(_ error: Error?) -> Bool {
+        var current = error as NSError?
+        while let error = current {
+            if error.domain == "CoreMediaErrorDomain", error.code == 1718449215 { return true }
             current = error.userInfo[NSUnderlyingErrorKey] as? NSError
         }
         return false

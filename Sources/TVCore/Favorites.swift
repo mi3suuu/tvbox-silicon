@@ -332,6 +332,35 @@ struct FavoriteRecord: Codable, Hashable, Sendable {
         return parts[1] == "default" ? nil : UUID(uuidString: parts[1])
     }
 
+    /// Shows and episodes saved from a subscription whose address changed (#982), under the new address.
+    public func moveOrigin(from old: URL, to new: URL) {
+        var changed = false
+        func move(_ video: FavoriteVideo) -> FavoriteVideo {
+            guard video.origin.absoluteString == old.absoluteString else { return video }
+            changed = true
+            var video = video
+            video.origin = new
+            return video
+        }
+        let next = items.map { item -> FavoriteItem in
+            switch item {
+            case .video(let video): return .video(move(video))
+            case .episode(var episode): episode.video = move(episode.video); return .episode(episode)
+            default: return item
+            }
+        }
+        guard changed else { return }
+        // 我方模型：`items` 是从 `records` 算出来的只读视图，写入必须落回 `records`（version 3），
+        // 并保留每条记录自己的 environment（不能按当前环境重写，否则会跨环境搬动收藏）。
+        var seen = Set<String>()
+        var byKey: [String: UUID?] = [:]
+        for record in records { byKey[record.item.key] = record.environment }
+        records = next.filter { seen.insert($0.key).inserted }
+            .map { FavoriteRecord(item: $0, environment: byKey[$0.key] ?? defaultEnvironmentID) }
+        persist()
+        onChange?()
+    }
+
     public func items(_ kind: FavoriteKind) -> [FavoriteItem] { items.filter { $0.kind == kind } }
 
     /// The kinds that have favorites, in the Favorites page's section order: what its filter offers.

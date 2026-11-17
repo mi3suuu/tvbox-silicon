@@ -176,7 +176,15 @@ import UniformTypeIdentifiers
         if selected != nil { selected = nil; show() }
     }
 
+    /// The viewer picked a subtitle file: the track picked in an earlier episode is no longer the wish (#779).
+    @ObservationIgnored var fileChosen: (() -> Void)?
+
     func select(_ id: String?) {
+        if id != nil { fileChosen?() }
+        choose(id)
+    }
+
+    private func choose(_ id: String?) {
         automatic = false
         guard id != selected else { return }
         selected = id
@@ -276,7 +284,7 @@ import UniformTypeIdentifiers
             self.hasSources = !sources.isEmpty
             guard !sources.isEmpty else { self.onlineState = .noSources; return }
             Diagnostics.shared.record(.info, "subtitles", "online search sources=\(sources.count) episode=\(asked.episode != nil) hash=\(asked.movieHash != nil) tmdb=\(asked.tmdbID != nil)")
-            for await progress in SubtitleSearch.shared.search(asked, sources: sources) {
+            for await progress in SubtitleSearch.shared.search(asked, sources: sources, within: SubtitleSearchPolicy.timeLimit()) {
                 guard self.generation == active, !Task.isCancelled else { return }
                 self.online = progress
             }
@@ -370,7 +378,7 @@ import UniformTypeIdentifiers
         let active = generation
         Task {
             guard await self.nativeShowing() != true, self.generation == active, self.selected == nil else { return }
-            self.select(best.id)
+            self.choose(best.id)
         }
     }
 

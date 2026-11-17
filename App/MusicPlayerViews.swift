@@ -177,11 +177,13 @@ struct MusicNowPlaying: View {
     }
 
     @ViewBuilder private func source(_ music: MusicPlaybackSession) -> some View {
-        // Both services ask to be named when their audio plays.
+        // Some services ask to be named when their audio plays (the channel's own credit).
         if music.failure == nil, let provider = music.selection?.candidate.provider {
-            if provider == .gdstudio {
-                // [mi3s] 二开：标明音源出处。上游不显示音乐来自哪个第三方服务 ——
-                // 用户无从判断音质与可用性的来源。另加 next 的 accessibilityLabel。
+            if let credit = CloudMusic.current?.channel(provider)?.credit {
+                Text(credit).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            } else if provider == .gdstudio {
+                // [mi3s] 二开：自研解析器不在云频道表里，没有 credit，这里补署名。
+                // 上游只显示云频道下发的 credit，我方 6 个自研源要各自说清出处。
                 Text(L10n.text("Source: GD Music (music.gdstudio.xyz)")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             } else if provider == .xinghai {
                 Text(L10n.text("Source: Xinghai (yy.zddyr.top)")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -301,8 +303,7 @@ struct MusicLyricsView: View {
                 } else if music.lyricsLoading || music.busy {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ContentUnavailableView(L10n.text("No Lyrics"), systemImage: "quote.bubble",
-                                           description: Text(L10n.text("Neither catalog has lyrics for this song.")))
+                    EmptyResults(symbol: "quote.bubble", title: L10n.text("No Lyrics"), message: L10n.text("Neither catalog has lyrics for this song."), fills: true)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -448,22 +449,14 @@ struct MusicChannelsView: View {
 struct MusicSettingsView: View {
     @Environment(Store.self) private var store
 
-    /// Each channel and the services it plays from.
-    private static var channels: [(MusicProviderID, String)] {
-        [(.migu, L10n.text("Migu Music")),
-         (.nianxin, L10n.text("Kuwo Music and NetEase Cloud Music")),
-         (.vkeys, L10n.text("QQ Music")),
-         (.gdstudio, L10n.text("NetEase Cloud Music")),
-         (.xinghai, L10n.text("Kuwo Music and NetEase Cloud Music, when the others fail")),
-         (.hyw, L10n.text("QQ Music, when VKeys fails"))]
-    }
+    /// The channels the recommended sources list, each with the services it plays from; none are part of the app.
+    private static var channels: [CloudMusic.Channel] { CloudMusic.current?.channels ?? [] }
+    /// The channels that stay off until the listener enters a key.
+    private static var keyed: [CloudMusic.Channel] { channels.filter { $0.keyLabel != nil } }
     private static var qualityNote: String {
         L10n.text("Lossless first plays the best lossy stream, marked as such, when no channel has lossless audio. Lossless only stops instead.")
     }
-    private static var channelNotes: [String] {
-        [L10n.text("HYW stays off until you enter the key from its published script. GD Music (music.gdstudio.xyz) is for personal, non-commercial use and allows 50 requests every 5 minutes."),
-         L10n.text("Xinghai (yy.zddyr.top) asks to be credited and not overused, so it is only asked when the other channels fail.")]
-    }
+    private static var channelNotes: [String] { CloudMusic.current?.notes ?? [] }
 
     var body: some View {
         @Bindable var music = store.music
@@ -477,11 +470,15 @@ struct MusicSettingsView: View {
                     music.preferences.quality = choices[((choices.firstIndex(of: music.preferences.quality) ?? 0) + 1) % choices.count]
                 }
             }
-            TVSettingsSection(title: L10n.text("Channels"), footer: Self.channelNotes.joined(separator: "\n\n")) {
-                ForEach(Self.channels, id: \.0) { provider, detail in
-                    TVSettingsToggle(title: provider.name, detail: detail, isOn: enabled(provider, music: music))
+            if !Self.channels.isEmpty {
+                TVSettingsSection(title: L10n.text("Channels"), footer: Self.channelNotes.joined(separator: "\n\n")) {
+                    ForEach(Self.channels) { channel in
+                        TVSettingsToggle(title: channel.name, detail: channel.detail, isOn: enabled(channel.id, music: music))
+                    }
+                    ForEach(Self.keyed) { channel in
+                        TVSettingsField(title: channel.keyLabel ?? channel.name, text: key(channel.id, music: music))
+                    }
                 }
-                TVSettingsField(title: L10n.text("HYW key"), text: $music.preferences.hywKey)
             }
             MusicLXSourcesSection()
             MusicExtensionsSection()
@@ -496,26 +493,30 @@ struct MusicSettingsView: View {
                 } footer: {
                     Text(Self.qualityNote)
                 }
-                Section {
-                    ForEach(Self.channels, id: \.0) { provider, detail in
-                        Toggle(isOn: enabled(provider, music: music)) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(provider.name)
-                                Text(detail).font(.caption).foregroundStyle(.secondary)
+                if !Self.channels.isEmpty {
+                    Section {
+                        ForEach(Self.channels) { channel in
+                            Toggle(isOn: enabled(channel.id, music: music)) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(channel.name)
+                                    Text(channel.detail).font(.caption).foregroundStyle(.secondary)
+                                }
                             }
+                            .settingsSwitch()
                         }
-                        .settingsSwitch()
-                    }
-                    TextField(L10n.text("HYW key"), text: $music.preferences.hywKey)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                } header: {
-                    Text(L10n.text("Channels"))
-                } footer: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Self.channelNotes, id: \.self) { Text($0) }
+                        ForEach(Self.keyed) { channel in
+                            TextField(channel.keyLabel ?? channel.name, text: key(channel.id, music: music))
+                                .autocorrectionDisabled()
+                                #if os(iOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                        }
+                    } header: {
+                        Text(L10n.text("Channels"))
+                    } footer: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Self.channelNotes, id: \.self) { Text($0) }
+                        }
                     }
                 }
                 MusicLXSourcesSection()
@@ -526,6 +527,10 @@ struct MusicSettingsView: View {
             #endif
         }
         #endif
+    }
+
+    private func key(_ provider: MusicProviderID, music: MusicPlaybackSession) -> Binding<String> {
+        Binding(get: { music.preferences.keys[provider.rawValue] ?? "" }, set: { music.preferences.keys[provider.rawValue] = $0 })
     }
 
     private func enabled(_ provider: MusicProviderID, music: MusicPlaybackSession) -> Binding<Bool> {
@@ -668,7 +673,7 @@ struct MusicScrubber: View {
         run {
             let scoped = file.startAccessingSecurityScopedResource()
             defer { if scoped { file.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: file)
+            let data = try ImportedFiles.read(file)
             guard let script = String(data: data, encoding: .utf8) else { throw TVError.unsupported(L10n.text("This file is not an LX Music source.")) }
             return try await LXSourceLibrary.shared.add(script: script, origin: nil)
         }
@@ -696,9 +701,10 @@ struct MusicScrubber: View {
         busy = true; message = nil; failed = false
         Task {
             do {
+                let added = Set(sources.map(\.id))
                 let source = try await work()
                 sources = LXSourceLibrary.shared.sources
-                message = L10n.text("Added “%@”.", source.info.name)
+                message = added.contains(source.id) ? L10n.text("“%@” is already added.", source.info.name) : L10n.text("Added “%@”.", source.info.name)
             } catch { report(error) }
             busy = false
         }
@@ -739,18 +745,21 @@ struct MusicLXSourcesSection: View {
     var body: some View {
         Section {
             ForEach(model.sources) { source in
-                HStack {
-                    Toggle(isOn: model.enabled(source)) {
+                // The trash inside the switch's label: after the switch, it pushed the switch out of line with the channels'.
+                Toggle(isOn: model.enabled(source)) {
+                    HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(source.info.name)
                             Text(MusicLXSourcesModel.detail(source)).font(.caption).foregroundStyle(.secondary)
                         }
+                        Spacer(minLength: 8)
+                        Button(role: .destructive) { model.remove(source) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(L10n.text("Remove “%@”", source.info.name))
                     }
-                    .settingsSwitch()
-                    Button(role: .destructive) { model.remove(source) } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel(L10n.text("Remove “%@”", source.info.name))
                 }
+                .settingsSwitch()
+                .accessibilityAction(named: L10n.text("Remove “%@”", source.info.name)) { model.remove(source) }
             }
             HStack {
                 TextField(L10n.text("Source address"), text: $address)
@@ -811,7 +820,7 @@ struct MusicLXSourcesSection: View {
         run {
             let scoped = file.startAccessingSecurityScopedResource()
             defer { if scoped { file.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: file)
+            let data = try ImportedFiles.read(file)
             guard let script = String(data: data, encoding: .utf8) else { throw TVError.unsupported(L10n.text("This file is not a music extension.")) }
             return try await MusicExtensionLibrary.shared.add(script: script, origin: nil)
         }
@@ -841,9 +850,10 @@ struct MusicLXSourcesSection: View {
         busy = true; message = nil; failed = false
         Task {
             do {
+                let added = Set(items.map(\.id))
                 let item = try await work()
                 items = MusicExtensionLibrary.shared.extensions
-                message = L10n.text("Added “%@”.", item.name)
+                message = added.contains(item.id) ? L10n.text("“%@” is already added.", item.name) : L10n.text("Added “%@”.", item.name)
                 changed()
             } catch { report(error) }
             busy = false
@@ -888,19 +898,22 @@ struct MusicExtensionsSection: View {
     var body: some View {
         Section {
             ForEach(model.items) { item in
-                HStack {
-                    Toggle(isOn: model.enabled(item)) {
+                // The trash inside the switch's label, as for LX Music sources, so the switches line up.
+                Toggle(isOn: model.enabled(item)) {
+                    HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.name)
                             let detail = MusicExtensionsModel.detail(item)
                             if !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
                         }
+                        Spacer(minLength: 8)
+                        Button(role: .destructive) { model.remove(item) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(L10n.text("Remove “%@”", item.name))
                     }
-                    .settingsSwitch()
-                    Button(role: .destructive) { model.remove(item) } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel(L10n.text("Remove “%@”", item.name))
                 }
+                .settingsSwitch()
+                .accessibilityAction(named: L10n.text("Remove “%@”", item.name)) { model.remove(item) }
             }
             HStack {
                 TextField(L10n.text("Extension address"), text: $address)

@@ -253,7 +253,7 @@ public struct Site: Identifiable, Codable, Hashable, Sendable {
             #endif
             return L10n.text("Requires script engine")
         case .jar:
-            if isBuiltIn { return L10n.text("Built-in") }
+            if isBuiltIn { return L10n.text("Recommended") }
             if runsLitePort { return L10n.text("Lite JavaScript · JAR fallback") }
             #if os(macOS) || os(iOS) || os(tvOS)
             if EmbeddedJarHost.available { return L10n.text("Local JAR · Experimental") }
@@ -269,9 +269,11 @@ public struct LiveSource: Identifiable, Codable, Hashable, Sendable {
     public let name: String
     public let url: URL
     public let headers: [String: String]
+    /// The program guide its subscription entry names (`epg`): an XMLTV file, or an address with `{name}` (#802).
+    public let guide: String?
     public var id: String { name + "|" + url.absoluteString }
-    public init(name: String, url: URL, headers: [String: String] = [:]) {
-        self.name = name; self.url = url; self.headers = headers
+    public init(name: String, url: URL, headers: [String: String] = [:], guide: String? = nil) {
+        self.name = name; self.url = url; self.headers = headers; self.guide = guide
     }
 }
 
@@ -310,7 +312,8 @@ public struct Subscription: Codable, Sendable {
                   let url = (try? WebAddress.resolve(address, relativeTo: origin)) ?? LiveCatalog.platformAddress(address) else { return nil }
             var headers = v["header"]?.object?.compactMapValues(\.string) ?? [:]
             if let ua = v["ua"]?.string { headers["User-Agent"] = ua }
-            return LiveSource(name: Site.localizedName(v) ?? v["name"]?.string ?? L10n.text("Live TV"), url: url, headers: headers)
+            let guide = v["epg"]?.string.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+            return LiveSource(name: Site.localizedName(v) ?? v["name"]?.string ?? L10n.text("Live TV"), url: url, headers: headers, guide: guide)
         }
         guard !sites.isEmpty || !lives.isEmpty else { throw TVError.invalidConfiguration }
         return Subscription(origin: origin, importedAt: Date(), sites: sites, lives: lives, raw: raw)
@@ -326,6 +329,13 @@ public struct Subscription: Codable, Sendable {
             || (parts.count == 2 && (parts[1] == "#genre#" || parts[1].contains("://")))
         return playlist && (try? Playlist.parse(text, origin: origin)) != nil
     }
+}
+
+/// Another address of a live channel, with the request headers it needs (#679).
+public struct ChannelLine: Codable, Hashable, Sendable {
+    public let url: URL
+    public let headers: [String: String]
+    public init(url: URL, headers: [String: String] = [:]) { self.url = url; self.headers = headers }
 }
 
 public struct Channel: Identifiable, Codable, Hashable, Sendable {
@@ -344,6 +354,19 @@ public struct Channel: Identifiable, Codable, Hashable, Sendable {
     public var skips: [PlaybackSkip] = []
     /// The Bilibili part playing, for its chapters, subtitles and the account's watch progress. Not saved.
     public var bilibiliPart: BilibiliAPI.Part? = nil
+    /// A live channel's other addresses, after `url`: a playlist that lists the channel more than once in a group, or
+    /// TVBox's `url1#url2`. The player tries the next when one doesn't play (#679). Saved with a favorite.
+    public var alternates: [ChannelLine] = []
+    /// The playlist's `tvg-id` (or `tvg-name`) for the channel, to find it in a program guide (#802). Saved.
+    public var guideID: String? = nil
+    /// Every address of the channel as a channel of its own, `url` first; just the channel when it has one.
+    public var lines: [Channel] {
+        [self] + alternates.map {
+            var line = Channel(name: name, group: group, url: $0.url, logo: logo, headers: $0.headers)
+            line.guideID = guideID
+            return line
+        }
+    }
     public var displayGroup: String { group.isEmpty ? L10n.text("Ungrouped") : group }
     public var id: String { group + "|" + name + "|" + url.absoluteString }
     public init(name: String, group: String = "", url: URL, logo: URL? = nil, headers: [String: String] = [:], skipScope: String? = nil,
@@ -353,7 +376,21 @@ public struct Channel: Identifiable, Codable, Hashable, Sendable {
         self.historyContext = historyContext; self.resumePosition = resumePosition; self.subtitles = subtitles
         self.skips = skips; self.bilibiliPart = bilibiliPart
     }
-    private enum CodingKeys: String, CodingKey { case name, group, url, logo, headers, skipScope, historyContext, resumePosition }
+    private enum CodingKeys: String, CodingKey { case name, group, url, logo, headers, skipScope, historyContext, resumePosition, alternates, guideID }
+    /// Favorites saved before channels had lines have none.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        group = try values.decode(String.self, forKey: .group)
+        url = try values.decode(URL.self, forKey: .url)
+        logo = try values.decodeIfPresent(URL.self, forKey: .logo)
+        headers = try values.decode([String: String].self, forKey: .headers)
+        skipScope = try values.decodeIfPresent(String.self, forKey: .skipScope)
+        historyContext = try values.decodeIfPresent(PlaybackHistoryContext.self, forKey: .historyContext)
+        resumePosition = try values.decodeIfPresent(Double.self, forKey: .resumePosition)
+        alternates = try values.decodeIfPresent([ChannelLine].self, forKey: .alternates) ?? []
+        guideID = try values.decodeIfPresent(String.self, forKey: .guideID)
+    }
 }
 
 // MARK: - 二开扩展（映匣融合层）

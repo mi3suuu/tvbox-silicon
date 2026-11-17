@@ -193,22 +193,15 @@ struct MusicView: View {
         } else if search.results.isEmpty && search.collections.isEmpty && search.busy {
             ProgressView().frame(maxWidth: .infinity).padding(.vertical, 80)
         } else if search.failed {
-            ErrorStateCard(title: L10n.text("Unable to Search Music"), message: L10n.text("Check your network connection and try again."),
+            ErrorState(title: L10n.text("Unable to Search Music"), message: L10n.text("Check your network connection and try again."),
                            details: failureDetails(search), retry: { search.search(query, immediately: true) }, busy: search.busy)
                 .padding(.vertical, 24).tvFocusSection()
         } else if search.filteredOut {
-            ContentUnavailableView {
-                Label(L10n.text("No Matches"), systemImage: "line.3.horizontal.decrease.circle")
-            } description: {
-                Text(L10n.text("No results match these filters. Only songs QQ Music lists have a year, genre and language."))
-            } actions: {
-                Button(L10n.text("Reset Filters")) { search.setFilter(MusicSearchFilter()) }
-            }
-            .frame(maxWidth: .infinity).padding(.vertical, 60).tvFocusSection()
+            EmptyResults(symbol: "line.3.horizontal.decrease", title: L10n.text("No Matches"),
+                         message: L10n.text("No results match these filters. Only songs QQ Music lists have a year, genre and language."),
+                         action: L10n.text("Reset Filters"), actionSymbol: "arrow.counterclockwise") { search.setFilter(MusicSearchFilter()) }
         } else if search.empty {
-            ContentUnavailableView(L10n.text("No Matching Songs"), systemImage: "music.note",
-                                   description: Text(L10n.text("Try the song's full name, or add the artist.")))
-                .frame(maxWidth: .infinity).padding(.vertical, 60)
+            EmptyResults(symbol: "music.note", title: L10n.text("No Matching Songs"), message: L10n.text("Try the song's full name, or add the artist."))
         } else {
             ForEach(search.failures.keys.sorted { $0.rawValue < $1.rawValue }, id: \.self) { platform in
                 StatusNotice(text: L10n.text("%@ didn't answer, so these results are from the other catalog.", platform.name))
@@ -315,12 +308,24 @@ private struct MusicHome: View {
         let library = store.music.library
         let browse = store.musicBrowse
         let resumable = store.music.track == nil ? library.resumePoint : nil
+        let downloads = !MusicDownloadLibrary.shared.items.isEmpty
+        let empty = library.history.isEmpty && resumable == nil && !downloads && browse.sections.isEmpty && !browse.loading
+        #if os(tvOS)
+        // Apple TV has no toolbar button for Music Settings (where music sources are added), so the page offers it
+        // here once there is something to show; the empty page below has its own (#1024).
+        if !empty {
+            Button(action: openSettings) { Label(L10n.text("Music Settings"), systemImage: "slider.horizontal.3") }
+                .glassPill()
+                .accessibilityIdentifier("music.settings")
+                .padding(.bottom, 20)
+        }
+        #endif
         if let point = resumable, let track = point.queue.current {
             MusicContinueCard(point: point, track: track).padding(.bottom, 20)
         }
         let liked = store.favorites.musicTracks.count
         if liked > 0 { MusicLikedLink(count: liked).padding(.bottom, 20) }
-        // 只按本环境判：另一个环境下的歌不该在这里点亮「下载」入口。
+        // [mi3s] 二开：只按本环境判 —— 另一个环境下的歌不该在这里点亮「下载」入口。
         let downloads = !MusicDownloadLibrary.shared.visibleItems.isEmpty
         if downloads { MusicDownloadsLink().padding(.bottom, 20) }
         if !browse.sections.isEmpty {
@@ -357,7 +362,7 @@ private struct MusicHome: View {
                     MusicTrackRow(track: track) { store.music.play(track) }
                 }
             }
-        } else if resumable == nil && !downloads && browse.sections.isEmpty && !browse.loading {
+        } else if empty {
             EmptyPage(symbol: "music.note", title: L10n.text("Search for a Song"),
                       message: L10n.text("Type a song's name, or its name and the artist. Yingxia finds the recording and plays it from the best channel available, lossless first."),
                       action: L10n.text("Music Settings"), actionSymbol: "slider.horizontal.3", perform: openSettings)
@@ -507,7 +512,7 @@ struct MusicCollectionView: View {
                 #endif
                 if loading && tracks.isEmpty { ProgressView().frame(maxWidth: .infinity).padding(.vertical, 60) }
                 if let error {
-                    ErrorStateCard(title: L10n.text("Unable to Load Songs"), message: L10n.text("Check your network connection and try again."),
+                    ErrorState(title: L10n.text("Unable to Load Songs"), message: L10n.text("Check your network connection and try again."),
                                    details: error, retry: { Task { await load() } }, busy: loading)
                         .padding(.vertical, 24).tvFocusSection()
                 }
@@ -629,9 +634,8 @@ struct MusicLikedView: View {
             LazyVStack(alignment: .leading, spacing: MusicLayout.rowSpacing) {
                 header(tracks).padding(.bottom, 20)
                 if tracks.isEmpty {
-                    ContentUnavailableView(L10n.text("No Liked Songs"), systemImage: "heart",
-                                           description: Text(L10n.text("Like a song from its menu, and it waits here, ready to play as one list.")))
-                        .frame(maxWidth: .infinity).padding(.vertical, 60)
+                    EmptyResults(symbol: "heart", title: L10n.text("No Liked Songs"),
+                                 message: L10n.text("Like a song from its menu, and it waits here, ready to play as one list."))
                 }
                 ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
                     HStack(spacing: 10) {

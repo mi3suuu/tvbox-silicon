@@ -66,6 +66,8 @@ typealias MusicTrack = TVCore.MusicTrack
     private var lyricsTask: Task<Void, Never>?
     private var cache = MusicStreamCache()
     private var recovery = MusicRecovery()
+    private var interruption = MusicInterruption()
+    private var interruptionObserver: NSObjectProtocol?
     private var itemObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
     private var observers: [NSObjectProtocol] = []
@@ -102,6 +104,10 @@ typealias MusicTrack = TVCore.MusicTrack
         // to a receiver that can play video, and an Android TV box's AirPlay app then plays the FLAC itself: with
         // static on some songs, or not at all (-11870, "external playback not supported for asset") (#376).
         player.allowsExternalPlayback = false
+        #if DEBUG
+        // `-qaMute 1`: QA runs on a shared Mac play silently, as the video player does.
+        if UserDefaults.standard.bool(forKey: "qaMute") { player.isMuted = true }
+        #endif
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
             MainActor.assumeIsolated { self?.tick(time) }
         }
@@ -109,6 +115,14 @@ typealias MusicTrack = TVCore.MusicTrack
             let status = player.timeControlStatus
             Task { @MainActor [weak self] in self?.statusChanged(status) }
         }
+        #if !os(macOS)
+        // An alarm, a call or Siri pauses the player; it plays again when the system says it may (#803).
+        interruptionObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] note in
+            let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue
+            let options = AVAudioSession.InterruptionOptions(rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+            MainActor.assumeIsolated { self?.interrupted(began: began, mayResume: options.contains(.shouldResume)) }
+        }
+        #endif
     }
 
     var busy: Bool { phase == .resolving || phase == .loading }
@@ -295,6 +309,7 @@ typealias MusicTrack = TVCore.MusicTrack
 
     func pause() {
         guard phase == .playing || phase == .loading else { return }
+        interruption.viewerPaused()
         player.pause(); phase = .paused
         saveResumePoint(force: true)
     }
@@ -373,7 +388,7 @@ typealias MusicTrack = TVCore.MusicTrack
                 self.start(selection, at: at, run: run)
             } catch {
                 guard self.generation == run else { return }
-                self.songFailed(MusicProviderError(error), run: run)
+                self.songFailed(MusicProviderError(error), run: run, channelsAsked: resolver.hasChannels)
             }
         }
     }
@@ -515,10 +530,13 @@ typealias MusicTrack = TVCore.MusicTrack
     }
 
     /// No channel could play the song: skip it while a queue goes on, otherwise stop and say why.
-    private func songFailed(_ error: MusicProviderError, run: UUID, message: String? = nil) {
+    private func songFailed(_ error: MusicProviderError, run: UUID, message: String? = nil, channelsAsked: Bool = true) {
         consecutiveFailures += 1
-        if let queue, queue.skipsAfterFailure(consecutive: consecutiveFailures), let title = track?.title {
-            notice = L10n.text("Skipped “%@”: %@", title, message ?? error.localizedDescription)
+        // With no channel at all, the next song fails the same way: stop and say so. LX Music sources that had nothing
+        // for this song may have the next one (#1206).
+        if let queue, queue.skipsAfterFailure(error, consecutive: consecutiveFailures, channelsAsked: channelsAsked), let title = track?.title {
+            let reason = error == .noChannels ? L10n.text("No LX Music source could play it.") : message ?? error.localizedDescription
+            notice = L10n.text("Skipped “%@”: %@", title, reason)
             Diagnostics.shared.record(.warning, "music", "skipped after: \(error.detail)")
             phase = .resolving
             Task { [weak self] in
@@ -628,10 +646,23 @@ typealias MusicTrack = TVCore.MusicTrack
         case .waitingToPlayAtSpecifiedRate:
             if phase == .playing { phase = .loading }
         case .paused:
-            if phase == .playing { phase = .paused }
+            if phase == .playing { phase = .paused; interruption.systemPaused() }
         @unknown default: break
         }
     }
+
+    #if !os(macOS)
+    private func interrupted(began: Bool, mayResume: Bool) {
+        if began {
+            interruption.began(playing: phase == .playing || phase == .loading)
+            return
+        }
+        let paused = phase == .paused || phase == .loading && player.timeControlStatus == .paused
+        guard interruption.ended(shouldResume: mayResume, paused: paused), track != nil, hasStream else { return }
+        Diagnostics.shared.record(.info, "music", "plays again after an interruption")
+        activateAudioSession(); player.play(); phase = .loading
+    }
+    #endif
 
     private func tearDownItem() {
         itemObservation = nil; pictureObservation = nil
