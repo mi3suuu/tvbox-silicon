@@ -39,6 +39,20 @@ struct ProxySettingsView: View {
                 }
                 SettingsActionRow(title: L10n.text("Add Proxy")) { adding = true }
             }
+            // 被 Loon 的**域名/IP 规则**判成直连、而直连又打不开的站点。
+            //
+            // Loon 的顺序是「域名规则 → IP 规则 → 其余（含 SRC-PORT）」，所以这些站无论
+            // 我们发哪条腿，Loon 都会按规则直连 —— 只能显式写进它的规则里。
+            // 之前把入口放在「检测到 Loon 预设」那块，没重新检测就不渲染，
+            // 而且还要已经有记录才出现 —— 等于观众永远看不到。改成常驻。
+            SettingsGroup(title: L10n.text("Sites That Must Use a Node"),
+                          footer: L10n.text("A site your Loon rules already classify as direct cannot be re-routed by this app. The ones detected so far are listed here: subscribe them in Loon and they will be forced through your node.")) {
+                SettingsRow(symbol: "list.bullet", tint: .secondary,
+                            title: L10n.text("Recorded: %@", "\(ForcedNodeHosts.shared.hosts.count)"),
+                            subtitle: ForcedNodeHosts.shared.hosts.prefix(3).joined(separator: ", "))
+                SettingsActionRow(title: L10n.text("Subscribe in Loon")) { openInLoon() }
+                SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
+            }
             // 默认出口：多台代理时，「源路由 = 代理」该从哪条腿出去，必须能指定。
             //
             // ⛔ 没有这一块时它是**静默失效**的：`fallbackEndpoint` 在「配了两台以上又没指定」
@@ -81,15 +95,6 @@ struct ProxySettingsView: View {
                 // 换节点、更新远程规则集都不需要再动它。
                 SettingsActionRow(title: ruleCopied ? L10n.text("Rule Copied") : L10n.text("Copy Loon Rule")) {
                     copyLoonRule()
-                }
-                // 比粘贴更省事：规则文件由本机托管，Loon 自己订阅它。
-                // 需要逐站覆盖的域名（被 Loon 的域名/IP 规则判成直连那些）会随学习自动进这份文件。
-                if let schemeURL = hostedRulesSchemeURL {
-                    SettingsActionRow(title: L10n.text("Subscribe in Loon")) {
-                        #if os(iOS)
-                        UIApplication.shared.open(schemeURL)
-                        #endif
-                    }
                 }
                 SettingsRow(symbol: "arrow.triangle.branch", tint: .secondary, title: L10n.text("Proxy %@", LoonSRCPortRule.range),
                             subtitle: L10n.text("Dialled for sources you route through a proxy."))
@@ -223,6 +228,21 @@ struct ProxySettingsView: View {
         guard let extra = ForcedNodeHosts.shared.ruleFragment(fallbackTarget: LoonPreset.defaultGroupName)
         else { return LoonSRCPortRule.fragment }
         return LoonSRCPortRule.fragment + "\n\n" + extra
+    }
+
+    /// 让 Loon 订阅本机托管的规则文件。
+    ///
+    /// 没有记录、或中继还没起来时也照常打开 —— 只是内容为空。
+    /// 隐藏这个按钮只会让观众找不到它（上一版就是这么错的）。
+    private func openInLoon() {
+        let hosted = LocalProxyServer.shared.baseSync?.port.flatMap { LoonScheme.hostedRulesURL(port: $0) }
+            ?? URL(string: "http://127.0.0.1:1/loon/rules.list")!
+        guard let schemeURL = LoonScheme.importRules(hosted) else { return }
+        #if os(iOS)
+        UIApplication.shared.open(schemeURL)
+        #elseif os(macOS)
+        NSWorkspace.shared.open(schemeURL)
+        #endif
     }
 
     /// `loon://import?rules=<本机托管的规则文件>`；中继没起来或没有记录时不给这个入口。
