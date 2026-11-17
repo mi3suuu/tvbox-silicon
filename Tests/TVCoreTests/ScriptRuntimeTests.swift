@@ -145,3 +145,38 @@ export default {
     #expect(ScriptAssets.resolve("lib/cat.js", from: "https://x.example/a.js") == "assets://js/lib/cat.js")
     #expect(ScriptAssets.bundled("assets://js/lib/../../../etc/passwd") == nil)
 }
+
+/// 站点普遍拿 `crypto.getRandomValues` 生成 salt，并有 `if (!crypto?.getRandomValues)` 的前置检查。
+/// QuickJS 不自带 Web Crypto —— 之前直接就是「缺少安全随机数能力」，整个源被判死。
+/// 这条测试同时钉住三件事：有接口、真填了非零字节、两次不同（真随机而不是占位）。
+@Test func webCryptoRandomIsAvailableToScripts() async throws {
+    let source = #"""
+    export default {
+        async home() {
+            const a = new Uint8Array(16);
+            crypto.getRandomValues(a);
+            const b = new Uint8Array(16);
+            crypto.getRandomValues(b);
+            return { class: [], checks: {
+                present: typeof crypto.getRandomValues === 'function',
+                filled: Array.from(a).some(v => v !== 0),
+                varies: Array.from(a).join() !== Array.from(b).join(),
+                uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID())
+            }};
+        }
+    };
+    """#
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("script-crypto-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let session = try await ScriptSession.start(api: "https://scripts.example/rng.js", key: "test", ext: "", profile: folder.appendingPathComponent("profile"), label: "test", source: source)
+    defer { session.close() }
+    let envelope = try await session.call([:])
+    let result = try #require(envelope["result"]?.string, "\(envelope)")
+    let home = try JSONDecoder().decode([String: JSONValue].self, from: Data(result.utf8))
+    let checks = try #require(home["checks"]?.object)
+    #expect(checks["present"] == .bool(true))
+    #expect(checks["filled"] == .bool(true))
+    #expect(checks["varies"] == .bool(true))
+    #expect(checks["uuid"] == .bool(true))
+}
