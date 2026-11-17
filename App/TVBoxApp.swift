@@ -310,26 +310,41 @@ struct SubscriptionImportView: View {
 enum LoonConfigProbe {
     static func logOnce() {
         guard let endpoint = CustomProxyStore.shared.endpoints.first else { return }
-        var components = URLComponents()
-        components.scheme = "http"
-        // ⛔ 不能用端点里存的地址：那是上一次网络的快照（真机上记着家里的 192.168.124.55，
-        // 换到热点后这个地址已经不存在）。按当前网络重算。
-        components.host = ProxyDialHost.primary(for: endpoint)
-        // Loon 的配置 API 走 Wi-Fi 访问的 HTTP 端口，与代理端口不是同一个。
-        components.port = endpoint.port == 7221 ? 7222 : endpoint.port
-        components.path = "/loonapi/v1/config/file.conf"
-        guard let url = components.url else { return }
+        // 候选顺序：按当前网络重算的地址 → 它的退路 → 端点里存的原始地址。
+        // 只试第一个会在「Loon 在别的机器上」时误报读不到；三条都失败才值得报警。
+        let plan = LocalNetwork.plan(stored: endpoint.host, currentIPv4: LocalNetwork.currentIPv4)
+        let apiPort = endpoint.port == 7221 ? 7222 : endpoint.port
+        var urls: [URL] = []
+        for host in [plan.primary, plan.fallback, endpoint.host].compactMap({ $0 }) {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = host
+            components.port = apiPort
+            components.path = "/loonapi/v1/config/file.conf"
+            if let url = components.url, !urls.contains(url) { urls.append(url) }
+        }
+        guard !urls.isEmpty else { return }
         Task {
-            do {
-                let preset = try await LoonPreset.load(from: url)
-                Diagnostics.shared.record(.info, "egress",
-                    "loon config wifi=\(preset.sharesOnLAN) http=\(preset.httpPort) socks=\(preset.socksPort)"
-                    + " portRule=\(String(describing: preset.portRule))"
-                    + " target=\(preset.portRuleTarget ?? "-")"
-                    + " directLine=\(preset.hasDirectLine) legacyWide=\(preset.hasLegacyWideRange)")
-            } catch {
+            var lastError: Error?
+            for url in urls {
+                do {
+                    let preset = try await LoonPreset.load(from: url)
+                    Diagnostics.shared.record(.info, "egress",
+                        "loon config host=\(url.host ?? "-") wifi=\(preset.sharesOnLAN)"
+                        + " http=\(preset.httpPort) socks=\(preset.socksPort)"
+                        + " portRule=\(String(describing: preset.portRule))"
+                        + " target=\(preset.portRuleTarget ?? "-")"
+                        + " directLine=\(preset.hasDirectLine)"
+                        + " legacyWide=\(preset.hasLegacyWideRange)")
+                    return
+                } catch {
+                    lastError = error
+                }
+            }
+            if let lastError {
+                let tried = urls.compactMap(\.host).joined(separator: "/")
                 Diagnostics.shared.record(.warning, "egress",
-                    "could not read Loon's config at \(components.host ?? "-"):\(components.port ?? 0) — \(error.localizedDescription)")
+                    "could not read Loon's config at \(tried):\(apiPort) — \(lastError.localizedDescription)")
             }
         }
     }
