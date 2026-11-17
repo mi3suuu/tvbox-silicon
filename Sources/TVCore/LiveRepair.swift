@@ -62,10 +62,14 @@ public enum LiveRepair {
         var text = text
         if skipsAds, !master {
             // 与 HLSProxy 同一个顺序：先剥**结构上的固定前缀**（免学习），再剔中段广告。
-            if let prefixed = AdPrefix.strip(text, origin: origin) {
+            let ad = AdPrefix.inspect(text, origin: origin)
+            if let prefixed = ad.result {
                 Diagnostics.shared.record(.info, "player",
-                    "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath) groups=\(prefixed.droppedGroups)")
+                    "ads removed segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath) groups=\(prefixed.droppedGroups)")
                 text = prefixed.text
+            } else {
+                Diagnostics.shared.record(.info, "player",
+                    "ads none reason=\(ad.verdict.code) host=\(origin.host() ?? "-")")
             }
             if let cleaned = AdSkip.clean(text, origin: origin) {
                 Diagnostics.shared.record(.info, "player", "ads removed runs=\(cleaned.runs) seconds=\(Int(cleaned.seconds)) host=\(cleaned.host)")

@@ -52,6 +52,50 @@ public enum AdPrefix {
     /// 全片至少这么长才动（短片的前几秒本来就是内容）。
     public static let shortestVideo = 120.0
 
+    /// 为什么没有去广告 —— 让 App 在**用户机器上**自己说清楚。
+    ///
+    /// ⛔ 这是本轮补齐的关键能力：此前判据不命中时一律静默返回 `nil`，
+    ///    界面上和日志里都看不出「到底是没广告、还是判据不认识这个源」。
+    ///    结果就是只能在开发机上逐个源抓包排查 —— 而实际环境里大量 CDN
+    ///    在开发机网络下根本连不上（实测 video32.balecao.com 的 TLS 直接断），
+    ///    那些源永远查不到。把判定理由带出来，用户点到哪条片子，
+    ///    日志里就有那条片子为什么不去的结论。
+    public enum Verdict: Equatable, Sendable {
+        /// 不是已完结的 media playlist（母清单或直播）。
+        case notMediaPlaylist
+        /// 没有分片。
+        case empty
+        /// 太短，前几秒本来就是内容。
+        case tooShort
+        /// 所有分片来自同一目录 —— 广告不以独立分段存在，结构判据不适用。
+        case singleSource
+        /// 目录太平均，不像「一个主片 + 若干广告」。
+        case noDominantSource
+        /// 小目录占比过高，更像多路正片而不是广告。
+        case adsTooLarge
+        /// 小目录带 MAP/BYTERANGE 等依赖，删了会破坏正片。
+        case dependencyInAds
+        /// 去掉了全部内容（判据出错时自我保护）。
+        case wouldRemoveEverything
+        /// 真的去掉了。
+        case removed(segments: Int, seconds: Double)
+
+        /// 给日志/诊断用的稳定短码（不带关联值，便于按字符串聚合统计）。
+        public var code: String {
+            switch self {
+            case .notMediaPlaylist: return "not-media-playlist"
+            case .empty: return "empty"
+            case .tooShort: return "too-short"
+            case .singleSource: return "single-source"
+            case .noDominantSource: return "no-dominant-source"
+            case .adsTooLarge: return "ads-too-large"
+            case .dependencyInAds: return "dependency-in-ads"
+            case .wouldRemoveEverything: return "would-remove-everything"
+            case .removed: return "removed"
+            }
+        }
+    }
+
     public struct Result: Equatable, Sendable {
         /// 去掉广告后的清单文本。
         public let text: String
@@ -101,9 +145,26 @@ public enum AdPrefix {
         var group: String
     }
 
+    /// 剥掉外来分片广告，**并说明为什么没剥**。
+    ///
+    /// 与 `strip` 的区别只有返回值：这里永远给出一个 `Verdict`，
+    /// 调用方可以把它写进诊断，让用户机器上也能看出判据在哪一步放弃。
+    public static func inspect(_ text: String, origin: URL) -> (result: Result?, verdict: Verdict) {
+        guard text.contains("#EXT-X-ENDLIST"), !text.contains("#EXT-X-STREAM-INF") else {
+            return (nil, .notMediaPlaylist)
+        }
+        let outcome = strip(text, origin: origin, diagnose: true)
+        return (outcome.result, outcome.verdict)
+    }
+
     /// 剥掉外来分片广告。不是这种形态时返回 `nil`，调用方原样放行。
     public static func strip(_ text: String, origin: URL) -> Result? {
-        guard text.contains("#EXT-X-ENDLIST"), !text.contains("#EXT-X-STREAM-INF") else { return nil }
+        strip(text, origin: origin, diagnose: false).result
+    }
+
+    private static func strip(_ text: String, origin: URL,
+                             diagnose: Bool) -> (result: Result?, verdict: Verdict) {
+        guard text.contains("#EXT-X-ENDLIST"), !text.contains("#EXT-X-STREAM-INF") else { return (nil, .notMediaPlaylist) }
 
         var header: [String] = []
         var segments: [Segment] = []
@@ -125,7 +186,7 @@ public enum AdPrefix {
                 if started { pending.append(line) } else { header.append(line) }
                 continue
             }
-            guard started, let url = URL(string: value, relativeTo: origin)?.absoluteURL else { return nil }
+            guard started, let url = URL(string: value, relativeTo: origin)?.absoluteURL else { return (nil, .empty) }
             segments.append(Segment(tags: pending, address: value, url: url,
                                     duration: duration, discontinuity: discontinuity,
                                     group: group(of: url)))
@@ -133,16 +194,19 @@ public enum AdPrefix {
             discontinuity = false
             duration = 0
         }
-        guard !segments.isEmpty else { return nil }
+        guard !segments.isEmpty else { return (nil, .empty) }
 
         let total = segments.reduce(0) { $0 + $1.duration }
-        guard total >= shortestVideo else { return nil }
+        guard total >= shortestVideo else { return (nil, .tooShort) }
 
         // ① 按时长给目录排序，最高者 = 正片主目录。
         var byGroup: [String: Double] = [:]
         for segment in segments { byGroup[segment.group, default: 0] += segment.duration }
-        guard let main = byGroup.max(by: { $0.value < $1.value }) else { return nil }
-        guard main.value >= total * smallestMainShare else { return nil }
+        guard let main = byGroup.max(by: { $0.value < $1.value }) else { return (nil, .empty) }
+        // 单目录 = 广告不以独立分段存在（实测 9 个 json.php 类源就是这种），
+        // 结构判据在这里天然不适用，只能交给内容指纹。
+        guard byGroup.count > 1 else { return (nil, .singleSource) }
+        guard main.value >= total * smallestMainShare else { return (nil, .noDominantSource) }
 
         // ② 其余目录里，占比够小的才算广告。
         var dropped: Set<String> = []
@@ -152,7 +216,8 @@ public enum AdPrefix {
             dropped.insert(group)
             droppedSeconds += seconds
         }
-        guard !dropped.isEmpty, droppedSeconds <= total * largestTotal else { return nil }
+        guard !dropped.isEmpty else { return (nil, .noDominantSource) }
+        guard droppedSeconds <= total * largestTotal else { return (nil, .adsTooLarge) }
 
         // ⛔ **只删开头的前缀，绝不删中插。**
         //
@@ -189,9 +254,9 @@ public enum AdPrefix {
         }
 
         // ② 至少还要留下正片；一段都不剩说明判据出错了，放行。
-        guard !kept.isEmpty, removedCount > 0 else { return nil }
+        guard !kept.isEmpty, removedCount > 0 else { return (nil, .wouldRemoveEverything) }
         // 删掉的比例过高同样说明判据不适用（那可能是多路正片而不是广告）。
-        guard removedSeconds <= total * largestTotal else { return nil }
+        guard removedSeconds <= total * largestTotal else { return (nil, .adsTooLarge) }
 
         // ③ 被丢的段里若带 KEY / MAP 之类，要看它是不是**广告自己**的。
         //
@@ -202,7 +267,7 @@ public enum AdPrefix {
         for segment in segments where dropped.contains(segment.group) {
             for tag in segment.tags where !tag.hasPrefix("#EXTINF:") {
                 if tag.hasPrefix("#EXT-X-KEY:") { continue }
-                return nil
+                return (nil, .dependencyInAds)
             }
         }
 
@@ -222,13 +287,14 @@ public enum AdPrefix {
         lines.append("#EXT-X-ENDLIST")
 
         let mainPath = main.key.split(separator: "/").suffix(2).joined(separator: "/")
-        return Result(text: lines.joined(separator: "\n") + "\n",
-                      segments: removedCount,
-                      seconds: removedSeconds,
-                      mainPath: mainPath,
-                      droppedGroups: dropped.count,
-                      keptMidrolls: 0,
-                      removedSecondsForDiagnostics: removedSeconds)
+        let result = Result(text: lines.joined(separator: "\n") + "\n",
+                            segments: removedCount,
+                            seconds: removedSeconds,
+                            mainPath: mainPath,
+                            droppedGroups: dropped.count,
+                            keptMidrolls: 0,
+                            removedSecondsForDiagnostics: removedSeconds)
+        return (result, .removed(segments: removedCount, seconds: removedSeconds))
     }
 
     /// 分组键：目录部分（去掉文件名）。

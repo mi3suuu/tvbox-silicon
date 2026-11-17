@@ -237,3 +237,115 @@ private func bodySeconds(_ text: String) -> Double {
         }
     }
 }
+
+// MARK: - 失败原因（Verdict）：让用户机器上也能看出缺口在哪
+
+@Test func aSingleSourcePlaylistSaysSoInsteadOfSilentlyDoingNothing() throws {
+    // 实测有 9 个「json.php」类源（香奶儿/淫水机/91麻豆/Madouse/成人19/美少女/黄AV/白嫖）
+    // 的分片全是 index_000.ts 这种扁平命名，**只有一个目录** ——
+    // 广告不以独立分段存在，结构判据天然不适用。
+    // 以前这种情况静默返回 nil，界面上和日志里都看不出区别，
+    // 用户只会觉得「去广告怎么没反应」。现在必须明确报 single-source。
+    let flat = """
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:5
+    #EXT-X-PLAYLIST-TYPE:VOD
+    #EXTINF:5.0,
+    index_000.ts
+    #EXTINF:5.0,
+    index_001.ts
+    #EXTINF:5.0,
+    index_002.ts
+    #EXTINF:5.0,
+    index_003.ts
+    #EXTINF:5.0,
+    index_004.ts
+    #EXTINF:5.0,
+    index_005.ts
+    #EXTINF:5.0,
+    index_006.ts
+    #EXTINF:5.0,
+    index_007.ts
+    #EXTINF:5.0,
+    index_008.ts
+    #EXTINF:5.0,
+    index_009.ts
+    #EXTINF:5.0,
+    index_010.ts
+    #EXTINF:5.0,
+    index_011.ts
+    #EXTINF:5.0,
+    index_012.ts
+    #EXTINF:5.0,
+    index_013.ts
+    #EXTINF:5.0,
+    index_014.ts
+    #EXTINF:5.0,
+    index_015.ts
+    #EXTINF:5.0,
+    index_016.ts
+    #EXTINF:5.0,
+    index_017.ts
+    #EXTINF:5.0,
+    index_018.ts
+    #EXTINF:5.0,
+    index_019.ts
+    #EXTINF:5.0,
+    index_020.ts
+    #EXTINF:5.0,
+    index_021.ts
+    #EXTINF:5.0,
+    index_022.ts
+    #EXTINF:5.0,
+    index_023.ts
+    #EXTINF:5.0,
+    index_024.ts
+    #EXT-X-ENDLIST
+    """
+    let outcome = AdPrefix.inspect(flat, origin: origin)
+    #expect(outcome.result == nil)
+    #expect(outcome.verdict == .singleSource,
+            "扁平命名的单目录清单必须报 single-source，实际 \(outcome.verdict.code)")
+}
+
+@Test func aPlaylistWithAdsReportsRemovedWithCounts() throws {
+    let text = try playlist("Y2")
+    let outcome = AdPrefix.inspect(text, origin: origin)
+    #expect(outcome.result != nil)
+    guard case .removed(let segments, let seconds) = outcome.verdict else {
+        Issue.record("应有 removed verdict，实际 \(outcome.verdict.code)")
+        return
+    }
+    #expect(segments > 0)
+    #expect(seconds > 20)   // 玉兔前缀 26.07s
+}
+
+@Test func liveAndMasterPlaylistsReportTheirOwnReasons() throws {
+    let live = try playlist("A").replacingOccurrences(of: "#EXT-X-ENDLIST", with: "")
+    #expect(AdPrefix.inspect(live, origin: origin).verdict == .notMediaPlaylist)
+
+    let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\n720/index.m3u8\n"
+    #expect(AdPrefix.inspect(master, origin: origin).verdict == .notMediaPlaylist)
+}
+
+@Test func aShortClipReportsToShortRatherThanSilence() throws {
+    var lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:4", "#EXT-X-PLAYLIST-TYPE:VOD"]
+    for i in 0..<10 { lines += ["#EXTINF:4.0,", "/ad/x/\(i).ts"] }
+    for i in 0..<3 { lines += ["#EXTINF:4.0,", "/body/y/\(i).ts"] }
+    lines.append("#EXT-X-ENDLIST")
+    let outcome = AdPrefix.inspect(lines.joined(separator: "\n"), origin: origin)
+    #expect(outcome.result == nil)
+    #expect(outcome.verdict == .tooShort, "实际 \(outcome.verdict.code)")
+}
+
+@Test func everyVerdictHasADistinctStableCode() {
+    // code 要能按字符串聚合统计；重复就等于统计口径被污染。
+    let all: [AdPrefix.Verdict] = [
+        .notMediaPlaylist, .empty, .tooShort, .singleSource, .noDominantSource,
+        .adsTooLarge, .dependencyInAds, .wouldRemoveEverything, .removed(segments: 1, seconds: 1)
+    ]
+    let codes = all.map(\.code)
+    #expect(Set(codes).count == codes.count, "存在重复 code: \(codes)")
+    #expect(codes.allSatisfy { !$0.isEmpty })
+}

@@ -121,10 +121,16 @@ actor HLSProxy {
                 // 而番茄这类源的广告前缀只是**另一个目录**（主机可能相同），
                 // 它认不出来 → 原来这条路上广告一律被放行。
                 if AdSkip.enabled {
-                    if let prefixed = AdPrefix.strip(playlist, origin: response.url ?? url) {
+                    let ad = AdPrefix.inspect(playlist, origin: response.url ?? url)
+                    if let prefixed = ad.result {
                         Diagnostics.shared.record(.info, "player",
-                            "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath) groups=\(prefixed.droppedGroups)")
+                            "ads removed segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) main=\(prefixed.mainPath) groups=\(prefixed.droppedGroups)")
                         text = prefixed.text
+                    } else {
+                        // 没去掉也要留痕：用户机器上才能看出是「这个源没广告」
+                        // 还是「判据不认识这种结构」。此前静默返回 nil，只能靠开发机逐个抓包。
+                        Diagnostics.shared.record(.info, "player",
+                            "ads none reason=\(ad.verdict.code) host=\(response.url?.host() ?? url.host() ?? "-")")
                     }
                     if let cleaned = AdSkip.clean(text, origin: response.url ?? url) {
                         Diagnostics.shared.record(.info, "player", "ads removed runs=\(cleaned.runs) seconds=\(Int(cleaned.seconds)) host=\(cleaned.host)")
