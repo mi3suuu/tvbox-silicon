@@ -322,16 +322,25 @@ struct AdTrimOverlay: View {
         return min(max(Double(x / width) * duration, 0), duration)
     }
 
-    /// 拖动时把画面 seek 过去 —— 用户要的就是"看着那一帧在剪"。
+    /// 拖动时把画面跳过去 —— 但用**大容差**预览版，不是精确 seek。
+    ///
+    /// ⛔ 这里原来调的是 `session.seek(to:)`（零容差精确 seek）：
+    ///    拖动时每秒发几十次，解码器每次都要从关键帧逐帧解到目标帧，
+    ///    请求在 AVPlayer 里排队积压 —— 表现就是"终点手柄完全不跟手"。
+    ///    现在走 `previewSeek`（±1s 容差 + 取消排队中的旧 seek），
+    ///    松手才用精确 seek 落定到用户真正想剪的那一帧。
     private func previewSeek(to t: Double) {
         guard duration > 0 else { return }
         if !scrubbing { scrubbing = true }
-        session.seek(to: clamped(t))
+        session.previewSeek(to: clamped(t))
     }
 
     private func endDrag() {
         scrubbing = false
+        // 松手：精确落定到手柄所指的那一帧（预览是大容差，可能差近 1 秒）。
+        let exact = dragging == .end ? end : start
         dragging = nil
+        session.seek(to: clamped(exact))
     }
 
     private func save() async {

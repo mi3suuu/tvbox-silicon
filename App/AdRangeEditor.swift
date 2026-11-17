@@ -47,6 +47,14 @@ struct AdRangeEditor: View {
 
     var body: some View {
         NavigationStack {
+            // ⛔ 这里原来是**裸 `Form`** —— iOS 深色模式下它自带灰底、分组标题用
+            //    `.secondary` 灰字、正文也是系统灰，于是整个页面是「灰底灰字」。
+            //    用户报的「标记广告区间还是灰底白底灰字根本看不清楚」就是它。
+            //
+            //    改法：与设置页用同一套 `SettingsStyle` —— 表单底色透明、
+            //    露出 App 自己的画布色；行底用 `SettingsStyle.rowFill`；
+            //    所有正文改成 `.primary`（浅色下纯黑 / 深色下纯白），
+            //    次级信息才用 `.secondary`，且不承载关键数字。
             Form {
                 Section {
                     row(title: L10n.text("Ad starts at"), value: $start, editing: $editingStart,
@@ -145,10 +153,11 @@ struct AdRangeEditor: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("\(EpisodeSkipSettings.formatTime(ad.start)) – \(EpisodeSkipSettings.formatTime(min(ad.end, duration)))")
-                                        .font(.subheadline).monospacedDigit()
+                                        .font(.subheadline.weight(.semibold)).monospacedDigit()
+                                        .foregroundStyle(.primary)
                                     Text(ad.marked ? L10n.text("Marked by hand")
                                                    : L10n.text("Found automatically"))
-                                        .font(.caption).foregroundStyle(.secondary)
+                                        .font(.caption).foregroundStyle(.primary.opacity(0.75))
                                 }
                                 Spacer()
                                 Button(role: .destructive) {
@@ -165,6 +174,8 @@ struct AdRangeEditor: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(SettingsStyle.rowFill.opacity(0.5))
             .navigationTitle(L10n.text("Mark Ad Range"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

@@ -49,9 +49,17 @@ public enum LiveRepair {
     static func rewrite(_ text: String, origin: URL, skipsAds: Bool = false) -> String {
         let master = text.contains("#EXT-X-STREAM-INF")
         var text = text
-        if skipsAds, !master, let cleaned = AdSkip.clean(text, origin: origin) {
-            Diagnostics.shared.record(.info, "player", "ads removed runs=\(cleaned.runs) seconds=\(Int(cleaned.seconds)) host=\(cleaned.host)")
-            text = cleaned.text
+        if skipsAds, !master {
+            // 与 HLSProxy 同一个顺序：先剥**结构上的固定前缀**（免学习），再剔中段广告。
+            if let prefixed = AdPrefix.strip(text, origin: origin) {
+                Diagnostics.shared.record(.info, "player",
+                    "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) path=\(prefixed.path)")
+                text = prefixed.text
+            }
+            if let cleaned = AdSkip.clean(text, origin: origin) {
+                Diagnostics.shared.record(.info, "player", "ads removed runs=\(cleaned.runs) seconds=\(Int(cleaned.seconds)) host=\(cleaned.host)")
+                text = cleaned.text
+            }
         }
         func resolve(_ value: String) -> String {
             guard let url = URL(string: value, relativeTo: origin)?.absoluteURL else { return value }

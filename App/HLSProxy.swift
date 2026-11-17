@@ -115,9 +115,21 @@ actor HLSProxy {
             if let playlist = String(data: raw, encoding: .utf8), playlist.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#EXTM3U") {
                 mime = "application/vnd.apple.mpegurl"
                 var text = playlist
-                if AdSkip.enabled, let cleaned = AdSkip.clean(playlist, origin: response.url ?? url) {
-                    Diagnostics.shared.record(.info, "player", "ads removed runs=\(cleaned.runs) seconds=\(Int(cleaned.seconds)) host=\(cleaned.host)")
-                    text = cleaned.text
+                // 两级：先按**结构**剥固定前缀（免学习），再按 host/family 剔中段广告。
+                //
+                // 顺序不能反：`AdSkip.clean` 要求广告与正片"来源不同"，
+                // 而番茄这类源的广告前缀只是**另一个目录**（主机可能相同），
+                // 它认不出来 → 原来这条路上广告一律被放行。
+                if AdSkip.enabled {
+                    if let prefixed = AdPrefix.strip(playlist, origin: response.url ?? url) {
+                        Diagnostics.shared.record(.info, "player",
+                            "ad prefix stripped segments=\(prefixed.segments) seconds=\(Int(prefixed.seconds)) path=\(prefixed.path)")
+                        text = prefixed.text
+                    }
+                    if let cleaned = AdSkip.clean(text, origin: response.url ?? url) {
+                        Diagnostics.shared.record(.info, "player", "ads removed runs=\(cleaned.runs) seconds=\(Int(cleaned.seconds)) host=\(cleaned.host)")
+                        text = cleaned.text
+                    }
                 }
                 data = Data(rewrite(text, origin: response.url ?? url).utf8)
             } else { data = MediaPayload.transportStream(raw); if data.count != raw.count { mime = "video/mp2t" } }
