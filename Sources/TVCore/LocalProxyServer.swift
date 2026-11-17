@@ -614,15 +614,23 @@ public final class LocalProxyServer: @unchecked Sendable {
         // CONNECT — which is what `SRC-PORT` matches. Measured: dialling a bare IP from the DIRECT
         // range bypassed the node that the same request took from the Proxy range or from an
         // ephemeral port. Domain rules still win over `SRC-PORT`; see `SRCPortPool`.
-        // 没有这一行，一个刚关掉的连接会把端口按 `TIME_WAIT` 扣住几十秒，
-        // 而池子只有 100 个口 —— 真机上表现为连点几部剧就整段 `NWError 48`。
         params.allowLocalEndpointReuse = true
         let lane: SRCPortPool.Lane = proxy == nil ? .direct : .proxy
+        // 代理腿默认**不绑** 41500-41599。
+        //
+        // 真相在用户的那份 Loon 配置里：`SRC-PORT,41500-41599,节点选择`。绑这一段等于把所有
+        // 「设成代理」的源整体推给境外节点，国内 api 和视频 CDN 立刻不可用
+        // （`NWError -9816` / `-1200`），而同一个源「直连 + Loon」是好的 —— 差别只在 Loon
+        // 拿到这条连接后按哪条规则处理。不绑端口，Loon 就按它自己的域名 / `GEOIP,CN,DIRECT`
+        // 走，也就是用户「直连」时那条已经验证能播的路。
+        //
+        // 想恢复「代理 = 强制走节点」的语义，在设置里打开 `forceNodeLane`。
+        let wantsPortLane = proxy == nil || CustomProxyStore.shared.forceNodeLane
         var sourcePort: UInt16?
-        if bindSourcePort, let port = SRCPortPool.shared.acquire(lane) {
+        if bindSourcePort, wantsPortLane, let port = SRCPortPool.shared.acquire(lane) {
             sourcePort = port
             params.requiredLocalEndpoint = .hostPort(host: "0.0.0.0", port: NWEndpoint.Port(rawValue: port)!)
-        } else if bindSourcePort {
+        } else if bindSourcePort, wantsPortLane {
             // Lane exhausted: this request goes out on an ephemeral port, so Loon falls back to its
             // own rules for it. Worth a line, because the symptom is "the proxy did not apply to
             // this one request" with nothing else to go on.

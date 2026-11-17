@@ -251,6 +251,10 @@ import Testing
     ///    走代理时那条 TCP 连接是 Network 自己拨向代理的，`requiredLocalEndpoint`
     ///    要穿过隐私上下文/隧道那一层才生效 —— 直连段的成功不能替它作证。
     @Test func theProxyLaneDialsTheProxyFromTheProxyRange() async throws {
+        // 「代理 = 强制走节点」是要显式打开的（默认不绑端口段，见 `forceNodeLane`）。
+        let previous = CustomProxyStore.shared.forceNodeLane
+        CustomProxyStore.shared.forceNodeLane = true
+        defer { CustomProxyStore.shared.forceNodeLane = previous }
         let spy = try PortSpy()
         try await spy.start()
         defer { spy.stop() }
@@ -290,6 +294,9 @@ import Testing
     /// 这条测试要证的是：目标是公网域名时，SOCKS5 握手那条连接也是从**代理段**端口拨出去的。
     /// （目标不能是私网/回环地址 —— 系统代理栈对它们有隐式 bypass，测出来是假阴性。）
     @Test func theSocksLaneDialsLoonFromTheProxyRange() async throws {
+        let previous = CustomProxyStore.shared.forceNodeLane
+        CustomProxyStore.shared.forceNodeLane = true
+        defer { CustomProxyStore.shared.forceNodeLane = previous }
         let socks = try SocksSpy()
         try await socks.start()
         defer { socks.stop() }

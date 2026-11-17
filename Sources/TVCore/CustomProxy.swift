@@ -253,6 +253,20 @@ public final class CustomProxyStore: @unchecked Sendable {
         }
     }
 
+    /// 代理腿是否绑 `41500-41599`，让 Loon 的 `SRC-PORT` 规则把它推进自己的策略组。
+    ///
+    /// 默认**关**。真机上这一段几乎总是被写成 `SRC-PORT,41500-41599,节点选择`：
+    /// 于是所有「设成代理」的源都被推去境外节点，国内 api 与视频 CDN 直接不可用
+    /// （`NWError -9816` / `-1200`），而同一个源在「直连 + Loon」下是好的。
+    /// 不绑端口时 Loon 会按它自己的域名 / `GEOIP,CN,DIRECT` 规则走 —— 那才是用户配这套东西的本意。
+    /// 只有在真的想让「代理」= 「强制走节点」时才打开它。
+    public static let forceNodeLaneKey = "proxyForceNodeLane.v1"
+
+    public var forceNodeLane: Bool {
+        get { lock.withLock { defaults.bool(forKey: Self.forceNodeLaneKey) } }
+        set { lock.withLock { defaults.set(newValue, forKey: Self.forceNodeLaneKey) } }
+    }
+
     /// 直连不通时该从哪台代理出去。
     ///
     /// 两条规则，都刻意保守：
