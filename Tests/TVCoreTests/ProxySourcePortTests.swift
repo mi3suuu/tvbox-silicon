@@ -412,6 +412,81 @@ import Testing
         }
     }
 
+    /// 返回固定 m3u8 的源站：子清单用绝对路径、分片用相对路径、KEY 用属性 URI ——
+    /// 这三种写法播放器都会按 assetURL 解析，中继必须全部改写。
+    private final class PlaylistSpy: @unchecked Sendable {
+        let listener: NWListener
+        let queue = DispatchQueue(label: "test.playlist.spy")
+        let body: String
+
+        init(body: String) throws {
+            self.body = body
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: "0.0.0.0", port: .any)
+            listener = try NWListener(using: parameters)
+        }
+
+        var port: UInt16 { listener.port?.rawValue ?? 0 }
+
+        func start() async throws {
+            listener.newConnectionHandler = { [self] connection in
+                connection.start(queue: queue)
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n"
+                        + "Content-Length: \(self.body.utf8.count)\r\nConnection: close\r\n\r\n"
+                    connection.send(content: Data(head.utf8) + Data(self.body.utf8),
+                                    completion: .contentProcessed { _ in connection.cancel() })
+                }
+            }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: continuation.resume()
+                    case .failed(let error): continuation.resume(throwing: error)
+                    default: break
+                    }
+                }
+                listener.start(queue: queue)
+            }
+        }
+
+        func stop() { listener.cancel() }
+    }
+
+    /// 清单里每个地址都要换成本中继地址，否则播放器会去 `127.0.0.1:<port>/2026/…`
+    /// 这种没有 `/d` `/p` 前缀的路径 —— 中继解析不出来只能断开，播放器报 -1005。
+    /// 真机表现就是「海报页能进、点进去播不了」，而同一个源直连能播。
+    @Test func aPlaylistIsRewrittenSoEveryChildURLComesBackThroughTheRelay() async throws {
+        let body = """
+        #EXTM3U
+        #EXT-X-KEY:METHOD=AES-128,URI="key.key"
+        #EXT-X-STREAM-INF:BANDWIDTH=2000000
+        /2026/hls/index.m3u8
+        seg001.ts
+        https://cdn.example.com/seg002.ts
+        """
+        let spy = try PlaylistSpy(body: body)
+        try await spy.start()
+        defer { spy.stop() }
+
+        let base = try await LocalProxyServer.shared.base()
+        let target = URL(string: "http://\(Self.lanHost):\(spy.port)/2026/main/index.m3u8")!
+        let (data, _) = try await URLSession.shared.data(from: LocalProxyServer.directURL(base: base, url: target))
+        let text = String(decoding: data, as: UTF8.self)
+        let prefix = base.absoluteString
+
+        #expect(text.contains("#EXTM3U"))
+        #expect(!text.contains("\n/2026/hls/index.m3u8"), "绝对路径的子清单没被改写")
+        #expect(text.contains("\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/hls/index.m3u8"),
+                "子清单应当被包装成中继地址，实际：\(text)")
+        #expect(text.contains("\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/main/seg001.ts"),
+                "相对路径分片没有按清单目录解析，实际：\(text)")
+        #expect(text.contains("\(prefix)d/https/cdn.example.com/443/seg002.ts"),
+                "绝对地址分片没有被包装，实际：\(text)")
+        #expect(text.contains("URI=\"\(prefix)d/http/\(Self.lanHost)/\(spy.port)/2026/main/key.key\""),
+                "EXT-X-KEY 的 URI 没有改写，实际：\(text)")
+    }
+
     /// 一个「收下连接就断」的坏代理：模拟真机上 Loon 交出去之后目标侧直接关会话
     /// （`Network.NWError -9816`，服务器未通知即关闭）。
     private final class BrokenProxy: @unchecked Sendable {

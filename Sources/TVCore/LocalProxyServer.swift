@@ -303,6 +303,9 @@ public final class LocalProxyServer: @unchecked Sendable {
         private var directFallback = false
         private var systemFallback = false
         private var retrying = false
+        /// 当前这条隧道实际走的代理（降级直连后为 nil）。重写播放清单时要用它，
+        /// 否则清单里的子清单会继续走已经失败的那条腿。
+        private var effectiveProxyID: String?
 
         init(connection: NWConnection, head: String, leftover: Data, scheme: String,
              host: String, port: UInt16, path: String, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
@@ -369,6 +372,9 @@ public final class LocalProxyServer: @unchecked Sendable {
 
         func finishedRetrying() { lock.withLock { retrying = false } }
 
+        func setEffectiveProxy(_ id: String?) { lock.withLock { effectiveProxyID = id } }
+        var proxyInUse: String? { lock.withLock { effectiveProxyID } }
+
         /// 最后一条腿：整个请求交给系统网络栈（`URLSession`）。
         ///
         /// 真机上有一类目标，中继自己建 TLS 时必然被对端关会话（`NWError -9816`），
@@ -395,6 +401,7 @@ public final class LocalProxyServer: @unchecked Sendable {
             state.connection.cancel()
             return
         }
+        state.setEffectiveProxy(endpoint?.id)
         let upstream = NWConnection(host: NWEndpoint.Host(state.host), port: port, using: built.parameters)
         // The port comes back to the pool as soon as this connection is done with it — on failure
         // and on cancellation as well as on a clean close, or a long session would drain the range.
@@ -412,7 +419,8 @@ public final class LocalProxyServer: @unchecked Sendable {
                 let dial = dialHost.map { " dial=\($0)" } ?? ""
                 Diagnostics.shared.record(.debug, "proxy",
                     "upstream ready \(via)\(viaPort)\(dial) \(state.scheme)://\(state.host):\(state.port)")
-                sendAndRelay(state.connection, upstream: upstream, head: state.head, leftover: state.leftover)
+                sendAndRelay(state.connection, upstream: upstream, head: state.head,
+                             leftover: state.leftover, state: state)
             case .failed(let error), .waiting(let error):
                 // 端口绑定失败先于一切：不是目标不通，是这个源端口还在 TIME_WAIT / 被占用。
                 // 换端口重来，别把请求判死（真机上一次端口粘滞曾让 558 条请求全灭）。
@@ -669,7 +677,8 @@ public final class LocalProxyServer: @unchecked Sendable {
         return (params, sourcePort)
     }
 
-    private static func sendAndRelay(_ connection: NWConnection, upstream: NWConnection, head: String, leftover: Data) {
+    private static func sendAndRelay(_ connection: NWConnection, upstream: NWConnection,
+                                     head: String, leftover: Data, state: TunnelState) {
         // Both sides are plaintext HTTP at this point — TLS, when the target had it, ended at this
         // server — so the request bytes go out as written and the response comes back as the origin
         // wrote it. No reframing, no chunked-encoding handling, nothing to get wrong per format.
@@ -680,8 +689,119 @@ public final class LocalProxyServer: @unchecked Sendable {
                 connection.cancel(); upstream.cancel(); return
             }
             Self.pump(from: connection, to: upstream)
-            Self.pump(from: upstream, to: connection)
+            Self.relayResponse(from: upstream, to: connection, state: state)
         })
+    }
+
+    /// 回程：普通响应原样流式转发；播放清单（m3u8）要先重写再发。
+    ///
+    /// ## 为什么清单必须重写
+    ///
+    /// 播放器拿到的是 `http://127.0.0.1:<port>/p/<id>/https/<host>/443/<path>/index.m3u8`。
+    /// m3u8 里的子清单和分片基本都以 `/` 开头的绝对路径书写（实测
+    /// `sryndbsfvd.com/20261117/…/index.m3u8` 里就是 `/20261117/…/2000kb/hls/index.m3u8`）。
+    /// 播放器按 assetURL 解析这个路径，得到 `http://127.0.0.1:<port>/20261117/…` ——
+    /// 这个请求没有 `/d/` 或 `/p/` 前缀，中继解析不出来，只能断开，
+    /// 播放器看到的就是 `-1005 网络连接已中断`。直连模式下 assetURL 是原始域名，
+    /// 同一个绝对路径解析出来是对的，所以「直连能播、代理不能播」。
+    ///
+    /// 重写把每个子清单 / 分片 / KEY-URI 都换成同一条腿的中继地址，
+    /// 于是播放全程走同一个出口（用户要的「播放也走我选的节点」），而不是掉回直连。
+    private static func relayResponse(from upstream: NWConnection, to client: NWConnection,
+                                      state: TunnelState, buffer: Data = Data()) {
+        upstream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
+            var bytes = buffer
+            if let data { bytes.append(data) }
+            if isPlaylist(state: state, head: bytes) {
+                if complete || error != nil || bytes.count > 8 << 20 {
+                    let rewritten = rewritePlaylist(bytes, state: state)
+                    client.send(content: rewritten, isComplete: true,
+                                completion: .contentProcessed { _ in client.cancel() })
+                    upstream.cancel()
+                } else {
+                    relayResponse(from: upstream, to: client, state: state, buffer: bytes)
+                }
+                return
+            }
+            if !bytes.isEmpty {
+                client.send(content: bytes, completion: .contentProcessed { _ in })
+            }
+            if error != nil || complete {
+                client.send(content: nil, completion: .contentProcessed { _ in client.cancel() })
+            } else {
+                pump(from: upstream, to: client)
+            }
+        }
+    }
+
+    /// 这条响应是不是播放清单：看请求路径后缀，再看响应头。
+    private static func isPlaylist(state: TunnelState, head: Data) -> Bool {
+        let path = state.path.lowercased()
+        if path.contains(".m3u8") || path.contains(".m3u") { return true }
+        guard let text = String(data: head.prefix(2048), encoding: .utf8) else { return false }
+        let lower = text.lowercased()
+        return lower.contains("application/vnd.apple.mpegurl") || lower.contains("application/x-mpegurl")
+    }
+
+    /// 把清单里所有 URL（子清单、分片、`EXT-X-KEY` / `EXT-X-MAP` 的 URI）换成本中继地址。
+    private static func rewritePlaylist(_ data: Data, state: TunnelState) -> Data {
+        guard let headerEnd = data.range(of: Data("\r\n\r\n".utf8)) else { return data }
+        let headText = String(decoding: data[..<headerEnd.lowerBound], as: UTF8.self)
+        let body = String(decoding: data[headerEnd.upperBound...], as: UTF8.self)
+        guard let asset = URL(string: "\(state.scheme)://\(state.host):\(state.port)\(state.path)") else { return data }
+        // 相对路径要相对清单所在目录解析，不是站点根。
+        let directory = asset.deletingLastPathComponent()
+
+        var lines: [String] = []
+        for line in body.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { lines.append(line); continue }
+            if trimmed.hasPrefix("#") {
+                lines.append(rewriteAttributeURI(line, base: directory, state: state))
+                continue
+            }
+            if let absolute = URL(string: trimmed, relativeTo: directory)?.absoluteURL {
+                lines.append(wrap(absolute, state: state) ?? line)
+            } else {
+                lines.append(line)
+            }
+        }
+        let rewrittenBody = lines.joined(separator: "\n")
+
+        var headers = headText.components(separatedBy: "\r\n").filter { line in
+            let lower = line.lowercased()
+            // 长度和连接语义都由我们重写，原值一定不对。
+            return !lower.hasPrefix("content-length:") && !lower.hasPrefix("connection:")
+                && !lower.hasPrefix("transfer-encoding:")
+        }
+        headers.append("Content-Length: \(rewrittenBody.utf8.count)")
+        headers.append("Connection: close")
+        return Data((headers.joined(separator: "\r\n") + "\r\n\r\n" + rewrittenBody).utf8)
+    }
+
+    /// 标签行里的 `URI="…"`（`#EXT-X-KEY:METHOD=AES-128,URI="key.key"`）。
+    private static func rewriteAttributeURI(_ line: String, base: URL, state: TunnelState) -> String {
+        guard let start = line.range(of: "URI=\"") else { return line }
+        let rest = line[start.upperBound...]
+        guard let end = rest.firstIndex(of: "\"") else { return line }
+        let uri = String(rest[..<end])
+        guard let absolute = URL(string: uri, relativeTo: base)?.absoluteURL,
+              let wrapped = wrap(absolute, state: state) else { return line }
+        return line.replacingCharacters(in: start.upperBound..<end, with: wrapped)
+    }
+
+    /// 一个原始地址 → 中继地址（沿用这条隧道当前实际走的那条腿）。
+    private static func wrap(_ url: URL, state: TunnelState) -> String? {
+        guard let base = LocalProxyServer.shared.baseSync else { return nil }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else { return nil }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        let path = url.path.isEmpty ? "/" : url.path
+        let query = url.query.map { "?\($0)" } ?? ""
+        let prefix = state.proxyInUse.map { "p/\($0)" } ?? "d"
+        // 走代理时，子清单里的域名可能与主清单不同（CDN 跳域名），这里保留它自己的 host，
+        // 由代理腿统一决定出口，而不是强行塞回主清单的 host。
+        return "\(base.absoluteString)\(prefix)/\(scheme)/\(host)/\(port)\(path)\(query)"
     }
 
     private static func pump(from source: NWConnection, to destination: NWConnection) {
