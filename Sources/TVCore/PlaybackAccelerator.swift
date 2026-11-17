@@ -98,9 +98,23 @@ public final class PlaybackAccelerator: @unchecked Sendable {
     ///   这里不直接读它，否则非隔离语境引用主 actor 属性编不过。
     public func session(for url: URL, headers: [String: String], lanes: Int) async -> Session? {
         guard Self.canAccelerate(url) else { return nil }
-        let width = max(1, min(lanes, 8))
+        // ⛔ 并发车道要跟着「当前有几路在播」缩。
+        //
+        // 每路默认取用户设置的连接数（6～8 条隧道），而代理端口段只有 100 个
+        // （`SRCPortPool.proxyRange` = 41500-41599，Loon 规则也只认这一段）。
+        // 20 个小窗同时播就是 120～160 条：端口用尽后 `acquire` 返回 nil，
+        // 连接退回临时端口 —— 那些端口不在规则段里，Loon 按自己的域名规则判，
+        // 于是我们费了半天劲的出口选择在这一段等于失效。
+        //
+        // 所以按活跃路数均分一个固定预算：1 路仍可拿满 8 条，20 路各 2 条（共 40 条）。
+        let active = lock.withLock { routes.count }
+        let width = Self.laneAllowance(active: active, requested: lanes)
         // 1 条连接等于没加速 —— 直接不包装，省掉一跳回环。
         guard width > 1 else { return nil }
+        if width < lanes {
+            Diagnostics.shared.record(.debug, "player",
+                "accelerator lanes \(lanes) → \(width) (active=\(active), budget=\(Self.laneBudget))")
+        }
 
         do {
             let base = try await base()
@@ -132,6 +146,20 @@ public final class PlaybackAccelerator: @unchecked Sendable {
             Diagnostics.shared.record(.warning, "playback", "accelerator unavailable: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// 全局车道预算：同时播 20 路也别把代理端口段挤爆。
+    ///
+    /// 48 不是随便定的：代理端口段 100 个，留一半余量给接口/海报/清单那些短连接
+    /// （它们也走同一个池）。单路时仍给满 8 条，不影响「只有一集在播」的绝大多数场景。
+    static let laneBudget = 48
+
+    /// 当前活跃 `active` 路时，新来的这一路最多能拿几条连接。
+    ///
+    /// 纯函数，便于测试。下限 2：1 条等于没加速（调用方会直接返回 nil，连回环都不走）。
+    static func laneAllowance(active: Int, requested: Int) -> Int {
+        let fair = max(2, laneBudget / max(1, active + 1))
+        return max(1, min(requested, 8, fair))
     }
 
     /// 释放一个会话。页面离开时调用，避免 `routes` 无限增长。

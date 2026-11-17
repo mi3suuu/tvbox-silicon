@@ -10,7 +10,13 @@ public actor ScriptRuntime {
     public static var available: Bool { ScriptAssets.root != nil }
     private var sessions: [String: ScriptSession] = [:]
     private var recent: [String] = []
-    private static let maximumSessions = 10
+    /// 同时保留多少个源的脚本运行时。
+    ///
+    /// ⛔ 不能是 10：坞里能同时挂 20 个小窗（`VideoTaskCenter`），每个窗一个源，
+    ///    每个源一个会话。第 11 个一起播就会把最早那个踢掉，它下一次取片单要重新
+    ///    冷启 QuickJS（导入 cheerio / 编译脚本），表现为「播放器还开着，切回那一窗
+    ///    转半天」。QuickJS 单个会话只有几 MB，24 个也不至于压垮内存。
+    private static let maximumSessions = 24
 
     public func request(site: Site, scriptURL: URL, params: [String: String], http: HTTPClient, origin: URL) async throws -> [String: JSONValue] {
         let started = ContinuousClock.now

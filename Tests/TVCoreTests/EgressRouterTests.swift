@@ -363,3 +363,28 @@ import Testing
         #expect(!EgressRouter.isLearnableProxyFailure(.badURL))
     }
 }
+
+/// 20 个小窗同时播时，加速器不能各按 8 条连接去占端口。
+///
+/// 代理端口段只有 100 个（41500-41599），而端口段就是「让 Loon 按我们的判断走」的唯一凭据：
+/// 端口用尽后退回临时端口，Loon 就按自己的域名规则判 —— 出口选择在这一段等于失效。
+@Suite struct AcceleratorLaneBudgetTests {
+    @Test func oneStreamStillGetsEverythingItAskedFor() {
+        #expect(PlaybackAccelerator.laneAllowance(active: 0, requested: 8) == 8)
+        #expect(PlaybackAccelerator.laneAllowance(active: 0, requested: 6) == 6)
+    }
+
+    @Test func twentyStreamsStayInsideThePortRange() {
+        // 稳态：已经有 19 路在播时，第 20 路拿到的车道 × 20 就是总占用。
+        let perStream = PlaybackAccelerator.laneAllowance(active: 19, requested: 8)
+        let total = perStream * 20
+        #expect(total <= 100, "20 路共占 \(total) 条连接，超过端口段")
+        #expect(total <= PlaybackAccelerator.laneBudget + 20)
+        #expect(perStream >= 2)
+    }
+
+    @Test func neverBelowTwoLanesOrAboveEight() {
+        #expect(PlaybackAccelerator.laneAllowance(active: 40, requested: 8) >= 2)
+        #expect(PlaybackAccelerator.laneAllowance(active: 0, requested: 64) == 8)
+    }
+}
