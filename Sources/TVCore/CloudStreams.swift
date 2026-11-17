@@ -177,6 +177,11 @@ private final class CloudStreamStore: @unchecked Sendable {
         return url
     }
     func stream(_ url: URL) -> CloudByteStream? { lock.withLock { streams[url] } }
+    /// 现在登记着几条云流。
+    ///
+    /// 用途只有一个：把 `CloudDevice.cacheBudget`（**进程级**总量）按路均分。
+    /// 没有它，20 个窗的云盘播放就是「每条流都以为自己是唯一的那条」。
+    var count: Int { lock.withLock { streams.count } }
 }
 
 actor CloudByteStream {
@@ -411,7 +416,9 @@ actor CloudByteStream {
     func setDuration(_ seconds: Double) {
         guard seconds.isFinite, seconds > 1, source.length > 0 else { return }
         bytesPerSecond = Double(source.length) / seconds
-        let plan = CloudBufferPlan.make(length: source.length, duration: seconds, budget: CloudDevice.cacheBudget, chunkSize: Self.chunkSize)
+        let plan = CloudBufferPlan.make(length: source.length, duration: seconds, budget: CloudDevice.cacheBudget,
+                                        chunkSize: Self.chunkSize,
+                                        share: CloudStreamStore.shared.count)
         readAheadChunks = plan.readAhead; cacheLimit = plan.cacheChunks
         growth = (Date(), 0)
         Diagnostics.shared.record(.info, "cloud.stream", "plan bitrate=\(Int(bytesPerSecond ?? 0) * 8 / 1000)kbps readAhead=\(plan.readAhead) chunks (~\(Int(plan.seconds)) s) cache=\(plan.cacheChunks) chunks connections=\(connections)...\(ceiling) device=\(CloudDevice.current.label)")

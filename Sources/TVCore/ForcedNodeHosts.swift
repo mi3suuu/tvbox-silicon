@@ -19,7 +19,12 @@ public final class ForcedNodeHosts: @unchecked Sendable {
     private static let targetKey = "forcedNodeTargetGroup.v1"
     private static let countsKey = "forcedNodeCounts.v1"
     /// 上限：观众真按这个列表维护规则时，几十条已经很多了。
-    private static let limit = 40
+    ///
+    /// 2026-11-17：40 → 80。20 个小窗播 20 个不同源时，每个源至少贡献「入口域名」，
+    /// 加上片单推导出的 CDN 域名就是 2–3 条/源 —— 40 条会在挂满 20 个窗时被写满，
+    /// 而写满是**FIFO 丢弃**：刚学到的域名把上一轮刚学会的挤掉，
+    /// 症状正是「有些窗一直取不到片单，而同样的源单独播又正常」。
+    private static let limit = 80
 
     private let defaults: UserDefaults
     private let lock = NSLock()

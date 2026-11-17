@@ -291,7 +291,17 @@ public final class EgressRouter: @unchecked Sendable {
 
         // 还没结论。同一个 host 只让一条请求去赛跑，其余先按直连走 ——
         // 它们就算失败也会因为「表里已经写明要走代理」而立刻重试，不会各自开一条代理腿。
+        //
+        // ⛔ 2026-11-17：「其余先按直连走」在 20 个小窗同时起播时是错的。
+        //    20 路一起点播，19 路盲着走直连 —— 直连被掐时每路都要先撞满 12/14 秒超时，
+        //    再回头读结论重取。用户看到的是「19 个窗转圈转一分钟后才出画面」，
+        //    而真正该做的只是**等那条赛跑出结论**（通常 <1 秒）。
+        //    所以这里改成：等一小会儿，拿到了就跟着走。
         guard beginDecision(key) else {
+            if await awaitDecision(key) {
+                return try await follow(table.leg(key), fallback: proxyLeg, url: url, headers: headers,
+                                        purpose: purpose, key: key, range: range)
+            }
             do {
                 return try await attempt(url, headers: headers, purpose: purpose, leg: .direct, range: range)
             } catch {
@@ -323,7 +333,15 @@ public final class EgressRouter: @unchecked Sendable {
             table.record(key, leg: .direct)
             return
         }
-        guard beginDecision(key) else { return }
+        // 这条 host 已经有别人在赛跑了：**等它的结论**，别各自盲跑直连。
+        //
+        // 起播路径上尤其要紧：20 个小窗同时起播时，只有一条在赛跑，
+        // 其余 19 条若直接返回，`leg(for:)` 读到的还是「没结论 → 直连」，
+        // 于是 19 个窗都拿着直连地址去建 item —— 直连被掐时全都要先失败一次。
+        guard beginDecision(key) else {
+            _ = await awaitDecision(key)
+            return
+        }
         defer { endDecision(key) }
 
         let hedge: Duration = {
@@ -789,6 +807,27 @@ public final class EgressRouter: @unchecked Sendable {
             deciding[key] = now
             return true
         }
+    }
+
+    /// 等别人把这条 host 的结论定下来（最多 `budget`），返回结论是否已经可用。
+    ///
+    /// ## 为什么是轮询而不是 continuation
+    ///
+    /// 用 continuation 要维护「谁在等」的表，并在赛跑结束时逐个 resume ——
+    /// 而 `withTaskGroup` 的胜者路径有 `cancelAll()`（被取消的那条腿不会走到 resume），
+    /// 稍不留神就是「等的人永远挂着」或「同一个 continuation resume 两次」（后者直接崩）。
+    /// 这里等的只是一个**锁定读**，60 ms 一次、最多 20 次：代价可以忽略，
+    /// 而「赛跑没结论」的语义天然正确（超时回去走直连，与改动前一致）。
+    ///
+    /// - Parameter budget: 上界。给 1.2 秒是因为直连超时是 4–6 秒、代理腿起跑最多 +0.9 秒，
+    ///   真正有结论的赛跑都在这个窗口内结束；再久就该让调用方自己走直连，不能一起挂死。
+    private func awaitDecision(_ key: String, budget: Duration = .milliseconds(1200)) async -> Bool {
+        let deadline = ContinuousClock.now + budget
+        while ContinuousClock.now < deadline {
+            if table.isProven(key) { return true }
+            try? await Task.sleep(for: .milliseconds(60))
+        }
+        return table.isProven(key)
     }
 
     private func endDecision(_ key: String) {

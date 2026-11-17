@@ -35,6 +35,19 @@ public final class LocalProxyServer: @unchecked Sendable {
     public static let shared = LocalProxyServer()
 
     private let queue = DispatchQueue(label: "tvbox.proxy.server")
+    /// 所有连接队列的公共目标：并发，但受 libdispatch 的池限制。
+    private static let connectionTarget = DispatchQueue(label: "tvbox.proxy.connections", attributes: .concurrent)
+    private static let connectionCountLock = NSLock()
+    /// 由 `connectionCountLock` 保护；`nonisolated(unsafe)` 是告诉编译器「同步由我们负责」。
+    nonisolated(unsafe) private static var connectionCount = 0
+    /// 一条新连接的串行队列（目标并发）。编号只用于诊断，不参与语义。
+    private static func connectionQueue() -> DispatchQueue {
+        connectionCountLock.lock()
+        connectionCount += 1
+        let n = connectionCount
+        connectionCountLock.unlock()
+        return DispatchQueue(label: "tvbox.proxy.conn.\(n)", target: connectionTarget)
+    }
     /// `port` is read from the main actor (`baseSync`) and written from the listener's queue, and
     /// `starting` is touched by whoever asks for the base address, so both live behind this lock.
     private let lock = NSLock()
@@ -135,6 +148,16 @@ public final class LocalProxyServer: @unchecked Sendable {
         lock.withLock { listener = server }
         let queue = self.queue
         server.newConnectionHandler = { connection in
+            // ⛔ 每条连接**自己的**串行队列，目标是一个共享的并发队列。
+            //
+            // 原来所有连接共用 `queue`（一条串行队列）：单路播放看不出问题，
+            // 20 个小窗里有几路分类到代理腿时，所有字节都要排进同一条队列
+            // —— 一条流的 `receive → send` 回调就把另一条的堵在后面。
+            // 实测「经中继只有 140–190 KB/s」正是这个形状：压不住码率不是节点慢，是我们自己排队。
+            //
+            // 每条连接仍是串行（`NWConnection` 的回调语义要求同一条连接不并发），
+            // 但不同连接之间不再互相等；线程数由 libdispatch 的并发池管，不是一连接一线程。
+            let queue = Self.connectionQueue()
             connection.start(queue: queue)
             Self.readRequest(connection, buffer: Data(), queue: queue)
         }
@@ -954,13 +977,26 @@ public final class LocalProxyServer: @unchecked Sendable {
 
     private static func pump(from source: NWConnection, to destination: NWConnection) {
         source.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
-            if let data, !data.isEmpty {
-                destination.send(content: data, completion: .contentProcessed { _ in })
+            // ⛔ 必须**等这一块发完**再读下一块。
+            //
+            // 原写法在 `send` 的 completion 里什么都不做，紧接着就递归 `receive` ——
+            // 等于把源站灌进来的字节以最快速度塞进 `NWConnection` 的发送缓冲。
+            // 对端（播放器）读得慢时，缓冲区无上界地长：内存一路涨，而**流量并没有更快**
+            // （同一个 socket）。20 路一起时这就是「越播越卡，最后被杀」。
+            //
+            // 现在 `send` 完成才继续读，反压直接落到源站 TCP 窗口上：
+            // 播放器慢 → 我们慢 → CDN 慢，内存平稳。
+            func proceed() {
+                if error != nil || complete {
+                    destination.send(content: nil, completion: .contentProcessed { _ in destination.cancel() })
+                } else {
+                    pump(from: source, to: destination)
+                }
             }
-            if error != nil || complete {
-                destination.send(content: nil, completion: .contentProcessed { _ in destination.cancel() })
+            if let data, !data.isEmpty {
+                destination.send(content: data, completion: .contentProcessed { _ in proceed() })
             } else {
-                pump(from: source, to: destination)
+                proceed()
             }
         }
     }

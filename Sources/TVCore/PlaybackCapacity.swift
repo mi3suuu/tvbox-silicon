@@ -43,7 +43,21 @@ public enum PlaybackCapacity {
     ///
     /// 暂停的那几个不占解码器、不占带宽，只保留已缓冲的一小段 —— 切过去再起播。
     /// 内存代价只在**真正在播**的那几路上，与改动前同量级。
-    public static let dock = 8
+    ///
+    /// ## 2026-11-17：8 → 20（用户要「10 个 20 个迷你小窗一起挂」）
+    ///
+    /// 卡片数涨到 20 之后，**同时解码**绝不能跟着涨到 20 —— 那不是一个数字取舍，
+    /// 是硬件的墙：iOS 同时能开的视频解码会话有上限，超了不是变慢，而是
+    /// **有些窗永远黑屏**（`AVPlayerItem` 起播后没有可用解码器）。
+    ///
+    /// 所以两件事分开（与 2026-11-16 那次同一个思路，只是这次到 20）：
+    ///   · **卡片**（挂着的观看队列）= 20；
+    ///   · **同时解码** = `decoding`（按机型 4–8，见下），其余**挂起**：
+    ///     `rate = 0` + 画面层让出 `AVPlayer`（`DockPlayerLayer`），卡片下露出海报。
+    ///
+    /// 挂起的那几个**看起来仍是一部剧**（海报 + 「已挂起」角标），点一下立刻回到预算内
+    /// 并自动续播 —— 而不是给用户 12 块黑玻璃。
+    public static let dock = 20
 
     /// 同时**解码**的上限。
     ///
@@ -62,7 +76,32 @@ public enum PlaybackCapacity {
     ///
     /// 若真机上仍出现整片卡顿，先看 `DockDecode` 探针里每路的实际解码档，
     /// 再考虑下调本值 —— 而不是直接改回去，那会让第 5–8 路又变成「点了要等」。
-    public static var decoding: Int { dock }
+    ///
+    /// ## 2026-11-17：不再等于 `dock`，改为按机型分档
+    ///
+    /// 卡片涨到 20 之后「解码 = 卡片」不成立：**iOS 的视频解码会话数有硬上限**，
+    /// 20 路同时解必然有一部分拿不到解码器（表现就是黑屏，且不会自愈）。
+    /// 这个上限不公开、随机型与分辨率变化，所以这里按**设备内存**给一个保守档位，
+    /// 并且仍然遵守「最近点的那一路优先解码」。
+    ///
+    /// ⛔ 分档的判据只能是「能不能真的跑起来」，不能是「用户希望多少路」——
+    ///    20 路里的第 9 个不是被我们拒绝，是被系统拒绝，硬上只会得到黑屏。
+    public static var decoding: Int { decodingBudget(cards: dock, memoryBytes: ProcessInfo.processInfo.physicalMemory) }
+
+    /// 给定「要挂几张卡」与「设备有多少内存」，同时解码几路。
+    ///
+    /// 纯函数，供测试直接钉住；也供以后按实际失败率下调（`dock > decoding` 是正常形态）。
+    ///
+    /// 档位依据：实测 6 GB 机型 8 路（480p 档）能同时跑；4 GB 机型 6 路开始互相抢；
+    /// 3 GB 机型 4 路是安全线。卡片本身不占解码器，所以**卡片数不参与**这个判定。
+    public static func decodingBudget(cards: Int, memoryBytes: UInt64) -> Int {
+        let gb = Double(memoryBytes) / Double(1 << 30)
+        let ceiling: Int
+        if gb <= 3.5 { ceiling = 4 }
+        else if gb <= 4.5 { ceiling = 6 }
+        else { ceiling = 8 }
+        return max(1, min(cards, ceiling))
+    }
 
     /// 前台那一集（观看页 / 全屏播放器）。iOS 的呈现现实：前台只能有一个。
     public static let foreground = 1
@@ -75,13 +114,13 @@ public enum PlaybackCapacity {
 
     /// 底层流存储（云盘 / 转封装 / DASH 清单 / 红果）应持有的槽位数。
     ///
-    /// = (坞 + 前台) × 每路 2 个槽位 = 10。
+    /// = (坞 + 前台) × 每路 2 个槽位 = 42（坞 20 之后）。
     ///
-    /// ⚠️ **内存影响必须写清楚**：`CloudByteStream` 每路最多缓存
-    /// `cacheChunks × chunkSize` = 24 × 2 MB = 48 MB。10 个槽位是理论上限，
-    /// 实际并发只会有「坞里真正在播的那几个」（用户上限 4）+ 前台 1 + 换集重叠 1~2 个。
-    /// 空槽位（已停止但未逐出的）不再持有缓存 —— `stop()` 会 `clear()` 掉。
-    /// 因此稳态内存与改动前同量级，只是不再「一超过 3 路就把正在播的那一路踢掉」。
+    /// ⚠️ **内存影响必须写清楚**：槽位只决定「谁会被逐出」，**不决定缓存上限**。
+    /// 缓存由 `CloudBufferPlan` 按设备预算算，`budget=320 MB` 时单路理论上能吃到 160 个
+    /// 2 MB 块 —— 20 路照着这个上限跑就是 6 GB，必然被系统杀掉。
+    /// 所以 2026-11-17 起 `CloudBufferPlan` 的预算要**按当前存活的云流数均分**
+    /// （`CloudStreamStore.count`），槽位多不等于内存多。
     public static let streamSlots = (dock + foreground) * streamsPerTask
 
     /// 把某个存储的 `while order.count > limit` 上限统一取这里。

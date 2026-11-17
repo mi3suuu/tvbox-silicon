@@ -1501,8 +1501,17 @@ struct VideoTaskCard: View {
                     // 它是**高频的临时操作**（切一下声音），不是破坏性的；
                     // 外沿那颗（右上）是销毁任务，两者必须在位置上分开。
                     HStack(spacing: 6) {
-                        Button { task.session.togglePlayback() } label: {
-                            Image(systemName: task.isPaused ? "play.fill" : "pause.fill")
+                        Button {
+                            // ⛔ 挂起的那一张，这颗键的语义是「**激活它**」，不是「播放它」。
+                            //
+                            // 直接 `togglePlayback()` 会绕过解码预算：12 个挂起窗各按一下，
+                            // 就真的有 20 路在解码 —— 又回到了「黑屏 + 抢解码器」那个状态，
+                            // 而且这次是我们自己放进去的。激活会把它提到队列最前，
+                            // 由 `applyMuting` 重新分配预算并续播。
+                            if isSuspended { store.videoTasks.activate(task.id) }
+                            else { task.session.togglePlayback() }
+                        } label: {
+                            Image(systemName: isSuspended || task.isPaused ? "play.fill" : "pause.fill")
                                 .contentTransition(.symbolEffect(.replace))
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(.white)
@@ -1511,7 +1520,7 @@ struct VideoTaskCard: View {
                                 .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(Text(task.isPaused ? "Play" : "Pause"))
+                        .accessibilityLabel(Text(isSuspended || task.isPaused ? "Play" : "Pause"))
 
                         DockSpeedButton(task: task)
                         DockVolumeButton(task: task, isActive: isActive,
@@ -2208,6 +2217,10 @@ struct DockManagerPanel: View {
                         if anyPlaying { t.session.player.rate = 0 }
                         else if !center.collapsed || true { t.session.togglePlayback() }
                     }
+                    // ⛔ 20 个窗时「全部继续」不能真的让 20 路一起解码 ——
+                    //    那是解码器硬上限，不是意愿问题。这里立刻按预算重算一遍：
+                    //    超出预算的重新挂起（并记下「本来在播」，轮到它时自动续上）。
+                    center.applyMuting()
                 } label: {
                     Label(center.tasks.contains { $0.session.player.rate != 0 }
                           ? L10n.text("Pause All") : L10n.text("Play All"),
@@ -2436,6 +2449,8 @@ struct DockManagerPanel: View {
 
                 Button {
                     task.session.togglePlayback()
+                    // 同上：管理器里的「播放」也不能绕过解码预算。
+                    center.applyMuting()
                 } label: {
                     Image(systemName: task.isPaused ? "play.fill" : "pause.fill")
                         .font(.system(size: 12, weight: .bold))

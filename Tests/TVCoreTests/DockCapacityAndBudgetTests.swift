@@ -9,22 +9,48 @@ struct DockCapacityAndBudgetTests {
 
     // MARK: 容量
 
-    /// 卡片上限必须够用（用户报「只能四个」）。
+    /// 卡片上限必须够用（用户报「只能四个」；2026-11-17 又提「10 个 20 个一起挂」）。
     @Test func theDockHoldsEnoughCards() {
-        #expect(PlaybackCapacity.dock >= 8, "用户报「只能四个」，至少要能挂到 8")
+        #expect(PlaybackCapacity.dock >= 20, "用户要求 10–20 个迷你小窗同时挂着")
     }
 
-    /// 2026-11-16 用户明确要求「就要同时解码」：解码上限必须等于卡片上限。
+    /// 2026-11-17：卡片不再等于解码路数。
     ///
-    /// ⛔ 这条与上一版**正好相反**（上一版要求 dock > decoding，好让第 5–8 路挂起）。
-    ///    改方向是用户的明确取舍：宁可 8 路一起解、可能互相抢带宽，
-    ///    也不要「切过去要等一秒」。判据跟着需求走，不能留着旧断言自相矛盾。
-    @Test func everyCardDecodesAtOnce() {
-        #expect(PlaybackCapacity.decoding == PlaybackCapacity.dock,
-                "用户要求同时解码：解码上限必须等于卡片上限，否则会有路被挂起")
-        // 挂起数因此恒为 0 —— 管理器里那条状态行才会显示「N 路同时播放」。
+    /// ⛔ 这条与 2026-11-16 那条**正好相反**（当时要求 decoding == dock）。
+    ///    改方向的理由不是喜好变了，是物理限制暴露了：dock 涨到 20 时
+    ///    「20 路同时解码」在 iOS 上做不到（解码会话有硬上限），硬上得到的是黑屏。
+    ///    所以现在要求：**解码 ≤ 卡片**，且解码有一个与机型无关的上限。
+    @Test func decodingStaysBelowTheCardLimit() {
+        #expect(PlaybackCapacity.decoding <= PlaybackCapacity.dock,
+                "解码路数不能超过卡片数（不然预算没有意义）")
+        #expect(PlaybackCapacity.decoding >= 4, "至少要能同时解 4 路，否则多窗没法用")
+        #expect(PlaybackCapacity.decoding <= 8, "iOS 的解码会话有限，8 是保守上限")
+        // 挂起数是「卡片 − 解码」，20 张卡时必须 > 0。
         let ids = (0..<PlaybackCapacity.dock).map { _ in UUID() }
-        #expect(DockDecodingBudget.suspendedCount(order: ids, budget: PlaybackCapacity.decoding) == 0)
+        #expect(DockDecodingBudget.suspendedCount(order: ids, budget: PlaybackCapacity.decoding)
+                == PlaybackCapacity.dock - PlaybackCapacity.decoding)
+    }
+
+    /// 解码预算按设备内存分档：内存小的机器必须更保守。
+    @Test func theDecodeBudgetFollowsDeviceMemory() {
+        let gb = UInt64(1) << 30
+        #expect(PlaybackCapacity.decodingBudget(cards: 20, memoryBytes: 3 * gb) == 4)
+        #expect(PlaybackCapacity.decodingBudget(cards: 20, memoryBytes: 4 * gb) == 6)
+        #expect(PlaybackCapacity.decodingBudget(cards: 20, memoryBytes: 8 * gb) == 8)
+        // 卡片比上限少时按卡片数（挂 3 个就没必要说「预算 8」）。
+        #expect(PlaybackCapacity.decodingBudget(cards: 3, memoryBytes: 8 * gb) == 3)
+        // 极端输入不返回 0/负数（预算 0 会让整坞都不解码）。
+        #expect(PlaybackCapacity.decodingBudget(cards: 0, memoryBytes: 8 * gb) == 1)
+    }
+
+    /// 按位置判挂起，与按 id 判必须等价（卡片视图只有位置）。
+    @Test func suspensionByPositionMatchesTheDecodeSet() {
+        let ids = (0..<20).map { _ in UUID() }
+        let budget = 8
+        let decoding = DockDecodingBudget.decodeSet(order: ids, budget: budget)
+        for (index, id) in ids.enumerated() {
+            #expect(DockDecodingBudget.isSuspended(index: index, budget: budget) == !decoding.contains(id))
+        }
     }
 
     /// 流槽位必须覆盖「全部同时解码 + 前台 + 换集重叠」。
@@ -135,3 +161,48 @@ struct DockCardClampTests {
     }
 }
 
+
+// MARK: - 画质增强的准入（20 个小窗那一轮）
+
+/// 「20 个窗 + sharper」在真机上是 2700 MB OOM。根因不是画质增强本身，
+/// 而是 `PlaybackSession` **每一路都持有一个 `VideoEnhancer`**，而开关是全局的 ——
+/// 于是 20 个窗各建一条 Metal + VideoToolbox 管线。
+///
+/// 这套断言锁住准入判据：**没有画面层的、有别人在解码的、内存紧张的，一律不许开**。
+@Suite("EnhancementBudget")
+struct EnhancementBudgetTests {
+
+    private func decide(hasSurface: Bool = true, otherDecoding: Int = 0,
+                        memoryPressure: Bool = false, constrained: Bool = false,
+                        externalPlayback: Bool = false) -> EnhancementBudget.Decision {
+        EnhancementBudget.decide(hasSurface: hasSurface, otherDecoding: otherDecoding,
+                                 memoryPressure: memoryPressure, constrained: constrained,
+                                 externalPlayback: externalPlayback)
+    }
+
+    /// 唯一的正经情形：屏上那一路、没有别的窗在解、系统状态良好。
+    @Test func aSingleForegroundPlayerMayEnhance() {
+        #expect(decide() == .on)
+    }
+
+    /// 坞卡片从来不 attach 画面层 —— 20 张卡片就是 20 个「不许」。
+    @Test func aWindowWithNoSurfaceNeverEnhances() {
+        #expect(!decide(hasSurface: false).isOn)
+    }
+
+    /// 坞里有别的路在解码时让路：这是真机 OOM 的组合（前台增强 + 小窗解码）。
+    @Test func otherDecodingWindowsMakeEnhancementYield() {
+        let decision = decide(otherDecoding: 3)
+        #expect(!decision.isOn)
+        #expect(decision.reason.contains("decoding"))
+    }
+
+    /// 内存压力 / 发热省电 / AirPlay 各自都能单独把它关掉，且原因可读（诊断要用）。
+    @Test func everyResourceReasonTurnsItOff() {
+        for decision in [decide(memoryPressure: true), decide(constrained: true),
+                         decide(externalPlayback: true)] {
+            #expect(!decision.isOn)
+            #expect(!decision.reason.isEmpty)
+        }
+    }
+}
