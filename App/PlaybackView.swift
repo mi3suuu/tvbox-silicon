@@ -77,7 +77,18 @@ import TVCore
     /// [mi3s] 二开融合（N-W5-03）：上游 1.8.11 #547 的字幕外观管线。播放器自绘层用 `Mi3sSubtitleOverlay`，
     /// 这个对象只负责「AVPlayer 自己画的那份」（画中画里尤其），并下发 `textStyleRules`。
     let subtitles = SubtitleCues()
-    private(set) var position: Double = 0
+    /// 采样得到的播放位置（每秒抄一次 `currentTime()`）。**界面不要直接读它** —— 读 `position`。
+    private var sampledPosition: Double = 0
+    /// 一次 seek 已经发出、播放器还没到位时的**乐观位置**。
+    ///
+    /// ⛔ 为什么必须有这一格：`sampledPosition` 只在采样 tick（1 秒一拍）里更新。
+    ///    松手 seek 之后要等下一拍才动 —— 坞卡片上的表现就是「拖完了线又弹回老位置，
+    ///    过一会儿才跳过去」，也就是用户报的「拖了进度不动 / 不会改变进度」。
+    ///    这里在 seek 发出的同一刻就记下目标位置，界面立刻画到新位置。
+    private var pendingSeekPosition: Double?
+
+    /// 当前播放位置（秒）。seek 之后立即反映目标位置，不等采样 tick。
+    var position: Double { pendingSeekPosition ?? sampledPosition }
     private(set) var duration: Double = 0
 
     /// 解码分辨率上限（`.zero` = 跟随源）。
@@ -371,7 +382,16 @@ import TVCore
 
     private func updateSkipping(_ item: AVPlayerItem) {
         let time = player.currentTime().seconds
-        position = time.isFinite ? max(0, time) : 0
+        let sampled = time.isFinite ? max(0, time) : 0
+        sampledPosition = sampled
+        // 采样点已经走到（或越过）乐观位置：这一次 seek 落定了，把控制权交回采样。
+        //
+        // 容差 2.5s：精确 seek 到非关键帧时 AVPlayer 会落在附近，`currentTime()` 可能
+        // 差零点几秒；而拖动松手的目标本来就允许这点误差。不设容差的话，
+        // 一个永远到不了的乐观位置会把进度条钉死在那儿（比不修更糟）。
+        if let pending = pendingSeekPosition {
+            if abs(sampled - pending) <= 2.5 { pendingSeekPosition = nil }
+        }
         // 画面比例镜像：值变了才写（见 `presentationAspect` 的注释）。
         let size = item.presentationSize
         if size.width > 0, size.height > 0 {
@@ -556,15 +576,67 @@ import TVCore
 
     /// 跳到绝对位置（秒）。进度条拖动用 —— `skip` 是相对量，表达不了「松手即定位」。
     /// 与 `skip` 共用同一套可 seek 区间夹取，超出范围会被按到区间端点。
+    ///
+    /// ⛔ 落定后**立刻**写 `pendingSeekPosition`：`sampledPosition` 要等下一拍采样 tick
+    ///    （1 秒）才跟上，中间那段时间界面读到的还是老位置 —— 松手后线弹回去再跳过来，
+    ///    用户看到的就是「拖了没反应」。这里在发 seek 的同一刻就把界面挪到目标位置。
     func seek(to seconds: Double) {
         guard let item = player.currentItem, item.status == .readyToPlay else { return }
         guard seconds.isFinite else { return }
-        let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
-        guard let range = ranges.first(where: { CMTimeRangeContainsTime($0, time: player.currentTime()) }) ?? ranges.last else { return }
-        let target = min(max(seconds, range.start.seconds), range.end.seconds)
-        guard target.isFinite else { return }
+        guard let target = Self.seekTarget(seconds, item: item, at: player.currentTime().seconds) else { return }
+        pendingSeekPosition = target
+        // 松手落定也先掐掉排队中的预览 seek：它们的目标都在手指经过的地方，
+        // 不取消的话最后一次预览可能排在这条精确 seek 之后，画面最后停在半路。
+        item.cancelPendingSeeks()
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
+        // ⛔ 兜底：乐观位置必须有寿命。
+        //
+        // 正常情况由 `updateSkipping` 在采样点追上时清掉。但有些情况采样**永远追不上**：
+        // 目标落在未缓冲区间（seek 不会完成）、换集把 item 换了、或这条源在 HLS 上
+        // 只落在两秒外的关键帧而阈值没放宽。任一种都可能让进度条**钉死在一个
+        // 到不了的位置**上，比原来的「弹回去」更难理解。
+        // 所以 3 秒后无条件交回采样值 —— 画面在哪里，线就在哪里。
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, self.pendingSeekPosition == target else { return }
+            self.pendingSeekPosition = nil
+        }
+    }
+
+    /// 把一个目标秒数钳进「这条 item 现在真的能 seek 的区间」，拿不到区间时退回时长。
+    ///
+    /// ⛔ **这一格是「拖了完全没反应」的第二个机制。**
+    ///
+    /// 原来的写法是：
+    /// ```swift
+    /// let ranges = item.seekableTimeRanges...
+    /// guard let range = ... else { return }   // ← 静默放弃
+    /// ```
+    /// HLS 源在播放器刚就绪、或正在缓冲下一段时，`seekableTimeRanges` **经常是空的**
+    /// （AVFoundation 只报「已经缓冲到的那些区间」）。而本 App 绝大部分源都是 HLS ——
+    /// 于是用户在坞卡片上拖进度条，每一次落定都走进这个 `return`：
+    /// 没有报错、没有日志、画面不动、进度不动。表现与「根本没接手势」一模一样，
+    /// 但代码看起来是「接了、也调了 seek」。用户报的正是这个。
+    ///
+    /// 现在的口径：
+    ///   · 有区间 → 按当前所在区间（找不到就用最后一段）钳，行为不变；
+    ///   · 没有区间但**时长已知** → 按 `[0, duration]` 钳，照样把 seek 发出去。
+    ///     发出去至少有两个好处：AVPlayer 会为它去请求对应的分片；
+    ///     而「已知时长」本身就说明这条 item 是有时间轴的（直播时长是 indefinite）。
+    ///   · 时长也未知（直播）→ 返回 nil，上游据此不显示可拖的时间轴。
+    private static func seekTarget(_ seconds: Double, item: AVPlayerItem, at now: Double) -> Double? {
+        guard seconds.isFinite else { return nil }
+        let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
+        if let range = ranges.first(where: { CMTimeRangeContainsTime($0, time: CMTime(seconds: now, preferredTimescale: 600)) })
+            ?? ranges.last {
+            let clamped = min(max(seconds, range.start.seconds), range.end.seconds)
+            return clamped.isFinite ? clamped : nil
+        }
+        let length = item.duration.seconds
+        guard length.isFinite, length > 0 else { return nil }
+        let clamped = min(max(seconds, 0), length)
+        return clamped.isFinite ? clamped : nil
     }
 
     /// 带**超时兜底**的 seek。
@@ -623,10 +695,7 @@ import TVCore
     func previewSeek(to seconds: Double) {
         guard let item = player.currentItem, item.status == .readyToPlay else { return }
         guard seconds.isFinite else { return }
-        let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
-        guard let range = ranges.first(where: { CMTimeRangeContainsTime($0, time: player.currentTime()) }) ?? ranges.last else { return }
-        let target = min(max(seconds, range.start.seconds), range.end.seconds)
-        guard target.isFinite else { return }
+        guard let target = Self.seekTarget(seconds, item: item, at: player.currentTime().seconds) else { return }
         // 取消尚未完成的旧 seek，否则拖动时会一串排队。
         player.currentItem?.cancelPendingSeeks()
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
@@ -1600,7 +1669,8 @@ import TVCore
         // 强持有那条 AVPlayerItem（连带它的 asset）——退出播放页后内存不释放。
         stopAdDetection()
         lastSkippedAd = nil
-        position = 0; duration = 0; editingSkip = false; resumeAfterEditing = false; seekingSegment = false
+        sampledPosition = 0; pendingSeekPosition = nil; duration = 0
+        editingSkip = false; resumeAfterEditing = false; seekingSegment = false
         onPlaybackEnded = nil; onUnplayableFile = nil
         if player.currentItem != nil {
             let seconds = player.currentTime().seconds
@@ -1662,7 +1732,7 @@ import TVCore
         skipScope = channel.skipScope
         skipSettings = skipScope.map { EpisodeSkipSettings.load(scope: $0, defaults: skipDefaults) } ?? EpisodeSkipSettings()
         skipPass = EpisodeSkipPass(); seekingSegment = false
-        position = 0; duration = 0
+        sampledPosition = 0; pendingSeekPosition = nil; duration = 0
         upcomingAttempted = false
         // Per-episode recovery state resets here so a retry that fired for the episode before doesn't
         // suppress this one's own retry, or leave a stale drop/loopback/live state behind on auto-advance.

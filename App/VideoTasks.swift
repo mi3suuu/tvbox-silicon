@@ -1301,6 +1301,62 @@ struct VideoTaskCard: View {
     ///    这正是「跟手又不抖」需要的；`@State` 每帧写入会重建卡片树。
     @GestureState private var livePan: CGSize?
 
+    // MARK: - 进度拖动（底部细线与标题栏共用同一份状态）
+
+    /// 手指拖到的进度（0…1）。nil = 没在拖，按播放进度画。
+    ///
+    /// ⛔ **一份状态，两处入口**。底部细线是 `DockProgressBar`，标题栏是那段
+    ///    `VStack`；两者都调 `scrub(_:)`，都读这里的值。
+    ///    分开各存一份的后果正是用户报的「没有真正进度条调整的样式」——
+    ///    拖标题栏时底部线一动不动、也没有读数泡。
+    @State private var scrubFraction: Double?
+    /// 节流器。用类实例而不是 `@State` 结构体：写它不进 SwiftUI 依赖图，
+    /// 拖动每帧改时间戳不会引起卡片重建（`DragAnchor` 同一理由）。
+    private final class ScrubClock { var throttle = DockScrubThrottle() }
+    @State private var scrubClock = ScrubClock()
+
+    /// 这一帧进度条该画到哪。
+    private var shownFraction: Double { scrubFraction ?? task.fraction }
+    /// 有没有手指正在抓进度。
+    private var isScrubbing: Bool { scrubFraction != nil }
+    /// 直播没有可拖的时间轴。
+    private var canScrub: Bool {
+        task.session.duration > 0 && !task.session.isLive
+    }
+
+    /// 拖动进度：`x` 是手指在控件内的横坐标，`width` 是控件宽，`ended` = 松手。
+    ///
+    /// ## 三件事，缺一件就是用户报的「拖了没用」
+    /// 1. **拖动中真的发 seek**（大容差 + 先取消排队）——只改本地变量不发 seek，
+    ///    画面一帧都不会动，「画面不会进行移动」说的就是这一格。
+    /// 2. **节流**，不是每帧都发：`onChanged` 每秒几十次，全发出去 AVPlayer 排队积压，
+    ///    画面越来越落后，比不发还糟（这就是 `previewSeek` 当初为前台修的病）。
+    /// 3. **松手发零容差精确 seek**，并立刻把进度交回播放器。
+    private func scrub(_ x: CGFloat, width: CGFloat, ended: Bool) {
+        guard canScrub else { return }
+        let f = DockScrub.fraction(x: x, width: width)
+        let duration = task.session.duration
+
+        if ended {
+            scrubClock.throttle.reset()
+            scrubFraction = f
+            if let target = DockScrub.seconds(fraction: f, duration: duration) {
+                task.session.seek(to: target)
+            }
+            // 松手后先保留一小会儿再交回播放器：`session.position` 已经做了乐观更新，
+            // 但换集/换线路时可能晚一点，这一手让线不会闪回旧值。
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(180))
+                scrubFraction = nil
+            }
+            return
+        }
+
+        scrubFraction = f
+        guard let target = DockScrub.seconds(fraction: f, duration: duration),
+              scrubClock.throttle.due(now: Date()) else { return }
+        task.session.previewSeek(to: target)
+    }
 
     /// 有手指正在抓进度条/标题栏。
     ///
@@ -1427,9 +1483,9 @@ struct VideoTaskCard: View {
                 //
                 // ⛔ 拖动手势必须挂在**比细线更高**的热区上（`contentShape` 给 22pt），
                 //    否则 2pt 的命中区用户根本按不住；视觉上仍然是细线，不占画面。
-                // ⛔ 拖动期间不能用 `task.fraction` 画：那读的是 `session.position`，
-                //    而 seek 之后位置要等下一拍 tick 才更新 —— 手指还没抬起来线就跳回去。
-                //    所以拖的时候用本地 `dragFraction`，松手才交出控制权。
+                // ⛔ 拖动期间不能用 `task.fraction` 画：`session.position` 的采样是 1 秒一拍。
+                //    所以这里画的是 `shownFraction`（拖动时是手指位置，否则是播放进度），
+                //    状态由本卡的 `scrubFraction` 统一保管，标题栏拖动也写同一份。
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 // ⛔ 进度条**必须挂在 dragSurface 之外**。
                 //
@@ -1444,7 +1500,12 @@ struct VideoTaskCard: View {
                 // 落在进度条以外的区域才轮到搬窗口。两者在层级上就分开了，
                 // 不再需要 `seekFlag` 那种运行时让路。
                 .overlay(alignment: .bottom) {
-                    DockProgressBar(task: task)
+                    // 底部细线与下方标题栏**共用同一份拖动状态**（`scrubFraction`），
+                    // 所以拖标题栏时这条线也会跟着走、也会浮出读数。
+                    DockProgressBar(task: task,
+                                    fraction: shownFraction,
+                                    isScrubbing: isScrubbing,
+                                    onScrub: scrub)
                 }
             }
             // ↓ 下方标题栏：**也用来调进度**。
@@ -1462,15 +1523,25 @@ struct VideoTaskCard: View {
             .padding(.horizontal, 10).padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            // 复用同一份 seek 实现：水平位置 → 百分比。
-            // ⛔ 用 `highPriorityGesture` 压过外层（若将来这里也被包进拖动区）。
+            // 整条标题栏接同一个拖动实现（`scrub`）—— 与底部细线共用状态与节流。
+            //
+            // ⛔ 原来这里是「每帧一次零容差精确 seek」，也就是用户报的
+            //    「拖标题栏不会改变进度、画面不移动、没有进度条调整的样式」的根因：
+            //      · 零容差 seek 要求解码器从最近关键帧逐帧解到目标帧，
+            //        每帧来一次就排队积压，画面反而越来越落后；
+            //      · 它只 seek，不写任何拖动状态 ⇒ 底部细线不动、没有标点、没有读数；
+            //      · 松手后 `session.position` 要等下一拍采样才更新 ⇒ 线弹回原处。
+            //    现在走 `scrub`：拖动中节流预览、松手精确落定、状态与细线同源。
+            //
+            // 坐标用 `.local`：标题栏自带 10pt 横向 padding，`local` 已经是它的内容坐标，
+            // 与底部条（无 padding）用同一个 `DockScrub.inset` 口径即可对齐。
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        guard task.session.duration > 0 else { return }
-                        let w = max(scaledWidth - 20, 1)   // 减去左右 padding
-                        let f = min(max((value.location.x - 10) / w, 0), 1)
-                        task.session.seek(to: f * task.session.duration)
+                        scrub(value.location.x, width: scaledWidth, ended: false)
+                    }
+                    .onEnded { value in
+                        scrub(value.location.x, width: scaledWidth, ended: true)
                     }
             )
             // ⛔ 必须是 `scaledWidth`，不是 `width`。
@@ -1576,131 +1647,97 @@ struct VideoTaskCard: View {
 /// （点外面自动关、外接键盘、VoiceOver），手搓浮层在坞这种**可拖动浮层**上
 /// 容易与拖动/缩放手势打架 —— 坞的外层就挂着 `DragGesture` 和 `MagnificationGesture`。
 ///
-/// 坞卡片的**进度条**：既能看，也能拖。
+/// 坞卡片的**进度条**：既能看，也能拖；拖动时给出样式与「已播 / 总长」读数。
 ///
-/// ## 为什么原来那条不够
-/// 原来是一条 2pt 的只读细线 —— 「哪个看到哪」看得出，但想往回退 30 秒只能点进播放页。
-/// 小窗存在的意义就是**不打断观看**，所以调进度必须能在这里直接做。
+/// ## 它只负责「画」和「把手指位置报上去」
 ///
-/// ## 三个必须守住的点
-/// 1. **命中区要比视觉大**：视觉 2pt 好看，但按不住。`contentShape` 给到 22pt，
-///    手指落在画面底部五分之一处都能拖。
-/// 2. **拖动时不能读 `session.position`**：seek 之后要等下一拍 tick 才更新，
-///    手指还没抬线就跳回去。拖动期间用本地 `dragFraction`，松手才交出控制权。
-/// 3. **拖动中暂停跟随**：`isDragging` 时不再把外部进度写进 `dragFraction`，
-///    否则后台 tick 会把手指的位置覆盖掉。
+/// 用户 2026-11-17 的实测要求：「进度条调整（**标题栏拖动也算进度条**）」。
+/// 所以底部这条线必须与下方标题栏**共用同一份拖动状态** —— 状态因此上提到
+/// `VideoTaskCard`，这里只读 `fraction` / `isScrubbing`。
+/// 分开存两份时的表现正是用户报的：「没有真正进度条调整的样式」——
+/// 拖标题栏时底部线一动不动、也没有任何读数。
+///
+/// ## 四个必须守住的点
+/// 1. **命中区要比视觉大**：视觉 2pt 好看但按不住，热区外扩到 44pt。
+/// 2. **拖动中不能用 `session.position` 画**：它是采样值，seek 之后要等下一拍 tick。
+///    拖动期间画手指位置（`fraction` 由卡片给），松手才交出控制权。
+/// 3. **拖动中要真的发 seek**（节流 + 大容差）：不发 seek 画面一帧都不动，
+///    用户看到的就是「拖了不改变进度、画面不移动」。落定那一刻再发零容差精确 seek。
+/// 4. **轨道与命中区用同一个内缩**（`DockScrub.inset`）：否则手指放在圆角上
+///    有线无响应，或拖到头了还差一截。
 private struct DockProgressBar: View {
     let task: VideoTask
-    @State private var dragFraction: Double?
-    @State private var isDragging = false
+    /// 这一帧该画到哪（0…1）：拖动时是手指位置，否则是播放进度。
+    let fraction: Double
+    let isScrubbing: Bool
+    /// 手指位置上报（x、控件宽、是否落定）。
+    let onScrub: (CGFloat, CGFloat, Bool) -> Void
 
-    /// 手指按下时，先停掉 ticker 的进度跟随，记住当前位置。
-    private var shown: Double { dragFraction ?? task.fraction }
-
-    /// 拖到的位置（秒）。总时长未知时为 nil —— 那种情况下只显示百分比，不编时间。
-    private var shownSeconds: Double? {
-        let d = task.session.duration
-        guard d.isFinite, d > 0 else { return nil }
-        return min(max(shown, 0), 1) * d
-    }
-
-    private static func clock(_ seconds: Double) -> String {
-        let total = max(0, Int(seconds.rounded()))
-        let h = total / 3600, m = total % 3600 / 60, s = total % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-    }
+    /// 直播没有可拖的时间轴：不给读数，也不画拖动样式。
+    private var showsReadout: Bool { !task.session.isLive }
 
     var body: some View {
         GeometryReader { geo in
             let width = max(geo.size.width, 1)
-            let f = min(max(shown, 0), 1)
-            let barHeight: CGFloat = isDragging ? 6 : 2
-            let thumb: CGFloat = isDragging ? 12 : 6
+            let inset = DockScrub.inset
+            let trackW = max(width - inset * 2, 1)
+            let f = min(max(fraction, 0), 1)
+            let barH: CGFloat = isScrubbing ? 6 : 2
+            let thumb: CGFloat = isScrubbing ? 13 : 6
+            let fillW = trackW * CGFloat(f)
+            let knobX = inset + min(max(fillW, 0), trackW)
 
-            // 轨道贴画面底边（原来就是贴底），圆点与轨道**共中线**：
-            // 两者高度不同，圆心要按高度差补偿 `(barHeight - thumb)/2`。
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .leading) {
+                // 轨道：拖动时整体提亮，让「正在调」这件事肉眼可见。
                 Capsule()
-                    .fill(.white.opacity(isDragging ? 0.35 : 0.22))
-                    .frame(width: width, height: barHeight)
-                HStack(spacing: 0) {
-                    Capsule()
-                        .fill(.white.opacity(isDragging ? 1 : 0.9))
-                        .frame(width: max(0, width * f), height: barHeight)
-                    Spacer(minLength: 0)
-                }
-                .frame(width: width)
-                // ★ 进度条标点：一直有，拖动时变大。
-                //
-                // 只有 2pt 的线时，用户手指压着根本看不出自己指到哪一秒 ——
-                // 拖动时圆点必须**可见且可读**，这是「能看到指到哪」的下限。
+                    .fill(.white.opacity(isScrubbing ? 0.38 : 0.22))
+                    .frame(width: trackW, height: barH)
+                    .offset(x: inset)
+                // 已播部分
+                Capsule()
+                    .fill(.white.opacity(isScrubbing ? 1 : 0.9))
+                    .frame(width: max(0, fillW), height: barH)
+                    .offset(x: inset)
+                // 标点：常驻一颗小点，拖动时放大并加阴影，圆心与轨道共中线。
                 Circle()
                     .fill(.white)
                     .frame(width: thumb, height: thumb)
-                    .overlay(Circle().strokeBorder(.black.opacity(isDragging ? 0.35 : 0.2),
-                                                   lineWidth: 0.5))
-                    .shadow(color: .black.opacity(isDragging ? 0.4 : 0), radius: 3)
-                    .offset(x: min(max(width * f, thumb / 2), width - thumb / 2) - width / 2,
-                            y: (barHeight - thumb) / 2)
+                    .overlay(Circle().strokeBorder(.black.opacity(isScrubbing ? 0.35 : 0.2), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(isScrubbing ? 0.45 : 0), radius: 3)
+                    .offset(x: knobX - thumb / 2)
             }
-            .frame(width: width, height: 22, alignment: .bottom)
-            .overlay(alignment: .bottom) {
-                // ★ 拖动时的具体信息：已播 / 总时长 + 百分比。
-                //
-                // 用户要求「拖移时要显示出进度条标点和进度条具体信息」。
-                // 位置跟着手指走，并**钳在卡片内**（贴边时不会露到卡片外面去）。
-                if isDragging {
-                    let info = shownSeconds.map { "\(Self.clock($0)) / \(Self.clock(task.session.duration))" }
-                        ?? "\(Int(f * 100))%"
-                    Text(info)
+            .frame(width: width, height: max(22, thumb), alignment: .leading)
+            .overlay(alignment: .leading) {
+                // 读数气泡：`12:34 / 45:00`（总时长未知时退化为百分比）。
+                // 位置跟着手指走，并钳在卡内（贴边时不露到卡片外）。
+                if isScrubbing, showsReadout {
+                    Text(DockScrub.readout(fraction: f, duration: task.session.duration))
                         .font(.system(size: 10, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         .lineLimit(1)
                         .fixedSize()
                         .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(.black.opacity(0.72), in: Capsule())
-                        .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
-                        // 先估一个宽度把标签钳在卡内；`fixedSize` 保证不换行。
-                        .offset(x: min(max(width * f - 44, 0), max(0, width - 88)) + 44 - width / 2,
-                                y: -20)
+                        .background(.black.opacity(0.78), in: Capsule())
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+                        .offset(x: min(max(knobX - 52, 0), max(0, width - 104)), y: -18)
                         .transition(.opacity)
                 }
             }
-            .animation(.easeOut(duration: 0.12), value: isDragging)
-            // ⛔ 热区：整个底部 22pt 都能接手势。
+            .animation(.easeOut(duration: 0.12), value: isScrubbing)
+            // 热区比视觉大：手指落在画面底部那一条上都能接住。
             .contentShape(Rectangle().inset(by: -11))
-            // ⛔ 必须是 `highPriorityGesture` —— 进度条要**独占**这块触摸。
-            //
-            // 外层（画面区）也挂了一个拖动窗口的手势。若两边同级或外层优先，
-            // 用户拖进度条时窗口会跟着一起跑 —— 那正是用户报的
-            // 「进度条不好拖拽调整」。高优先级让这一层先吃掉手势，
-            // 落在 22pt 热区内的拖动**不会**再传到搬窗口那一层。
+            // ⛔ 必须 `highPriorityGesture`：画面区挂着「搬窗口」的拖动，
+            //    同级或外层优先时会变成「拖进度条=搬窗口」。
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        if !isDragging {
-                            isDragging = true
-                            dragFraction = task.fraction
-                        }
-                        guard task.session.duration > 0 else { return }
-                        dragFraction = min(max(value.location.x / max(width, 1), 0), 1)
-                    }
-                    .onEnded { value in
-                        let target = min(max(value.location.x / max(width, 1), 0), 1)
-                        task.session.seek(to: target * task.session.duration)
-                        isDragging = false
-                        // 松手后先保留一小会儿，等 seek 生效（下一拍 tick 会把它接过去）。
-                        Task { @MainActor in
-                            try? await Task.sleep(for: .milliseconds(320))
-                            dragFraction = nil
-                        }
-                    }
+                    .onChanged { value in onScrub(value.location.x, width, false) }
+                    .onEnded { value in onScrub(value.location.x, width, true) }
             )
         }
         .frame(height: 22)
         .accessibilityLabel(Text("Progress"))
-        .accessibilityValue(Text("\(Int(shown * 100))%"))
+        .accessibilityValue(Text("\(Int(min(max(fraction, 0), 1) * 100))%"))
     }
 }
 
