@@ -45,8 +45,34 @@ public enum LocalNetwork {
     /// 非回环地址原样返回（用户在别的机器上跑代理就是这种情况）；
     /// 回环且拿得到局域网地址 → 换成局域网地址；拿不到 → 保持回环。
     public static func dialHost(forProxyHost host: String) -> String {
-        guard isLoopback(host) else { return host }
-        return currentIPv4 ?? host
+        plan(stored: host, currentIPv4: currentIPv4).primary
+    }
+
+    /// 端点里存的是**上一次网络环境**下的地址，换网络就失效 —— 真机上踩过：
+    /// 端点记着 `192.168.124.55`（家里 Wi-Fi），设备切到热点 `172.20.10.x` 之后，
+    /// 中继拨这个地址必然失败，代理腿和直连腿一起挂，界面只剩「暂时无法加载此来源」。
+    ///
+    /// 所以拨号前按**当前**网络重算一次。纯函数，便于测试。
+    public static func plan(stored: String, currentIPv4: String?) -> (primary: String, fallback: String?) {
+        if isLoopback(stored) {
+            guard let currentIPv4 else { return (stored, nil) }
+            return (currentIPv4, stored)
+        }
+        // 存的是私有网段但不是本机现在的地址 → 多半是「本机代理」换了网段（Loon 就在这台手机上）。
+        guard isPrivate(stored) else { return (stored, nil) }
+        guard let currentIPv4, currentIPv4 != stored else { return (stored, nil) }
+        return ("127.0.0.1", currentIPv4)
+    }
+
+    /// 私有网段（RFC1918）。公网代理不动。
+    static func isPrivate(_ host: String) -> Bool {
+        let parts = host.split(separator: ".")
+        guard parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) else { return false }
+        guard let a = UInt8(parts[0]), let b = UInt8(parts[1]) else { return false }
+        if a == 10 { return true }
+        if a == 192, b == 168 { return true }
+        if a == 172, (16...31).contains(b) { return true }
+        return false
     }
 
     // MARK: - 地址枚举
@@ -129,11 +155,14 @@ public enum ProxyDialHost {
 
     /// 现在该拨的地址（主选）。
     public static func primary(for endpoint: CustomProxyEndpoint) -> String {
-        let substituted = LocalNetwork.dialHost(forProxyHost: endpoint.host)
-        guard substituted != endpoint.host else { return endpoint.host }
+        let planned = LocalNetwork.plan(stored: endpoint.host, currentIPv4: LocalNetwork.currentIPv4)
+        guard planned.primary != endpoint.host else { return endpoint.host }
         let key = key(endpoint)
         let forced = lock.withLock { loopbackOnly.contains(key) }
-        return forced ? endpoint.host : substituted
+        // 端点地址在本机网段上已不存在（换了网络）时，不能因为「上次记录过回环优先」就继续拨旧地址。
+        if forced, LocalNetwork.isPrivate(endpoint.host),
+           LocalNetwork.currentIPv4 != endpoint.host { return planned.primary }
+        return forced ? endpoint.host : planned.primary
     }
 
     /// 主选失败后该退到哪；没有可退的返回 nil。

@@ -50,6 +50,7 @@ import TVCore
         // [mi3s] 出口代理：回环中继必须在播放前起来。此前 `LocalProxyServer.base()` 零调用点，
         // `baseSync` 恒为 nil，配了代理也只会静默直连——这里在启动时就把它拉起。
         LocalProxyServer.shared.ensureStarted()
+        Task.detached { LoonConfigProbe.logOnce() }
     }
     var body: some Scene {
         WindowGroup {
@@ -298,3 +299,38 @@ struct SubscriptionImportView: View {
     }
 }
 #endif
+
+/// 启动时读一次 Loon 的运行配置，把「端口段规则指向哪个策略组」写进日志。
+///
+/// 为什么需要它：观众看到的现象是「标了代理也不能播」，而真正决定走不走节点的
+/// 是 Loon 自己 —— 我们的代理腿只是把连接交给 Loon，Loon 再按自己的规则判。
+/// 规则若把 `SRC-PORT 41500-41599` 指向一个「直连」的策略组（或 FINAL 就是直连），
+/// 那么代理腿和直连腿都出不去，App 侧怎么改都没用。
+/// 这条日志把「Loon 到底怎么判我们的端口」变成可核对的证据，而不是靠猜。
+enum LoonConfigProbe {
+    static func logOnce() {
+        guard let endpoint = CustomProxyStore.shared.endpoints.first else { return }
+        var components = URLComponents()
+        components.scheme = "http"
+        // ⛔ 不能用端点里存的地址：那是上一次网络的快照（真机上记着家里的 192.168.124.55，
+        // 换到热点后这个地址已经不存在）。按当前网络重算。
+        components.host = ProxyDialHost.primary(for: endpoint)
+        // Loon 的配置 API 走 Wi-Fi 访问的 HTTP 端口，与代理端口不是同一个。
+        components.port = endpoint.port == 7221 ? 7222 : endpoint.port
+        components.path = "/loonapi/v1/config/file.conf"
+        guard let url = components.url else { return }
+        Task {
+            do {
+                let preset = try await LoonPreset.load(from: url)
+                Diagnostics.shared.record(.info, "egress",
+                    "loon config wifi=\(preset.sharesOnLAN) http=\(preset.httpPort) socks=\(preset.socksPort)"
+                    + " portRule=\(String(describing: preset.portRule))"
+                    + " target=\(preset.portRuleTarget ?? "-")"
+                    + " directLine=\(preset.hasDirectLine) legacyWide=\(preset.hasLegacyWideRange)")
+            } catch {
+                Diagnostics.shared.record(.warning, "egress",
+                    "could not read Loon's config at \(components.host ?? "-"):\(components.port ?? 0) — \(error.localizedDescription)")
+            }
+        }
+    }
+}

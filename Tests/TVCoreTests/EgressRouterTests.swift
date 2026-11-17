@@ -197,3 +197,42 @@ import Testing
         #expect(!EgressRouter.isEgressFailure(CancellationError()))
     }
 }
+
+/// 端点地址不能是「上一次网络的快照」。
+///
+/// 真机踩过：端点记着 `192.168.124.55`（家里 Wi-Fi），设备切到热点 `172.20.10.x`，
+/// 中继拨这个地址必然失败 —— 代理腿和直连腿一起挂，界面只剩「暂时无法加载此来源」。
+@Suite struct ProxyDialPlanTests {
+    @Test func aStalePrivateAddressFollowsTheCurrentNetwork() {
+        let plan = LocalNetwork.plan(stored: "192.168.124.55", currentIPv4: "172.20.10.2")
+        #expect(plan.primary == "127.0.0.1")
+        #expect(plan.fallback == "172.20.10.2")
+    }
+
+    @Test func anAddressThatStillExistsIsLeftAlone() {
+        let plan = LocalNetwork.plan(stored: "192.168.124.55", currentIPv4: "192.168.124.55")
+        #expect(plan.primary == "192.168.124.55")
+        #expect(plan.fallback == nil)
+    }
+
+    @Test func loopbackBecomesTheCurrentLANAddress() {
+        let plan = LocalNetwork.plan(stored: "127.0.0.1", currentIPv4: "10.0.0.7")
+        #expect(plan.primary == "10.0.0.7")
+        #expect(plan.fallback == "127.0.0.1")
+    }
+
+    @Test func aPublicProxyIsNeverRewritten() {
+        let plan = LocalNetwork.plan(stored: "203.0.113.9", currentIPv4: "172.20.10.2")
+        #expect(plan.primary == "203.0.113.9")
+        #expect(plan.fallback == nil)
+    }
+
+    @Test func privateRangesAreRecognised() {
+        #expect(LocalNetwork.isPrivate("10.1.2.3"))
+        #expect(LocalNetwork.isPrivate("172.16.0.1"))
+        #expect(LocalNetwork.isPrivate("172.31.255.254"))
+        #expect(!LocalNetwork.isPrivate("172.32.0.1"))
+        #expect(!LocalNetwork.isPrivate("192.169.1.1"))
+        #expect(!LocalNetwork.isPrivate("8.8.8.8"))
+    }
+}
