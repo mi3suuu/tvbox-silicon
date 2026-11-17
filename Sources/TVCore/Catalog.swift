@@ -435,15 +435,14 @@ public struct CatalogClient: Sendable {
             let start = String(decoding: data.prefix(512), as: UTF8.self).lowercased()
             let isPage = start.contains("<html") || start.contains("<!doctype") || start.contains("<head")
             guard isPage else { throw error }
-            // 连上了，但回的不是数据 —— 这正是赛跑判断不了的那一类（连接是通的）。
-            // 把这条 host 的结论翻到代理，再要一次。观众看到的差别是「这源能用了」。
-            if CustomProxyStore.shared.fallbackEndpoint != nil {
-                EgressRouter.shared.noteBadContent(url, purpose: .catalog, allowsProxy: egressPolicy.allowsProxy)
-                if let second = try? await fetchCMS(url),
-                   let json = try? JSONDecoder().decode([String: JSONValue].self, from: second) {
-                    Diagnostics.shared.record(.info, "egress", "\(url.host() ?? "?") answered a page direct; proxy answered data")
-                    return json
-                }
+            // 连上了，但回的不是数据 —— 这正是赛跑判断不了的那一类（连接是通的、状态码 200）。
+            // 把结论翻到**另一条腿**再要一次：拿到网页的是直连就翻去代理，
+            // 拿到网页的是代理就翻回直连。后者是本轮真机踩到的那个源
+            // （国内站只对国内 IP 返回 XML，节点拿到的是一张网页）。
+            if EgressRouter.shared.noteWrongContent(url, purpose: .catalog, allowsProxy: egressPolicy.allowsProxy),
+               let second = try? await fetchCMS(url),
+               let json = try? JSONDecoder().decode([String: JSONValue].self, from: second) {
+                return json
             }
             throw TVError.unsupported(L10n.text("The source returned a web page instead of data. It may be offline or blocking apps."))
         }

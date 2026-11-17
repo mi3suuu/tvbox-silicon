@@ -842,6 +842,12 @@ public final class LocalProxyServer: @unchecked Sendable {
         // 相对路径要相对清单所在目录解析，不是站点根。
         let directory = asset.deletingLastPathComponent()
 
+        // 入口被判成「必须走节点」时，片单里出现的每一个主机都是同一件事的一部分：
+        // 子清单在 A、分片在 B、密钥在 C。分片由播放器直接拉，我们看不到它的成败，
+        // 所以只能在这儿按片单推导 —— 少收一个就是「能打开、放不出来」。
+        let entry = state.host.lowercased()
+        let entryNeedsNode = ForcedNodeHosts.shared.hosts.contains(entry)
+
         var lines: [String] = []
         for line in body.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -851,6 +857,9 @@ public final class LocalProxyServer: @unchecked Sendable {
                 continue
             }
             if let absolute = URL(string: trimmed, relativeTo: directory)?.absoluteURL {
+                if entryNeedsNode, let host = absolute.host, host.lowercased() != entry {
+                    ForcedNodeHosts.shared.noteRelated(host: host)
+                }
                 // 只把**子清单**接回中继；分片一律改成绝对地址，交给播放器自己请求。
                 //
                 // 实测（真机 17:03-17:04）：分片也走中继时，每片都要新建一条 TLS 到节点，

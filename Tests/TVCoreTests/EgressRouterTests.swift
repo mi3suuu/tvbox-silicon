@@ -297,6 +297,36 @@ import Testing
         #expect(store.hosts == ["aosikazy.com"])
     }
 
+    /// 接口一次就记（它就是这个源的身份证），CDN 要两次（一条流几十个请求，偶尔慢不算）。
+    /// 「只收接口」是错的：片单指向的是**别的域名**，不收就是「能打开、放不出来」。
+    @Test func theEntryIsRecordedOnceButCDNsNeedTwoStrikes() {
+        let store = freshStore()
+        store.note(host: "aosikazy.com", purpose: .catalog)
+        #expect(store.hosts == ["aosikazy.com"])
+
+        // 分片 CDN：第一次只记一次失败，不进名单。
+        store.note(host: "cdn.example.com", purpose: .media)
+        #expect(!store.hosts.contains("cdn.example.com"))
+        store.note(host: "cdn.example.com", purpose: .media)
+        #expect(store.hosts.contains("cdn.example.com"))
+
+        // 海报 CDN 同理，且与分片共用同一个计数器。
+        store.note(host: "img.example.com", purpose: .image)
+        #expect(!store.hosts.contains("img.example.com"))
+        store.note(host: "img.example.com", purpose: .image)
+        #expect(store.hosts.contains("img.example.com"))
+    }
+
+    /// 片单里推导出来的主机立即收录：分片由播放器自己拉，我们看不到它的成败。
+    @Test func hostsDerivedFromAPlaylistAreRecordedImmediately() {
+        let store = freshStore()
+        #expect(store.noteRelated(host: "seg-a.example.com"))
+        #expect(store.hosts == ["seg-a.example.com"])
+        #expect(!store.noteRelated(host: "seg-a.example.com"), "重复项不该重复写入")
+        // 本机地址不是「站点」，推导时顺手排掉。
+        #expect(!store.noteRelated(host: "127.0.0.1"))
+    }
+
     @Test func hostsAreLowercasedAndCapped() {
         let store = freshStore()
         store.note(host: " AoSikazy.COM ")

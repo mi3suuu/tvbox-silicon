@@ -17,6 +17,7 @@ public final class ForcedNodeHosts: @unchecked Sendable {
 
     private static let hostsKey = "forcedNodeHosts.v1"
     private static let targetKey = "forcedNodeTargetGroup.v1"
+    private static let countsKey = "forcedNodeCounts.v1"
     /// 上限：观众真按这个列表维护规则时，几十条已经很多了。
     private static let limit = 40
 
@@ -27,20 +28,65 @@ public final class ForcedNodeHosts: @unchecked Sendable {
         self.defaults = defaults
     }
 
-    /// 代理腿超时的 host。
-    public func note(host: String) {
+    /// 记一条「这条腿不通」的 host。返回**是否刚刚新增**（调用方据此决定要不要排恢复探测）。
+    ///
+    /// 分档是这个方法的全部要点：
+    ///   · 接口（`.catalog`）一次就记 —— 它就是这个源的身份证，错了整个源都进不去；
+    ///   · 视频（`.media`）与图片（`.image`）要**两次**才记 —— 这两个是 CDN，一条流里几十个
+    ///     请求，偶尔一个慢不该让整片域名永久绕出国；连着两次都不通才算真的判错了。
+    ///
+    /// ⛔ 不能因为「只关心入口」就只收 `.catalog`：入口进去之后，片单指向的是**别的域名**
+    ///    （m3u8 在 A、分片在 B、海报在 C）。Loon 是按域名判的，我们少收一个域名，
+    ///    观众看到的就是「能打开、点进去放不出来」。
+    @discardableResult
+    public func note(host: String, purpose: EgressPurpose = .catalog) -> Bool {
         let key = host.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty, key.contains(".") else { return }
+        guard !key.isEmpty, key.contains(".") else { return false }
         // 名单会变成永久的全局规则，所以「我们自己发出去的探测地址」绝不能进：
         // 它们的超时只说明代理腿没通，和「这个站被判直连」是两件事。
-        guard !Self.utilityHosts.contains(key) else { return }
+        guard !Self.utilityHosts.contains(key) else { return false }
         lock.lock()
         defer { lock.unlock() }
         var hosts = storedHosts()
-        guard !hosts.contains(key) else { return }
+        if hosts.contains(key) { return false }
+
+        let required = purpose == .catalog ? 1 : 2
+        var counts = defaults.dictionary(forKey: Self.countsKey) as? [String: Int] ?? [:]
+        let count = (counts[key] ?? 0) + 1
+        counts[key] = count
+        defaults.set(counts, forKey: Self.countsKey)
+        guard count >= required else { return false }
+
+        hosts.append(key)
+        if hosts.count > Self.limit {
+            let overflow = hosts.count - Self.limit
+            for host in hosts.prefix(overflow) { counts.removeValue(forKey: host) }
+            hosts.removeFirst(overflow)
+            defaults.set(counts, forKey: Self.countsKey)
+        }
+        defaults.set(hosts, forKey: Self.hostsKey)
+        return true
+    }
+
+    /// 从**片单/播放地址**里推导出来的同源域名，立即收录。
+    ///
+    /// 为什么需要这条独立入口：分片是播放器自己拉的（走系统栈 → Loon），
+    /// 失败根本经过不了我们的出口决策，也就学不到。而片单里写着它们的域名。
+    /// 所以只要「入口已被判定必须走节点」，片单里出现的主机就是同一件事的一部分：
+    /// 不一起收，观众看到的就是「片单取到了、点进去放不出来」。
+    @discardableResult
+    public func noteRelated(host: String) -> Bool {
+        let key = host.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, key.contains("."), !Self.utilityHosts.contains(key) else { return false }
+        guard !key.hasPrefix("127."), key != "localhost" else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        var hosts = storedHosts()
+        guard !hosts.contains(key) else { return false }
         hosts.append(key)
         if hosts.count > Self.limit { hosts.removeFirst(hosts.count - Self.limit) }
         defaults.set(hosts, forKey: Self.hostsKey)
+        return true
     }
 
     /// 我们自己用来探测出口的公共地址，不属于任何源，不该被写成规则。
@@ -97,6 +143,7 @@ public final class ForcedNodeHosts: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         defaults.removeObject(forKey: Self.hostsKey)
+        defaults.removeObject(forKey: Self.countsKey)
     }
 
     private func storedHosts() -> [String] {

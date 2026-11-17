@@ -389,6 +389,32 @@ public final class EgressRouter: @unchecked Sendable {
     /// 只能把结论翻到代理再取一次。
     ///
     /// `allowsProxy` 必须由调用方传入：观众把这个源设成「直连」时，翻到代理会直接违背他的选择。
+    /// 回来的正文是网页而不是数据 —— 赛跑判断不了这一类（连接是通的、状态码是 200）。
+    ///
+    /// 把结论翻到**另一条腿**，让调用方重取一次。方向取决于**这一次是谁拿到的**：
+    ///   · 直连拿到网页 → 多半是源站被墙/被拦截，翻到代理；
+    ///   · 代理拿到网页 → 多半是源站只对某些地区返回数据（国内站常见），翻回直连。
+    /// 后者是最容易被漏掉的一格：观众把源标成「代理」，赛跑里代理先到、直连还在飞，
+    /// 于是抢先把拦截页当成了答案，界面只报一句「格式不正确」。
+    @discardableResult
+    public func noteWrongContent(_ url: URL, purpose: EgressPurpose, allowsProxy: Bool) -> Bool {
+        let key = Self.key(url, purpose)
+        let leg = table.leg(key)
+        if leg.isProxy {
+            table.recordFailure(key, leg: leg)
+            table.record(key, leg: .direct)
+            Diagnostics.shared.record(.info, "egress",
+                "\(key) answered a page on the proxy leg; retrying direct")
+            return true
+        }
+        guard allowsProxy, let id = CustomProxyStore.shared.bestEndpointID() else { return false }
+        table.recordFailure(key, leg: .direct)
+        table.record(key, leg: .proxy(id))
+        Diagnostics.shared.record(.info, "egress",
+            "\(key) answered a page direct; retrying through the proxy")
+        return true
+    }
+
     public func noteBadContent(_ url: URL, purpose: EgressPurpose, allowsProxy: Bool) {
         let key = Self.key(url, purpose)
         guard allowsProxy, table.leg(key).isProxy == false else { return }
@@ -592,20 +618,12 @@ public final class EgressRouter: @unchecked Sendable {
                                   url: URL? = nil, headers: [String: String] = [:],
                                   purpose: EgressPurpose = .catalog) {
         guard let urlError = error as? URLError, urlError.code == .timedOut else { return }
-        // ⛔ 只学「源站接口」这一类。
-        //
-        // 这份名单会被写成**永久的全局规则**（Loon 插件里 `DOMAIN-SUFFIX,…,PROXY`），
-        // 所以不能见到超时就收：真机上就收进过两个纯误伤 ——
-        //   · `api.ipify.org`：那是 Identify My Node 自己发出去的探测，它超时说明
-        //     代理腿没通，与「这个站被判直连」无关；
-        //   · `webp.hahacdn.com`：海报 CDN，一次慢就被写成永久强制走节点，
-        //     等于让所有源的海报都绕出国。
-        guard purpose == .catalog, let host = key.split(separator: "|").first.map(String.init) else {
-            Diagnostics.shared.record(.debug, "egress", "\(key): proxy leg timed out (\(purpose.rawValue)); not recorded")
-            return
-        }
-        let isNew = !ForcedNodeHosts.shared.hosts.contains(host.lowercased())
-        ForcedNodeHosts.shared.note(host: host)
+        // 三类用途都要收：入口是接口，进去之后片单在 A 域名、分片在 B、海报在 C，
+        // Loon 按域名判，少收一个就是「能打开、放不出来」。
+        // 收不收得下由 `ForcedNodeHosts` 分档：接口一次、CDN 两次。
+        // 唯一的硬排除是我们自己发的探测地址（`api.ipify.org` 之类）。
+        guard let host = key.split(separator: "|").first.map(String.init) else { return }
+        let isNew = ForcedNodeHosts.shared.note(host: host, purpose: purpose)
         // 记下之后自己定期重测：Loon 一旦刷新了订阅、把这条域名指向节点，
         // 下一次探测就会成功，这台 host 的结论自动翻成代理 —— 观众不需要重开页面。
         //
