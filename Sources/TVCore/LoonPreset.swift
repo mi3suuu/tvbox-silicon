@@ -49,6 +49,13 @@ public struct LoonPreset: Sendable, Equatable {
     /// 不是 `Proxy` 就说明观看者把它写成了某个地区组 —— 代理源会被钉死在那个地区。
     public let portRuleTarget: String?
 
+    /// 配置里 `[Proxy]` 段出现的节点协议（去重、排序），例如 `["ss","trojan"]`。
+    ///
+    /// 只记协议名，不碰服务器地址与凭据。用途是回答一个产品问题：
+    /// 「能不能绕过 Loon 直接连节点」—— 那取决于协议，SS/VLESS 可自研，
+    /// VMess/Trojan/REALITY/QUIC 类的代价完全不同，不能拍脑袋承诺。
+    public let nodeProtocols: [String]
+
     /// The endpoint to add. SOCKS5 is preferred when Loon shares it: it carries UDP and leaves the
     /// request line alone, so nothing about the upstream request is rewritten in transit.
     public var endpoint: CustomProxyEndpoint {
@@ -119,6 +126,25 @@ public struct LoonPreset: Sendable, Equatable {
                           portRule: LoonSRCPortRule.placement(inConfig: text),
                           hasDirectLine: LoonSRCPortRule.hasDirectRule(inConfig: text),
                           hasLegacyWideRange: LoonSRCPortRule.hasLegacyWideRange(inConfig: text),
-                          portRuleTarget: LoonSRCPortRule.portRuleTarget(inConfig: text))
+                          portRuleTarget: LoonSRCPortRule.portRuleTarget(inConfig: text),
+                          nodeProtocols: Self.nodeProtocols(inConfig: text))
+    }
+
+    /// `[Proxy]` 段里每个节点的协议名（第一段），去重排序。
+    static func nodeProtocols(inConfig text: String) -> [String] {
+        var inside = false
+        var found: Set<String> = []
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") {
+                inside = line.lowercased().hasPrefix("[proxy]")
+                continue
+            }
+            guard inside, !line.isEmpty, !line.hasPrefix("#"), let equals = line.firstIndex(of: "=") else { continue }
+            let value = line[line.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+            let type = value.split(separator: ",").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            if let type, !type.isEmpty { found.insert(type) }
+        }
+        return found.sorted()
     }
 }

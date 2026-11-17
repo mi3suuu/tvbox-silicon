@@ -337,6 +337,7 @@ enum LoonConfigProbe {
                         + " portRule=\(String(describing: preset.portRule))"
                         + " target=\(preset.portRuleTarget ?? "-")"
                         + " directLine=\(preset.hasDirectLine)"
+                        + " nodeTypes=\(preset.nodeProtocols.joined(separator: ","))"
                         + " legacyWide=\(preset.hasLegacyWideRange)")
                     return
                 } catch {

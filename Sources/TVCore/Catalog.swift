@@ -479,8 +479,12 @@ public struct CatalogClient: Sendable {
         let headers = cmsRequestHeaders()
         // 走统一出口：这台 host 该直连还是该过代理，由 `EgressRouter` 按实际成败决定。
         do {
-            return try await EgressRouter.shared.data(for: url, headers: headers,
-                                                      purpose: .catalog, policy: egressPolicy).0
+            let data = try await EgressRouter.shared.data(for: url, headers: headers,
+                                                          purpose: .catalog, policy: egressPolicy).0
+            // 成功之后回读结论表：这既是「赛跑谁赢了」，也是观众在列表上看到的那一格。
+            EgressOutcomeStore.shared.note(sourceKey: site.sourceKey, host: url.host ?? "",
+                                           leg: EgressRouter.shared.leg(for: url, purpose: .catalog))
+            return data
         } catch {
             if error is CancellationError || Task.isCancelled { throw CancellationError() }
             // 服务器已经明确回过一个状态码（403/404/5xx）时不再换协议：那不会因为 http 而变好，

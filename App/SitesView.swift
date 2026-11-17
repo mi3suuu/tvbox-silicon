@@ -1454,6 +1454,7 @@ struct SiteCard: View {
                     if runs { SourceHealthDot(status: store.health(of: site)) }
                     if dimmed { Text(L10n.text("Hidden")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                     if customized { SourceRouteBadge(site: site, fallback: L10n.text("Customized")) }
+                    EgressWinnerBadge(sourceKey: site.sourceKey)
                 }
                 if !detail.isEmpty {
                     Text(detail).font(.subheadline).lineLimit(1)
@@ -3291,6 +3292,29 @@ private struct RenameAlerts: ViewModifier {
 ///
 /// `fallback` 是「没有显式路由、但源被改名/改地址」时显示的文字 —— 那种情况仍然要提示，
 /// 只是不该再说成「自定义」而不给出口。
+/// 「这个源上一次取片单，赛跑是谁赢的」。
+///
+/// 观众要能一眼看出实际走的哪条腿 —— 配置写「代理」而实际直连这种事，
+/// 只有把**真实结果**摆在列表上才看得见。超过五分钟的结论不显示：
+/// 改完设置还挂着旧结果会误导。
+struct EgressWinnerBadge: View {
+    let sourceKey: String
+
+    var body: some View {
+        if let entry = EgressOutcomeStore.shared.fresh(sourceKey: sourceKey) {
+            let tint: Color = entry.isProxy ? Brand.amber : .secondary
+            Text(entry.isProxy ? L10n.text("Proxy") : L10n.text("Direct"))
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .foregroundStyle(tint)
+                .background(tint.opacity(0.14), in: Capsule())
+                .accessibilityLabel(L10n.text("Last fetch took the %@ leg", entry.isProxy ? "proxy" : "direct"))
+        }
+    }
+}
+
 struct SourceRouteBadge: View {
     @Environment(Store.self) private var store
     let site: Site
