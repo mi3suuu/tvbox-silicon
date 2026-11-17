@@ -120,11 +120,21 @@ final class HostEgressTable: @unchecked Sendable {
         }
     }
 
-    func record(_ key: String, leg: EgressLeg) {
-        let trust = leg.isProxy ? Self.proxyTrust : Self.directTrust
+    /// 记住一条结论。
+    ///
+    /// - `trust`：显式有效期。只有「赛跑里代理先到、直连并没失败」这一种情形用短信任。
+    /// - 同一条腿、还没过期时**不延长**：否则一条短信任会被后续每一次成功不断续命，
+    ///   等于永远回不到「重新测一次」。过期就重新赛跑，代价只是两个请求。
+    func record(_ key: String, leg: EgressLeg, trust: TimeInterval? = nil) {
+        let lifetime = trust ?? (leg.isProxy ? Self.proxyTrust : Self.directTrust)
         lock.withLock {
+            if trust == nil, let existing = entries[key], existing.proven,
+               existing.leg == leg, existing.expires > Date() {
+                return
+            }
             entries[key] = Entry(leg: leg, proven: true,
-                                 expires: Date().addingTimeInterval(trust), proxyFailures: 0)
+                                 expires: Date().addingTimeInterval(lifetime),
+                                 proxyFailures: entries[key]?.proxyFailures ?? 0)
         }
     }
 
@@ -467,7 +477,7 @@ public final class EgressRouter: @unchecked Sendable {
         Diagnostics.shared.record(.debug, "egress",
             "racing \(key) hedge=\(hedge == .zero ? 0 : Int(purpose.hedgeDelay.milliseconds()))ms")
 
-        let result: (EgressLeg, Data, URL)? = await withTaskGroup(
+        let result: (EgressLeg, Data, URL, Bool)? = await withTaskGroup(
             of: (EgressLeg, Result<(Data, URL), Error>).self
         ) { group in
             group.addTask {
@@ -483,13 +493,17 @@ public final class EgressRouter: @unchecked Sendable {
                 })
             }
             var lastError: Error?
+            var directFailed = false
             while let (leg, outcome) = await group.next() {
                 switch outcome {
                 case .success(let value):
                     group.cancelAll()
-                    return (leg, value.0, value.1)
+                    return (leg, value.0, value.1, directFailed)
                 case .failure(let error):
-                    if !(error is CancellationError) { lastError = error }
+                    if !(error is CancellationError) {
+                        lastError = error
+                        if !leg.isProxy { directFailed = true }
+                    }
                 }
             }
             if let lastError { return nil }
@@ -497,9 +511,20 @@ public final class EgressRouter: @unchecked Sendable {
         }
 
         if let result {
-            table.record(key, leg: result.0)
-            Diagnostics.shared.record(.info, "egress", "\(key) → \(result.0.label) (raced)")
-            return (result.1, result.2)
+            let (leg, data, finalURL, directFailed) = result
+            if leg.isProxy, !directFailed {
+                // 代理**先到**，但直连并没有报错 —— 它只是慢一点（或者还在握手中）。
+                // 这种情况钉 10 分钟会把「能直连」的站整整十分钟都绕出国，用户感知就是
+                // 「能播但要缓冲」。给 90 秒短信任：够挡掉一页几十个并发请求的重复赛跑，
+                // 又不会把慢当成不通。
+                table.record(key, leg: leg, trust: 90)
+                Diagnostics.shared.record(.info, "egress",
+                    "\(key) → \(leg.label) (raced; direct still in flight, short trust)")
+            } else {
+                table.record(key, leg: leg)
+                Diagnostics.shared.record(.info, "egress", "\(key) → \(leg.label) (raced)")
+            }
+            return (data, finalURL)
         }
         // 两条腿都没成：不留结论，下一次还会赛跑。
         table.forget(host: url.host())
