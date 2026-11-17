@@ -2708,3 +2708,8 @@
 "Needs parsing" = "需解析";
 
 "That line didn't play. Switched to %@." = "那条线路播不出来，已自动切到「%@」。";
+
+"Tidy Once" = "整理一次";
+"Lock Tiled Layout" = "锁定整理";
+"Unlock Layout" = "解除锁定";
+"Open Episode List" = "回到选集页";

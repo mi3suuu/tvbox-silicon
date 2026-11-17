@@ -2703,3 +2703,8 @@
 "Needs parsing" = "Needs parsing";
 
 "That line didn't play. Switched to %@." = "That line didn't play. Switched to %@.";
+
+"Tidy Once" = "Tidy Once";
+"Lock Tiled Layout" = "Lock Tiled Layout";
+"Unlock Layout" = "Unlock Layout";
+"Open Episode List" = "Open Episode List";

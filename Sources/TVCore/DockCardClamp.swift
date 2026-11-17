@@ -3,42 +3,62 @@ import CoreGraphics
 
 // MARK: - 坞卡片的位置钳位
 
-/// 保证「任何拖动结果都还留得下一角能抓回来」。
+/// 保证卡片的**整块**都留在容器（屏幕）里。
 ///
-/// ## 为什么必须有
+/// ## 为什么口径从「留一角」改成「全在里面」
 ///
-/// 坞卡片的偏移是相对**右下角锚点**的，拖动时是纯累加。于是卡片能被拖到任意远，
-/// 一旦整块出屏：屏幕上没有它，也就没有它的手势 —— **再也抓不回来**，只能杀 App。
-/// 用户报的「不小心拖到屏幕外无法呼唤回来」就是这条。
+/// 上一版只要求「至少留 72pt 可触摸」—— 那是为了修「拖出屏幕叫不回来」。
+/// 但用户要的不是「能抓回来」，是**根本不允许出去**：
+/// 卡片压在状态栏 / 底部手势条上时，那部分内容既看不见也点不到，
+/// 看起来就是「窗口被屏幕吃掉半截」。
 ///
-/// 判据不是「不许出界」，而是「至少要留 `keep` 那一角在容器里」：
-/// 把卡片拖到边上是用户的自由，我们只保证他还能再抓到它。
+/// 现在的判据：四条边都落在 `[margin, container - margin]` 内。
+/// 卡片被捏得比容器还大时无解，此时取区间中点（居中溢出），
+/// 并且调用方必须先过 `fit(_:in:)` 把尺寸压回容器内 —— 那是「捏不出去」的另一半。
+///
+/// 坐标系：卡片以容器**右下角**为锚点，`offset` 往左/上为负。
+/// 于是卡片的四条边是：
+///   right  = container.width  + offset.width
+///   left   = right - card.width
+///   bottom = container.height + offset.height
+///   top    = bottom - card.height
 public enum DockCardClamp {
 
-    /// 默认要求留下的最小可见宽度（pt）。比 44pt 的触摸目标大一些，好按。
-    public static let keep: CGFloat = 72
+    /// 卡片与容器边缘之间至少留的空隙（pt）。
+    ///
+    /// 不留空隙的话，卡片会贴在屏幕圆角 / 手势条上 —— 视觉上像被切掉，
+    /// 触摸上边角那几 pt 也点不准。
+    public static let margin: CGFloat = 8
 
-    /// 把偏移钳到「至少露一角」。
+    /// 把偏移钳到「整块都在容器内」。
     ///
-    /// 坐标系：卡片以容器**右下角**为锚点，`offset` 往左/上为负。
-    /// 于是卡片的四条边是：
-    ///   right  = container.width  + offset.width
-    ///   left   = right - card.width
-    ///   bottom = container.height + offset.height
-    ///   top    = bottom - card.height
-    ///
-    /// 约束（两个方向各两条，保证「至少 keep 宽/高 落在容器内」）：
-    ///   right ≥ keep                     ⇒ offset.width  ≥ keep  - container.width
-    ///   left  ≤ container.width - keep   ⇒ offset.width  ≤ card.width - keep
+    /// 约束（两个方向各两条）：
+    ///   left ≥ margin              ⇒ offset.width  ≥ card.width  - container.width + margin
+    ///   right ≤ container - margin ⇒ offset.width  ≤ -margin
     /// 上下同理。
     public static func clamp(_ offset: CGSize,
                              card: CGSize,
                              in container: CGSize,
-                             keep: CGFloat = DockCardClamp.keep) -> CGSize {
+                             margin: CGFloat = DockCardClamp.margin) -> CGSize {
         CGSize(width: clampAxis(offset.width,
-                                cardLength: card.width, containerLength: container.width, keep: keep),
+                                cardLength: card.width, containerLength: container.width, margin: margin),
                height: clampAxis(offset.height,
-                                 cardLength: card.height, containerLength: container.height, keep: keep))
+                                 cardLength: card.height, containerLength: container.height, margin: margin))
+    }
+
+    /// 把卡片尺寸压回「放得进容器」的大小。
+    ///
+    /// 用户能捏到 2.2 倍，320pt 的基础宽在手机上就是 704pt —— 比屏幕还宽。
+    /// 那种尺寸无论怎么摆都会出界，所以**尺寸**这一侧也必须有一道闸：
+    /// 最多到 `container - 2 * margin`，宽高按同一比例收（不改变画面比例）。
+    public static func fit(_ size: CGSize,
+                           in container: CGSize,
+                           margin: CGFloat = DockCardClamp.margin) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return CGSize(width: 1, height: 1) }
+        let maxW = max(1, container.width - margin * 2)
+        let maxH = max(1, container.height - margin * 2)
+        let scale = min(1, min(maxW / size.width, maxH / size.height))
+        return CGSize(width: size.width * scale, height: size.height * scale)
     }
 
     /// 单轴版本。容器比卡片还小时上下界会交叉 —— 那时取区间中点，
@@ -46,9 +66,9 @@ public enum DockCardClamp {
     private static func clampAxis(_ value: CGFloat,
                                   cardLength: CGFloat,
                                   containerLength: CGFloat,
-                                  keep: CGFloat) -> CGFloat {
-        let lower = keep - containerLength
-        let upper = cardLength - keep
+                                  margin: CGFloat) -> CGFloat {
+        let lower = cardLength + margin - containerLength
+        let upper = -margin
         guard lower <= upper else { return (lower + upper) / 2 }
         return min(max(value, lower), upper)
     }

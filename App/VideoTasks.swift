@@ -372,21 +372,40 @@ import TVCore
 
     // MARK: 排布模式与图层顺序
 
-    /// 当前排布方式：自由摆放 / 平铺。
+    /// 当前排布方式：自由摆放 / 锁定整理。
     ///
-    /// 用户要求：「多个窗口需要支持平铺处理」。
-    /// 平铺时位置由 `DockLayout.tiles` 统一算，用户拖不动单张（位置由布局决定）；
-    /// 切回自由时，各卡回到各自记住的位置。
+    /// 用户要求：「多个窗口需要支持平铺处理」，同时「锁定整理可以保留，
+    /// 得把视窗统一」—— 锁定态下所有卡同一个尺寸、位置由 `DockLayout` 算，
+    /// 不接受拖动（拖也拖不动，那才叫锁定）。
     var layoutMode: DockLayoutMode = .free
 
-    func toggleLayoutMode() {
-        layoutMode = layoutMode == .free ? .tiled : .free
+    /// 锁定态：位置与尺寸都由网格决定。
+    var isLayoutLocked: Bool { layoutMode == .tiled }
+
+    func toggleLayoutLock() {
+        layoutMode = isLayoutLocked ? .free : .tiled
     }
+
+    /// 「整理一次」请求。
+    ///
+    /// 与锁定整理的分工（用户 2026-11-17 明确要求两个都要）：
+    ///   · **单次整理** —— 把多张卡摆成互不重叠的平铺网格、尺寸统一成格子大小，
+    ///     摆完**立刻回到自由模式**，用户可以接着拖、接着捏。整理是动作，不是状态；
+    ///   · **锁定整理** —— 同一个网格，但位置与尺寸一直由布局决定，随手拖动无效。
+    ///
+    /// 网格的几何只有坞视图知道（容器尺寸、安全区），所以这里只发一个计数，
+    /// 由 `VideoTaskDock` 消费（`onChange(of: tidyRequest)`）。
+    var tidyRequest = 0
+    func tidy() { tidyRequest &+= 1 }
 
     /// 把某张卡提到最前（z-order 最高）。
     ///
-    /// 坞是按 `tasks` 数组顺序渲染的，**越靠前越在上层**。
-    /// 所以「提到最前」= 挪到数组首位。
+    /// 坞是按 `tasks` 数组顺序渲染的，**越靠前越在上层**（`zIndex` 由倒序给出，
+    /// 见 `VideoTaskDock`）。所以「提到最前」= 挪到数组首位。
+    ///
+    /// ⛔ 这条以前只从管理器的「上移一层」按钮进，用户的原话是
+    ///    「调整图层顺序应该单击即响应，点击则挪到最前，而不是在面板里复杂操作」。
+    ///    现在轻点卡片走的是 `activate`，它内部就是这一步 —— 没有中间步骤。
     func bringToFront(_ id: UUID) {
         guard let i = tasks.firstIndex(where: { $0.id == id }), i != 0 else { return }
         tasks.insert(tasks.remove(at: i), at: 0)
@@ -1248,6 +1267,20 @@ struct VideoTaskCard: View {
     ///    乘上去无害，但保留它是为了不破坏既有单卡手势路径。
     var externalPinch: CGFloat = 1
 
+    /// 位置与尺寸被布局锁死（锁定整理）。
+    ///
+    /// 锁定时**所有卡同一个宽**（`DockLayout.packedTiles` 给的格子宽），
+    /// 捏合不生效、拖动也不生效 —— 「锁定」得是真的锁住，
+    /// 而不是「拖一下再弹回去」（那比拖不动还难受）。
+    var isLayoutLocked: Bool = false
+
+    /// 拖动允许的位移区间（相对起手位置）。`nil` = 不限制。
+    ///
+    /// ⛔ 逐帧钳位，不是松手才钳。
+    ///    只钳「松手结果」的话，拖动过程中窗口照样整块跑到屏幕外（手指跟着它走），
+    ///    松手再弹回来 —— 用户看到的是「能拖出去」。要求是**任何位置都不许出屏**。
+    var panBounds: CGRect? = nil
+
     /// 画面区被拖动时上报的**累计位移**。摆放层据此落定最终位置。
     ///
     /// ⛔ 只在 `onEnded` 里上报，拖动过程**不报** ——
@@ -1281,7 +1314,18 @@ struct VideoTaskCard: View {
 
 
 
-    private var scaledWidth: CGFloat { width * ownScale * pinch * externalPinch }
+    /// 拖动中的位移，钳进 `panBounds`。
+    private var clampedLivePan: CGSize {
+        guard let pan = livePan else { return .zero }
+        guard let b = panBounds else { return pan }
+        return CGSize(width: min(max(pan.width, b.minX), b.maxX),
+                      height: min(max(pan.height, b.minY), b.maxY))
+    }
+
+    private var scaledWidth: CGFloat {
+        // 锁定整理时忽略捏合：尺寸由网格统一，手指捏了也不动。
+        width * ownScale * (isLayoutLocked ? 1 : pinch * externalPinch)
+    }
     private var height: CGFloat { scaledWidth / task.aspectRatio }
 
     var body: some View {
@@ -1344,6 +1388,23 @@ struct VideoTaskCard: View {
                         DockSpeedButton(task: task)
                         DockVolumeButton(task: task, isActive: isActive,
                                          taskIndex: taskIndex, taskCount: taskCount)
+                        // 「回到选集页」：原来只藏在**双击**里。
+                        //
+                        // ⛔ 双击是这颗键存在的原因。用户要求「单击即响应，点击则挪到最前」，
+                        //    而单击只要与「双击」共存，SwiftUI 就得等双击超时（≈0.3s）才敢
+                        //    认定这是单击 —— 于是「点一下换层」这件事永远慢半拍。
+                        //    现在单击是**唯一**的点按语义（提到最前 + 主选择），
+                        //    回选集页改成这颗显式键：看得见、点得到、不用抢时间窗口。
+                        Button { open() } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .background(.black.opacity(0.5), in: Circle())
+                                .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text(L10n.text("Open Episode List")))
                     }
                     .padding(6)
                 }
@@ -1437,46 +1498,46 @@ struct VideoTaskCard: View {
                 .offset(x: 8, y: -8)
         }
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        // ⛔ 轻点 = **只做「主选择」**，不跳页、不摘除。
+        // ★ 轻点 = **提到最前 + 设为主选择**（同一个动作，一次到位）。
         //
-        // 原来这里是 `onTapGesture { open() }`，而 `open()` 会
-        // `activate` + **`take`**（把这集从坞里摘走并压到选集页）。于是：
-        //   · 想「点一下把它设成主窗」这个动作**根本不存在** —— 一点就离开了；
-        //   · 用户报的「点击迷你小窗不会视为主选择，需要重新进入页面才能视为主选择」
-        //     就是这个：主选择（蓝框 / PiP 主体）只在 `take` 那一瞬间被顺带设了一次，
-        //     之后想换主体只能重新走一遍「点进去 → 再回来」。
+        // 用户 2026-11-17：「调整图层顺序应该单击即响应，点击则挪到最前。
+        // 而不是在面板里复杂操作」。所以点按只有这一个语义，没有第二个候选动作。
         //
-        // 现在拆成两个动作：
-        //   · **轻点** → `activate`（蓝框点亮、成为 PiP 与音频的主体、置顶到队首）
-        //   · **双击** → 才回到那一集的选集页（`open()`，它内部会 `take`）
-        // ⛔ 用显式 `TapGesture` 组合，不用两个 `onTapGesture` 叠加。
+        // ⛔ 原来这里是
+        //      `TapGesture(count: 2).onEnded { open() }.exclusively(before: TapGesture())`
+        //    `.exclusively` 的意思是「先看是不是双击，不是才当单击」——
+        //    于是**每一次单击都要等双击超时（≈0.3s）**才生效。换层慢半拍、
+        //    连着点两张卡时第一下还会被吞掉。这正是「单击不响应」的机制。
         //
-        // `.onTapGesture(count: 2)` 会让单击**等双击超时**才触发（约 0.3s）。
-        // 两个 onTapGesture 叠在一起时，SwiftUI 还会把它们各自做成独立识别器，
-        // 与父层的拖动争抢触摸 —— 这正是上一版拖动完全收不到 `onChanged` 的原因之一。
+        //    现在双击不再存在（「回到选集页」改成了画面左上角那颗显式的展开键，
+        //    管理器里也有同款），单击识别器单独一路，手指一抬就生效。
         //
-        // `.exclusively(before:)` 让「双击优先、否则单击」在**一个识别器**里判定，
-        // 不再各自占一个通道。
         // ⛔ 用 `simultaneousGesture` 而不是 `gesture`：子层**不能独占**触摸。
         //    父层的拖动要用同一串触摸的坐标，独占会让它一帧都收不到。
         .simultaneousGesture(
-            TapGesture(count: 2).onEnded { open() }
-                .exclusively(before: TapGesture().onEnded { store.videoTasks.activate(task.id) })
+            TapGesture().onEnded {
+                // `activate` 内部就把这张卡挪到数组首位 —— 数组顺序 = 图层顺序，
+                // 首位画在最上层（`zIndex` 在坞里给）。
+                store.videoTasks.activate(task.id)
+            }
         )
         // ★ 每张卡**自己**可以捏合缩放。
         //
         // 用户要求：「迷你小窗每个窗口要能单独调整大小，而不是黏成一块」。
         // 手势必须挂在**卡片**上而不是坞上：挂在坞上时一次捏合会改所有卡，
         // 而 `MagnificationGesture` 的倍率是相对起手值的，多卡共用一个会互相打架。
+        //
+        // 锁定整理时尺寸由网格统一（`isLayoutLocked`）：手势照样接，但不写回 ——
+        // 让它把手指的意图吃掉，好过让它漏到别处去。
         .simultaneousGesture(
             MagnificationGesture()
                 // 画面跟手：手势进行中就实时缩放（`scaledWidth` 里乘了 `pinch`）。
-                .updating($pinch) { value, state, _ in state = value }
+                .updating($pinch) { value, state, _ in state = isLayoutLocked ? 1 : value }
                 // 松手才写回：提交的是「起手值 × 本次倍率」。
                 // 直接提交 `value` 等于把之前的缩放丢掉（见 `pinch` 的注释）。
                 .onEnded { value in
-                    guard let onScaleChange else { return }
-                    onScaleChange(min(max(ownScale * value, 0.6), 2.2))
+                    guard !isLayoutLocked, let onScaleChange else { return }
+                    onScaleChange(min(max(ownScale * value, 0.35), 2.2))
                 }
         )
         // ★ 拖动中的实时位移**在本卡叠加**。
@@ -1485,7 +1546,7 @@ struct VideoTaskCard: View {
         //    在拖动期间每帧给新值，但**不触发依赖重算** ——
         //    所以只有这一处 offset 会变，卡片树本身不重建。
         //    没有这一行，手势收到了事件也没人用，表现就是「松手才跳」。
-        .offset(x: livePan?.width ?? 0, y: livePan?.height ?? 0)
+        .offset(x: clampedLivePan.width, y: clampedLivePan.height)
         .transaction { $0.animation = nil }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(task.title))
@@ -1543,27 +1604,76 @@ private struct DockProgressBar: View {
     /// 手指按下时，先停掉 ticker 的进度跟随，记住当前位置。
     private var shown: Double { dragFraction ?? task.fraction }
 
+    /// 拖到的位置（秒）。总时长未知时为 nil —— 那种情况下只显示百分比，不编时间。
+    private var shownSeconds: Double? {
+        let d = task.session.duration
+        guard d.isFinite, d > 0 else { return nil }
+        return min(max(shown, 0), 1) * d
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let h = total / 3600, m = total % 3600 / 60, s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+
     var body: some View {
         GeometryReader { geo in
-            let width = geo.size.width
-            let shownFraction = min(max(shown, 0), 1)
-            ZStack(alignment: .leading) {
-                // 轨道：拖起来时加高加亮，让用户看清自己按到了什么。
+            let width = max(geo.size.width, 1)
+            let f = min(max(shown, 0), 1)
+            let barHeight: CGFloat = isDragging ? 6 : 2
+            let thumb: CGFloat = isDragging ? 12 : 6
+
+            // 轨道贴画面底边（原来就是贴底），圆点与轨道**共中线**：
+            // 两者高度不同，圆心要按高度差补偿 `(barHeight - thumb)/2`。
+            ZStack(alignment: .bottom) {
                 Capsule()
                     .fill(.white.opacity(isDragging ? 0.35 : 0.22))
-                    .frame(height: isDragging ? 5 : 2)
-                Capsule()
-                    .fill(.white.opacity(0.9))
-                    .frame(width: max(0, width * shownFraction), height: isDragging ? 5 : 2)
-                // 拖动时给一颗圆点，指头压着也能看出当前落到哪。
+                    .frame(width: width, height: barHeight)
+                HStack(spacing: 0) {
+                    Capsule()
+                        .fill(.white.opacity(isDragging ? 1 : 0.9))
+                        .frame(width: max(0, width * f), height: barHeight)
+                    Spacer(minLength: 0)
+                }
+                .frame(width: width)
+                // ★ 进度条标点：一直有，拖动时变大。
+                //
+                // 只有 2pt 的线时，用户手指压着根本看不出自己指到哪一秒 ——
+                // 拖动时圆点必须**可见且可读**，这是「能看到指到哪」的下限。
+                Circle()
+                    .fill(.white)
+                    .frame(width: thumb, height: thumb)
+                    .overlay(Circle().strokeBorder(.black.opacity(isDragging ? 0.35 : 0.2),
+                                                   lineWidth: 0.5))
+                    .shadow(color: .black.opacity(isDragging ? 0.4 : 0), radius: 3)
+                    .offset(x: min(max(width * f, thumb / 2), width - thumb / 2) - width / 2,
+                            y: (barHeight - thumb) / 2)
+            }
+            .frame(width: width, height: 22, alignment: .bottom)
+            .overlay(alignment: .bottom) {
+                // ★ 拖动时的具体信息：已播 / 总时长 + 百分比。
+                //
+                // 用户要求「拖移时要显示出进度条标点和进度条具体信息」。
+                // 位置跟着手指走，并**钳在卡片内**（贴边时不会露到卡片外面去）。
                 if isDragging {
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 11, height: 11)
-                        .offset(x: max(0, width * shownFraction - 5.5))
+                    let info = shownSeconds.map { "\(Self.clock($0)) / \(Self.clock(task.session.duration))" }
+                        ?? "\(Int(f * 100))%"
+                    Text(info)
+                        .font(.system(size: 10, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(.black.opacity(0.72), in: Capsule())
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+                        // 先估一个宽度把标签钳在卡内；`fixedSize` 保证不换行。
+                        .offset(x: min(max(width * f - 44, 0), max(0, width - 88)) + 44 - width / 2,
+                                y: -20)
+                        .transition(.opacity)
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .bottom)
             .animation(.easeOut(duration: 0.12), value: isDragging)
             // ⛔ 热区：整个底部 22pt 都能接手势。
             .contentShape(Rectangle().inset(by: -11))
@@ -2008,23 +2118,38 @@ struct DockManagerPanel: View {
                     .accessibilityLabel(Text(L10n.text("Restore Last Windows")))
                 }
 
-                // 「平铺」开关：把多窗排成网格，一键整理。
+                // 「整理一次」：把多窗摆成互不重叠的网格、尺寸统一，**摆完就放开**。
                 //
-                // 用户要求：「多个窗口需要支持平铺处理整理」。
-                // 图标随状态切换：散开时显示网格（点了会平铺），
-                // 已平铺时显示散开（点了回到自由摆放）—— 一颗键表达两个方向。
+                // 用户 2026-11-17：「进行图层整理 状态不应该是锁定的，只整理一次后即可自由拖动，
+                // 并且整理要根据平铺来，而不是图层互相折叠了」。所以这里是一个**动作**：
+                // 点一下按容器尺寸算一遍网格、写回每张卡的位置与尺寸，然后回到自由模式。
                 Button {
-                    center.toggleLayoutMode()
+                    center.tidy()
+                    center.showsManager = false
                 } label: {
-                    Image(systemName: center.layoutMode == .tiled
-                          ? "rectangle.3.group"
-                          : "square.grid.2x2")
+                    Image(systemName: "square.grid.2x2")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(center.layoutMode == .tiled ? Color.accentColor : .primary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(Text(L10n.text(center.layoutMode == .tiled
-                                                   ? "Free Arrange" : "Tile Windows")))
+                .accessibilityLabel(Text(L10n.text("Tidy Once")))
+
+                // 「锁定整理」：同一个网格，但位置与尺寸一直由布局决定。
+                //
+                // 用户要求「锁定整理可以保留，锁定整理得把视窗统一」——
+                // 锁定态下所有卡共用格子宽度（`DockLayout.uniformTiles`），
+                // 拖动不生效，要摆位就先解锁。
+                Button {
+                    center.toggleLayoutLock()
+                } label: {
+                    Image(systemName: center.isLayoutLocked
+                          ? "lock.fill"
+                          : "lock.open")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(center.isLayoutLocked ? Color.accentColor : .primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(L10n.text(center.isLayoutLocked
+                                                   ? "Unlock Layout" : "Lock Tiled Layout")))
 
                 Button {
                     // 一键归位：把被拖丢/缩太小的卡片全部拉回来。
@@ -2157,23 +2282,14 @@ struct DockManagerPanel: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(Text(L10n.text("Make Active")))
 
-                // 「上移一层」：把这张卡提到更前（z-order 更高）。
+                // ⛔ 这里**不再有「上移一层」**。
                 //
-                // 用户要求：「不同迷你窗的图层前后显示顺序需要可以拖拽」。
-                // 在触摸屏上「直接拖着叠放的窗口换层」很容易误触（拖动本身在搬窗口），
-                // 所以这里给**逐层移动**的明确键：按一下前移一层，可预期、不会误操作。
-                // 数组首位 = 最上层，所以「前移」= index 减一。
-                Button {
-                    center.moveToLayer(task.id, max(0, center.tasks.firstIndex(where: { $0.id == task.id }).map { $0 - 1 } ?? 0))
-                } label: {
-                    Image(systemName: "square.2.layers.3d.top.filled")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .foregroundStyle(center.tasks.first?.id == task.id ? Color.secondary.opacity(0.35) : .primary)
-                }
-                .buttonStyle(.plain)
-                .disabled(center.tasks.first?.id == task.id)
-                .accessibilityLabel(Text(L10n.text("Bring Forward")))
+                // 用户 2026-11-17：「调整图层顺序应该单击即响应，点击则挪到最前，
+                // 而不是在面板里复杂操作」。逐层按钮就是那个「复杂操作」：
+                // 要叠三层就得在这个列表里按三次，而且按完还得回去看效果。
+                //
+                // 现在改图层只有一种手法：**点那张卡片**（轻点 = 提到最前 + 成为主选择）。
+                // 这个列表里点某一行也等价（见 `row` 末尾的 `onTapGesture`）。
 
                 // 「回到选集页」：把这集从坞里摘走，并把页面推到它的选集页。
                 //
@@ -2224,7 +2340,10 @@ struct DockManagerPanel: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .contentShape(Rectangle())
-            // 选中这一路（高亮 + 让它进解码预算）。**不摘除**。
+            // 点这一行 = 设为主选择 + **提到最前**（同一个动作，见 `activate`）。
+            //
+            // 列表顺序就是图层顺序（第一行最上），所以点一下的效果与直接点卡片一样：
+            // 它跳到第一行，同时蓝框、PiP 主体、声音都归它。**不摘除**、不跳页。
             .onTapGesture { center.activate(task.id) }
             // ★ 长按拖动 = 把这扇窗「拖出来」摆到松手的位置。
             //
@@ -2295,6 +2414,14 @@ private struct DockPlacedCard: View {
     let task: VideoTask
     let index: Int
     let width: CGFloat
+    /// 锁定整理时的**统一宽度**（格子宽）。非空时压过 `width × ownScale`。
+    ///
+    /// 用户要求「锁定整理得把视窗统一」—— 统一的是**渲染宽度**，
+    /// 所以不能靠把每张卡的 `ownScale` 调成同一个值（各卡基础宽相同但比例不同，
+    /// 而且 `ownScale` 是用户捏出来的个人偏好，不该被布局改写）。
+    let widthOverride: CGFloat?
+    /// 位置与尺寸都由布局锁死：拖动照收手势，但不写回（拖不动的感觉才叫锁定）。
+    let locksPlacement: Bool
     let gravity: AVLayerVideoGravity
     let pip: PictureInPicture?
     let isActive: Bool
@@ -2344,6 +2471,46 @@ private struct DockPlacedCard: View {
     @State private var dragAnchor = DragAnchor()
 
     private var placed: CGSize { tileOffset ?? dragOffset ?? slot }
+
+    /// 这张卡**没被容器压过**的整卡宽度。
+    private var askedWidth: CGFloat { widthOverride ?? (width * ownScale) }
+
+    /// 真正拿去渲染的宽度：先过 `fit`，保证捏到再大也放得进容器。
+    ///
+    /// ⛔ 只钳位不钳尺寸是不够的：用户能捏到 2.2 倍，320pt 的基础宽在手机上
+    ///    就是 700pt+，比屏幕还宽 —— 那种尺寸无论怎么摆都要出界，
+    ///    而 `DockCardClamp` 在「卡片比容器大」时只能居中溢出。
+    private var renderWidth: CGFloat {
+        guard containerSize.width > 1, containerSize.height > 1 else { return askedWidth }
+        let aspect = max(task.aspectRatio, 0.2)
+        let fitted = DockCardClamp.fit(
+            CGSize(width: askedWidth,
+                   height: askedWidth / aspect + VideoTaskDock.chromeHeight),
+            in: containerSize)
+        return fitted.width
+    }
+
+    /// 拖动允许的位移区间（相对**起手位置**）。
+    ///
+    /// 由「偏移的合法区间」减去当前基准得到：`base + delta` 必须仍在
+    /// `[card + margin - container, -margin]` 之间。
+    /// 卡片比容器还宽时区间会反向，这里用 min/max 归一 —— 那种情况下交给 `fit` 收尺寸。
+    private var panBounds: CGRect {
+        let base = dragOffset ?? slot
+        let m = DockCardClamp.margin
+        let loX = cardSize.width + m - containerSize.width - base.width
+        let hiX = -m - base.width
+        let loY = cardSize.height + m - containerSize.height - base.height
+        let hiY = -m - base.height
+        return CGRect(x: min(loX, hiX), y: min(loY, hiY),
+                      width: abs(hiX - loX), height: abs(hiY - loY))
+    }
+
+    /// 这张卡此刻的整卡尺寸（含标题栏），钳位与存档都用它。
+    private var cardSize: CGSize {
+        CGSize(width: renderWidth,
+               height: renderWidth / max(task.aspectRatio, 0.2) + VideoTaskDock.chromeHeight)
+    }
 
     var body: some View {
         card
@@ -2404,18 +2571,24 @@ private struct DockPlacedCard: View {
             // 「不能找回不在屏幕内的小窗」。
             //
             // 不能只靠拖动时的 clamp：那只在**用户下一次拖**的时候生效。
+            //
+            // ⛔ 卡片的尺寸必须用 `cardSize`（含捏合后的宽度与标题栏），
+            //    不是基础 `width` —— 用基础宽算边界，放大后的卡照样会出屏。
             .onChange(of: containerSize) { _, new in
-                guard let cur = dragOffset, new.width > 1, new.height > 1 else { return }
-                let cardH = width / max(task.aspectRatio, 0.2) + 34
-                let fixed = DockCardClamp.clamp(cur,
-                                                card: CGSize(width: width, height: cardH),
-                                                in: new)
-                if fixed != cur { dragOffset = fixed }
+                guard new.width > 1, new.height > 1 else { return }
+                // 锁定时位置由网格算，不需要这里兜底。
+                guard !locksPlacement, let cur = dragOffset else { return }
+                let fixed = DockCardClamp.clamp(cur, card: cardSize, in: new)
+                if fixed != cur {
+                    dragOffset = fixed
+                    task.lastKnownOffset = fixed
+                }
             }
-            // 从管理器拖出来的落点：直接把自己摆过去。
+            // 从管理器拖出来的落点：直接把自己摆过去（先钳一次，落点也可能在屏幕外）。
             .onChange(of: store.videoTasks.pendingDropOffset[task.id]) { _, landed in
                 guard let landed else { return }
-                dragOffset = landed
+                let fixed = DockCardClamp.clamp(landed, card: cardSize, in: containerSize)
+                dragOffset = fixed
                 dragAnchor.value = nil
                 store.videoTasks.pendingDropOffset[task.id] = nil
             }
@@ -2429,22 +2602,26 @@ private struct DockPlacedCard: View {
 
     /// 卡片本体。`Equatable` 短路：拖动期间入参不变，这里直接跳过重建。
     private var card: some View {
-        VideoTaskCard(task: task, width: width, gravity: gravity,
+        VideoTaskCard(task: task, width: widthOverride ?? width, gravity: gravity,
                       isActive: isActive, pip: pip,
                       coveredByForeground: coveredByForeground,
-                      ownScale: ownScale, onScaleChange: onScaleChange,
+                      // 渲染宽度 / 基础宽 = 这一帧该用的倍率（已过 `fit`）。
+                      ownScale: renderWidth / max(widthOverride ?? width, 1),
+                      onScaleChange: onScaleChange,
                       taskIndex: index, taskCount: taskCount,
                       externalPinch: pinch,
+                      isLayoutLocked: locksPlacement,
+                      panBounds: panBounds,
                       // ★ 松手才上报：拖动中的逐帧位移由卡片自己的
                       //   `livePan` 承担，这里只负责「落定 + 存档」。
                       onPanEnded: { translation in
+                          // 锁定整理时位置由网格决定，手动拖不生效 ——
+                          // 不然「锁定」只是看起来锁定，松手就漂走。
+                          guard !locksPlacement else { return }
                           let base = dragOffset ?? slot
                           let raw = CGSize(width: base.width + translation.width,
                                            height: base.height + translation.height)
-                          let cardH = width / max(task.aspectRatio, 0.2) + 34
-                          let final = DockCardClamp.clamp(raw,
-                                                          card: CGSize(width: width, height: cardH),
-                                                          in: containerSize)
+                          let final = DockCardClamp.clamp(raw, card: cardSize, in: containerSize)
                           dragOffset = final
                           task.lastKnownOffset = final
                           if let context = task.channel.historyContext {
@@ -2457,10 +2634,11 @@ private struct DockPlacedCard: View {
 
     private var pinchGesture: some Gesture {
         MagnificationGesture()
-            .onChanged { value in pinch = value }
+            .onChanged { value in pinch = locksPlacement ? 1 : value }
             .onEnded { value in
-                onScaleChange(min(max(ownScale * value, 0.6), 2.2))
-                pinch = 1
+                defer { pinch = 1 }
+                guard !locksPlacement else { return }
+                onScaleChange(min(max(ownScale * value, 0.35), 2.2))
             }
     }
 }
@@ -2485,36 +2663,65 @@ struct VideoTaskDock: View {
         DockCardClamp.clamp(offset, card: card, in: container)
     }
 
-    /// 把管理器的一次拖放落成卡片位置。
+    /// 卡片标题栏高度（pt）。
     ///
-    /// 坐标系三层必须分清（这里是本类型最容易错的地方）：
+    /// ⛔ 平铺时**必须算进格子高度**：卡片高度 = 画面高 + 标题栏，少了这 34pt，
+    ///    每张卡都比自己的格子高一截，上下两排就会叠在一起 ——
+    ///    用户说的「整理完图层互相折叠了」有一半来自这里。
+    static let chromeHeight: CGFloat = 34
+
+    /// 整理（单次整理 / 锁定整理）用的格子。
+    ///
+    /// 统一宽度、逐行排开、从右下角往里收 —— 用户要求「整理要根据平铺来」
+    /// 「锁定整理得把视窗统一」。几何在 `DockLayout.packedTiles`（能单测），
+    /// 这里只负责把当前的卡片比例与基础宽度喂进去。
+    private func tidyTiles(in container: CGSize, cardWidth: CGFloat) -> [DockLayout.Tile] {
+        let tasks = store.videoTasks.tasks
+        guard !tasks.isEmpty else { return [] }
+        return DockLayout.packedTiles(count: tasks.count,
+                                      aspects: tasks.map { max($0.aspectRatio, 0.2) },
+                                      cardWidth: cardWidth,
+                                      chrome: Self.chromeHeight,
+                                      in: container)
+    }
+
+    /// 「整理一次」：按当前容器算一遍整齐的网格，写进每张卡的位置与尺寸，
+    /// 然后**回到自由模式** —— 整理是动作，不是状态。
+    ///
+    /// - Parameter keepLocked: 由「锁定整理」触发时传 true（保持锁定）。
+    ///   锁定那一下也要把位置与尺寸**写进每张卡自己的账**，
+    ///   否则解锁的瞬间它们会跳回锁定前的位置 —— 用户会以为「一解锁就散了」。
+    private func applyTidy(container: CGSize, cardWidth: CGFloat, keepLocked: Bool = false) {
+        let tasks = store.videoTasks.tasks
+        let tiles = tidyTiles(in: container, cardWidth: cardWidth)
+        guard !tiles.isEmpty else { return }
+        var landed: [UUID: CGSize] = [:]
+        for (index, task) in tasks.enumerated() where index < tiles.count {
+            let tile = tiles[index]
+            let offset = DockCardClamp.clamp(DockLayout.offset(for: tile, in: container),
+                                             card: tile.size, in: container)
+            // 统一视窗：每张卡的缩放都落到**同一个格子宽**。
+            let scaleForCard = tile.size.width / max(cardWidth, 1)
+            perCardScale[task.id] = scaleForCard
+            task.lastKnownOffset = offset
+            landed[task.id] = offset
+            if let context = task.channel.historyContext {
+                VideoTaskCenter.savePlacement(context.id + "|" + context.episodeID,
+                                              scale: scaleForCard, offset: offset)
+            }
+        }
+        withAnimation(.smooth(duration: 0.25)) {
+            store.videoTasks.pendingDropOffset = landed
+            if !keepLocked { store.videoTasks.layoutMode = .free }
+        }
+    }
+
+    /// 管理器的拖放落点。坐标系三层必须分清（这里是本类型最容易错的地方）：
     ///   ① 管理器给的 `point` 是**屏幕（global）**坐标；
     ///   ② 卡片偏移是**相对坞右下角**的偏移（往左/上为负）；
     ///   ③ 容器尺寸是坞自己的 `geo.size`。
     ///
     /// 换算：坞内坐标 = 全局点 − 坞的全局原点 → 再转成相对右下角的偏移。
-    /// 平铺模式下每张卡的偏移（相对右下角）。自由模式返回空数组。
-    ///
-    /// ⛔ 平铺的位置由 `DockLayout` 统一算，**不读各卡自己存的位置** ——
-    ///    否则用户上次摆在左上角的窗会跑到网格外面去。
-    private func tiledOffsets(in container: CGSize, count: Int) -> [CGSize] {
-        guard store.videoTasks.layoutMode == .tiled else { return [] }
-        // 用第一张卡的宽高比作为整组的口径：平铺要的是「整齐」，
-        // 每张各自不同宽高比会让格子参差，反而更难看清。
-        let aspect = store.videoTasks.tasks.first.map { max($0.aspectRatio, 0.2) } ?? 0.5625
-        return DockLayout.tiles(count: count, in: container, aspect: aspect)
-            .map { DockLayout.offset(for: $0, in: container) }
-    }
-
-    /// 自由模式下的默认落点（错开堆叠）。
-    private func slotOffset(index: Int, width: CGFloat, container: CGSize) -> CGSize {
-        if store.videoTasks.layoutMode == .tiled {
-            // 平铺时 slot 不参与：位置由 `tileOffset` 给。给零，避免两套值打架。
-            return .zero
-        }
-        return CGSize(width: 0, height: -CGFloat(index) * (width * 0.78 + 12))
-    }
-
     private func handleDrop(_ request: VideoTaskCenter.DropRequest,
                             container geo: GeometryProxy,
                             width: CGFloat) {
@@ -2526,7 +2733,7 @@ struct VideoTaskDock: View {
         let raw = CGSize(width: insideX - geo.size.width,
                          height: insideY - geo.size.height)
         guard let task = store.videoTasks.tasks.first(where: { $0.id == request.id }) else { return }
-        let cardH = width / max(task.aspectRatio, 0.2) + 34
+        let cardH = width / max(task.aspectRatio, 0.2) + Self.chromeHeight
         let clamped = DockCardClamp.clamp(raw,
                                           card: CGSize(width: width, height: cardH),
                                           in: geo.size)
@@ -2579,9 +2786,24 @@ struct VideoTaskDock: View {
                         //    这个 init 有 15 个参数，其中三个是内联的闭包/方法调用，
                         //    一起塞进一个字面量就超出类型推导预算。
                         let cardCount = store.videoTasks.tasks.count
-                        let tile = tiledOffsets(in: geo.size, count: cardCount)
-                        let thisTile: CGSize? = index < tile.count ? tile[index] : nil
-                        let slot = slotOffset(index: index, width: width, container: geo.size)
+                        let locked = store.videoTasks.isLayoutLocked
+                        let tiles = tidyTiles(in: geo.size, cardWidth: width)
+                        let tile = index < tiles.count ? tiles[index] : nil
+                        // 锁定整理：位置与宽度都由格子给，用户拖不动、捏不动。
+                        // 再钳一次是兜底：卡多到连最小缩放都排不下时，网格会顶到屏幕外。
+                        let thisTile: CGSize? = locked
+                            ? tile.map {
+                                DockCardClamp.clamp(DockLayout.offset(for: $0, in: geo.size),
+                                                    card: $0.size, in: geo.size)
+                              }
+                            : nil
+                        // 新窗（还没有自己的坐标）的默认落点 = 同一个网格里它那一格。
+                        //
+                        // ⛔ 原来这里是「第 n 张往上错开 n 个卡高」：8 张时最后几张
+                        //    整块在屏幕上方之外 —— 既看不见也点不到，正是用户说的
+                        //    「图层互相折叠」。现在默认就是整齐的一格，绝不出屏。
+                        let slot = tile.map { DockLayout.offset(for: $0, in: geo.size) } ?? .zero
+                        let uniformWidth: CGFloat? = locked ? tile?.size.width : nil
                         let scale = perCardScale[task.id] ?? 1
                         let active = task.id == store.videoTasks.activeTaskID
                         let reset = store.videoTasks.resetRequest
@@ -2589,6 +2811,8 @@ struct VideoTaskDock: View {
                             task: task,
                             index: index,
                             width: width,
+                            widthOverride: uniformWidth,
+                            locksPlacement: locked,
                             gravity: gravity,
                             pip: pip,
                             isActive: active,
@@ -2600,6 +2824,12 @@ struct VideoTaskDock: View {
                             resetRequest: reset,
                             slot: slot,
                             tileOffset: thisTile)
+                            // ★ 图层顺序：数组首位 = 最上层。
+                            //
+                            // ⛔ 少了这一行，「提最前」是反的：`ZStack` 按声明顺序画，
+                            //    后画的在上 —— 首位反而被压在最底下。用户点一下卡片
+                            //    看到的是「它跑到底下去了」，于是又去管理器里按上移。
+                            .zIndex(Double(cardCount - index))
                     }
                 }
                 // 卡片**增删**的淡入淡出。只认 id 序列的变化，不认位移。
@@ -2637,10 +2867,24 @@ struct VideoTaskDock: View {
                     }
                 }
                 .animation(.smooth(duration: 0.22), value: store.videoTasks.tasks.map(\.id))
+                // 「整理一次」：几何只有这一层知道（容器尺寸），所以动作落在这里。
+                .onChange(of: store.videoTasks.tidyRequest) { _, _ in
+                    applyTidy(container: geo.size, cardWidth: width)
+                }
+                // 刚进「锁定整理」时先整一次，并把结果写进每张卡自己的账 ——
+                // 这样解锁之后它们就停在原地、可以接着拖，而不是弹回锁定前的散乱摆位。
+                .onChange(of: store.videoTasks.layoutMode) { _, mode in
+                    guard mode == .tiled else { return }
+                    applyTidy(container: geo.size, cardWidth: width, keepLocked: true)
+                }
                 .offset(offset)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
-                .padding(12)
-
+                // ⛔ 这里**不要 `.padding(12)`**。
+                //
+                // `.padding` 套在「与容器等大」的 frame 外面时，子层仍按 `geo.size` 排版、
+                // 再整体被推 12pt —— 底边和右边那 12pt 直接落到屏幕外，
+                // 卡片贴着右下角的默认位就有一截看不见（用户说的「被屏幕吃掉」）。
+                // 内缩改由 `DockCardClamp.margin` 与网格的 `spacing` 负责，那两处是算出来的。
             }
         }
     }

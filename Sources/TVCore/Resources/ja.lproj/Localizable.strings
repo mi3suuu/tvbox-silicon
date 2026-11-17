@@ -2705,3 +2705,8 @@
 "Needs parsing" = "解析が必要";
 
 "That line didn't play. Switched to %@." = "この回線は再生できませんでした。「%@」に切り替えました。";
+
+"Tidy Once" = "一度だけ整列";
+"Lock Tiled Layout" = "整列をロック";
+"Unlock Layout" = "ロック解除";
+"Open Episode List" = "エピソード一覧へ";

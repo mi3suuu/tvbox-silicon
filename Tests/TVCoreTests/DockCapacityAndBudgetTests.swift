@@ -85,31 +85,32 @@ struct DockCapacityAndBudgetTests {
 
 // MARK: - 卡片拖出屏幕的问题
 
-/// 「拖到屏幕外叫不回来」的守卫。
+/// 「窗口不许出屏」的守卫。
 ///
-/// 卡片的偏移是相对右下角锚点的，拖动时原来是纯累加 —— 能拖到任意远，
-/// 一旦出屏，屏幕上既没有它，也就没有它的手势，**再也抓不回来**。
+/// 卡片的偏移是相对右下角锚点的，拖动时是纯累加 —— 能拖到任意远。
+/// 上一版只保证「留一角可触摸」，用户的实际感受是「窗口被屏幕吃掉半截」：
+/// 压到状态栏/手势条上的那部分既看不见也点不到。现在要求**整块**留在容器内。
 @Suite("DockCardClamp")
 struct DockCardClampTests {
 
     private let container = CGSize(width: 466, height: 678)
     private let card = CGSize(width: 200, height: 150)
 
-    /// 拖得再远，也要留出一角可触摸。
-    @Test func aCardDraggedFarAwayStillKeepsAGrabbableCorner() {
-        let keep: CGFloat = 72
+    /// 拖得再远，整块也必须留在容器里。
+    @Test func aCardDraggedFarAwayIsFullyPulledBackInside() {
+        let margin = DockCardClamp.margin
         for raw in [CGSize(width: -5000, height: 0), CGSize(width: 0, height: -5000),
-                    CGSize(width: 5000, height: 5000), CGSize(width: -5000, height: 5000)] {
+                    CGSize(width: 5000, height: 5000), CGSize(width: -5000, height: 5000),
+                    CGSize(width: -60, height: -40)] {
             let c = DockCardClamp.clamp(raw, card: card, in: container)
-            // 右边缘 = container.width + offset.width；必须有 ≥ keep 落在容器内。
             let rightEdge = container.width + c.width
             let leftEdge = rightEdge - card.width
-            #expect(rightEdge >= keep - 0.001, "整块跑到左边的卡再也抓不回来")
-            #expect(leftEdge <= container.width - keep + 0.001, "整块跑到右边的卡再也抓不回来")
+            #expect(leftEdge >= margin - 0.001, "左边出界：\(leftEdge)")
+            #expect(rightEdge <= container.width - margin + 0.001, "右边出界：\(rightEdge)")
             let bottomEdge = container.height + c.height
             let topEdge = bottomEdge - card.height
-            #expect(bottomEdge >= keep - 0.001)
-            #expect(topEdge <= container.height - keep + 0.001)
+            #expect(topEdge >= margin - 0.001, "上边出界：\(topEdge)")
+            #expect(bottomEdge <= container.height - margin + 0.001, "下边出界：\(bottomEdge)")
         }
     }
 
@@ -117,6 +118,20 @@ struct DockCardClampTests {
     @Test func aReasonableOffsetPassesThroughUntouched() {
         let raw = CGSize(width: -100, height: -200)
         #expect(DockCardClamp.clamp(raw, card: card, in: container) == raw)
+    }
+
+    /// 捏到比屏幕还大的卡片：尺寸先被 `fit` 压回来，再钳位就一定有解。
+    @Test func anOversizedCardIsShrunkBeforeClamping() {
+        let huge = CGSize(width: 900, height: 700)
+        let fitted = DockCardClamp.fit(huge, in: container)
+        #expect(fitted.width <= container.width - DockCardClamp.margin * 2 + 0.001)
+        #expect(fitted.height <= container.height - DockCardClamp.margin * 2 + 0.001)
+        // 宽高比保持不变（不能被拉扁）。
+        #expect(abs(fitted.width / fitted.height - huge.width / huge.height) < 0.001)
+
+        let c = DockCardClamp.clamp(CGSize(width: 5000, height: 5000), card: fitted, in: container)
+        #expect(container.width + c.width <= container.width - DockCardClamp.margin + 0.001)
+        #expect(container.height + c.height <= container.height - DockCardClamp.margin + 0.001)
     }
 }
 
