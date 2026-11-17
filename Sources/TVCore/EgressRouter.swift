@@ -617,7 +617,18 @@ public final class EgressRouter: @unchecked Sendable {
     private func noteProxyTimeout(_ key: String, error: Error,
                                   url: URL? = nil, headers: [String: String] = [:],
                                   purpose: EgressPurpose = .catalog) {
-        guard let urlError = error as? URLError, urlError.code == .timedOut else { return }
+        guard let urlError = error as? URLError else { return }
+        // ⛔ 不能只认「超时」。
+        //
+        // 真机 3 小时日志：15 个主机、64 次 `-1200 TLS错误`（slapibf.com、98jpg1.vip、
+        // pic31.havzy1.com、api.souavzy.vip …）。它们全都没进过学习名单 ——
+        // 因为名单只收 `.timedOut`。而这批站是同一种病：Loon 把域名判成直连，
+        // 直连路径上 TLS 被中间设备掐断，代理腿又被 Loon 按同一条规则直连出去，
+        // 于是两条腿都是 -1200。只等「超时」等于永远等不到。
+        //
+        // 只收「连接已建立/被重置」这一类信号；`cannotConnectToHost` 刻意排除 ——
+        // 它也可能是中继自己没起来，那不该算到站点头上。
+        guard Self.isLearnableProxyFailure(urlError.code) else { return }
         // 三类用途都要收：入口是接口，进去之后片单在 A 域名、分片在 B、海报在 C，
         // Loon 按域名判，少收一个就是「能打开、放不出来」。
         // 收不收得下由 `ForcedNodeHosts` 分档：接口一次、CDN 两次。
@@ -631,7 +642,8 @@ public final class EgressRouter: @unchecked Sendable {
         // 所以「无感」的正确形态是：我们等，Loon 按它自己的间隔刷新。
         if isNew, let url { scheduleRecoveryProbe(for: url, headers: headers, purpose: purpose) }
         Diagnostics.shared.record(.warning, "egress",
-            "\(key): the proxy leg timed out — Loon accepted the connection and never answered. "
+            "\(key): the proxy leg failed (\(urlError.code.rawValue)) — Loon accepted the connection "
+            + "and the path behind it did not work. "
             + "Loon 的域名规则优先于 SRC-PORT：这个站的出口由你配置的规则决定,App 无法覆盖。"
             + " 要强制走节点,把该域名加进指向节点的规则集,并放在判直连的规则之前。")
     }
@@ -733,6 +745,21 @@ public final class EgressRouter: @unchecked Sendable {
     private static func capture<T>(_ body: () async throws -> T) async -> Result<T, Error> {
         do { return .success(try await body()) }
         catch { return .failure(error) }
+    }
+
+    /// 代理腿的哪一种失败值得写进「必须显式走节点」名单。
+    ///
+    /// 收的是「连接已经建立、路径却没通」那一类：超时、TLS 被掐、连接被重置。
+    /// `cannotConnectToHost` 刻意不收 —— 中继没起来也会是这个错，不能算到站点头上。
+    static func isLearnableProxyFailure(_ code: URLError.Code) -> Bool {
+        switch code {
+        case .timedOut, .secureConnectionFailed, .networkConnectionLost,
+             .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot:
+            return true
+        default:
+            return false
+        }
     }
 
     /// 这条失败该不该归咎于「出口」。

@@ -336,6 +336,19 @@ public final class PlaybackAccelerator: @unchecked Sendable {
         }.resume()
     }
 
+    /// 按被加速地址的后缀给 `Content-Type`；认不出才退回二进制流。
+    private static func mime(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "mp4", "m4v", "m4s": "video/mp4"
+        case "m3u8": "application/vnd.apple.mpegurl"
+        case "ts": "video/mp2t"
+        case "m4a", "aac": "audio/mp4"
+        case "mp3": "audio/mpeg"
+        case "webm": "video/webm"
+        default: "application/octet-stream"
+        }
+    }
+
     /// 并发拉 `[from, to]`，按序写给 `connection`。
     private func pump(_ route: Route, from: Int64, to: Int64, on connection: NWConnection) {
         let span = to - from + 1
@@ -348,7 +361,14 @@ public final class PlaybackAccelerator: @unchecked Sendable {
         // 而 AVPlayer 已经知道它要的是这一段；再声明 206 会让它二次确认区间，
         // 平白多一次往返。长度写区间长度，客户端据此知道何时收完。
         var head = "HTTP/1.1 200 OK\r\n"
-        head += "Content-Type: application/octet-stream\r\n"
+        // ⛔ 不能一律 `application/octet-stream`。
+        //
+        // 真机证据（20:03-20:07）：
+        //   item.status=2 assetURL=http://127.0.0.1:63471/….mp4
+        //   CoreMediaErrorDomain -12939 — HTTP response has no Content-Type
+        // AVPlayer 拿到 octet-stream 等于「类型不明」，直接判失败；
+        // 浏览器能猜，它不猜。按被加速地址的后缀给类型。
+        head += "Content-Type: \(Self.mime(for: route.origin))\r\n"
         head += "Content-Length: \(span)\r\n"
         head += "Accept-Ranges: bytes\r\n"
         head += "Connection: close\r\n\r\n"

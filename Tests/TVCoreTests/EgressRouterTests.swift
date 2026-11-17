@@ -343,3 +343,23 @@ import Testing
         #expect(!text.contains("ipify"))
     }
 }
+
+/// 「什么失败才值得写进名单」是这份名单正确性的全部。
+///
+/// 只收超时会让一整类站永远进不来：真机 3 小时里有 15 个主机、64 次 -1200 TLS错误，
+/// 它们都是「Loon 判直连 → 直连 TLS 被掐 → 代理腿又被同一条规则直连」。
+@Suite struct LearnableProxyFailureTests {
+    @Test func establishedButBrokenPathsAreLearnable() {
+        #expect(EgressRouter.isLearnableProxyFailure(.timedOut))
+        #expect(EgressRouter.isLearnableProxyFailure(.secureConnectionFailed))
+        #expect(EgressRouter.isLearnableProxyFailure(.networkConnectionLost))
+        #expect(EgressRouter.isLearnableProxyFailure(.serverCertificateUntrusted))
+    }
+
+    /// 中继没起来也是 `cannotConnectToHost`，不能算到站点头上。
+    @Test func ourOwnRelayBeingDownIsNotTheSitesFault() {
+        #expect(!EgressRouter.isLearnableProxyFailure(.cannotConnectToHost))
+        #expect(!EgressRouter.isLearnableProxyFailure(.cancelled))
+        #expect(!EgressRouter.isLearnableProxyFailure(.badURL))
+    }
+}
