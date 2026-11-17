@@ -250,6 +250,8 @@ public final class CustomProxyStore: @unchecked Sendable {
                 if let newValue, !newValue.isEmpty { defaults.set(newValue, forKey: Self.defaultKey) }
                 else { defaults.removeObject(forKey: Self.defaultKey) }
             }
+            // 换了默认出口：按 host 记的结论全部作废（旧结论指向的是另一台出口）。
+            EgressRouter.shared.reset()
         }
     }
 
@@ -266,7 +268,11 @@ public final class CustomProxyStore: @unchecked Sendable {
     public var forceNodeLane: Bool {
         // 缺省为 true：老版本从没写过这个键，升级后要立刻恢复「代理 = 走节点」的语义。
         get { lock.withLock { defaults.object(forKey: Self.forceNodeLaneKey) as? Bool ?? true } }
-        set { lock.withLock { defaults.set(newValue, forKey: Self.forceNodeLaneKey) } }
+        set {
+            lock.withLock { defaults.set(newValue, forKey: Self.forceNodeLaneKey) }
+            // 端口段的用法变了，之前「这条腿不通」的结论可能正是因为端口段造成的。
+            EgressRouter.shared.reset()
+        }
     }
 
     /// 直连不通时该从哪台代理出去。
@@ -300,6 +306,10 @@ public final class CustomProxyStore: @unchecked Sendable {
     private func persistLocked() {
         if let data = try? JSONEncoder().encode(_endpoints) { defaults.set(data, forKey: Self.endpointsKey) }
         if let data = try? JSONEncoder().encode(_routes) { defaults.set(data, forKey: Self.routesKey) }
+        // 出口配置变了：`EgressRouter` 里按 host 记的结论全部作废。
+        // 不作废的话，换了代理地址/端口之后旧结论还会把请求拨向已经不存在的出口，
+        // 而且新出口可能整段已经被判成「不用代理」。
+        EgressRouter.shared.reset()
     }
 }
 

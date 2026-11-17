@@ -129,19 +129,42 @@ public enum SourceRoute: String, Codable, CaseIterable, Sendable {
 ///
 /// 现在：算一次，存一份，两边读同一个答案。
 public final class RelayRouteRegistry: @unchecked Sendable {
+    /// 观众给这个源选的出口，以及（如果允许）该用哪台代理。
+    ///
+    /// ⛔ 这里只存「策略」，**不再改写 `site.api`**。地址一旦被改写成回环中继，
+    /// 这个源的所有请求（接口、海报、清单）就只能走同一条腿 —— 而真实情况恰恰相反：
+    /// 接口在国内直连是好的、播放 CDN 必须过节点，换一部剧又反过来。
+    /// 具体每条 host 走哪条腿由 `EgressRouter` 按请求决定。
+    public struct Route: Sendable, Equatable {
+        public var mode: SourceRoute
+        public var proxyID: String?
+        public init(mode: SourceRoute, proxyID: String?) {
+            self.mode = mode
+            self.proxyID = proxyID
+        }
+    }
+
     public static let shared = RelayRouteRegistry()
 
     private let lock = NSLock()
-    private var table: [String: String] = [:]
+    private var table: [String: Route] = [:]
 
     public init() {}
 
     /// 每次重算路由后**整表替换** —— 迟到的那条结论不该继续生效。
-    public func replace(_ table: [String: String]) {
+    public func replace(_ table: [String: Route]) {
         lock.withLock { self.table = table }
     }
 
     public func proxyID(origin: URL, sourceKey: String) -> String? {
+        lock.withLock { table[Self.key(origin: origin, sourceKey: sourceKey)]?.proxyID }
+    }
+
+    public func mode(origin: URL, sourceKey: String) -> SourceRoute? {
+        lock.withLock { table[Self.key(origin: origin, sourceKey: sourceKey)]?.mode }
+    }
+
+    public func route(origin: URL, sourceKey: String) -> Route? {
         lock.withLock { table[Self.key(origin: origin, sourceKey: sourceKey)] }
     }
 

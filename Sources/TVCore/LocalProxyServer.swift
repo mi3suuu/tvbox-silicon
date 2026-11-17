@@ -117,8 +117,14 @@ public final class LocalProxyServer: @unchecked Sendable {
         let scheme = url.scheme ?? "http"
         let host = url.host ?? ""
         let port = url.port ?? (scheme == "https" ? 443 : 80)
-        let path = url.path.isEmpty ? "/" : url.path
-        let query = url.query.map { "?\($0)" } ?? ""
+        // ⛔ 必须用百分号编码后的形式。
+        //
+        // `url.path` 是**解码过**的：签名地址里常见的 `%2F`、`%2B` 会变回 `/` 和 `+`，
+        // 拼进 `/p/…/host/443/a/b` 之后中继按斜杠切分，路径就多了一层、签名也失效 ——
+        // 源站回 403/404，播放器只看到「连上了但没内容」。
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let path = (components?.percentEncodedPath).flatMap { $0.isEmpty ? nil : $0 } ?? "/"
+        let query = components?.percentEncodedQuery.map { "?\($0)" } ?? ""
         return URL(string: "\(base.absoluteString)\(prefix)/\(scheme)/\(host)/\(port)\(path)\(query)") ?? url
     }
 
@@ -302,7 +308,13 @@ public final class LocalProxyServer: @unchecked Sendable {
         private var rebinds = 0
         private var directFallback = false
         private var systemFallback = false
-        private var retrying = false
+        /// 每次 `open` 取一个号：只有**当前这一腿**的回调能动本地连接。
+        ///
+        /// ⛔ 之前用 `retrying` 布尔标记挡「自己取消的那条 upstream 的 `.cancelled`」，
+        ///    挡住了取消，却没挡住它随后以 `.failed` 形式到达的回调 —— 换腿时旧腿已经开始握手，
+        ///    cancel 之后照样回调。于是「一次换腿」被记成「目标站两次失败」，
+        ///    同时把客户端的连接关掉。症状正是「代理模式下有些请求永远等不到响应」。
+        private var generation = 0
         /// 当前这条隧道实际走的代理（降级直连后为 nil）。重写播放清单时要用它，
         /// 否则清单里的子清单会继续走已经失败的那条腿。
         private var effectiveProxyID: String?
@@ -358,7 +370,6 @@ public final class LocalProxyServer: @unchecked Sendable {
             lock.withLock {
                 guard !directFallback else { return false }
                 directFallback = true
-                retrying = true
                 // 换了一条腿，端口重试预算也要跟着重来 —— 否则代理腿上用掉的两次
                 // 会让直连腿第一次撞上 TIME_WAIT 就直接判死。
                 rebinds = 0
@@ -366,11 +377,10 @@ public final class LocalProxyServer: @unchecked Sendable {
             }
         }
 
-        /// 正在换腿：这条 upstream 的 `.cancelled` 不能把本地连接一起关掉，
-        /// 否则重试时已经没有客户端可回了。
-        var isRetrying: Bool { lock.withLock { retrying } }
+        /// 这一腿的编号。`open` 每次递增，回调里带着过期的号就直接丢弃。
+        func takeToken() -> Int { lock.withLock { generation += 1; return generation } }
 
-        func finishedRetrying() { lock.withLock { retrying = false } }
+        func isCurrent(_ token: Int) -> Bool { lock.withLock { generation == token } }
 
         func setEffectiveProxy(_ id: String?) { lock.withLock { effectiveProxyID = id } }
         var proxyInUse: String? { lock.withLock { effectiveProxyID } }
@@ -385,7 +395,6 @@ public final class LocalProxyServer: @unchecked Sendable {
             lock.withLock {
                 guard !systemFallback else { return false }
                 systemFallback = true
-                retrying = true
                 return true
             }
         }
@@ -402,17 +411,23 @@ public final class LocalProxyServer: @unchecked Sendable {
             return
         }
         state.setEffectiveProxy(endpoint?.id)
+        let token = state.takeToken()
         let upstream = NWConnection(host: NWEndpoint.Host(state.host), port: port, using: built.parameters)
         // The port comes back to the pool as soon as this connection is done with it — on failure
         // and on cancellation as well as on a clean close, or a long session would drain the range.
         let sourcePort = built.sourcePort
         upstream.stateUpdateHandler = { connectionState in
+            // 旧腿的回调（换腿时被我们 cancel 掉的那条）不许动这一条：它带着过期的号，
+            // 只能把自己的源端口还回去。
+            guard state.isCurrent(token) else {
+                if let sourcePort { SRCPortPool.shared.release(sourcePort) }
+                return
+            }
             // 日志必须标清是哪条腿：`state.endpoint` 在 forceDirect 后仍然非 nil，
             // 用它打标签会让「直连腿失败」看起来像「代理腿失败」。
             let leg = endpoint?.name ?? (forceDirect ? "direct(after proxy failed)" : "direct")
             switch connectionState {
             case .ready:
-                state.finishedRetrying()
                 if endpoint != nil { ProxyCircuit.noteSuccess(host: state.host) }
                 let via = endpoint.map { "proxy=\($0.name)" } ?? (forceDirect ? "direct(after proxy failed)" : "direct")
                 let viaPort = sourcePort.map { " src=:\($0)" } ?? ""
@@ -453,7 +468,9 @@ public final class LocalProxyServer: @unchecked Sendable {
                     ProxyDialHost.notePrimaryFailed(proxy)
                     if let sourcePort { SRCPortPool.shared.release(sourcePort) }
                     upstream.cancel()
-                    open(state, dialHost: fallback)
+                    // ⛔ 必须把 `bindSourcePort` 带过去。上一次就是在这里丢的：临时端口那条路
+                    //    一旦回退，会重新去抢 415xx/416xx —— 而它当初就是因为端口段不可用才降级的。
+                    open(state, dialHost: fallback, bindSourcePort: bindSourcePort, forceDirect: forceDirect)
                     return
                 }
                 // 代理那条腿对这条请求就是不工作（真机典型形态：`NWError -9816`，
@@ -474,6 +491,9 @@ public final class LocalProxyServer: @unchecked Sendable {
                     Diagnostics.shared.record(.warning, "proxy",
                         "relay legs failed for \(state.host):\(state.port); retrying through the system stack")
                     if let sourcePort { SRCPortPool.shared.release(sourcePort) }
+                    // 换一种方式发请求 = 换一腿：先作废这一腿，它的收官/取消回调不许再动本地连接，
+                    // 否则系统栈刚发出请求，客户端这头已经被自己关掉了（真机上是「一直 loading」）。
+                    _ = state.takeToken()
                     upstream.cancel()
                     relayThroughSystemStack(state)
                     return
@@ -485,8 +505,7 @@ public final class LocalProxyServer: @unchecked Sendable {
                 state.connection.cancel(); upstream.cancel()
             case .cancelled:
                 if let sourcePort { SRCPortPool.shared.release(sourcePort) }
-                // 换腿重试时这条 upstream 是被我们自己取消的 —— 本地连接还要接着用。
-                if !state.isRetrying { state.connection.cancel() }
+                state.connection.cancel()
             default: break
             }
         }

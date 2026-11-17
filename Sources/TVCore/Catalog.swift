@@ -427,15 +427,39 @@ public struct CatalogClient: Sendable {
                 throw crashed
             }
         }
-        let data = try await fetchCMS(requestURL(params))
+        let url = try requestURL(params)
+        let data = try await fetchCMS(url)
         do { return try JSONDecoder().decode([String: JSONValue].self, from: data) }
         catch {
             // Dead or bot-protected sites answer with a web page; say that rather than a decoding error.
             let start = String(decoding: data.prefix(512), as: UTF8.self).lowercased()
-            if start.contains("<html") || start.contains("<!doctype") || start.contains("<head") {
-                throw TVError.unsupported(L10n.text("The source returned a web page instead of data. It may be offline or blocking apps."))
+            let isPage = start.contains("<html") || start.contains("<!doctype") || start.contains("<head")
+            guard isPage else { throw error }
+            // 连上了，但回的不是数据 —— 这正是赛跑判断不了的那一类（连接是通的）。
+            // 把这条 host 的结论翻到代理，再要一次。观众看到的差别是「这源能用了」。
+            if CustomProxyStore.shared.fallbackEndpoint != nil {
+                EgressRouter.shared.noteBadContent(url, purpose: .catalog, allowsProxy: egressPolicy.allowsProxy)
+                if let second = try? await fetchCMS(url),
+                   let json = try? JSONDecoder().decode([String: JSONValue].self, from: second) {
+                    Diagnostics.shared.record(.info, "egress", "\(url.host() ?? "?") answered a page direct; proxy answered data")
+                    return json
+                }
             }
-            throw error
+            throw TVError.unsupported(L10n.text("The source returned a web page instead of data. It may be offline or blocking apps."))
+        }
+    }
+
+    /// 这个源允许走哪条腿。
+    ///
+    /// 观众的选择 → 策略：直连 = 只走直连；自动 = 直连先跑、代理兜底；
+    /// 代理 = 两条同时起跑（谁先给出内容用谁，所以标成代理也不会更慢）。
+    private var egressPolicy: EgressPolicy {
+        let route = RelayRouteRegistry.shared.route(origin: origin, sourceKey: site.sourceKey)
+        let proxyID = route?.proxyID ?? CustomProxyStore.shared.fallbackEndpoint?.id
+        switch route?.mode ?? .auto {
+        case .direct: return .directOnly
+        case .proxy: return proxyID.map { EgressPolicy.preferProxy(proxyID: $0) } ?? .automatic(proxyID: nil)
+        case .auto: return .automatic(proxyID: proxyID)
         }
     }
 
@@ -452,8 +476,10 @@ public struct CatalogClient: Sendable {
     /// 不是隐私。源自己定义的 `header` 一律优先，自带的 Referer/Accept 不会被覆盖。
     private func fetchCMS(_ url: URL) async throws -> Data {
         let headers = cmsRequestHeaders()
+        // 走统一出口：这台 host 该直连还是该过代理，由 `EgressRouter` 按实际成败决定。
         do {
-            return try await http.get(url, headers: headers).0
+            return try await EgressRouter.shared.data(for: url, headers: headers,
+                                                      purpose: .catalog, policy: egressPolicy).0
         } catch {
             if error is CancellationError || Task.isCancelled { throw CancellationError() }
             // 服务器已经明确回过一个状态码（403/404/5xx）时不再换协议：那不会因为 http 而变好，
@@ -465,7 +491,8 @@ public struct CatalogClient: Sendable {
             guard let fallback = parts.url else { throw error }
             Diagnostics.shared.record(.info, "catalog",
                 "\(reportContext) https refused (\(error.localizedDescription)); retrying over http")
-            return try await http.get(fallback, headers: headers).0
+            return try await EgressRouter.shared.data(for: fallback, headers: headers,
+                                                      purpose: .catalog, policy: egressPolicy).0
         }
     }
 
