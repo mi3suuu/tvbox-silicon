@@ -842,7 +842,38 @@ struct PlayerControlsLayout: Equatable {
         for control in PlayerControl.standardMore where !placed.contains(control) { more.append(control) }
         self.init(topSlots: top.map(Optional.some), bottomSlots: bottom.map(Optional.some), more: more)
         assertComplete("load")
+        #if DEBUG
+        // ⛔ 必须在 `#if DEBUG` **内部**调用：`assertOverflowReachable` 的定义体
+        //    整个在 `#if DEBUG` 里（见下方同文件的守卫）。Release 下它根本不存在，
+        //    守卫外调用会直接 `type 'PlayerControlsLayout' has no member
+        //    'assertOverflowReachable'` —— 即 **Release 编译失败**。
+        //    最小复现已验：DEBUG 外调用 DEBUG 内定义的静态函数，Release 报
+        //    `has no member`（不是运行时问题，是编译期就断）。
         Self.assertOverflowReachable()
+        #endif
+        #if DEBUG
+        // 6 形态 × (顶/中/底) 的「全集可达」自检。
+        //
+        // winW 取 `OneSkinWindowGeometryCore` 的**真源**（= 列宽 colW）：
+        //   外屏竖持 428（单列整宽）/ 外屏横持 926×0.5499=509 /
+        //   内屏竖持 673 / 内屏横持 951×0.5499=523 /
+        //   全屏横 951 / 全屏竖 669
+        // winH 用 `winW / 1.819`（`Metrics.windowAspect`）。
+        //
+        // ⚠️ 这些尺寸来自 `Docs` 与 geometry 公式的**静态推导**，不是本轮真机实测；
+        //    真机若不同以实际为准（断言失败会打印具体的缺失控件名，便于定位）。
+        let shapes: [(String, CGFloat, Bool)] = [
+            ("外屏竖持", 428, false),
+            ("外屏横持", 509, false),
+            ("内屏竖持", 673, false),
+            ("内屏横持", 523, false),
+            ("全屏横", 951, true),
+            ("全屏竖", 669, true),
+        ]
+        for (name, w, fs) in shapes {
+            Self.assertEveryShapeReachable(winW: w, winH: w / 1.819, fullScreen: fs, label: name)
+        }
+        #endif
     }
 
     /// 回归断言：**真机那个崩溃串，修好之后 isComplete 必须为真。**
@@ -908,6 +939,92 @@ struct PlayerControlsLayout: Equatable {
             + "|" + Array(repeating: Self.empty, count: slotCount).joined(separator: ",")
         let full = PlayerControlsLayout(stored: fullStored)
         assert(full.isComplete, "底栏塞满 slotCount 项后布局不完整 —— 补位溢出又被丢了")
+    }
+
+    /// 回归断言：**「栏上可见 + 抽屉里列出」必须等于可用全集**，一个不漏。
+    ///
+    /// ## 为什么需要这条（它补的是上面 `assertOverflowReachable` 管不到的那一半）
+    ///
+    /// `assertOverflowReachable` 只验**布局对象**（`top/bottom/more` 三个数组）里的
+    /// 成员是否齐全。但用户能不能**点到**，还取决于**渲染层**把这几个数组真的画出来多少：
+    /// 窗口窄的时候顶栏只放得下 5 颗（427pt 外屏竖持），中间排只放得下 16 颗，
+    /// 底栏只放得下 2 颗 —— 这些「放不下的」必须全部落进「更多」抽屉，
+    /// 否则就是用户报的「设置里排好了、播放器里找不到」。
+    ///
+    /// 这里用**容量公式**逐形态算一遍，验证
+    ///     栏上能画的 + 抽屉里列出的 == 可用全集
+    /// 对**每一个形态**都成立。容量公式与渲染层同源（见 `OneSkinPlayerChrome` 的
+    /// `topSurfaceCapacity` / `centerCapacity` / `edgeCapacity`），不是我另造一份。
+    ///
+    /// - Parameters:
+    ///   - winW: 播放器窗口宽（= 列宽 colW，见 `OneSkinWindowGeometryCore`）。
+    ///   - winH: 播放器窗口高。
+    ///   - fullScreen: 全屏态（顶栏结构位只有 2 颗）。
+    ///
+    /// ⚠️ 阈值常量（`hit=44` / `reserve` 的 120 / `edge = winW*0.012`）与渲染层保持一致；
+    ///    改渲染层那几处时**必须同步改这里**，否则这条断言会变成假的。
+    static func assertEveryShapeReachable(winW: CGFloat, winH: CGFloat, fullScreen: Bool,
+                                          lockInSlot: Bool = false,
+                                          label: String) {
+        let edge = max(4, winW * 0.012)
+        let scale = min(max(winH / 300, 0.82), 1.4)
+        let glyph = (13 * scale).rounded()
+        let hit = min(52, max(44, (glyph * 1.8).rounded()))
+        let stepHit = ((glyph * 1.2).rounded() * 1.9).rounded()
+        let caption = (glyph * 0.9).rounded()
+        // ⚠️ 这里按 `safeLeft = safeRight = 0`（最宽松）算容量，所以容量偏**大**。
+        //    断言因此在真机上不会假失败；代价是它抓不到「安全区吃掉一格」那一类问题。
+        let barLeading = edge
+        let barTrailing = edge
+        let structural = fullScreen ? 2 : (lockInSlot ? 3 : 4)
+        let topCap = max(0, Int((winW - barLeading - barTrailing - CGFloat(structural) * hit) / hit))
+        let centerCap = max(1, Int(max(0, winW - 2 * edge) / max(stepHit, 1)))
+        let reserve = caption * 15 + hit + 120
+        let edgeCap = max(1, Int(max(0, winW - barLeading - barTrailing - reserve) / hit))
+
+        // ── 以下逐行镜像 `OneSkinPlayerChrome` 的渲染逻辑（`topSlotRow` /
+        //    `centerSlotRow` / `bottomItems` / `moreList`），改那边必须同步改这里。
+        let layout = current
+        let available = Set(PlayerControl.allCases).subtracting(PlayerControl.fixedKeys)
+
+        // 顶栏：槽位里放得下的画出来，放不下的溢出。
+        let topShown = Set(layout.top.prefix(topCap))
+        let topOverflow = Array(layout.top.dropFirst(topCap))
+
+        // 中间排：与 `centerItems` / `centerSlotsToShow` 同口径。
+        let centerItems = layout.bottom.filter { PlayerControl.centerControls.contains($0) }
+        let centerShowCount = min(centerItems.count, centerCap)
+        let centerShown = Set(centerItems.prefix(centerShowCount))
+        let centerOverflow = Array(centerItems.dropFirst(centerShowCount))
+
+        // 底栏边缘：`progressBar` 与 `fullScreen` 无条件画（兜底），其余受 `edgeCap` 限。
+        var fixedCount = 0
+        var bottomItems: [PlayerControl] = []
+        for control in layout.bottom where !PlayerControl.centerControls.contains(control) {
+            if control == .progressBar { bottomItems.append(control); continue }
+            if control == .fullScreen { bottomItems.append(control); fixedCount += 1; continue }
+            guard fixedCount < edgeCap else { continue }
+            fixedCount += 1
+            bottomItems.append(control)
+        }
+        let edgeAll = layout.bottom.filter { !PlayerControl.centerControls.contains($0) }
+        let bottomOverflow = centerOverflow + edgeAll.filter { !bottomItems.contains($0) }
+
+        // 「更多」抽屉：用户的 more + 各处溢出，去重、去固定键。
+        var moreList: [PlayerControl] = []
+        var seen = Set<PlayerControl>()
+        for control in layout.more + topOverflow + bottomOverflow {
+            guard !PlayerControl.fixedKeys.contains(control), seen.insert(control).inserted else { continue }
+            moreList.append(control)
+        }
+
+        let shown = topShown.union(centerShown).union(bottomItems).union(moreList)
+        let missing = available.subtracting(shown)
+        assert(missing.isEmpty, """
+            [\(label)] 有 \(missing.count) 个控件**在任何地方都点不到**：\(missing.map(\.rawValue).sorted())
+            容量：顶 \(topCap) / 中 \(centerCap) / 底 \(edgeCap)，结构位 \(structural)
+            用户会表现为「设置里勾了，播放器里找不到这个功能」。
+            """)
     }
     #endif
 
