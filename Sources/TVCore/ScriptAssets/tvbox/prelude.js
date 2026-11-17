@@ -181,6 +181,27 @@ Object.assign(globalThis, {
     md5X: text => host('md5', String(text)),
     // Native AES/hash/HMAC (ScriptCrypto.swift); binary fields are base64. Mirrored in host.mjs.
     nativeCrypto: request => JSON.parse(host('crypto', JSON.stringify(request))),
+    // Web Crypto 的最小面：`crypto.getRandomValues` / `randomUUID`。
+    // 原生 JS 源与 WeBox 源都会用它生成 salt；QuickJS 不自带，缺了就是「不支持」。
+    // 字节来自原生 `SecRandomCopyBytes`（`nativeCrypto({op:'random'})`），不是 Math.random。
+    crypto: (() => {
+        const fill = array => {
+            const view = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+            const hex = JSON.parse(host('crypto', JSON.stringify({ op: 'random', bytes: view.length }))).hex;
+            for (let i = 0; i < view.length; i += 1) view[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+            return array;
+        };
+        return {
+            getRandomValues: fill,
+            randomUUID: () => {
+                const bytes = fill(new Uint8Array(16));
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+                return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+            }
+        };
+    })(),
     gzip: text => bytesToBase64(globalThis.pako.gzip(utf8Encode(text))),
     ungzip: text => decodeBytes(globalThis.pako.ungzip(base64ToBytes(text))),
     getProxy: () => 'http://127.0.0.1:-1/proxy?do=js', getPort: () => -1,

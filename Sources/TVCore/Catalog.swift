@@ -489,12 +489,17 @@ public struct CatalogClient: Sendable {
             // 服务器已经明确回过一个状态码（403/404/5xx）时不再换协议：那不会因为 http 而变好，
             // 只是白花一次请求。要回退的是「连接都没建立」的那些。
             if let tv = error as? TVError, case .http = tv { throw error }
-            guard url.scheme?.lowercased() == "https",
+            // 两个方向都要试，只做 https→http 会漏掉另一半：
+            // 真机日志里 `www.afasu.com` 这类站是 http 通、https 被掐；
+            // 而 `apilj.com` / `api.okzyw.net` / `ffzy1.tv` 是 :80 直接空回复、:443 才给数据。
+            let scheme = url.scheme?.lowercased()
+            let other = scheme == "https" ? "http" : (scheme == "http" ? "https" : nil)
+            guard let other,
                   var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw error }
-            parts.scheme = "http"
+            parts.scheme = other
             guard let fallback = parts.url else { throw error }
             Diagnostics.shared.record(.info, "catalog",
-                "\(reportContext) https refused (\(error.localizedDescription)); retrying over http")
+                "\(reportContext) \(scheme ?? "?") refused (\(error.localizedDescription)); retrying over \(other)")
             return try await EgressRouter.shared.data(for: fallback, headers: headers,
                                                       purpose: .catalog, policy: egressPolicy).0
         }

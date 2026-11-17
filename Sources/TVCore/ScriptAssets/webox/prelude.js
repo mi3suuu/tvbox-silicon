@@ -29,6 +29,29 @@ class WeBoxFailure extends Error {
 
 const fail = (code, message, extra) => { throw new WeBoxFailure(code, message, extra); };
 
+// --- Web Crypto 的最小可用面 ---------------------------------------------------------------
+// 站点普遍用 `crypto.getRandomValues` 生成 salt / nonce，并有 `if (!crypto?.getRandomValues)` 的
+// 前置检查 —— 没有就直接报「缺少安全随机数能力」。QuickJS 不带 Web Crypto，这里补上它真正用到的两种。
+// 随机字节来自原生 `SecRandomCopyBytes`（同一条 `nativeCrypto` 桥），不是 Math.random。
+function fillRandom(array) {
+    const view = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+    const hex = nativeCrypto({ op: 'random', bytes: view.length }).hex;
+    for (let i = 0; i < view.length; i += 1) view[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return array;
+}
+
+if (!globalThis.crypto) globalThis.crypto = {};
+if (typeof globalThis.crypto.getRandomValues !== 'function') globalThis.crypto.getRandomValues = fillRandom;
+if (typeof globalThis.crypto.randomUUID !== 'function') {
+    globalThis.crypto.randomUUID = () => {
+        const bytes = fillRandom(new Uint8Array(16));
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    };
+}
+
 // --- Settings and store -----------------------------------------------------------------------
 // Settings live for the whole session: `spider.init` fills them from the source's ext, and `ctx.settings`
 // reads the same object, so a plugin sees its configured base URL on every call.

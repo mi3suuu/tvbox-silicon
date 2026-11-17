@@ -52,11 +52,16 @@ enum ScriptCrypto {
         let answer: [String: String]
         switch request["op"]?.string {
         case "random":
-            guard let count = request["count"]?.int, (1...1024).contains(count) else { throw ScriptHostError("invalid random byte count") }
+            // ⛔ 两个键名都要认：WeBox 侧写的是 `bytes`，TVBox 侧历来写 `count`。
+            //    只认 `count` 时 WeBox 的 `crypto.random()` 每次都抛
+            //    「invalid random byte count」—— 站点于是判定「缺少安全随机数能力」。
+            let count = request["count"]?.int ?? request["bytes"]?.int
+            guard let count, (1...1024).contains(count) else { throw ScriptHostError("invalid random byte count") }
             var data = Data(count: count)
             let status = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!) }
             guard status == errSecSuccess else { throw ScriptHostError("random bytes unavailable") }
-            answer = ["data": data.base64EncodedString()]
+            // 两种形状都给：有人读 `.hex`，有人读 `.data`（base64）。少给一个就是「undefined」。
+            answer = ["data": data.base64EncodedString(), "hex": hex(Array(data))]
         case "aes":
             let ecb = request["mode"]?.string?.uppercased() == "ECB"
             let encrypt = flag("encrypt", false)
