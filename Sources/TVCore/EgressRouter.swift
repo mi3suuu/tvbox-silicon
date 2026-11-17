@@ -493,6 +493,7 @@ public final class EgressRouter: @unchecked Sendable {
             table.record(key, leg: leg)
             return result
         } catch {
+            if leg.isProxy { noteProxyTimeout(key, error: error) }
             guard Self.isEgressFailure(error) else { throw error }
             Diagnostics.shared.record(.info, "egress",
                 "\(leg.label) failed on \(key) (\(error.localizedDescription)); trying \(fallback.label)")
@@ -571,6 +572,20 @@ public final class EgressRouter: @unchecked Sendable {
         // 两条腿都没成：不留结论，下一次还会赛跑。
         table.forget(host: url.host())
         throw TVError.unsupported(L10n.text("Neither the direct line nor the proxy could reach %@.", url.host() ?? url.absoluteString))
+    }
+
+    /// 代理腿超时的真实含义，说清楚一次。
+    ///
+    /// Loon 的规则顺序是 **域名规则 → IP 规则 → 其余（含 SRC-PORT）**，这一点在本仓库
+    /// 的 `LoonPreset` 里对着真机实测过。所以对「已被观众自己的规则判成直连」的域名，
+    /// 我们把连接交给 Loon 也没用 —— Loon 会照旧直连，直连被墙就是超时，
+    /// 而我们这侧只看到「代理腿也超时」，很容易误判成出口选择坏了。
+    private func noteProxyTimeout(_ key: String, error: Error) {
+        guard let urlError = error as? URLError, urlError.code == .timedOut else { return }
+        Diagnostics.shared.record(.warning, "egress",
+            "\(key): the proxy leg timed out — Loon accepted the connection and never answered. "
+            + "Loon 的域名规则优先于 SRC-PORT：这个站的出口由你配置的规则决定,App 无法覆盖。"
+            + " 要强制走节点,把该域名加进指向节点的规则集,并放在判直连的规则之前。")
     }
 
     private func attempt(_ url: URL, headers: [String: String], purpose: EgressPurpose,
