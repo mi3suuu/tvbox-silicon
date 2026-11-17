@@ -126,9 +126,20 @@ public enum BundledSubscriptions {
     /// plugin puts first (`official` by default, `4k`, or `ordinary` to spend no tokens).
     public static func kanju() -> Subscription {
         let sites = [
+            // ⛔ 三档**全部只走官方线路**，不再提供「省额度」（普通采集线）那一档。
+            //
+            // 用户要求：「kanju.ai 的 4k 和官方线路能播放，但经常跑到普通线路，非官方线路」
+            //          「只取官方源 其他的不做收录」。
+            //
+            // 原来第三档 `{"prefer":"ordinary"}` 是**显式要求走普通采集线**的，
+            // 名字还叫「省额度」—— 这在语义上就是「降级到非官方」。
+            // 现在三档都锁在官方组内，区别只在**优先 1080 还是 4K**：
+            //   · 官方优先 —— 1080 在前，画质够用且每集词元更省
+            //   · 官方4K   —— 4K 在前，画质优先
+            //   · 官方·省词元 —— 仍是官方 1080，只是把 4K 排后（省的是 4K 那份高额词元）
             kanjuSite(key: "kanju_o", name: "看剧AI · 官方优先", ext: "", sort: 1),
             kanjuSite(key: "kanju_4k", name: "看剧AI · 官方4K", ext: #"{"prefer":"4k"}"#, sort: 2),
-            kanjuSite(key: "kanju_s", name: "看剧AI · 省额度", ext: #"{"prefer":"ordinary"}"#, sort: 3)
+            kanjuSite(key: "kanju_s", name: "看剧AI · 官方·省词元", ext: "", sort: 3)
         ]
         let raw: [String: JSONValue] = [
             "sites": .array(sites.map { .object($0.raw) }),

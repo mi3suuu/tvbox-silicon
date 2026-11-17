@@ -33,6 +33,7 @@
 		0BBB1F26988FF0B1F3B58F94 /* SeriesSuggestionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B78DACC0792D757F147226A /* SeriesSuggestionSheet.swift */; };
 		0C95000B36C5B15AF33D6C8C /* Capstone.txt in Resources */ = {isa = PBXBuildFile; fileRef = E84A48E8E87E4B3CC3DCDA8C /* Capstone.txt */; };
 		0CE05383C71F065C9E0418FA /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2C01FE189D8A11AC65FD3 /* Motion.swift */; };
+		0D6CDE1D21FFCF1E61BB69D0 /* AdTrimOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F14AF0FDADAE3794B26F3AB /* AdTrimOverlay.swift */; };
 		0F6089AD2912330CB32F7472 /* ResourceRankingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0119708AAA410683832EA99B /* ResourceRankingView.swift */; };
 		0F7F7AE060BDF43670901DFB /* SourceSpeedTestView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C70282A45D363DFFC54101 /* SourceSpeedTestView.swift */; };
 		0FA7FA99F56470E770C10768 /* BiliMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D4AD15975DFAAC895470ADB /* BiliMetrics.swift */; };
@@ -320,6 +321,7 @@
 		858FA22A2D9276C2596DCED9 /* MusicNowPlayingPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D10D9BAFE11E31196C70422 /* MusicNowPlayingPanels.swift */; };
 		85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */; };
 		862B4D7324AB9499E249FB15 /* DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B784080CDE6CF171AEA5E7 /* DiscoverView.swift */; };
+		86AA76C6647BB500985648D0 /* AdTrimOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F14AF0FDADAE3794B26F3AB /* AdTrimOverlay.swift */; };
 		87B2F825565E0BAC988FC145 /* JNA-Apache2.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8320284C7FB9590C44BA7102 /* JNA-Apache2.txt */; };
 		8800C0A4C06D6E8292303CAE /* BiliPortraitPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FA997C81BF3F47E374AACA2 /* BiliPortraitPage.swift */; };
 		8856C15BDAEE7E53EBCE7705 /* AdSkipSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */; };
@@ -417,6 +419,7 @@
 		B5B9BEFC49D2638D3A92F9C0 /* MusicNowPlayingScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0131105AAF88C36366936A /* MusicNowPlayingScreen.swift */; };
 		B5DCC83D47D5AEB70A55028D /* RuntimeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2075419FEF0E1C161A31A9F0 /* RuntimeView.swift */; };
 		B6C486D931AC62E81A8D4E76 /* MangaQA.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0894F8B5758D4C02A76BCD8E /* MangaQA.swift */; };
+		B6C994FA887C6D896C870E2A /* AdTrimOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F14AF0FDADAE3794B26F3AB /* AdTrimOverlay.swift */; };
 		B6D98E9068E2C71CDE638751 /* SeriesSuggestionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B78DACC0792D757F147226A /* SeriesSuggestionSheet.swift */; };
 		B707210418BAE0B5004182C3 /* CloudBackupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB66FB7D520F445FF983F9E1 /* CloudBackupView.swift */; };
 		B7474CA781A4D7B0845D2B2E /* Store+Search.swift in Sources */ = {isa = PBXBuildFile; fileRef = EED18D8626AD516C10884111 /* Store+Search.swift */; };
@@ -688,6 +691,7 @@
 		7DD9CCBC29ECDB9D8B254CBF /* AITranslationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AITranslationView.swift; sourceTree = "<group>"; };
 		7EDFD011E82E17C840FA9015 /* SourceSpeedLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceSpeedLab.swift; sourceTree = "<group>"; };
 		7EF6B4F9CC797C7CCE023CBD /* VideoTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTasks.swift; sourceTree = "<group>"; };
+		7F14AF0FDADAE3794B26F3AB /* AdTrimOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdTrimOverlay.swift; sourceTree = "<group>"; };
 		7FB6ADF5D41A7842884ED8A4 /* ArtworkLanguageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkLanguageView.swift; sourceTree = "<group>"; };
 		83012EDBEC81088E38456212 /* SubtitleCues+Mi3s.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SubtitleCues+Mi3s.swift"; sourceTree = "<group>"; };
 		8320284C7FB9590C44BA7102 /* JNA-Apache2.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "JNA-Apache2.txt"; sourceTree = "<group>"; };
@@ -886,6 +890,7 @@
 			children = (
 				5A9E83225BBA9F455D6B450C /* AdRangeEditor.swift */,
 				02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */,
+				7F14AF0FDADAE3794B26F3AB /* AdTrimOverlay.swift */,
 				7DD9CCBC29ECDB9D8B254CBF /* AITranslationView.swift */,
 				075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */,
 				F43A8E3DBB135075D0CF9D44 /* Announcements.swift */,
@@ -1538,6 +1543,7 @@
 				85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */,
 				7B36995D3B72089B0C980C9A /* AdRangeEditor.swift in Sources */,
 				77B1B0F4A710F470CE13E966 /* AdSkipSettingsView.swift in Sources */,
+				86AA76C6647BB500985648D0 /* AdTrimOverlay.swift in Sources */,
 				8A685170BCEDE3AE50C538DA /* Announcements.swift in Sources */,
 				0BAEA44063C146779B061BB1 /* ApplePython.c in Sources */,
 				36506AEA4D6F2E1541C1BCD1 /* AppleRuntime.m in Sources */,
@@ -1718,6 +1724,7 @@
 				A1D25FF82C16A6CF78FDFBA8 /* AITranslatorAdapter.swift in Sources */,
 				6D45D9B269EAAB16EBE5F8B7 /* AdRangeEditor.swift in Sources */,
 				43FB839E124CB117117DD991 /* AdSkipSettingsView.swift in Sources */,
+				0D6CDE1D21FFCF1E61BB69D0 /* AdTrimOverlay.swift in Sources */,
 				D5E6CDAD56F3272FD731DBDE /* Announcements.swift in Sources */,
 				452280EFF985A9357EAAD738 /* ArtworkLanguageView.swift in Sources */,
 				C868FA361E3AFD4CD42B3146 /* AsyncView.swift in Sources */,
@@ -1896,6 +1903,7 @@
 				BB123BCA3A508B0B08D97994 /* AITranslatorAdapter.swift in Sources */,
 				CC1429402773ABBE6DF95073 /* AdRangeEditor.swift in Sources */,
 				8856C15BDAEE7E53EBCE7705 /* AdSkipSettingsView.swift in Sources */,
+				B6C994FA887C6D896C870E2A /* AdTrimOverlay.swift in Sources */,
 				D54D6BFE675267FF2D16FC49 /* Announcements.swift in Sources */,
 				B7C3291A656E2548E80F1E4B /* ApplePython.c in Sources */,
 				FD9721B84A06B25F362AF291 /* AppleRuntime.m in Sources */,
@@ -2119,7 +2127,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1280;
+				CURRENT_PROJECT_VERSION = 1283;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -2144,7 +2152,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.28.0;
+				MARKETING_VERSION = 1.28.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -2303,7 +2311,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1280;
+				CURRENT_PROJECT_VERSION = 1283;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -2322,7 +2330,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.28.0;
+				MARKETING_VERSION = 1.28.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

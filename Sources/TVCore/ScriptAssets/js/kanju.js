@@ -593,7 +593,10 @@ function mediaAlive(url) {
         r = globalThis.req(address, {
             method: 'GET',
             headers: { 'User-Agent': UA, 'Referer': HOST + '/', 'Range': 'bytes=0-1' },
-            timeout: 6000
+            // 4000 而不是 6000：这一步只是「看一眼有没有字节」，
+            // 拿不到就当 unknown（见下面 resolveOfficial 的处理），不该在首播里
+            // 为一次探测压 6 秒。真正出不出字节由播放器自己决定。
+            timeout: 4000
         });
     } catch (e) { return 'unknown'; }
     if (!r) return 'unknown';
@@ -687,7 +690,17 @@ function resolveOfficial(line, want4K) {
     noteGood(line, want4K);
     // 解票扣词元：本地先减一，免得为了显示「还剩几集」再问一次服务端。
     if (remainCache != null && remainCache > 0) remainCache -= 1;
-    return { url: url, alive: alive !== 'unknown' };
+    // ⛔ `unknown`（探测超时）**不再当成「这条不行」**。
+    //
+    //    原来返回 `alive: false`，调用方就去试下一条线：解签名 7s + 探测 6s ≈ 13s，
+    //    最多三条即 **39 秒**才能开播 —— 这就是「播放比较慢」的主因。
+    //    而 `unknown` 的语义是「没拿到答复」，不是「拿不到字节」：
+    //    实测 360 资源要 7.5s 才出分片，6000ms 超时必然把它判 unknown。
+    //
+    //    现在把 unknown 视为**可用**：先把这条地址交给播放器（它自己的加载指示
+    //    比我们再等 13 秒更诚实），真播不了用户再点一次，那时黑名单已记住。
+    //    `dead`（服务器明确答复非媒体）仍然换线 —— 那是确定性的坏。
+    return { url: url, alive: true };
 }
 
 // 签名地址自带 x-expires（约 1 小时）。缓存到过期前 3 分钟，重播/来回切线路就不用再解一次票
@@ -964,8 +977,24 @@ export default {
 
         const episodes = data.episodes || [];
         const groups = preference(extPreference);
+        // ⛔ 只输出**官方线路组**（official-v / 官方4K），不把普通采集线路写进
+        //    `vod_play_from`。
+        //
+        //    原来的行为：三个组（普通 / 官方1080 / 官方4K）全部列出，靠
+        //    `preference()` 只决定谁排第一。于是只要官方线解票失败一次，
+        //    播放器（或用户切组）就会落到普通采集线上 —— 用户看到的就是
+        //    「经常跑到普通线路，非官方线路」。
+        //
+        //    现在：不列普通组 ⇒ 物理上不存在「跑到普通线」这条路。
+        //    官方线全失败时宁可不播并给出明确原因，也不偷偷降级到采集站
+        //    （采集站画质与稳定度都差，且用户明确要求「只取官方源」）。
+        //
+        //    需要恢复旧行为（含普通线）时，把 `ext` 里的 `prefer` 设成
+        //    `"ordinary"`，或在下面放开 `allowOrdinary`。
+        const allowOrdinary = extPreference === 'ordinary';
+        const wanted = groups.filter(g => allowOrdinary || g.mode !== 'o');
         const from = [], urls = [];
-        for (const group of groups) {
+        for (const group of wanted) {
             const items = episodes.map(ep => {
                 // 站点这套接口有两种分集写法：老的 display_name/episode_number，新的 title/number。
                 const label = ep.display_name || ep.title || ep.name;
@@ -983,7 +1012,12 @@ export default {
         if (extPreference !== 'ordinary') {
             const left = remainingEpisodes(false, false);
             if (left != null) {
-                const note = left > 0 ? '官方额度余 ' + left + ' 集' : '官方额度已用尽，本片走普通线路';
+                // ⛔ 额度用尽时必须说清「播不了」，不能还写「走普通线路」——
+                //    普通组已经从 `vod_play_from` 里去掉了（见上面的 allowOrdinary），
+                //    再这么写就是一句假话，用户点下去只会一脸问号。
+                const note = left > 0
+                    ? '官方额度余 ' + left + ' 集'
+                    : '官方额度已用尽 · 换账号或稍后再试（不降级到普通线路）';
                 vod.vod_remarks = (vod.vod_remarks ? vod.vod_remarks + ' · ' : '') + note;
             }
         }

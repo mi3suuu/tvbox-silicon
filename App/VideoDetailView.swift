@@ -2327,7 +2327,20 @@ struct VideoDetailView: View {
         //   · 内屏竖持：容器宽 ≈ 594（≥500）→ 宽屏变体，画面全出血 + 详情抽屉
         //   · 外屏/手机竖持：容器宽 ≈ 466（<500）→ 标准单列
         if ratio < 1.15 {
-            return w >= 500 ? .fullBleed : .column
+            // ⛔ 竖持一律单列，**不再按宽度分 fullBleed**。
+            //
+            // 这一行必须与 `OneSkin.geoShape` 里的同名判据**完全一致** ——
+            // 两处各写一份是历史遗留，改一处不改另一处会让「页面级形态」与
+            // 「本帧实际形态」打架：
+            //   · 页面级说 fullBleed（内屏竖持 669 宽），
+            //   · geoShape 说 column（已改），
+            //   两者不同 → stage 按 column 排、控件按 fullBleed 定位，
+            //   每帧重排且几何互相矛盾（真机日志实测 `page=column axis=split`
+            //   同时出现，随后几秒闪退）。
+            //
+            // 用户要求：「竖持播放正常、横持转竖持要回到单栏」。
+            // `fullBleed`（全出血 + 抽屉）只保留给 QA 与真正的宽容器。
+            return .column
         }
 
         return .column

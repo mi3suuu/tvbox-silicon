@@ -1919,10 +1919,26 @@ struct OneSkinStage: View {
                     picked = .split
                     via = "wide(\(String(format: "%.3f", ratio))≥1.15)"
                 } else if h > w * 1.15 {
-                    picked = w >= 500 ? .fullBleed : .column
-                    via = "tall(\(String(format: "%.3f", ratio))≤0.870)w≥500=\(w >= 500)"
+                    // ⛔ 竖持**一律单列**，不再按宽度分 `fullBleed`。
+                    //
+                    // 原来这里是 `w >= 500 ? .fullBleed : .column`，于是内屏竖持
+                    // （669 宽）走 `.fullBleed`：画面列按 664×0.5637 固定 374 高，
+                    // 而播放器窗口按 1.819 只有 271 高、居中在 y=103 ——
+                    // 外面 374 的海报虚化底 + 里面 271 的视频窗口，
+                    // 用户看到的就是「大的里面叠了一个小的」。
+                    //
+                    // One 的 `fullBleed` 本意是「展开宽屏出血」，那是给
+                    // **平板/更宽容器**的版式；Duo 内屏竖持 669 并不宽，
+                    // 用单列（画面在上、详情在下）才是手机竖持该有的样子。
+                    //
+                    // 实测日志（本机 941KB oneskin.log）：
+                    //   geo=669x951 → fullBleed  col=664x374 win=664x271 at=(0,103)
+                    //   geo=951x669 → split     （横持双栏，正确）
+                    //   geo=466x678 → column    （外屏，正确）
+                    picked = .column
+                    via = "tall(\(String(format: "%.3f", ratio))≤0.870)→column"
                 } else {
-                    picked = shape == .split ? .split : (w >= 500 ? .fullBleed : .column)
+                    picked = shape == .split ? .split : .column
                     via = "gray(\(String(format: "%.3f", ratio)))page=\(shape.logName)"
                 }
                 if OneSkinProbeGate.allow("SHAPEPICK", value: "\(Int(w))x\(Int(h))\(via)") {
@@ -3446,6 +3462,28 @@ struct OneSkinStage: View {
                         // 画中画绑这一条 layer（不是播放器那条 AVKit 载体）。
                         pip: pip
                     )
+                    // ⛔ 固定身份，**转屏时不许重建宿主 UIView**。
+                    //
+                    // 真机日志（941KB oneskin.log，外屏竖↔横切一轮）：
+                    //   fixedView INSTANCE #3 created → rect=0,85,370x203
+                    //   fixedView INSTANCE #4 created → rect=0,59,464x255
+                    // 两个 `OneSkinFixedPlayerLayer` 宿主**同时**在屏幕上，
+                    // 且共用同一个 `AVPlayer`。表现就是：
+                    //   · 竖持看到「两个画面」（旧宿主 370x203 + 新宿主 464x255）；
+                    //   · 横持转竖持后停在「竖持双栏」（旧的双栏宿主没销毁）；
+                    //   · 几秒后闪退 —— 一条 AVPlayerLayer 被两个宿主同时 attach，
+                    //     AVFoundation 在渲染线程上重复取帧即崩。
+                    //
+                    // 为什么会重建：`pictureColumn` 在不同形态下被包进
+                    // `VStack` / `HStack` 等**不同类型**的父视图，SwiftUI 按结构位置
+                    // 判定身份，结构一变就销毁旧的、建新的。SwiftUI 的销毁是异步的
+                    // （转场动画期间新旧共存），于是两个 UIKit 宿主重叠。
+                    //
+                    // 用 `.id` 把它钉在一个稳定身份上：无论父视图怎么换，
+                    // SwiftUI 都复用同一个 `UIViewRepresentable`，不重建宿主。
+                    // 这同时满足 `OneSkinPlayerStyle` 的锁定规则第 4 条：
+                    // 「同一个 AVPlayer 在选集页只允许有这一个渲染宿主」。
+                    .id("oneSkin.fixedPicture")
                 } else {
                     OneSkinPosterWash(image: posterImage)
                 }

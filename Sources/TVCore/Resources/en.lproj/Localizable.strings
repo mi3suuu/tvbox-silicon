@@ -2740,3 +2740,11 @@
 "This title has no source to play from." = "This title has no source to play from.";
 "End at current position" = "End at current position";
 "Start at current position" = "Start at current position";
+"A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon." = "A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon.";
+"Drag both ends so the range is at least %@ long." = "Drag both ends so the range is at least %@ long.";
+"End Here" = "End Here";
+"Rule points at “%@”, not Proxy" = "Rule points at “%@”, not Proxy";
+"Saving…" = "Saving…";
+"Start Here" = "Start Here";
+"Trim the Ad" = "Trim the Ad";
+"Trim the Ad Here" = "Trim the Ad Here";

@@ -124,6 +124,27 @@ struct OneSkinFixedPlayerLayer: UIViewRepresentable {
         return view
     }
 
+    /// SwiftUI 销毁宿主时**必须解绑 player**。
+    ///
+    /// ⛔ 这是「转屏后两个画面 / 竖持双栏 / 几秒后闪退」的根因修法。
+    ///
+    /// 真机日志（941KB oneskin.log，外屏竖↔横一轮）同时存在两个宿主：
+    ///   fixedView INSTANCE #3 → rect=0,85,370x203
+    ///   fixedView INSTANCE #4 → rect=0,59,464x255
+    /// 而 `updateUIView` 只负责「给当前宿主绑 player」，**从不给旧宿主解绑**。
+    /// SwiftUI 的销毁是异步的（转场动画期间新旧共存），于是：
+    ///   · 两条 `AVPlayerLayer` 同时指向同一个 `AVPlayer` —— AVFoundation 只允许
+    ///     一条 layer 驱动输出，第二条会拿不到帧（黑）或在渲染线程上重复取帧而崩溃；
+    ///   · 旧宿主在动画期间仍然可见，用户看到的就是「两个画面叠着」。
+    ///
+    /// `dismantleUIView` 是 SwiftUI 给 representable 的**唯一拆解回调**：
+    /// 在这里把 `playerLayer.player = nil`，旧宿主立刻停止渲染、彻底放手，
+    /// 新宿主才能独占这个 player。行为与 `OneSkinPlayerStyle` 锁定规则第 4 条
+    /// （「同一个 AVPlayer 在选集页只允许有这一个渲染宿主」）一致。
+    static func dismantleUIView(_ view: OneSkinFixedPlayerView, coordinator: ()) {
+        view.detach()
+    }
+
     func updateUIView(_ view: OneSkinFixedPlayerView, context: Context) {
         view.fixedSize = size
         // ⚠️ 一个 AVPlayer 同时只能驱动一条 AVPlayerLayer：PiP 悬浮窗在跑的时候，
@@ -208,6 +229,18 @@ final class OneSkinFixedPlayerView: UIView {
     func attach(player: AVPlayer, gravity: AVLayerVideoGravity) {
         playerLayer.player = player
         playerLayer.videoGravity = gravity
+    }
+
+    /// 彻底放手：解绑 player 并清空渲染层。
+    ///
+    /// 由 `OneSkinFixedPlayerLayer.dismantleUIView` 调用。调用后这个宿主不再
+    /// 占用 player，新宿主可以独占输出；旧宿主即使还在动画里露脸，也只是
+    /// 一张空图层（透明），不会再画出第二份视频。
+    func detach() {
+        playerLayer.player = nil
+        #if DEBUG
+        oneSkinLog("fixedView INSTANCE #\(instanceID) detached")
+        #endif
     }
 
     func update(player: AVPlayer?, gravity: AVLayerVideoGravity) {

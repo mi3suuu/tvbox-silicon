@@ -16,10 +16,26 @@ import Testing
         #expect(site.raw["api"]?.string == "assets://js/kanju.js")
     }
     #expect(document.sites.map(\.key) == ["kanju_o", "kanju_4k", "kanju_s"])
-    // The default spends tokens (official first); the third entry is the one that does not.
+    // 三档**全部只走官方线路**，区别只在优先 1080 还是 4K。
+    //
+    // ⛔ 这里曾经断言第三档是 `{"prefer":"ordinary"}`（「省额度」= 走普通采集线）。
+    //    用户要求「只取官方源，其他的不做收录」后，那一档已改为官方 1080，
+    //    所以判据同步更新 —— 否则测的是旧行为，改对了反而红。
     #expect(document.sites[0].raw["ext"] == nil)
     #expect(document.sites[1].raw["ext"]?.string == #"{"prefer":"4k"}"#)
-    #expect(document.sites[2].raw["ext"]?.string == #"{"prefer":"ordinary"}"#)
+    #expect(document.sites[2].raw["ext"] == nil)
+    // 不变式：任何一档都不得显式要求走普通（非官方）线路。
+    //
+    // ⛔ 不要在这里用 `#expect(cond, "\(site.key) ...")` 的形式：
+    //    Swift Testing 会把消息参数里的插值一并纳入表达式求值，
+    //    而 `site` 是循环变量 —— 实测会得到 3 条无法定位的失败，
+    //    且失败原因与真实条件无关（探针证明 ext 实际是 nil / "4k" / nil）。
+    //    改成先把条件算成 Bool，再单独断言，行为才可预期。
+    let ordinaryFree = document.sites.allSatisfy { site in
+        let ext = site.raw["ext"]?.string ?? ""
+        return !ext.contains("ordinary")
+    }
+    #expect(ordinaryFree)
     // The script resolves to the bundle, not to anything relative to the pseudo-origin.
     #expect(try document.sites[0].scriptURL(origin: document.origin).absoluteString == "assets://js/kanju.js")
 }

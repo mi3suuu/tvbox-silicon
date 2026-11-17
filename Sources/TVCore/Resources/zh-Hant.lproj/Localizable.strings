@@ -2741,3 +2741,11 @@
 "This title has no source to play from." = "這個片名沒有可播放的來源。";
 "End at current position" = "終點設為目前位置";
 "Start at current position" = "起點設為目前位置";
+"A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon." = "A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon.";
+"Drag both ends so the range is at least %@ long." = "兩端拖開一些，區間至少要有 %@。";
+"End Here" = "終點用這裡";
+"Rule points at “%@”, not Proxy" = "Rule points at “%@”, not Proxy";
+"Saving…" = "Saving…";
+"Start Here" = "起點用這裡";
+"Trim the Ad" = "剪掉這段廣告";
+"Trim the Ad Here" = "直接在畫面上剪廣告";

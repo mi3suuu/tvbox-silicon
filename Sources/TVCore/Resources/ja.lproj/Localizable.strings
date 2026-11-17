@@ -2741,3 +2741,11 @@
 "This title has no source to play from." = "この作品には再生できるソースがありません。";
 "End at current position" = "終了を現在位置にする";
 "Start at current position" = "開始を現在位置にする";
+"A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon." = "A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon.";
+"Drag both ends so the range is at least %@ long." = "両端を広げて、範囲を %@ 以上にしてください。";
+"End Here" = "ここを終了に";
+"Rule points at “%@”, not Proxy" = "Rule points at “%@”, not Proxy";
+"Saving…" = "Saving…";
+"Start Here" = "ここを開始に";
+"Trim the Ad" = "この広告をカット";
+"Trim the Ad Here" = "この画面で広告をカット";
