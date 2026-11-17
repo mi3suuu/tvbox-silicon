@@ -2750,3 +2750,7 @@
 "Start Here" = "起點用這裡";
 "Trim the Ad" = "剪掉這段廣告";
 "Trim the Ad Here" = "直接在畫面上剪廣告";
+
+/* 首播自动学习 */
+"Learned automatically from videos you have played on the same source. Only applies to that source." = "從你在同一源上播過的影片裡自動學到的。只對該源生效。";
+"%@ · from %d videos" = "%@ · 來自 %d 部影片";

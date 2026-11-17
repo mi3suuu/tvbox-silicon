@@ -2753,3 +2753,7 @@
 "Start Here" = "起点用这里";
 "Trim the Ad" = "剪掉这段广告";
 "Trim the Ad Here" = "直接在画面上剪广告";
+
+/* 首播自动学习 */
+"Learned automatically from videos you have played on the same source. Only applies to that source." = "从你在同一源上播过的视频里自动学到的。只对该源生效。";
+"%@ · from %d videos" = "%@ · 来自 %d 条视频";

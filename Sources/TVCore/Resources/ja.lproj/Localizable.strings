@@ -2750,3 +2750,7 @@
 "Start Here" = "ここを開始に";
 "Trim the Ad" = "この広告をカット";
 "Trim the Ad Here" = "この画面で広告をカット";
+
+/* 首播自动学习 */
+"Learned automatically from videos you have played on the same source. Only applies to that source." = "同じソースで再生した動画から自動的に学習したものです。そのソースにのみ適用されます。";
+"%@ · from %d videos" = "%@ · %d 本の動画から";

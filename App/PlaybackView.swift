@@ -128,6 +128,26 @@ import TVCore
     private var adMatcher = AdMatcher()
     /// 广告库快照，开播时载入一次；标注新广告后刷新。
     private var adLibrary: [AdSignature] = []
+
+    // ── 首播自动学习 ──
+    /// 当前这条片子开头采到的逐秒指纹（用于攒样本）。
+    ///
+    /// 只在**开头一段**积累：学习判据是「同源多条视频开头一样」，
+    /// 攒到前缀上限（`AdAutoLearn.longestPrefix`）就停，不再吃内存。
+    private var adLearnBuffer: [UInt64] = []
+    /// 本集**第一次采样**的时间点，作为自动学习的时间基准。
+    ///
+    /// ⛔ 不能写死 0：用户常常从上次进度续播（比如第 300 秒），
+    ///    那时「开头」是 300 秒，不是 0。写死 0 会两头都错：
+    ///    · 样本收集条件 `seconds - 0 <= 上限` 永远不成立 → 一条样本都收不到；
+    ///    · 命中后 `target = 0 + span` 会把播放拉回片头。
+    private var adLearnEpoch: Double? = nil
+    /// 本源的自动学习结果（学到才有值）。
+    var autoLearned: AdAutoLearn.Learned?
+    /// 本源的 key，学习结果按它隔离。
+    var autoLearnSourceKey: String?
+    /// 用已学到的前缀去匹配当前这条时，攒到的探测指纹。
+    private var adLearnProbe: [UInt64] = []
     /// 用户是否开启自动跳广告。
     var skipsAds: Bool {
         get { UserDefaults.standard.object(forKey: "player.skipAds") as? Bool ?? true }
@@ -173,8 +193,29 @@ import TVCore
     /// 空库时采样毫无意义，白白耗电。
     func startAdDetection(for item: AVPlayerItem) {
         stopAdDetection()
-        guard skipsAds, !adLibrary.isEmpty else { return }
+        guard skipsAds else { return }
+        // ⛔ 不能再用「库非空」当门禁：**自动学习正是从空库开始的**。
+        //    原来这里 `guard !adLibrary.isEmpty`，于是第一批片子的采样器根本不启动，
+        //    永远学不到任何东西 —— 自动学习死在第一行。
         adMatcher = AdMatcher()
+        adLearnBuffer = []
+        adLearnProbe = []
+        adLearnEpoch = nil
+        // 自动学习按**源**隔离：A 站点的固定开头不能拿去跳 B 站点的视频（那是误跳）。
+        autoLearnSourceKey = historyContext?.sourceKey
+        autoLearned = nil
+        if let key = autoLearnSourceKey {
+            Task { [weak self] in
+                let learned = await AutoLearnStore.shared.learned(for: key)
+                guard let learned else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.autoLearnSourceKey == key else { return }
+                    self.autoLearned = learned
+                    Diagnostics.shared.record(.info, "ads",
+                        "auto prefix ready source=\(key) span=\(Int(learned.span))s")
+                }
+            }
+        }
         adSampler.start(item: item) { [weak self] hash, seconds in
             Task { @MainActor [weak self] in
                 self?.handleAdHash(hash, at: seconds)
@@ -201,6 +242,40 @@ import TVCore
     func stopAdDetection() {
         adSampler.stop()
         adMatcher.reset()
+        adLearnProbe = []
+        flushAdSamples()
+    }
+
+    /// 把这一集开头采到的指纹交给自动学习。
+    ///
+    /// 触发点是**停止检测时**（换集 / 关闭开关 / 退出播放），不是播完时 ——
+    /// 用户很可能看不到片尾就切走，那时样本已经够了，不该因为「没播完」丢掉。
+    ///
+    /// 样本入库后若攒够同源 3 条，`AutoLearnStore.feed` 会算出前缀；
+    /// 学到就立刻用上（下一集直接生效），不用等重启。
+    private func flushAdSamples() {
+        guard skipsAds, !adLearnBuffer.isEmpty,
+              let sourceKey = autoLearnSourceKey, !sourceKey.isEmpty else { return }
+        // 太短的样本没有学习价值（少于 3 秒分不出台标和广告）。
+        guard Double(adLearnBuffer.count) >= AdAutoLearn.shortestPrefix else {
+            adLearnBuffer = []
+            return
+        }
+        let sample = AdAutoLearn.Sample(videoID: historyContext?.episodeID ?? UUID().uuidString,
+                                        hashes: adLearnBuffer,
+                                        interval: 1.0,
+                                        start: adLearnEpoch ?? 0)
+        adLearnBuffer = []
+        Task { [weak self] in
+            let learned = await AutoLearnStore.shared.feed(sourceKey: sourceKey, sample: sample)
+            guard let learned else { return }
+            await MainActor.run { [weak self] in
+                guard let self, self.autoLearnSourceKey == sourceKey else { return }
+                self.autoLearned = learned
+                Diagnostics.shared.record(.info, "ads",
+                    "auto learned source=\(sourceKey) span=\(Int(learned.span))s samples=\(learned.sampleCount)")
+            }
+        }
     }
 
     /// 从磁盘（或云端合并后的结果）刷新库快照。
@@ -211,11 +286,58 @@ import TVCore
 
     /// 采样器每 1 秒回调一次。
     private func handleAdHash(_ hash: UInt64, at seconds: Double) {
-        guard skipsAds, !adLibrary.isEmpty,
+        guard skipsAds,
               !seekingSegment, pendingResume == nil, !restoringPosition,
               player.rate > 0 else { return }
 
-        guard let hit = adMatcher.feed(hash, library: adLibrary) else { return }
+        // ① 攒样本：把开头这段的指纹收起来，供「同源多条一致」学习用。
+        //
+        //    只收开头 `longestPrefix` 秒内的，后面是正片，收了既没用又占内存。
+        if adLearnEpoch == nil { adLearnEpoch = seconds }
+        let sinceEpoch = seconds - (adLearnEpoch ?? seconds)
+        if sinceEpoch >= -0.5, sinceEpoch <= AdAutoLearn.longestPrefix {
+            adLearnBuffer.append(hash)
+        }
+
+        // ② 已学到本源前缀时，用当前这条的开头去比对；**完整命中**才跳。
+        //
+        //    这条分支解决「清单层判据不适用」的那批源（12 个单目录源）。
+        //    注意：必须攒够前缀长度才判 —— 边攒边判会在只看到 2 秒时
+        //    就以为「匹配失败」，把真正命中的情况漏掉。
+        if let learned = autoLearned {
+            let need = learned.hashes.count
+            if adLearnProbe.count < need + 1 {
+                adLearnProbe.append(hash)
+            }
+            if adLearnProbe.count >= need {
+                if AdAutoLearn.matchedPrefix(learned, in: adLearnProbe) > 0 {
+                    adLearnProbe = []
+                    // 目标 = 前缀末尾。学到的前缀就是「每条视频开头都一样的那段」，
+                    // 跳过它正好落在正片第一帧。
+                    let target = (adLearnEpoch ?? 0) + learned.span
+                    if target > seconds + 0.5,
+                       let item = player.currentItem,
+                       item.seekableTimeRanges.contains(where: {
+                           CMTimeRangeContainsTime($0.timeRangeValue,
+                                                   time: CMTime(seconds: target, preferredTimescale: 600))
+                       }) {
+                        Diagnostics.shared.record(.info, "ads",
+                            "auto prefix skip to=\(Int(target))s span=\(Int(learned.span))s source=\(autoLearnSourceKey ?? "-")")
+                        seekingSegment = true
+                        seekGuarded(to: target, label: "autolearn")
+                    } else {
+                        // 目标不可 seek（还没缓冲）——下一 tick 再来，不清样本。
+                        Diagnostics.shared.record(.info, "ads",
+                            "auto prefix hit but target not seekable to=\(Int(target))s")
+                    }
+                    return
+                }
+            }
+        }
+
+        // ③ 再试广告库（用户手标过的那些）。
+        guard !adLibrary.isEmpty,
+              let hit = adMatcher.feed(hash, library: adLibrary) else { return }
         adMatcher.reset()
 
         // 命中：先**找这支广告真正的结尾**，再跳。

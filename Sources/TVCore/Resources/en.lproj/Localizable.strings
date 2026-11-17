@@ -2749,3 +2749,7 @@
 "Start Here" = "Start Here";
 "Trim the Ad" = "Trim the Ad";
 "Trim the Ad Here" = "Trim the Ad Here";
+
+/* 首播自动学习 */
+"Learned automatically from videos you have played on the same source. Only applies to that source." = "Learned automatically from videos you have played on the same source. Only applies to that source.";
+"%@ · from %d videos" = "%@ · from %d videos";

@@ -10,6 +10,7 @@ struct AdSkipSettingsView: View {
     @AppStorage("player.skipAds") private var skipsAds = true
 
     @State private var ads: [AdSignature] = []
+    @State private var learned: [AdAutoLearn.Learned] = []
     @State private var busy = false
     @State private var message: String?
     @State private var confirmingClear = false
@@ -59,6 +60,33 @@ struct AdSkipSettingsView: View {
                                 Image(systemName: "trash")
                             }
                             .buttonStyle(.borderless)
+                        }
+                    }
+                }
+
+                // 自动学到的「站点固定开头」。
+                //
+                // 与上面的「广告库」分开两栏，因为两者语义不同：
+                // 上面是「某支广告」的指纹，跨站点通用、用户手动标的；
+                // 这里是「某个站点每条视频开头都一样的那段」，只对该站点有效、自动学的。
+                // 混在一栏会让用户以为可以导出通用。
+                if !learned.isEmpty {
+                    SettingsGroup(footer: L10n.text("Learned automatically from videos you have played on the same source. Only applies to that source.")) {
+                        ForEach(learned) { item in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.sourceKey).font(.subheadline)
+                                    Text(L10n.text("%@ · from %d videos", durationText(item.span), item.sampleCount))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button(role: .destructive) {
+                                    Task { await forgetLearned(item) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                     }
                 }
@@ -123,6 +151,14 @@ struct AdSkipSettingsView: View {
 
     private func reload() async {
         ads = await AdSignatureLibrary.shared.all().sorted { $0.createdAt > $1.createdAt }
+        learned = await AutoLearnStore.shared.allLearned()
+            .filter(\.isUsable)
+            .sorted { $0.learnedAt > $1.learnedAt }
+    }
+
+    private func forgetLearned(_ item: AdAutoLearn.Learned) async {
+        await AutoLearnStore.shared.forget(sourceKey: item.sourceKey)
+        await reload()
     }
 
     private func remove(_ ad: AdSignature) async {
