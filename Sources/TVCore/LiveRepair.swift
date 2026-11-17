@@ -24,6 +24,17 @@ public enum LiveRepair {
         return components?.url ?? url
     }
 
+    /// 把播放地址套上本模块的 scheme，让 AVPlayer 在**取清单时**经过改写（去广告）。
+    ///
+    /// `address` 本身是 internal（包内用），App 侧需要这个 public 入口：
+    /// iOS 上 `HLSProxy` 不存在，清单改写只有这一条路 —— 不暴露它，
+    /// 去广告在 iOS 上就没有任何生效点（此前正是如此）。
+    ///
+    /// - Returns: 可交给 `asset(for:)` 的地址；非 http(s) 时原样返回。
+    public static func adSkippingAddress(_ url: URL, headers: [String: String]? = nil) -> URL {
+        address(url, headers: headers, skipsAds: true)
+    }
+
     /// The headers the playlist's server was asked with.
     static func headers(for url: URL) -> [String: String] {
         lock.withLock { hostHeaders[url.host()?.lowercased() ?? ""] ?? [:] }
