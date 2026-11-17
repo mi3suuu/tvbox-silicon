@@ -78,7 +78,44 @@ public enum JarRuntimeHealth {
     ///
     /// ⚠️ 如果真机上发现 JVM 崩溃隔离没接住（仍然闪退），把它改回 `true` —— 那时说明
     /// 崩在隔离窗口之外（例如 VM 创建前的 C++ 静态初始化），需要另外处理。
-    public static let shippedRuntimeIsBroken = false
+    /// 这一版 App 期望的原生运行时版本（与 `Runtime/AppleRuntime/runtime-version` 同源）。
+    ///
+    /// 打包脚本会把它写进包内 `JavaHost/runtime-version`，App 启动时读回来对一次。
+    public static let expectedRuntimeVersion = 2
+
+    /// 装进这个包里的原生运行时是哪一版；老包没有这个标记，返回 nil。
+    ///
+    /// ⛔ 为什么要在运行期读它：2026-11-17 审查发现**设备侧** `libTVAppleRuntime.a` 停在 11-04，
+    ///    而模拟器侧 11-16 已换成新库 —— 因为 `check-apple-runtime.sh` 在 Debug 只 warn、
+    ///    Release 才 fail，而装机全走 Debug。于是「验证过的库」与「发出去的库」是两个东西，
+    ///    而代码里只有一个常量在猜自己链接的是哪一版。猜错的代价就是闪退。
+    public static var packagedRuntimeVersion: Int? {
+        guard let url = Bundle.main.url(forResource: "runtime-version", withExtension: nil,
+                                        subdirectory: "JavaHost"),
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return nil }
+        return Int(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// 这一版运行库还没有在**真机**上完整跑通过一次。
+    ///
+    /// 冒烟宿主跑通只证明「JVM 能起」，不证明「App 里的崩溃隔离接得住」。
+    /// 真机上点开一个 jar 源、能出画面且不闪退之后，把这里改成 `false` 再发版。
+    public static let awaitingDeviceValidation = true
+
+    /// 随包运行时是不是不能用。**由证据决定，不由常量决定。**
+    ///
+    /// 两个条件同时成立才算好：
+    ///   ① 包里有版本标记，且与本 checkout 期望的一致（挡住「链了旧库」这一种）；
+    ///   ② 这一版已经过真机验证（`awaitingDeviceValidation == false`）。
+    ///
+    /// 任一不成立 → 默认关。观众仍可在「设置 › JAR 运行时」里手动打开试一次。
+    public static var shippedRuntimeIsBroken: Bool {
+        if awaitingDeviceValidation { return true }
+        guard let packaged = packagedRuntimeVersion,
+              packaged == expectedRuntimeVersion else { return true }
+        return false
+    }
 
     /// 用户在设置里是否允许使用插件运行时。
     ///

@@ -327,6 +327,14 @@ struct VideoDetailView: View {
     /// 这一集已经因为「播不出来」被自动跳过的线路。按集记账：换集就该重新给每条线一次机会。
     @State private var autoTriedLines: Set<String> = []
     @State private var autoTriedEpisode: String?
+    /// 这一次「用户点的播放」是否已经自动换过线。
+    ///
+    /// ⛔ 2026-11-17 加的闸。注释一直写「只自动换**一次**」，代码却是累积式的：
+    ///    失败 → 换下一条 → 又失败 → 再换，直到候选耗尽。审计里 **6 个源的线路全部播不出来**
+    ///    （建安×2、分享迷你 PAN1、瓜子体育、4K影视 alists、骚火），它们现在的表现是
+    ///    串行换 7 次、每次含 13 秒探针重试或 15 秒网页嗅探 —— 接近两分钟，且中途不能取消。
+    ///    现在：一次用户点击最多自动换一条；再失败就如实报错，把选择权交回用户。
+    @State private var autoSwitched = false
     /// TMDB's details for the video (TMDBViews.swift). The page shows the source's own until they are in, then fades them in.
     @State var tmdb = TMDBLookup()
     /// The source's own recommendations, shown under the video when TMDB has none for it. Loaded lazily, once TMDB
@@ -1013,6 +1021,9 @@ struct VideoDetailView: View {
                     // 有实测读数时按**长边**取最好的一条：同一部剧里 720p 的线常排在 1080p 前面，
                     // 而「第一条像直链的」就是它（`Video.init` 的 playable 排序）。
                     quality: SourceProbeStore.shared.qualityReader(
+                        sourceKey: client.site.key, videoID: video.id),
+                    // 历史是一条网页线 / 实测不可达的线时让位：否则「默认线路」又被旧记录绑住。
+                    unplayableNow: SourceProbeStore.shared.blockedLineReader(
                         sourceKey: client.site.key, videoID: video.id)
                 )
             }
@@ -1635,11 +1646,19 @@ struct VideoDetailView: View {
     private func download(_ episode: Episode) -> DownloadItem? {
         DownloadLibrary.shared.visibleItem(for: DownloadSource(site: client.site, videoID: video.id, episode: episode, origin: client.origin))
     }
-    private func play(_ episode: Episode, skipAccountCheck: Bool = false) async {
+    /// - Parameter auto: 由「上一条线播不出来」触发的重试。它不重置自动换线的预算，
+    ///   否则 `fail → 换线 → 播 → 又失败 → 换线` 会一直转下去（见 `autoSwitched`）。
+    private func play(_ episode: Episode, skipAccountCheck: Bool = false, auto: Bool = false) async {
         #if DEBUG
-        oneSkinLog("play episode=\(episode.name) flag=\(episode.flag) busy=\(busy)")
+        oneSkinLog("play episode=\(episode.name) flag=\(episode.flag) busy=\(busy) auto=\(auto)")
         #endif
         guard !busy else { return }
+        // 一次用户点击 = 一个预算。自动换线触发的那次不重置，链条才不会无限延长。
+        if !auto {
+            autoSwitched = false
+            autoTriedLines = []
+            autoTriedEpisode = episode.id
+        }
         // A downloaded episode plays from the device: no link to fetch, and it works offline.
         if let saved = download(episode), saved.status == .completed {
             store.playing = DownloadLibrary.shared.channel(for: saved)
@@ -1774,6 +1793,8 @@ struct VideoDetailView: View {
     private func autoAdvanceLine(from episode: Episode, error: Error) -> Bool {
         guard error as? CloudDriveLoginRequired == nil,
               CloudDriveLoginRequired.matching(message: error.localizedDescription) == nil,
+              // 一次点击只换一条：换到底等于把用户关在「七次转圈」里，最后还不知道错在哪。
+              !autoSwitched,
               flags.count > 1 else { return false }
         if autoTriedEpisode != episode.id {
             autoTriedEpisode = episode.id
@@ -1787,6 +1808,7 @@ struct VideoDetailView: View {
                 ?? detail?.episodes.first(where: { $0.flag == next })
         else { return false }
         autoTriedLines = tried
+        autoSwitched = true
         selectedFlag = next
         #if DEBUG
         oneSkinLog("auto-switch \(episode.flag) → \(next) after \(error.localizedDescription.prefix(60))")
@@ -1799,7 +1821,7 @@ struct VideoDetailView: View {
         Task {
             // 让当前这次 `play` 的 `defer`（busy = false）先跑完，否则会被 busy 挡回去。
             try? await Task.sleep(for: .milliseconds(60))
-            await play(target)
+            await play(target, auto: true)
         }
         return true
     }

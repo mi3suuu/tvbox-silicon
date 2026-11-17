@@ -139,7 +139,9 @@ public final class CustomProxyStore: @unchecked Sendable {
     /// 名字不参与：观众把「Loon」再导入一次时名字是一样的，改了名也不该变成两台。
     /// 账号密码也不参与 —— 同一台机器换密码不是「另一台代理」，而是一条要更新的记录。
     private func identityKey(_ endpoint: CustomProxyEndpoint) -> String {
-        "\(endpoint.scheme.rawValue)|\(endpoint.host.lowercased())|\(endpoint.port)"
+        // ⛔ host 要 trim：`"127.0.0.1 "` 与 `"127.0.0.1"` 会被当成两台，
+        //    于是又回到「配了多台且没指定 → 全站直连」的老坑（本轮 P0 的形态之一）。
+        "\(endpoint.scheme.rawValue)|\(endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(endpoint.port)"
     }
 
     /// 加一台代理（或更新已有的那一台）。

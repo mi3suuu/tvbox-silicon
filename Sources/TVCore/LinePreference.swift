@@ -75,7 +75,10 @@ public enum LinePreference {
         picked: String? = nil,
         watched: String? = nil,
         playableNow: ((String) -> Bool)? = nil,
-        quality: ((String) -> Int?)? = nil
+        quality: ((String) -> Int?)? = nil,
+        /// 这条线**明确不该当默认**：回的是网页（需要解析）或实测不可达。
+        /// 与 `playableNow` 分开，是因为「没测过」不该被当成「不能播」—— 那条要尊重历史。
+        unplayableNow: ((String) -> Bool)? = nil
     ) -> String? {
         guard !flags.isEmpty else { return nil }
 
@@ -83,8 +86,14 @@ public enum LinePreference {
         if let picked = sanitized(picked, in: flags) { return picked }
 
         // 能播的那几条；一条都不认时退回全部（与第四级兜底同理）。
-        let pool = playableNow.map { predicate in flags.filter(predicate) } ?? flags
-        let usable = pool.isEmpty ? flags : pool
+        let playable = playableNow.map { predicate in flags.filter(predicate) } ?? flags
+        let pool = playable.isEmpty ? flags : playable
+        // 再把「明确不该当默认」的剔掉（网页型 / 实测不可达）。
+        //
+        // ⛔ 只在**还剩下别的东西**时才剔：如果整组线路都是网页，剔完就没有候选了，
+        //    那时保留原组、照旧尊重历史 —— 那不是「选错」，是这部片只有这样的地址。
+        let filtered = pool.filter { !(unplayableNow?($0) ?? false) }
+        let usable = filtered.isEmpty ? pool : filtered
 
         // ② 上次看这部剧用的那条 —— 但「实测明显更好的线」可以把历史顶掉。
         //
@@ -96,7 +105,15 @@ public enum LinePreference {
         //
         // 判据用长边（宽高取大），且要「明显」更好才改判（≥15%），避免 818 与 1080
         // 这种同一档内的差异把历史反复打翻。没有实测读数时一律尊重历史。
-        if let watched = sanitized(watched, in: flags) {
+        // ⛔ 历史必须落在「现在能播」的那几条里，且不能是一条**明确不可播**的线。
+        //
+        //    2026-11-17 审查发现：这里用的是 `flags`（全部线路），于是
+        //      · 历史是一条网页线（`quality` 为 nil，因为它不是媒体）→ 永远返回它；
+        //      · 历史是网盘线且现在要登录（不在 `usable` 里）→ 仍然返回它。
+        //    两种都让「默认线路」重新变成由旧记录决定、而不是由当下证据决定 ——
+        //    与看剧AI 的 official→ordinary 静默降级是同一个病。
+        //    现在让位给「能播且有实测」的那条；一条读数都没有时才继续尊重历史。
+        if let watched = sanitized(watched, in: flags), usable.contains(watched) {
             guard let quality else { return watched }
             let best = bestMeasured(in: usable, quality: quality)
             guard let best, best != watched,

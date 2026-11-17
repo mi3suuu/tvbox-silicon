@@ -48,4 +48,12 @@ cp "$WORK/native-$TARGET/apple-bindings.jar" "$OUT/Resources/JavaHost/"
 Scripts/sync-apple-javahost.sh "$PLATFORM"
 # Scripts/check-apple-runtime.sh compares this with the checkout when Xcode embeds the runtime.
 cp Runtime/AppleRuntime/runtime-version "$OUT/runtime-version"
+# ★ 同一份标记也放进 App 资源里，让**运行期**能判断「装进包里的这份库到底是哪一版」。
+#
+# ⛔ 2026-11-17：设备侧 libTVAppleRuntime.a 停在 11-04 那一版，而模拟器侧 11-16 已换成新库 ——
+#    因为 `check-apple-runtime.sh` 在 Debug 只 warn（Release 才 fail），装机又全走 Debug，
+#    于是「验证过的库」和「发出去的库」是两个东西。`JarRuntimeHealth` 因此只能写一个
+#    常量去猜自己链接的是哪一版，猜错就是闪退。
+#    现在把版本写进包内资源，App 启动时读得到、对不上就把插件运行时关掉。
+cp Runtime/AppleRuntime/runtime-version "$OUT/Resources/JavaHost/runtime-version"
 echo "Packaged runtime: $OUT"

@@ -496,6 +496,8 @@ struct EpisodePicker: View {
                 playableNow: { CloudDrive.preferredFlag([$0]) != nil },
                 // 与播放页同一口径：面板高亮的那条必须就是会被播的那条。
                 quality: SourceProbeStore.shared.qualityReader(
+                    sourceKey: sourceKey, videoID: video.id),
+                unplayableNow: SourceProbeStore.shared.blockedLineReader(
                     sourceKey: sourceKey, videoID: video.id)
             )
             if let resolved, resolved != activeLine {

@@ -778,6 +778,19 @@ public final class SourceProbeStore {
         probes[storageKey(sourceKey: sourceKey, videoID: videoID, lineFlag: lineFlag)]
     }
 
+    /// 这条线**明确不该当默认**：回的是网页（要解析），或实测不可达。
+    ///
+    /// 与 `qualityReader` 分开：后者对「没测过」也返回 nil，而「没测过」不该被当成不能播
+    /// （冷启动后就该尊重历史）。这里只认**有读数且读数说不行**的那一条。
+    public func blockedLineReader(sourceKey: String, videoID: String,
+                                  now: Date = Date()) -> (String) -> Bool {
+        { [weak self] flag in
+            guard let reading = self?.probe(sourceKey: sourceKey, videoID: videoID, lineFlag: flag),
+                  !reading.isStale(now: now) else { return false }
+            return reading.isPageOnly || reading.reachability == .unreachable
+        }
+    }
+
     /// 给「默认线路」用的一份画质读数：某个 flag 当前**可信**的长边，没有就 nil。
     ///
     /// 三条都要过：新鲜（不是几天前测的）、能用（不是不可达/没测出）、不是网页型

@@ -221,6 +221,9 @@ struct RootView: View {
         //    Loon 那边只看到临时端口。用户报的「设置好了 Loon 但没按我们规定好的端口连接」
         //    有一半是这条：`customProxy.touch()` 以前没有任何观察者。
         .onChange(of: store.customProxy.revision) { _, _ in
+            // 改了代理就重新给中继一次机会：否则冷启动那两次失败之后，这一轮里加的新代理
+            // 要等下次启动才生效（观众看到的是「配了但没反应」）。
+            store.resetRelayStartBudget()
             store.rebuildSubscription()
         }
         // A Baidu or Aliyun line waiting for its plugin's sign-in code to be scanned.

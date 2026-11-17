@@ -54,6 +54,8 @@ import TVCore
     /// ⛔ 不重算就等于代理没配：源地址停在直连写法，Loon 只会看到临时端口。
     ///    用 `@ObservationIgnored` 是因为它纯属内部节流，不该触发任何视图重算。
     @ObservationIgnored private var relayStartRetryPending = false
+    /// 这一次启动已经为重排中继试过几次。上限 2：失败就停，别让「起不来」变成自持循环。
+    @ObservationIgnored private var relayStartAttempts = 0
     /// Per-source rename and API override (the viewer edits one source without editing the subscription).
     let sourceOverrides: SourceOverrides
     /// Per-line (flag) route and hide choices, finer than the source-level routing.
@@ -1911,13 +1913,26 @@ import TVCore
         //    没有端口就退成原地址；而这一轮之后没有任何东西会再跑一遍，
         //    于是列表、海报、播放全都直连 —— Loon 只能看到临时端口。
         if relayBase == nil, !CustomProxyStore.shared.endpoints.isEmpty,
-           !relayStartRetryPending {
+           !relayStartRetryPending, relayStartAttempts < Self.relayStartAttemptLimit {
             relayStartRetryPending = true
+            relayStartAttempts += 1
             LocalProxyServer.shared.ensureStarted()
             Task { @MainActor [weak self] in
                 _ = try? await LocalProxyServer.shared.base()
-                self?.relayStartRetryPending = false
-                self?.rebuildSubscription()
+                // 失败不立刻重排：给监听器一点时间释放/重绑，也避免「失败 → 重排 → 再失败」空转。
+                try? await Task.sleep(for: .milliseconds(600))
+                guard let self else { return }
+                self.relayStartRetryPending = false
+                // ⛔ 这里原来无条件 `rebuildSubscription()`：`base()` 起不来时，重排又会
+                //    走到这段、又排一个 Task，没有上限也没有退避 —— 端口被占或系统拒绝监听时
+                //    就是一个自持循环（每轮一次全量重排 + 25 秒探测超时 + 一行失败日志）。
+                //    现在只在上限内重排，超了就记一行、把这一轮当作「本次启动没有中继」。
+                if self.relayStartAttempts < Self.relayStartAttemptLimit {
+                    self.rebuildSubscription()
+                } else {
+                    Diagnostics.shared.record(.warning, "proxy",
+                        "relay did not start after \(Self.relayStartAttemptLimit) attempts; sources stay direct this launch")
+                }
             }
         }
         // 「这台源经哪台出口出去」的结论表：播放侧（没有 Store）从这里读，
@@ -1969,6 +1984,15 @@ import TVCore
         }
         subscription = config.with(sites: sites)
         RelayRouteRegistry.shared.replace(relayed)
+    }
+
+    /// 冷启动时为「中继还没绑上端口」最多排几次重排。
+    private static let relayStartAttemptLimit = 2
+
+    /// 观众改了代理设置：预算重置，允许再试一轮（否则加完代理也要等下次冷启动才生效）。
+    func resetRelayStartBudget() {
+        relayStartAttempts = 0
+        relayStartRetryPending = false
     }
 
     /// 这个源的直连地址已知不可达，需要出口代理。
@@ -2230,6 +2254,13 @@ import TVCore
         // 包内标签不算「刚测过」。它不是这台设备量的，而且打包之后一直不变 ——
         // 认它当新鲜的，就等于「刚装完 / 刚刷新」的十分钟里所有测速按钮都不干活。
         if reading.declared == true { return true }
+        // 「未测」不是读数，别拿它当新鲜。
+        //
+        // ⛔ `probe` 两次都拿不到答复时返回 `.unknown(measuredAt: Date())` —— 那个「现在」
+        //    会让它在十分钟里都被当成刚测过：批量扫描跳过它、界面上是灰点「未测」、
+        //    `sortScore` 又把它当不能用。刚修好的「别误标不通」于是换了个颜色继续误标，
+        //    而且**不会自动重测**。这条线本来最需要再试一次，却成了最不容易被重试的一种。
+        if reading.reachability == .unknown { return true }
         return reading.measuredAt.timeIntervalSinceNow < -maxAge
     }
 

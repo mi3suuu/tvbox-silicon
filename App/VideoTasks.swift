@@ -561,7 +561,12 @@ import TVCore
         activeTaskID = id
         // 提到队首：`applyMuting` 用 `prefix(decoding)` 决定谁在解码，
         // 不置顶的话「刚点的那一路」仍可能排在预算之外而拿不到解码。
-        if index != 0 { tasks.insert(tasks.remove(at: index), at: 0) }
+        if index != 0 {
+            tasks.insert(tasks.remove(at: index), at: 0)
+            // 图层顺序也是用户摆出来的状态。以前只有 `bringToFront`（管理器按钮）会落快照，
+            // 轻点换层不落 —— 于是重启后顺序回到旧样子，用户会以为「点了没记住」。
+            saveSnapshot()
+        }
         applyMuting()
     }
 
@@ -1521,25 +1526,13 @@ struct VideoTaskCard: View {
                 store.videoTasks.activate(task.id)
             }
         )
-        // ★ 每张卡**自己**可以捏合缩放。
+        // ★ 捏合**只在摆放层**（`DockPlacedCard.pinchGesture`）识别。
         //
-        // 用户要求：「迷你小窗每个窗口要能单独调整大小，而不是黏成一块」。
-        // 手势必须挂在**卡片**上而不是坞上：挂在坞上时一次捏合会改所有卡，
-        // 而 `MagnificationGesture` 的倍率是相对起手值的，多卡共用一个会互相打架。
-        //
-        // 锁定整理时尺寸由网格统一（`isLayoutLocked`）：手势照样接，但不写回 ——
-        // 让它把手指的意图吃掉，好过让它漏到别处去。
-        .simultaneousGesture(
-            MagnificationGesture()
-                // 画面跟手：手势进行中就实时缩放（`scaledWidth` 里乘了 `pinch`）。
-                .updating($pinch) { value, state, _ in state = isLayoutLocked ? 1 : value }
-                // 松手才写回：提交的是「起手值 × 本次倍率」。
-                // 直接提交 `value` 等于把之前的缩放丢掉（见 `pinch` 的注释）。
-                .onEnded { value in
-                    guard !isLayoutLocked, let onScaleChange else { return }
-                    onScaleChange(min(max(ownScale * value, 0.35), 2.2))
-                }
-        )
+        // ⛔ 2026-11-17：这里原来还挂着一条自己的 `MagnificationGesture`，而摆放层那条
+        //    也挂着 —— 两条都 `simultaneousGesture`，于是同一次捏合被算了两遍：
+        //    `scaledWidth = width × ownScale × pinch × externalPinch`，捏到 1.5 倍时
+        //    画面是 2.25 倍，松手两个 `pinch` 归 1、`ownScale` 只写了 1.5，
+        //    视觉上就是「放大过头又缩回去」。现在只剩摆放层一条，本卡只读 `externalPinch`。
         // ★ 拖动中的实时位移**在本卡叠加**。
         //
         // ⛔ 这一行是「跟手」的关键读取点：`livePan`（`@GestureState`）
@@ -2763,6 +2756,12 @@ struct VideoTaskDock: View {
                 // 现在：`ZStack` 里每张卡各自 `.offset(自己的位置)`、各自带
                 // `DragGesture` 与 `MagnificationGesture`，位置与大小都按 `task.id` 分开存。
                 // 初次出现时给一个错开的默认落点（右下角往上排），之后完全由用户摆布。
+                // 整理网格**算一次**，别在 `ForEach` 里每张卡各算一遍。
+                //
+                // ⛔ 原来这一行写在 `ForEach` 内部：`packedTiles` 里有「按 0.05 步长往下试」
+                //    的循环（最多十几轮 × 行列），8 张卡就是 8 次完整试排，而且每次 body
+                //    重算都要再来一遍。它只是「给定张数与容器」的纯函数，本来就该在循环外。
+                let tiles = tidyTiles(in: geo.size, cardWidth: width)
                 ZStack(alignment: .bottomTrailing) {
                     ForEach(Array(store.videoTasks.tasks.enumerated()), id: \.element.id) { index, task in
                         // ★ 每张卡包一层 `DockPlacedCard`，**位移状态就住在这一层里**。
@@ -2787,7 +2786,6 @@ struct VideoTaskDock: View {
                         //    一起塞进一个字面量就超出类型推导预算。
                         let cardCount = store.videoTasks.tasks.count
                         let locked = store.videoTasks.isLayoutLocked
-                        let tiles = tidyTiles(in: geo.size, cardWidth: width)
                         let tile = index < tiles.count ? tiles[index] : nil
                         // 锁定整理：位置与宽度都由格子给，用户拖不动、捏不动。
                         // 再钳一次是兜底：卡多到连最小缩放都排不下时，网格会顶到屏幕外。

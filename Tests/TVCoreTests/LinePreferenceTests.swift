@@ -43,8 +43,18 @@ import Testing
 
     // MARK: - 二级：上次看的那条
 
+    /// 没有用户选择、没有任何「现在不能播」的证据时，历史照用。
     @Test func historyIsUsedWhenNothingWasJustPicked() {
-        #expect(LinePreference.choose(flags: flags, watched: "线路2", playableNow: { $0 == "线路1" }) == "线路2")
+        #expect(LinePreference.choose(flags: flags, watched: "线路2") == "线路2")
+    }
+
+    /// ⛔ 历史那条**现在播不了**（要扫码/没登录的网盘）时必须让位。
+    ///
+    /// 原断言是反的：`playableNow: { $0 == "线路1" }` 却期望返回「线路2」——
+    /// 那意味着用户会先撞一次登录/60 秒超时，而同一集里就有一条能直接播的线。
+    /// 2026-11-17 审查把这条改成「历史落在能播的那几条里才作数」。
+    @Test func historyYieldsToAPlayableLine() {
+        #expect(LinePreference.choose(flags: flags, watched: "线路2", playableNow: { $0 == "线路1" }) == "线路1")
     }
 
     // MARK: - 三级：现在就能播的第一条
@@ -209,5 +219,40 @@ import Testing
         let edges = ["线路1": 1920, "线路3": 720]
         let chosen = LinePreference.choose(flags: flags, picked: "线路3", quality: { edges[$0] })
         #expect(chosen == "线路3")
+    }
+
+    // MARK: - 历史必须让位给「当下不可播」的线（2026-11-17 审查）
+
+    /// 历史停在一条**网页线**（回 HTML，需要解析）上：不能因为「上次是它」就继续默认它。
+    ///
+    /// 真实形状：内置「可播」组里 19 个源各有一条云播/平台页线路，用户点过一次之后
+    /// `watched` 就记成了那条；此后每次进来先撞 15 秒嗅探，而同一集里有一条正常 1080p。
+    @Test func historyYieldsWhenItIsAPageOnlyLine() {
+        let edges = ["线路2": 1920]
+        let chosen = LinePreference.choose(
+            flags: flags,
+            watched: "线路1",
+            quality: { edges[$0] },
+            unplayableNow: { $0 == "线路1" }
+        )
+        #expect(chosen == "线路2")
+    }
+
+
+    /// 整组都是网页线时保留历史：那不是选错，是这部片只有这样的地址。
+    @Test func historySurvivesWhenEveryLineIsUnplayable() {
+        let chosen = LinePreference.choose(
+            flags: flags,
+            watched: "线路2",
+            unplayableNow: { _ in true }
+        )
+        #expect(chosen == "线路2")
+    }
+
+    /// 「没测过」不等于「不能播」：冷启动没有任何读数时仍尊重历史。
+    @Test func neverMeasuredHistoryIsStillRespected() {
+        #expect(LinePreference.choose(flags: flags, watched: "线路2",
+                                      quality: { _ in nil },
+                                      unplayableNow: { _ in false }) == "线路2")
     }
 }

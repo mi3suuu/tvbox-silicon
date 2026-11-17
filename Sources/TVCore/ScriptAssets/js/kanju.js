@@ -600,7 +600,13 @@ function mediaAlive(url) {
     // code 0 = 没拿到答复（连接被断/超时）：可能只是慢，不判死，也别记。
     if (!r.code) return 'unknown';
     const verdict = r.code < 400 ? 'ok' : 'dead';
-    if (host) hostVerdict[host] = { verdict: verdict, until: now + 300 };
+    // ⛔ 只缓存「好」，不缓存「死」。
+    //
+    //    以前 `dead` 也按 host 记 5 分钟：一次 403（签名过期、单条 URL 失效、边缘节点抽风）
+    //    就把整台 CDN 判死，同 host 下别的线路（不同 token、不同路径）会被直接跳过。
+    //    这正是我们在 App 侧刚修掉的「一条线抖，整台 CDN 陪葬」（`baseLatency` 的同一形态），
+    //    插件里不该再长一份。死判只对**这一个地址**这次生效，下一条照常实测。
+    if (host && verdict === 'ok') hostVerdict[host] = { verdict: verdict, until: now + 300 };
     return verdict;
 }
 
