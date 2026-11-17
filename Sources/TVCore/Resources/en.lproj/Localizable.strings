@@ -2711,3 +2711,5 @@
 
 "Default Exit" = "Default Exit";
 "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically.";
+
+"Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way." = "Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way.";

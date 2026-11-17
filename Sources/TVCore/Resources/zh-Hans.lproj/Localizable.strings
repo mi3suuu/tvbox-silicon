@@ -2716,3 +2716,5 @@
 
 "Default Exit" = "默认出口";
 "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "配了多台代理时，选一台作为「代理」源的出口。只配一台时会自动使用它。";
+
+"Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way." = "回环地址会自动改用局域网地址拨出 —— Loon 的端口规则只对从局域网地址进来的连接生效。";

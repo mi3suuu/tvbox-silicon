@@ -2713,3 +2713,5 @@
 
 "Default Exit" = "既定の出口";
 "With more than one proxy, pick the one “Proxy” sources leave through. With a single proxy it is used automatically." = "プロキシが複数あるとき、「Proxy」の源が使う出口を選びます。1 台だけなら自動で使われます。";
+
+"Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way." = "ループバックアドレスはローカルネットワークのアドレス経由で接続します。Loon のポートルールはその経路の接続にのみ適用されます。";

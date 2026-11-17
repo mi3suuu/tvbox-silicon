@@ -235,29 +235,96 @@ public final class LocalProxyServer: @unchecked Sendable {
             endpoint = nil
         }
 
-        let built = connectionParameters(secure: secure, serverName: parsed.host, proxy: endpoint)
-        let upstream = NWConnection(host: NWEndpoint.Host(parsed.host), port: port, using: built.parameters)
+        // 拨代理的地址可能不是端点上写的那个（见 `LocalNetwork`）：回环地址要换成局域网地址，
+        // 否则 Loon 收下连接却按它自己的规则透传 —— 用户看到的就是「没用我们规定的端口」。
+        let state = TunnelState(connection: connection, head: rewrittenHead, leftover: leftover,
+                                scheme: parsed.scheme, host: parsed.host, port: parsed.port,
+                                endpoint: endpoint, queue: queue)
+        Self.open(state, dialHost: endpoint.map { ProxyDialHost.primary(for: $0) })
+    }
+
+    /// 一次隧道尝试的状态。抽成类是因为「局域网地址失败后退回回环」要在
+    /// `@Sendable` 的状态回调里再发起一次连接 —— 局部函数捕获可变变量在 Swift 6 下过不了。
+    private final class TunnelState: @unchecked Sendable {
+        let connection: NWConnection
+        let head: String
+        let leftover: Data
+        let scheme: String
+        let host: String
+        let port: UInt16
+        let endpoint: CustomProxyEndpoint?
+        let queue: DispatchQueue
+        private let lock = NSLock()
+        private var retried = false
+
+        init(connection: NWConnection, head: String, leftover: Data, scheme: String,
+             host: String, port: UInt16, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
+            self.connection = connection
+            self.head = head
+            self.leftover = leftover
+            self.scheme = scheme
+            self.host = host
+            self.port = port
+            self.endpoint = endpoint
+            self.queue = queue
+        }
+
+        /// 只会成功一次：回退只做一次，别在两条腿之间来回弹。
+        func claimRetry() -> Bool {
+            lock.withLock {
+                guard !retried else { return false }
+                retried = true
+                return true
+            }
+        }
+    }
+
+    private static func open(_ state: TunnelState, dialHost: String?) {
+        let built = connectionParameters(secure: state.scheme.lowercased() == "https",
+                                         serverName: state.host, proxy: state.endpoint,
+                                         dialHost: dialHost)
+        guard let port = NWEndpoint.Port(rawValue: state.port) else {
+            state.connection.cancel()
+            return
+        }
+        let upstream = NWConnection(host: NWEndpoint.Host(state.host), port: port, using: built.parameters)
         // The port comes back to the pool as soon as this connection is done with it — on failure
         // and on cancellation as well as on a clean close, or a long session would drain the range.
         let sourcePort = built.sourcePort
-        upstream.stateUpdateHandler = { state in
-            switch state {
+        upstream.stateUpdateHandler = { connectionState in
+            switch connectionState {
             case .ready:
-                let via = endpoint.map { "proxy=\($0.name)" } ?? "direct"
+                let via = state.endpoint.map { "proxy=\($0.name)" } ?? "direct"
                 let viaPort = sourcePort.map { " src=:\($0)" } ?? ""
-                Diagnostics.shared.record(.debug, "proxy", "upstream ready \(via)\(viaPort) \(parsed.scheme)://\(parsed.host):\(parsed.port)")
-                Self.sendAndRelay(connection, upstream: upstream, head: rewrittenHead, leftover: leftover)
-            case .failed(let error):
-                Diagnostics.shared.failure("proxy", "upstream failed \(parsed.scheme)://\(parsed.host):\(parsed.port) via=\(endpoint?.name ?? "direct")", error)
+                let dial = dialHost.map { " dial=\($0)" } ?? ""
+                Diagnostics.shared.record(.debug, "proxy",
+                    "upstream ready \(via)\(viaPort)\(dial) \(state.scheme)://\(state.host):\(state.port)")
+                sendAndRelay(state.connection, upstream: upstream, head: state.head, leftover: state.leftover)
+            case .failed(let error), .waiting(let error):
+                // 局域网地址上没人监听（Loon 的 Wi-Fi 访问关着）会落到这里 —— 包括
+                // `.waiting`：被拒之后 Network 会一直重试，那等于把这条请求挂死。
+                // 退一次回环，至少让 Loon 用它的普通规则把这条带出去。
+                if let proxy = state.endpoint,
+                   let fallback = ProxyDialHost.fallback(for: proxy), fallback != dialHost,
+                   state.claimRetry() {
+                    ProxyDialHost.notePrimaryFailed(proxy)
+                    if let sourcePort { SRCPortPool.shared.release(sourcePort) }
+                    upstream.cancel()
+                    open(state, dialHost: fallback)
+                    return
+                }
+                Diagnostics.shared.failure("proxy",
+                    "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(state.endpoint?.name ?? "direct")",
+                    error)
                 if let sourcePort { SRCPortPool.shared.release(sourcePort) }
-                connection.cancel(); upstream.cancel()
+                state.connection.cancel(); upstream.cancel()
             case .cancelled:
                 if let sourcePort { SRCPortPool.shared.release(sourcePort) }
-                connection.cancel()
+                state.connection.cancel()
             default: break
             }
         }
-        upstream.start(queue: queue)
+        upstream.start(queue: state.queue)
     }
 
     /// TCP, plus TLS when the target needs it, plus the viewer's proxy when one is assigned.
@@ -277,7 +344,8 @@ public final class LocalProxyServer: @unchecked Sendable {
     /// `sourcePort` is released by the caller when the connection ends, never here: this function
     /// only builds the parameters.
     private static func connectionParameters(secure: Bool, serverName: String,
-                                             proxy: CustomProxyEndpoint?) -> (parameters: NWParameters, sourcePort: UInt16?) {
+                                             proxy: CustomProxyEndpoint?,
+                                             dialHost: String? = nil) -> (parameters: NWParameters, sourcePort: UInt16?) {
         let tcp = NWProtocolTCP.Options()
         // Media segments arrive in bursts; the default window throttles a 4K stream on a close link.
         tcp.noDelay = true
@@ -322,7 +390,8 @@ public final class LocalProxyServer: @unchecked Sendable {
             Diagnostics.shared.record(.warning, "proxy",
                 "endpoint unusable (host=\"\(proxy.host)\" port=\(proxy.port)); this request goes direct")
         }
-        if let proxy, let host = proxy.address.flatMap({ NWEndpoint.Host($0) }), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
+        let proxyHost = dialHost ?? proxy?.host
+        if let proxy, let host = proxyHost.flatMap({ NWEndpoint.Host($0) }), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
             let context = NWParameters.PrivacyContext(description: "tvbox.proxy.\(proxy.id)")
             let endpoint = NWEndpoint.hostPort(host: host, port: port)
             let configuration: ProxyConfiguration

@@ -360,6 +360,19 @@ private struct CustomProxyEndpointEditor: View {
                         #if os(iOS)
                         .keyboardType(.numberPad)
                         #endif
+                    // 回环地址会被换成局域网地址再拨。
+                    //
+                    // ⛔ 这一条是 2026-11-17 实测出来的：Loon 的 SRC-PORT 规则只对**局域网**
+                    //    来的连接生效。端点写 127.0.0.1 时连接能通（Loon 监听所有接口），
+                    //    日志里也是一片 `proxy=Loon src=:415xx`，但请求从回环进来，
+                    //    Loon 不做端口分类，按它自己的规则透传 —— 用户看到的就是
+                    //    「没用我们规定的端口，原样透传」。同一台机器用局域网地址拨，
+                    //    41521 走节点、41621 走直连，规则立刻生效。
+                    if LocalNetwork.isLoopback(trimmedHost) {
+                        Text(L10n.text("Loopback addresses are dialled over the local network address. Loon’s port rules only apply to connections that arrive that way."))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Section(L10n.text("Authentication (optional)")) {
                     TextField(L10n.text("Username"), text: $username)
