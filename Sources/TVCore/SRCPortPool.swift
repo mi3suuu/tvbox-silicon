@@ -74,9 +74,16 @@ public final class SRCPortPool: @unchecked Sendable {
     public var allPorts: [UInt16] { ports }
 
     /// A port nobody else in this process is using right now, or nil when that lane is exhausted.
+    ///
+    /// **最久没用的那个先发**（FIFO），不是刚才用过的那个。这一点不是风格问题：连接每次
+    /// 结束都会 `release`，而结束前它刚在这个端口上跑过 —— 如果后进先出，下一次 `acquire`
+    /// 拿到的正是那个还没从 `TIME_WAIT` 里出来的端口，绑定失败、再还回去、再拿到同一个，
+    /// 一条脏端口就能把之后的所有请求全吃掉（真机 3 分钟 558 次 `NWError 48`）。
     public func acquire(_ lane: Lane = .proxy) -> UInt16? {
         lock.withLock {
-            guard let port = free[lane]?.popLast() else { return nil }
+            guard var pool = free[lane], !pool.isEmpty else { return nil }
+            let port = pool.removeFirst()
+            free[lane] = pool
             leased.insert(port)
             return port
         }

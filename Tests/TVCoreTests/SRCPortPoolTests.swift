@@ -48,6 +48,18 @@ import Testing
         #expect(pool.acquire(.proxy) != nil)
     }
 
+    @Test func aReturnedPortDoesNotJumpTheQueue() {
+        // 刚归还的端口连接才断，可能还在 TIME_WAIT。池子必须先把「最久没用」的发出去，
+        // 否则一条脏端口会被同一个请求反复拿到（真机 3 分钟 558 次 NWError 48）。
+        let pool = SRCPortPool(proxy: 41_500...41_502, direct: 41_600...41_600)
+        let first = try! #require(pool.acquire(.proxy))
+        _ = try! #require(pool.acquire(.proxy))
+        pool.release(first)
+        let next = try! #require(pool.acquire(.proxy))
+        #expect(next != first, "刚归还的端口被立刻发回去了")
+        #expect(next == 41_502, "应当先发池子里最冷的那个，实际 \(next)")
+    }
+
     @Test func everyPortInTheRangeIsCovered() {
         let pool = SRCPortPool(proxy: 41_500...41_599, direct: 41_600...41_699)
         #expect(pool.allPorts.count == 200)

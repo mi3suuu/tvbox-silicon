@@ -49,6 +49,58 @@ import Testing
         return found
     }
 
+    /// 用 POSIX socket 占住一个端口，模拟「这个源端口还在 TIME_WAIT / 被别的东西占着」。
+    /// 拿不到（系统上已被占用）返回 nil，调用方据此跳过。
+    private static func occupy(port: UInt16) -> Int32? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY
+        let bound = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+        guard bound else { close(fd); return nil }
+        return fd
+    }
+
+    /// 源端口占用不能让请求失败：换一个端口重拨，而不是把这条请求判死。
+    ///
+    /// 这就是真机上「一开代理就连不上」的真因 —— 回退重拨把刚关掉的端口还回池子，
+    /// 池子又立刻把它发出去，绑定失败被当成链路失败，3 分钟 558 次 `NWError 48`。
+    @Test func aBusySourcePortIsRetriedOnAnotherPortInsteadOfFailing() async throws {
+        let spy = try PortSpy()
+        try await spy.start()
+        defer { spy.stop() }
+
+        var held: [Int32] = []
+        var busy = Set<UInt16>()
+        for port in UInt16(41_600)...UInt16(41_609) where held.count < 6 {
+            if let fd = Self.occupy(port: port) { held.append(fd); busy.insert(port) }
+        }
+        defer { held.forEach { close($0) } }
+        try #require(!busy.isEmpty, "系统上占不到直连段的端口，这条测不了")
+
+        let base = try await LocalProxyServer.shared.base()
+        for _ in 0..<4 {
+            let target = URL(string: "http://\(Self.lanHost):\(spy.port)/probe")!
+            let (data, _) = try await URLSession.shared.data(from: LocalProxyServer.directURL(base: base, url: target))
+            #expect(String(decoding: data, as: UTF8.self) == "spy-ok", "端口被占用时请求整条失败了")
+        }
+
+        try await Task.sleep(for: .milliseconds(150))
+        let ports = spy.peerPorts
+        #expect(!ports.isEmpty, "源站一条连接都没收到")
+        #expect(ports.contains { !busy.contains($0) }, "所有请求都挤在被占的端口上，没有换口重试")
+        for port in ports where !busy.contains(port) {
+            #expect(SRCPortPool.directRange.contains(Int(port)), "换口后跑出了直连段：\(port)")
+        }
+    }
+
     /// 只回一次响应、并记下「对端从哪个端口来」的极小服务。
     private final class PortSpy: @unchecked Sendable {
         let listener: NWListener
@@ -94,8 +146,7 @@ import Testing
     }
 
     /// 直连段（41600-41699）：不经代理时，源站看到的源端口必须落在这一段。
-    @Test func theDirectLaneDialsFromTheDirectRange() async throws {
-        let spy = try PortSpy()
+    @Test func theDirectLaneDialsFromTheDirectRange() async throws {        let spy = try PortSpy()
         try await spy.start()
         defer { spy.stop() }
 

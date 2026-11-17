@@ -256,6 +256,7 @@ public final class LocalProxyServer: @unchecked Sendable {
         let queue: DispatchQueue
         private let lock = NSLock()
         private var retried = false
+        private var rebinds = 0
 
         init(connection: NWConnection, head: String, leftover: Data, scheme: String,
              host: String, port: UInt16, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
@@ -277,12 +278,32 @@ public final class LocalProxyServer: @unchecked Sendable {
                 return true
             }
         }
+
+        /// 源端口绑定失败（`EADDRINUSE`）后的下一手。
+        ///
+        /// 这条路径曾经把整个代理模式打死：一次回退重拨会把刚 `cancel()` 的端口还回池子，
+        /// 池子按 LIFO 又把同一个端口发给下一条连接，绑定失败 → 再还 → 再发同一个，
+        /// 于是一条坏端口能吃掉之后所有请求（真机实测 3 分钟 558 次 `NWError 48`）。
+        /// 所以绑定失败不再算「这条链路坏了」，只算「这个端口脏了」：换一个端口重来，
+        /// 两次都撞上就改用临时端口 —— 请求能出去比端口落在规定段里重要。
+        enum Rebind { case anotherPort, ephemeral, giveUp }
+
+        func claimRebind() -> Rebind {
+            lock.withLock {
+                rebinds += 1
+                switch rebinds {
+                case 1, 2: return .anotherPort
+                case 3: return .ephemeral
+                default: return .giveUp
+                }
+            }
+        }
     }
 
-    private static func open(_ state: TunnelState, dialHost: String?) {
+    private static func open(_ state: TunnelState, dialHost: String?, bindSourcePort: Bool = true) {
         let built = connectionParameters(secure: state.scheme.lowercased() == "https",
                                          serverName: state.host, proxy: state.endpoint,
-                                         dialHost: dialHost)
+                                         dialHost: dialHost, bindSourcePort: bindSourcePort)
         guard let port = NWEndpoint.Port(rawValue: state.port) else {
             state.connection.cancel()
             return
@@ -301,6 +322,28 @@ public final class LocalProxyServer: @unchecked Sendable {
                     "upstream ready \(via)\(viaPort)\(dial) \(state.scheme)://\(state.host):\(state.port)")
                 sendAndRelay(state.connection, upstream: upstream, head: state.head, leftover: state.leftover)
             case .failed(let error), .waiting(let error):
+                // 端口绑定失败先于一切：不是目标不通，是这个源端口还在 TIME_WAIT / 被占用。
+                // 换端口重来，别把请求判死（真机上一次端口粘滞曾让 558 条请求全灭）。
+                if isAddressInUse(error) {
+                    let plan = state.claimRebind()
+                    if let sourcePort { SRCPortPool.shared.release(sourcePort) }
+                    upstream.cancel()
+                    switch plan {
+                    case .anotherPort:
+                        Diagnostics.shared.record(.debug, "proxy",
+                            "source port \(sourcePort.map(String.init) ?? "-") busy; retrying on another port \(state.scheme)://\(state.host):\(state.port)")
+                        open(state, dialHost: dialHost)
+                    case .ephemeral:
+                        Diagnostics.shared.record(.warning, "proxy",
+                            "source port range unusable; falling back to an ephemeral port \(state.scheme)://\(state.host):\(state.port)")
+                        open(state, dialHost: dialHost, bindSourcePort: false)
+                    case .giveUp:
+                        Diagnostics.shared.failure("proxy",
+                            "upstream failed \(state.scheme)://\(state.host):\(state.port) via=\(state.endpoint?.name ?? "direct") (source port)", error)
+                        state.connection.cancel()
+                    }
+                    return
+                }
                 // 局域网地址上没人监听（Loon 的 Wi-Fi 访问关着）会落到这里 —— 包括
                 // `.waiting`：被拒之后 Network 会一直重试，那等于把这条请求挂死。
                 // 退一次回环，至少让 Loon 用它的普通规则把这条带出去。
@@ -327,6 +370,13 @@ public final class LocalProxyServer: @unchecked Sendable {
         upstream.start(queue: state.queue)
     }
 
+    /// `NWError 48` / `EADDRINUSE`：源端口绑定冲突，与目标站无关。
+    private static func isAddressInUse(_ error: Error) -> Bool {
+        guard let nw = error as? NWError else { return false }
+        if case .posix(let code) = nw { return code == .EADDRINUSE }
+        return false
+    }
+
     /// TCP, plus TLS when the target needs it, plus the viewer's proxy when one is assigned.
     ///
     /// `Network` performs the `CONNECT` and then the TLS handshake over that tunnel by itself once
@@ -345,10 +395,15 @@ public final class LocalProxyServer: @unchecked Sendable {
     /// only builds the parameters.
     private static func connectionParameters(secure: Bool, serverName: String,
                                              proxy: CustomProxyEndpoint?,
-                                             dialHost: String? = nil) -> (parameters: NWParameters, sourcePort: UInt16?) {
+                                             dialHost: String? = nil,
+                                             bindSourcePort: Bool = true) -> (parameters: NWParameters, sourcePort: UInt16?) {
         let tcp = NWProtocolTCP.Options()
         // Media segments arrive in bursts; the default window throttles a 4K stream on a close link.
         tcp.noDelay = true
+        // 建连必须自己定死上限。系统默认是几十秒的重传预算，而这里的上游可能是「拿不到局域网
+        // 地址的 Loon」这种根本不会应答的目标 —— 不设上限，播放器看到的就是「一直等待」，
+        // 而且回环回退要等这个超时过完才发生。6 秒够跨洋握手，也够让我们快速换腿。
+        tcp.connectionTimeout = 6
         let params: NWParameters
         if secure {
             let tls = NWProtocolTLS.Options()
@@ -373,12 +428,15 @@ public final class LocalProxyServer: @unchecked Sendable {
         // CONNECT — which is what `SRC-PORT` matches. Measured: dialling a bare IP from the DIRECT
         // range bypassed the node that the same request took from the Proxy range or from an
         // ephemeral port. Domain rules still win over `SRC-PORT`; see `SRCPortPool`.
+        // 没有这一行，一个刚关掉的连接会把端口按 `TIME_WAIT` 扣住几十秒，
+        // 而池子只有 100 个口 —— 真机上表现为连点几部剧就整段 `NWError 48`。
+        params.allowLocalEndpointReuse = true
         let lane: SRCPortPool.Lane = proxy == nil ? .direct : .proxy
         var sourcePort: UInt16?
-        if let port = SRCPortPool.shared.acquire(lane) {
+        if bindSourcePort, let port = SRCPortPool.shared.acquire(lane) {
             sourcePort = port
             params.requiredLocalEndpoint = .hostPort(host: "0.0.0.0", port: NWEndpoint.Port(rawValue: port)!)
-        } else {
+        } else if bindSourcePort {
             // Lane exhausted: this request goes out on an ephemeral port, so Loon falls back to its
             // own rules for it. Worth a line, because the symptom is "the proxy did not apply to
             // this one request" with nothing else to go on.
