@@ -1331,6 +1331,17 @@ struct VideoTaskCard: View {
     ///    拖动中的逐帧位移由本卡自己的 `@GestureState livePan` 承担，
     ///    这样父层（摆放层）在拖动期间完全不用重算，卡片树也就不会重建。
     var onPanEnded: ((CGSize) -> Void)? = nil
+    /// 双击 = 伪全屏置顶 / 再双击还原（用户 2026-11-17）。
+    ///
+    /// 与单击**并行**识别（两条 `simultaneousGesture`），不用 `.exclusively`：
+    /// 后者会让单击等双击超时 ≈0.3s 才生效（见 `:1660` 注释记的那个坑）。
+    /// 双击时单击也会触发一次 `activate` —— 无害，`activate` 只改 tasks 顺序（= zIndex），
+    /// 不碰伪全屏状态，而伪全屏切换是幂等的（只切一个 id）。
+    ///
+    /// ⚠️ 参数顺序：`onPanEnded` 之后、`initialEpisodeIndex` 之前。
+    ///    Swift 的成员初始化按声明顺序，写在前面会让调用点报
+    ///    「argument 'onPanEnded' must precede argument 'onDoubleTap'」。
+    var onDoubleTap: (() -> Void)? = nil
     /// 拖动中每帧的位移（不含基准），由摆放层在拖动开始时告知基准。
     var panBase: CGSize = .zero
 
@@ -1684,7 +1695,7 @@ struct VideoTaskCard: View {
         //    声音会停在坞里另一张卡上（`open()` 内那段注释记的正是这个坑）。
         //    现在双击先跑，`open()` 内部自己先 `activate` 再 `take`，顺序天然正确。
         .simultaneousGesture(
-            TapGesture(count: 2).onEnded { open() }
+            TapGesture(count: 2).onEnded { onDoubleTap?() }
         )
         .simultaneousGesture(
             TapGesture().onEnded {
@@ -2569,6 +2580,13 @@ private struct DockPlacedCard: View {
     /// 平铺是「把多窗整理好」，用户不该再手动微调某一格 ——
     /// 位置完全由布局决定才叫平铺。
     let tileOffset: CGSize?
+    /// 这张卡此刻是否处于伪全屏（双击置顶）。
+    ///
+    /// 只影响两件事：`placed` 临时返回 `.zero`（居中铺满），以及禁用拖拽/捏合。
+    /// **不参与**宽度计算 —— 宽度走 `widthOverride`，由坞层每帧从容器反算。
+    let pseudoFullscreen: Bool
+    /// 双击回调（坞层持有状态，卡片只上报）。见 `VideoTaskCard.onDoubleTap`。
+    let onDoubleTap: () -> Void
 
     /// 这张卡当前位置。`nil` 表示还在默认落点上。
     ///
@@ -2602,7 +2620,31 @@ private struct DockPlacedCard: View {
     private final class DragAnchor { var value: CGSize? }
     @State private var dragAnchor = DragAnchor()
 
-    private var placed: CGSize { tileOffset ?? dragOffset ?? slot }
+    /// 这张卡的位置。伪全屏时**临时返回 `.zero`**（居中铺满）。
+    ///
+    /// ⛔ 为什么用「读时覆写」而不是「进入时存原值、退出时写回」：
+    ///    写回方案要处理「伪全屏期间 dragOffset 被整理/重钳/转屏改过」的冲突，
+    ///    而 `dragOffset` / `slot` / `tileOffset` 在本方案里**全程一个字节都没被写**，
+    ///    退出伪全屏后这个计算属性自动回到原值 —— 零还原成本、零状态同步风险。
+    ///    （captain 2026-11-17 指出我先前的设计自相矛盾：既说「不动位置」又说「居中铺满」。
+    ///      矛盾的正确解法就是这个：**位置来源不变，只在读的时候换个值**。）
+    private var placed: CGSize {
+        if pseudoFullscreen {
+            // ⛔ **不能返回 `.zero`**：坞的 ZStack 是 `alignment: .bottomTrailing`（:2987），
+            //    `.offset(.zero)` 意味着「卡片右下角贴容器右下角」= 落在角上，不是居中。
+            //
+            // 居中所需的偏移：bottomTrailing 对齐时卡片左上角默认在
+            // `(W−cw, H−ch)`，要挪到 `((W−cw)/2, (H−ch)/2)` ⇒ 偏移为负的一半余量。
+            //
+            // `cardSize` 此刻已是**伪全屏尺寸**（它由 `renderWidth` 派生，而
+            // `renderWidth ← askedWidth ← widthOverride ← pseudoFullscreenWidth`），
+            // 所以这里量的是放大后的卡片，量对了。
+            let c = cardSize
+            return CGSize(width: -(containerSize.width - c.width) / 2,
+                          height: -(containerSize.height - c.height) / 2)
+        }
+        return tileOffset ?? dragOffset ?? slot
+    }
 
     /// 这张卡**没被容器压过**的整卡宽度。
     private var askedWidth: CGFloat { widthOverride ?? (width * ownScale) }
@@ -2628,6 +2670,9 @@ private struct DockPlacedCard: View {
     /// `[card + margin - container, -margin]` 之间。
     /// 卡片比容器还宽时区间会反向，这里用 min/max 归一 —— 那种情况下交给 `fit` 收尺寸。
     private var panBounds: CGRect {
+        // 伪全屏时**禁用拖拽**：返回空区间，任何位移都会被夹回原点。
+        // （尺寸与位置都由容器决定，手动拖动必然出界。）
+        if pseudoFullscreen { return CGRect(x: 0, y: 0, width: 0, height: 0) }
         let base = dragOffset ?? slot
         let m = DockCardClamp.margin
         let loX = cardSize.width + m - containerSize.width - base.width
@@ -2760,16 +2805,24 @@ private struct DockPlacedCard: View {
                               VideoTaskCenter.savePlacement(context.id + "|" + context.episodeID,
                                                             scale: ownScale, offset: final)
                           }
-                      })
+                      },
+                      // ⚠️ 必须写在 `onPanEnded` **之后**：Swift 成员初始化按声明顺序
+                      //    （`VideoTaskCard.onPanEnded` 声明在前、`onDoubleTap` 在其后）。
+                      onDoubleTap: onDoubleTap)
     }
 
 
     private var pinchGesture: some Gesture {
         MagnificationGesture()
-            .onChanged { value in pinch = locksPlacement ? 1 : value }
+            // 伪全屏时**禁用捏合**：尺寸由容器反算，手捏会与它打架；
+            // 且松手时 `DockCardClamp.clamp` 会按伪全屏尺寸钳位，把卡片推到界外。
+            .onChanged { value in
+                guard !pseudoFullscreen else { return }
+                pinch = locksPlacement ? 1 : value
+            }
             .onEnded { value in
                 defer { pinch = 1 }
-                guard !locksPlacement else { return }
+                guard !locksPlacement, !pseudoFullscreen else { return }
                 onScaleChange(min(max(ownScale * value, 0.35), 2.2))
             }
     }
@@ -2797,13 +2850,19 @@ struct VideoTaskDock: View {
     ///    转屏 / 折叠 / 展开都会改容器，存常量就会重演用户报过的
     ///    「窗口溢出屏幕太多」。所以这里只记「是哪一张」，尺寸见 `pseudoFullscreenWidth`。
     ///
-    /// ## 为什么不需要保存「原位置」
+    /// ## 必须保存「原位置」（captain 2026-11-17 复核抓到我的设计矛盾）
     ///
-    /// 伪全屏**只改宽度、不动位置**：卡片的 `.offset` 始终走 `placed`
-    /// （`tileOffset ?? dragOffset ?? slot`），伪全屏期间这个值一个字节都没变。
-    /// 所以还原时不需要回写任何位置 —— 只需把 id 清掉。
-    /// （这一条是 t12 设计与 captain 推演的差别：风险③担心「placed 是计算属性没处存」，
-    ///   但既然不改它，就没有「存不回去」的问题。）
+    /// 我先前写过「只改宽度、不动位置 ⇒ 不用存原位置」，**那是错的**。
+    /// 事实：卡片的唯一位置来源是 `.offset(placed)`（`:2664`），而
+    /// `placed = tileOffset ?? dragOffset ?? slot`（`:2605`）。
+    /// 伪全屏若要让卡片**居中铺满**，`.offset` 必须给 `.zero` —— 那就覆盖了 `placed`，
+    /// 不存原值就还原不回去（卡片会停在左上角）。
+    ///
+    /// 但**不需要把原位置存进坞层**：让 `placed` 在伪全屏时临时返回 `.zero` 即可
+    /// （见 `DockPlacedCard.placed` 的 `guard`）。`dragOffset` 与 `slot` 全程未被写，
+    /// 退出时 `placed` 自动回到原值 —— 零还原成本、零状态同步风险。
+    /// 这比「存快照 + 退出写回」更稳：写回要处理「期间的拖动/整理/转屏改了 dragOffset」的冲突，
+    /// 而临时覆写读值不产生任何冲突面。
     @State private var pseudoFullscreenID: UUID?
 
     /// 卡片钳位：判据与实现在 `TVCore/DockCardClamp`（那里能单测）。
@@ -2827,10 +2886,13 @@ struct VideoTaskDock: View {
     /// ⛔ 不能只给 `containerSize.width`：`renderWidth` 只钳宽度，
     ///    高度是 `width / aspect + chromeHeight` —— 竖屏片源（aspect ≈ 0.56）
     ///    直接给满宽会算出远超容器的**高度**，正是「溢出」的成因。
-    private func pseudoFullscreenWidth(for task: VideoTaskCenter.Task, in container: CGSize) -> CGFloat? {
+    private func pseudoFullscreenWidth(for task: VideoTask, in container: CGSize,
+                                       safeTop: CGFloat, safeBottom: CGFloat) -> CGFloat? {
         guard container.width > 1, container.height > 1 else { return nil }
         let aspect = max(task.aspectRatio, 0.2)
-        let maxPictureHeight = container.height - Self.chromeHeight
+        // ⛔ 安全区必须显式扣掉（captain 2026-11-17 指出我原公式漏了这一项）：
+        //    伸进刘海 / Home 条会让右上关闭键与底部进度条被遮挡。
+        let maxPictureHeight = container.height - Self.chromeHeight - safeTop - safeBottom
         guard maxPictureHeight > 1 else { return nil }
         let byHeight = maxPictureHeight * aspect
         return min(container.width, byHeight)
@@ -2974,7 +3036,14 @@ struct VideoTaskDock: View {
                         //    整块在屏幕上方之外 —— 既看不见也点不到，正是用户说的
                         //    「图层互相折叠」。现在默认就是整齐的一格，绝不出屏。
                         let slot = tile.map { DockLayout.offset(for: $0, in: geo.size) } ?? .zero
-                        let uniformWidth: CGFloat? = locked ? tile?.size.width : nil
+                        // 伪全屏优先级**高于**平铺统一宽：用户在伪全屏时整理一次，
+                        // 期望的是「继续满屏」，不该被打回格子尺寸。
+                        let pseudoWidth = (pseudoFullscreenID == task.id)
+                            ? pseudoFullscreenWidth(for: task, in: geo.size,
+                                                    safeTop: geo.safeAreaInsets.top,
+                                                    safeBottom: geo.safeAreaInsets.bottom) : nil
+                        let uniformWidth: CGFloat? = pseudoWidth
+                            ?? (locked ? tile?.size.width : nil)
                         let scale = perCardScale[task.id] ?? 1
                         let active = task.id == store.videoTasks.activeTaskID
                         let reset = store.videoTasks.resetRequest
@@ -2994,7 +3063,35 @@ struct VideoTaskDock: View {
                             taskCount: cardCount,
                             resetRequest: reset,
                             slot: slot,
-                            tileOffset: thisTile)
+                            tileOffset: thisTile,
+                            pseudoFullscreen: pseudoFullscreenID == task.id,
+                            // ★ 双击 = 伪全屏置顶 / 再双击还原（用户 2026-11-17）。
+                            //
+                            // ## 为什么用「状态机幂等」而不是 `.exclusively(before:)`
+                            //
+                            // `.exclusively` 让单击**等双击超时**（≈0.3s）才生效 —— 正是
+                            // `:1660` 注释记的「换层慢半拍」。这里两条 `simultaneousGesture`
+                            // 并行挂，单击立刻响应。
+                            //
+                            // 并行带来的问题：双击时单击也会跑一次 `activate`。但本实现里
+                            // **`activate` 不参与伪全屏状态**（它只改 tasks 数组顺序 = zIndex），
+                            // 而伪全屏的切换是下面这一段独立逻辑 ⇒ 两次调用互不覆盖 ⇒ 幂等。
+                            //
+                            // ⛔ 这也正是 t12 与 captain 推演风险①的差别：风险①说
+                            //    「伪全屏要记录原尺寸 + 原位置，两条手势都会覆盖」。
+                            //    但本设计**不记录位置**（只改宽度、不动 offset），
+                            //    宽度也不存状态（每帧从容器反算）⇒ 没有可被覆盖的东西。
+                            // ⛔ 幂等的关键：这里**只切一个 id**，不记录任何位置。
+                            //
+                            // 双击时单击那次 `activate` 只改 tasks 数组顺序（= zIndex），
+                            // 完全不碰 `pseudoFullscreenID` ⇒ 两条手势互不覆盖。
+                            //
+                            // 「原位置」不需要存：见 `DockPlacedCard.placed` 的注释 ——
+                            // 伪全屏是让 `placed` **临时返回 .zero**，而 `dragOffset` / `slot`
+                            // 一个字节都没被写，退出时 `placed` 自动回到原值。
+                            onDoubleTap: {
+                                pseudoFullscreenID = (pseudoFullscreenID == task.id) ? nil : task.id
+                            })
                             // ★ 图层顺序：数组首位 = 最上层。
                             //
                             // ⛔ 少了这一行，「提最前」是反的：`ZStack` 按声明顺序画，
