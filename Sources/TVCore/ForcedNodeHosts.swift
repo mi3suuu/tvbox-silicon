@@ -63,6 +63,16 @@ public final class ForcedNodeHosts: @unchecked Sendable {
         hosts.map { "DOMAIN-SUFFIX,\($0)" }
     }
 
+    /// `[Remote Rule]` 的一整行，带 `update-interval`。
+    ///
+    /// ⛔ 这才是「无感」的唯一正路：`loon://update?sub=all` 会把 Loon 切到前台，
+    ///    而 Remote Rule 的 `update-interval`（秒）是 Loon **自己在后台**按间隔重拉的。
+    ///    把它设成 120，观众就不再需要任何手动动作，也不必被切 App。
+    public func remoteRuleLine(url: URL, policy: String? = nil, interval: Int = 120) -> String {
+        let target = policy ?? targetGroup ?? LoonPreset.defaultGroupName
+        return "\(url.absoluteString), policy=\(target), tag=映匣强制节点, update-interval=\(interval), enabled=true"
+    }
+
     /// 可直接粘进 `[Rule]` 的行。没有记录时返回 nil，调用方就别附带这一段。
     public func ruleFragment(fallbackTarget: String = "Proxy") -> String? {
         let hosts = hosts

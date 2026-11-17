@@ -18,6 +18,7 @@ struct ProxySettingsView: View {
     @State private var ruleCopied = false
     @State private var checking = false
     @State private var probe: LoonPortRuleProbe?
+    @State private var remoteRuleCopied = false
 
     var body: some View {
         // 读一次 revision：代理/默认出口改动后要重算这一页（`CustomProxyStore` 本身不可观察）。
@@ -66,6 +67,9 @@ struct ProxySettingsView: View {
                     // Loon 只暴露了 scheme 这一个「立刻刷新」入口，它会切到 Loon 前台。
                     // 所以这条是显式动作，不自动跳 —— 自动跳会打断观看。
                     SettingsActionRow(title: L10n.text("Sync Now (opens Loon)")) { syncLoon() }
+                    // 真正实现「无感」的那一行：Remote Rule + update-interval，
+                    // Loon 自己在后台按间隔重拉，不需要 scheme、不会切前台。
+                    SettingsActionRow(title: L10n.text("Copy Remote Rule Line")) { copyRemoteRuleLine() }
                     SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
                 }
             }
@@ -250,6 +254,24 @@ struct ProxySettingsView: View {
     ///
     /// 没有记录、或中继还没起来时也照常打开 —— 只是内容为空。
     /// 隐藏这个按钮只会让观众找不到它（上一版就是这么错的）。
+    /// 复制 `[Remote Rule]` 的一行（带 update-interval）。
+    ///
+    /// 这是「无感」的正解：Loon 按 `update-interval` 秒在后台自己重拉，
+    /// 不经过任何 scheme，也就不会把 Loon 切到前台。
+    private func copyRemoteRuleLine() {
+        RulesHost.shared.start()
+        guard let url = RulesHost.shared.rulesURLs().first else { return }
+        let line = ForcedNodeHosts.shared.remoteRuleLine(url: url)
+        #if os(iOS)
+        UIPasteboard.general.string = line
+        remoteRuleCopied = true
+        #elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(line, forType: .string)
+        remoteRuleCopied = true
+        #endif
+    }
+
     /// 让 Loon 立刻重拉订阅资源。会切到 Loon 前台，所以只能由观众主动点。
     private func syncLoon() {
         guard let url = LoonScheme.updateAll else { return }
