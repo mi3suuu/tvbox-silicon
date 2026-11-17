@@ -204,14 +204,13 @@ public final class EgressRouter: @unchecked Sendable {
 
     init(session: URLSession? = nil) {
         if let session { self.session = session; return }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 12
-        configuration.timeoutIntervalForResource = 30
-        // 不用系统代理设置里的 HTTP 代理：那层由 TUN 完成，两条腿都由我们显式选择，
-        // 让 URLSession 再套一层会把「直连腿」也变成代理腿，赛跑就没意义了。
-        configuration.httpShouldUsePipelining = false
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
+        // ⛔ 用 `URLSession.shared`，不用 `ephemeral`。
+        //
+        // 采集站的接口会下发会话 Cookie，个别站没有它就回空列表；原来 `HTTPClient`
+        // 走的是 shared，换成 ephemeral 等于把 Cookie 罐悄悄丢了 —— 症状是「有些源
+        // 直连能看、改走这条路之后列表空了」，而且日志里什么都不会说。
+        // 每条请求的超时由 `URLRequest.timeoutInterval` 单独给，不需要另建会话。
+        self.session = .shared
     }
 
     // MARK: 对外
