@@ -280,9 +280,13 @@ public final class LocalProxyServer: @unchecked Sendable {
             return
         }
 
-        // Rewrite to origin-form for the upstream and force it to close when done: this server
-        // answers one request per local connection, and a keep-alive upstream would leave the local
-        // socket open with nothing reading it.
+        // Rewrite to origin-form for the upstream. 回程的 keep-alive 由下面按「能不能算清长度」决定：
+        // 只有 GET/HEAD 且不是播放清单时，才请上游别关连接 —— 那种响应的体长度可判定，
+        // 读完能安全放回 `RelayUpstreamPool`，下一片就不用再握一次手。
+        let method = String(fields[0]).uppercased()
+        let playlistPath = parsed.path.lowercased().contains(".m3u8") || parsed.path.lowercased().contains(".m3u")
+        let canKeepAlive = RelayUpstreamPool.enabled && (method == "GET" || method == "HEAD")
+            && leftover.isEmpty && !playlistPath
         let rewritten = String(fields[0]) + " " + parsed.path + " " + String(fields.dropFirst(2).joined(separator: " "))
         var headers = lines.dropFirst().filter { line in
             let name = line.split(separator: ":", maxSplits: 1).first.map { $0.lowercased() } ?? ""
@@ -292,7 +296,7 @@ public final class LocalProxyServer: @unchecked Sendable {
         var hostHeader = parsed.host
         if Int(parsed.port) != (parsed.scheme.lowercased() == "https" ? 443 : 80) { hostHeader += ":\(parsed.port)" }
         headers.insert("Host: " + hostHeader, at: 0)
-        headers.append("Connection: close")
+        headers.append(canKeepAlive ? "Connection: keep-alive" : "Connection: close")
         let rewrittenHead = ([rewritten] + headers).joined(separator: "\r\n")
 
         guard let port = NWEndpoint.Port(rawValue: parsed.port) else { connection.cancel(); return }
@@ -316,11 +320,34 @@ public final class LocalProxyServer: @unchecked Sendable {
         // 同一个目标已经连续在代理腿上失败过几次：这一条就直接走直连，不再先赔一次失败。
         // 剧集列表一次并发几十个请求，每条都「先挂一次再重试」会让整页慢到像没反应。
         let directNow = endpoint != nil && ProxyCircuit.isOpen(host: parsed.host)
+        let dialHost = directNow ? nil : endpoint.map { ProxyDialHost.primary(for: $0) }
+        let effectiveEndpoint = directNow ? nil : endpoint
         let state = TunnelState(connection: connection, head: rewrittenHead, leftover: leftover,
-                                scheme: parsed.scheme, host: parsed.host, port: parsed.port,
-                                path: parsed.path, endpoint: endpoint, queue: queue)
-        Self.open(state, dialHost: directNow ? nil : endpoint.map { ProxyDialHost.primary(for: $0) },
-                  forceDirect: directNow)
+                                scheme: parsed.scheme, host: parsed.host, port: port.rawValue,
+                                path: parsed.path, endpoint: endpoint, queue: queue,
+                                method: method, keepAlive: canKeepAlive,
+                                poolKey: canKeepAlive
+                                    ? RelayUpstreamPool.key(proxyID: effectiveEndpoint?.id,
+                                                            dialHost: dialHost,
+                                                            scheme: parsed.scheme,
+                                                            host: parsed.host,
+                                                            port: port.rawValue)
+                                    : nil)
+
+        // 池子里已经有这条目标的热连接：直接用它，省掉这次握手。
+        //
+        // ⛔ 只在**第一次尝试**时取（重试会带着新的 `dialHost`/直连切换，键已经不同，
+        //    而旧键上的空闲连接属于另一条腿 —— 拿它来跑重试等于让出口判定反过来）。
+        if state.keepAlive, let key = state.poolKey,
+           let pooled = RelayUpstreamPool.shared.take(key: key) {
+            Diagnostics.shared.record(.debug, "proxy",
+                "upstream reused target=\(parsed.host):\(parsed.port) pool=\(RelayUpstreamPool.shared.count)")
+            Self.sendAndRelay(connection, upstream: pooled.connection, head: rewrittenHead,
+                              leftover: leftover, state: state,
+                              canPool: true, poolKey: key, sourcePort: pooled.sourcePort)
+            return
+        }
+        Self.open(state, dialHost: dialHost, forceDirect: directNow)
     }
 
     /// 代理腿按目标熔断：同一个 host 连续失败几次之后，短时间内直接走直连。
@@ -372,6 +399,14 @@ public final class LocalProxyServer: @unchecked Sendable {
         let path: String
         let endpoint: CustomProxyEndpoint?
         let queue: DispatchQueue
+        /// 请求方法（大写）。只有 GET/HEAD 才可能复用上游连接。
+        let method: String
+        /// 这条请求允许上游 keep-alive（键在 `poolKey`）。
+        ///
+        /// 为什么不是「一律允许」：带请求体的方法要知道体到哪结束才敢复用，
+        /// 而中继目前只转发不解析请求体。GET/HEAD 没有体，这一格才安全。
+        let keepAlive: Bool
+        let poolKey: String?
         private let lock = NSLock()
         private var retried = false
         private var rebinds = 0
@@ -389,7 +424,8 @@ public final class LocalProxyServer: @unchecked Sendable {
         private var effectiveProxyID: String?
 
         init(connection: NWConnection, head: String, leftover: Data, scheme: String,
-             host: String, port: UInt16, path: String, endpoint: CustomProxyEndpoint?, queue: DispatchQueue) {
+             host: String, port: UInt16, path: String, endpoint: CustomProxyEndpoint?, queue: DispatchQueue,
+             method: String = "GET", keepAlive: Bool = false, poolKey: String? = nil) {
             self.connection = connection
             self.head = head
             self.leftover = leftover
@@ -399,6 +435,9 @@ public final class LocalProxyServer: @unchecked Sendable {
             self.path = path
             self.endpoint = endpoint
             self.queue = queue
+            self.method = method
+            self.keepAlive = keepAlive
+            self.poolKey = poolKey
         }
 
         /// 只会成功一次：回退只做一次，别在两条腿之间来回弹。
@@ -766,7 +805,9 @@ public final class LocalProxyServer: @unchecked Sendable {
     }
 
     private static func sendAndRelay(_ connection: NWConnection, upstream: NWConnection,
-                                     head: String, leftover: Data, state: TunnelState) {
+                                     head: String, leftover: Data, state: TunnelState,
+                                     canPool: Bool = false, poolKey: String? = nil,
+                                     sourcePort: UInt16? = nil) {
         // Both sides are plaintext HTTP at this point — TLS, when the target had it, ended at this
         // server — so the request bytes go out as written and the response comes back as the origin
         // wrote it. No reframing, no chunked-encoding handling, nothing to get wrong per format.
@@ -776,9 +817,159 @@ public final class LocalProxyServer: @unchecked Sendable {
                 Diagnostics.shared.failure("proxy", "upstream send failed", error)
                 connection.cancel(); upstream.cancel(); return
             }
-            Self.pump(from: connection, to: upstream)
-            Self.relayResponse(from: upstream, to: connection, state: state)
+            if canPool, let key = poolKey {
+                // ⛔ **不要**在这条路径上启客户端→上游的泵。
+                //    GET/HEAD 没有请求体，而客户端一旦被关（我们回完就走），
+                //    `pump` 会给上游发 FIN —— 那条连接刚放进池子就废了。
+                Self.relayFramed(from: upstream, to: connection, state: state, key: key,
+                                 sourcePort: sourcePort)
+            } else {
+                Self.pump(from: connection, to: upstream)
+                Self.relayResponse(from: upstream, to: connection, state: state)
+            }
         })
+    }
+
+    /// 帧式回程：**按响应头算出的体长度**转发，读完就能把上游连接放回池子。
+    ///
+    /// 与 `relayResponse` 的分工：
+    ///   · 播放清单（m3u8）→ 永远走 `relayResponse`（要整段重写，不能复用）；
+    ///   · 拿不到 `Content-Length`/`chunked`，或对端写了 `Connection: close`
+    ///     → 退化成「读到关闭为止」，也不复用；
+    ///   · 其余（HLS 分片、图片、JSON）→ 这里，读完放回 `RelayUpstreamPool`。
+    ///
+    /// 三条保险：对端多给了字节（`overflow`）→ 不复用；中途出错 → 不复用；
+    /// 客户端写不进去 → 不复用。宁可多握一次手，也不要让下一片拿到错位的字节。
+    private static func relayFramed(from upstream: NWConnection, to client: NWConnection,
+                                    state: TunnelState, key: String, sourcePort: UInt16?,
+                                    progress: FramedProgress = FramedProgress()) {
+        upstream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
+            if let data, !data.isEmpty { progress.buffer.append(data) }
+
+            func closeBoth() {
+                client.send(content: nil, completion: .contentProcessed { _ in client.cancel() })
+                upstream.cancel()
+            }
+
+            // ① 还在等响应头。
+            if progress.head == nil {
+                guard let headerEnd = progress.buffer.range(of: Data("\r\n\r\n".utf8)) else {
+                    if error != nil || complete {
+                        // 头都没给全就断了：把手上这些原样送出去，然后收摊。
+                        client.send(content: progress.buffer.isEmpty ? nil : progress.buffer,
+                                    completion: .contentProcessed { _ in client.cancel() })
+                        upstream.cancel()
+                    } else {
+                        Self.relayFramed(from: upstream, to: client, state: state, key: key,
+                                         sourcePort: sourcePort, progress: progress)
+                    }
+                    return
+                }
+                let headText = String(decoding: progress.buffer[..<headerEnd.lowerBound], as: UTF8.self)
+                // 清单要重写：交给整段缓冲那条路径，并且**不**复用这条连接。
+                if isPlaylist(state: state, head: Data(progress.buffer.prefix(2048))) {
+                    Self.relayResponse(from: upstream, to: client, state: state, buffer: progress.buffer)
+                    return
+                }
+                guard let parsed = RelayResponseHead.parse(headText, requestMethod: state.method) else {
+                    // 不像 HTTP：原样转发，读完关闭（与改动前一致）。
+                    Self.relayResponse(from: upstream, to: client, state: state, buffer: progress.buffer)
+                    return
+                }
+                progress.head = parsed
+                if case .length(let total) = parsed.framing { progress.remaining = total }
+                let headBytes = Data(progress.buffer[..<headerEnd.upperBound])
+                let body = Data(progress.buffer[headerEnd.upperBound...])
+                progress.buffer.removeAll(keepingCapacity: true)
+                client.send(content: headBytes, completion: .contentProcessed { _ in })
+                // 头里说没有体（HEAD / 204 / 304）：立刻收尾。
+                if case .length(0) = parsed.framing {
+                    Self.finishFramed(upstream: upstream, client: client, key: key,
+                                      sourcePort: sourcePort, progress: progress)
+                    return
+                }
+                if !body.isEmpty {
+                    if !Self.forwardFramedBody(body, progress: progress, client: client, key: key,
+                                               sourcePort: sourcePort, upstream: upstream) { return }
+                }
+                Self.relayFramed(from: upstream, to: client, state: state, key: key,
+                                 sourcePort: sourcePort, progress: progress)
+                return
+            }
+
+            // ② 体已经在流：只处理这一次拿到的新字节。
+            let incoming = progress.buffer
+            progress.buffer.removeAll(keepingCapacity: true)
+            if !incoming.isEmpty {
+                if !Self.forwardFramedBody(incoming, progress: progress, client: client, key: key,
+                                           sourcePort: sourcePort, upstream: upstream) { return }
+            }
+            if error != nil || complete {
+                // 对端在我们算完之前就关了：不能复用，把能给的给出去。
+                closeBoth()
+                return
+            }
+            Self.relayFramed(from: upstream, to: client, state: state, key: key,
+                             sourcePort: sourcePort, progress: progress)
+        }
+    }
+
+    /// 转一块体字节；返回 `false` 表示已经收尾（调用方不要再排下一次 receive）。
+    private static func forwardFramedBody(_ data: Data, progress: FramedProgress,
+                                          client: NWConnection, key: String,
+                                          sourcePort: UInt16?, upstream: NWConnection) -> Bool {
+        guard let head = progress.head else { return true }
+        switch head.framing {
+        case .length:
+            let take = min(data.count, progress.remaining)
+            if take > 0 {
+                client.send(content: Data(data.prefix(take)), completion: .contentProcessed { _ in })
+                progress.remaining -= take
+            }
+            // 比 Content-Length 多出来的字节说明连接已经错位：这条绝不能再复用。
+            if data.count > take { progress.overflow = true }
+            if progress.remaining == 0 {
+                Self.finishFramed(upstream: upstream, client: client, key: key,
+                                  sourcePort: sourcePort, progress: progress)
+                return false
+            }
+            return true
+        case .chunked:
+            _ = progress.scanner.consume(data)
+            client.send(content: data, completion: .contentProcessed { _ in })
+            if progress.scanner.finished {
+                Self.finishFramed(upstream: upstream, client: client, key: key,
+                                  sourcePort: sourcePort, progress: progress)
+                return false
+            }
+            return true
+        case .untilClose:
+            client.send(content: data, completion: .contentProcessed { _ in })
+            return true
+        }
+    }
+
+    /// 一条响应体读完了：关掉本地，上游**能留就留**。
+    private static func finishFramed(upstream: NWConnection, client: NWConnection, key: String,
+                                     sourcePort: UInt16?, progress: FramedProgress) {
+        client.send(content: nil, completion: .contentProcessed { _ in client.cancel() })
+        let reusable = (progress.head?.keepAlive ?? false) && !progress.overflow
+        if case .untilClose? = progress.head?.framing { upstream.cancel(); return }
+        if reusable {
+            RelayUpstreamPool.shared.put(key: key, connection: upstream, sourcePort: sourcePort)
+        } else {
+            upstream.cancel()
+        }
+    }
+
+    /// 一次帧式转发的进行态。类而不是 tuple：要在多个 `receive` 闭包之间共享同一份。
+    private final class FramedProgress: @unchecked Sendable {
+        var buffer = Data()
+        var head: RelayResponseHead?
+        var remaining = 0
+        var scanner = ChunkedBodyScanner()
+        /// 对端给的字节比声明的多 —— 连接已不可信。
+        var overflow = false
     }
 
     /// 回程：普通响应原样流式转发；播放清单（m3u8）要先重写再发。

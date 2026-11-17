@@ -2474,7 +2474,7 @@
 "Close All" = "Close All";
 "%@ paused — too many playing at once" = "%@ paused — too many playing at once";
 "%@ playing at once" = "%@ playing at once";
-"%@ playing · %@ paused" = "%@ playing · %@ paused";
+"%@ playing · %@ parked" = "%@ playing · %@ parked";
 "Make Active" = "Make Active";
 "Restore Last Windows" = "Restore Last Windows";
 "Put away %@ — at most %@ at once" = "Put away %@ — at most %@ at once";

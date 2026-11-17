@@ -286,6 +286,8 @@ public struct CatalogClient: Sendable {
     public private(set) var sniffAds: [String] = []
     public private(set) var sniffRules: [SniffRule] = []
     public private(set) var sniffer: (any WebSniffing)?
+    /// 钉死的出口（`with(egress:)`）；`nil` = 按观众配置算。
+    private var egressOverride: EgressPolicy?
     /// A merged source runs against its own subscription, whatever `origin` and `jarURL` the caller has.
     public init(site: Site, origin: URL, http: HTTPClient = HTTPClient(), jarURL: URL? = nil) {
         self.site = site; self.origin = site.origin(or: origin); self.http = http; self.jarURL = site.spider(or: jarURL)
@@ -304,6 +306,19 @@ public struct CatalogClient: Sendable {
     public func with(sniffer: any WebSniffing) -> CatalogClient {
         var client = self
         client.sniffer = sniffer
+        return client
+    }
+
+    /// 钉死这条客户端的出口，不再读 `RelayRouteRegistry` / `CustomProxyStore`。
+    ///
+    /// 生产里不传（`nil`）——出口本来就该按观众的配置走。
+    /// 测试里必须钉 `.directOnly`：否则**别的用例临时加的一台代理**会让这里的请求
+    /// 多出一条代理腿，而那条腿指向的假代理谁也连不上，于是 `async let` 里的
+    /// 那一路请求被 `try?` 吞掉、页面退回默认响应 —— 断言看起来像「解析坏了」，
+    /// 实际上是「并行测试互相改配置」。这类红灯只看结论永远不会想到这一层。
+    public func with(egress policy: EgressPolicy) -> CatalogClient {
+        var client = self
+        client.egressOverride = policy
         return client
     }
     public func requestURL(_ params: [String: String]) throws -> URL {
@@ -453,6 +468,8 @@ public struct CatalogClient: Sendable {
     /// 观众的选择 → 策略：直连 = 只走直连；自动 = 直连先跑、代理兜底；
     /// 代理 = 两条同时起跑（谁先给出内容用谁，所以标成代理也不会更慢）。
     private var egressPolicy: EgressPolicy {
+        // 测试/预览可以钉死出口：不然「别人刚配了一台代理」会改变这个客户端的行为。
+        if let egressOverride { return egressOverride }
         let route = RelayRouteRegistry.shared.route(origin: origin, sourceKey: site.sourceKey)
         // 用 `bestEndpointID`：标了代理就必须找到一台，多台没指定默认出口时也不能缩回直连。
         let proxyID = route?.proxyID ?? CustomProxyStore.shared.bestEndpointID()
@@ -477,9 +494,16 @@ public struct CatalogClient: Sendable {
     private func fetchCMS(_ url: URL) async throws -> Data {
         let headers = cmsRequestHeaders()
         // 走统一出口：这台 host 该直连还是该过代理，由 `EgressRouter` 按实际成败决定。
+        //
+        // ⛔ `session:` 必须传 `http.session`。
+        //    路由器自己的会话只负责「发得出去」，而这个源的会话里有它的传输配置
+        //    （超时、缓存策略、测试里的 `protocolClasses`）。不传的后果很具体：
+        //    测试夹具的请求被绕过去、真的发去了外网（12 个用例因此长期红着），
+        //    生产里则是「源配好的会话策略在出口这一段被丢掉」。
         do {
             let data = try await EgressRouter.shared.data(for: url, headers: headers,
-                                                          purpose: .catalog, policy: egressPolicy).0
+                                                          purpose: .catalog, policy: egressPolicy,
+                                                          session: http.session).0
             // 成功之后回读结论表：这既是「赛跑谁赢了」，也是观众在列表上看到的那一格。
             EgressOutcomeStore.shared.note(sourceKey: site.sourceKey, host: url.host ?? "",
                                            leg: EgressRouter.shared.leg(for: url, purpose: .catalog))
@@ -501,7 +525,8 @@ public struct CatalogClient: Sendable {
             Diagnostics.shared.record(.info, "catalog",
                 "\(reportContext) \(scheme ?? "?") refused (\(error.localizedDescription)); retrying over \(other)")
             return try await EgressRouter.shared.data(for: fallback, headers: headers,
-                                                      purpose: .catalog, policy: egressPolicy).0
+                                                      purpose: .catalog, policy: egressPolicy,
+                                                      session: http.session).0
         }
     }
 

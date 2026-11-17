@@ -28,16 +28,25 @@ import Testing
     }
 
     /// 非回环的原样返回 —— 观众在别的机器上跑代理就是这种情况，不该被改写。
+    ///
+    /// ⛔ 这条曾经红着：上一版 `plan` 把「私有网段但不是本机地址」一律改写成 `127.0.0.1`，
+    ///    于是「NAS 在 192.168.1.9、手机在 192.168.124.x」这种配置被无声打死，
+    ///    日志只写「连不上」。现在改为**先按存的地址拨**，拨不通才退（见下一条）。
     @Test func aRemoteProxyHostIsLeftAlone() {
         #expect(LocalNetwork.dialHost(forProxyHost: "192.168.1.9") == "192.168.1.9")
+        #expect(LocalNetwork.dialHost(forProxyHost: "203.0.113.9") == "203.0.113.9")
     }
 
-    /// 回环且拿得到局域网地址 → 换成局域网地址。
-    @Test func aLoopbackProxyIsDialledOverTheLAN() {
-        guard LocalNetwork.currentIPv4 != nil else { return }   // 只跑在真的连着网的机器上
-        let dialled = LocalNetwork.dialHost(forProxyHost: "127.0.0.1")
-        #expect(dialled != "127.0.0.1")
-        #expect(!LocalNetwork.isLoopback(dialled))
+    /// 回环端点：主选就是回环（Loon 的端口默认只接受本机），局域网地址只做退路。
+    ///
+    /// ⛔ 反过来试过一次，真机日志点名：`Loon unreachable at 192.168.124.55:7221;
+    ///    dialling 127.0.0.1 instead` —— 把局域网放前面等于每次冷启动先白等一个超时。
+    @Test func aLoopbackProxyDialsLoopbackFirstAndKeepsTheLANAsFallback() {
+        let planned = LocalNetwork.plan(stored: "127.0.0.1", currentIPv4: "192.168.124.6")
+        #expect(planned.primary == "127.0.0.1")
+        #expect(planned.fallback == "192.168.124.6")
+        // 没有局域网地址时没有退路。
+        #expect(LocalNetwork.plan(stored: "127.0.0.1", currentIPv4: nil).fallback == nil)
     }
 
     // MARK: 网卡打分
@@ -67,25 +76,42 @@ import Testing
 
     // MARK: 失败回落
 
-    /// 局域网地址连不通时退回回环，并且**记住**，后面的请求不再先失败一次。
-    @Test func aFailedLANAttemptFallsBackAndStaysThere() {
-        let endpoint = CustomProxyEndpoint(name: "Loon", scheme: .socks5, host: "127.0.0.1", port: 7221)
-        defer { ProxyDialHost.forget(endpoint) }
-        guard LocalNetwork.currentIPv4 != nil else { return }
+    /// 换网段后的端点：**先按存的地址拨**，拨不通才改拨回环，而且记住。
+    ///
+    /// 判据用 `plan` 的纯函数（不依赖本机当前网卡），所以断言与网络环境无关。
+    @Test func aStalePrivateAddressKeepsItsTruthUntilItFails() {
+        let planned = LocalNetwork.plan(stored: "192.168.124.55", currentIPv4: "172.20.10.2")
+        #expect(planned.primary == "192.168.124.55", "用户填的地址不该被我们擅自改写")
+        #expect(planned.fallback == "127.0.0.1", "拨不通时才退到回环")
 
-        #expect(ProxyDialHost.primary(for: endpoint) != "127.0.0.1")
+        // 已经是本机地址：没有可退的。
+        #expect(LocalNetwork.plan(stored: "172.20.10.2", currentIPv4: "172.20.10.2").fallback == nil)
+        // 公网地址不动。
+        let publicHost = LocalNetwork.plan(stored: "203.0.113.9", currentIPv4: "172.20.10.2")
+        #expect(publicHost.primary == "203.0.113.9")
+        #expect(publicHost.fallback == nil)
+    }
+
+    /// 「记下来」之后：主选直接是回环，且不再有第二层退路。
+    @Test func aFailedPrimaryIsRemembered() {
+        let endpoint = CustomProxyEndpoint(name: "Loon", scheme: .http, host: "192.168.199.254", port: 7221)
+        defer { ProxyDialHost.forget(endpoint) }
+        guard LocalNetwork.currentIPv4 != nil, LocalNetwork.currentIPv4 != endpoint.host else { return }
+
+        #expect(ProxyDialHost.primary(for: endpoint) == endpoint.host,
+                "没有失败过之前，拨的就是端点写的地址")
         #expect(ProxyDialHost.fallback(for: endpoint) == "127.0.0.1")
 
         ProxyDialHost.notePrimaryFailed(endpoint)
         #expect(ProxyDialHost.primary(for: endpoint) == "127.0.0.1",
-                "已判定局域网地址不通时，后续请求应直接拨回环")
-        #expect(ProxyDialHost.fallback(for: endpoint) == nil)
+                "已判定主选不通时，后续请求应直接拨回环")
+        #expect(ProxyDialHost.fallback(for: endpoint) == nil, "已经在退路上，没有第二层退路")
     }
 
-    /// 非回环端点没有「另一条腿」可退。
-    @Test func aRemoteEndpointHasNoFallback() {
-        let endpoint = CustomProxyEndpoint(name: "NAS", scheme: .http, host: "192.168.1.9", port: 7890)
-        #expect(ProxyDialHost.primary(for: endpoint) == "192.168.1.9")
+    /// 非私有、非回环的端点没有可退的。
+    @Test func aPublicEndpointHasNoFallback() {
+        let endpoint = CustomProxyEndpoint(name: "VPS", scheme: .http, host: "203.0.113.9", port: 7890)
+        #expect(ProxyDialHost.primary(for: endpoint) == "203.0.113.9")
         #expect(ProxyDialHost.fallback(for: endpoint) == nil)
     }
 }

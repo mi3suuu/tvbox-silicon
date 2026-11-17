@@ -71,7 +71,7 @@ private func catalog(play: String, click: String = "site-click", parses: [ParseS
     let base = URL(string: "https://fixture.test/config.json")!
     let site = Site(key: "a", name: "A", type: 4, api: "https://fixture.test/api", raw: ["key": .string("a"), "click": .string(click)])
     let sniffer = RecordingSniffer()
-    let client = CatalogClient(site: site, origin: base, http: http()).with(parses: parses).with(sniffer: sniffer)
+    let client = CatalogClient(site: site, origin: base, http: http()).with(parses: parses).with(sniffer: sniffer).with(egress: .directOnly)
     let episode = Episode(id: "1", name: "Episode", address: play, flag: "线路1")
     return (client, sniffer, episode)
 }

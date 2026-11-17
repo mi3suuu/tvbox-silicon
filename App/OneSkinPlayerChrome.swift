@@ -741,7 +741,29 @@ struct OneSkinChrome: View {
             // 且命中区盖住下方的播放控制 —— 正是「全屏还夹带选集页菜单」的根因。
             // 上游全屏只留播放器自己的 transport（返回退全屏 / 播放 / 进度），
             // 没有任何页级菜单。
-            if !fullScreen {
+            if fullScreen {
+                // ★ 全屏态：**不画完整菜单键**（`:739-743` 的上游语义），
+                //   只在「确实有溢出」时画一颗**极小圆点**当出口。
+                //
+                // 全屏横（951）顶栏放 19 格、可用集 22 项里顶栏只需放 17 ⇒ 溢出 0
+                //   ⇒ 这颗圆点**根本不出现**，界面与上游一致。
+                // 全屏竖（669）顶栏只有 12 格 ⇒ 溢出 5（`speechSubtitles` / `adBlock` /
+                //   `autoPlayNext` / `skipIntroAuto` / `skipIntroManual`）⇒ 圆点出现。
+                //
+                // 尺寸：视觉 12pt、热区 32pt。12pt 圆点约只占 16pt 宽，
+                // 塞得进顶栏剩余边距，不挤掉任何一颗真控件。
+                if fullScreenNeedsEntry {
+                    Button { showsMore.toggle() } label: {
+                        Circle()
+                            .fill(Color.white.opacity(0.85))
+                            .frame(width: 12, height: 12)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(L10n.text("Playback Options")))
+                }
+            } else {
                 // ⛔ 只留**一个**「更多」菜单。
                 //
                 // 原来这里并排两个：`moreMenu`（本页自己那套）与
@@ -777,13 +799,30 @@ struct OneSkinChrome: View {
     /// 窗口窄（小窗 / 折叠竖持）时 N 自然变小，不会挤成一团。
     private var topSurfaceCapacity: Int {
         // 结构位**不含返回键了**（2026-11-11 起选集页的退出键已移到页面层）。
-        // 全屏：退全屏 + 旋转 = 2。
-        // 选集页：旋转 + 合拢 + 更多 + 选集聚合 + 锁定 = 5 → **改成 5 减 1 = 4**。
         //
-        // ⛔ 这里少减一个，顶栏就空出一个用不上的槽 —— 用户把控件排进顶栏时会发现
-        // 「勾了 3 颗只画出 2 颗」，且没有任何提示（正是本项目反复出现的
-        // 「设置里排好了、播放器里是空槽」那一类）。
-        let structural = fullScreen ? 2 : 4
+        // 实地清点 `topBar`（:667-765）真正画出的结构键，共 4 颗，各有独立门控：
+        //   :679-680  `if fullScreen`                     退全屏
+        //   :701-702  `if !controlsRotateElsewhere`        旋转
+        //   :729-730  `if !topSlotRow.contains(.lock)`     锁定
+        //   :744-755  `if !fullScreen`                     更多
+        //
+        // ⇒ 全屏 = 退全屏 + 旋转 = **2**（更多不画）
+        //    非全屏 = 旋转 + 更多 +（锁定，除非锁已排进槽位）= **3 或 4**
+        //
+        // ⛔ 这里多减一个（非全屏一律按 4），顶栏就空出一个用不上的槽 ——
+        //    用户把控件排进顶栏时会发现「勾了 3 颗只画出 2 颗」，且没有任何提示
+        //    （正是本项目反复出现的「设置里排好了、播放器里是空槽」那一类）。
+        //    用户的要求是「**尽量**显示全集」，所以锁已进槽时必须按 3 算。
+        //
+        // ⚠️ 旧注释写「旋转 + 合拢 + 更多 + 选集聚合 + 锁定 = 5 → 4」与代码不符：
+        //    顶栏里**没有**合拢键、也**没有**选集聚合键（那两颗不在这段里）。已改准。
+        //
+        // `topSlotRow` 依赖 `layout`，而 `layout` 在用户从未配置时走标准布局
+        // （`:449` `current` → `rawStored` → 空则 `standard`），所以这里不必特判
+        // `hasOwnConfiguration`。
+        let structural = fullScreen
+            ? 2                                    // 退全屏 + 旋转
+            : (topSlotRow.contains(.lock) ? 3 : 4) // 旋转 + 更多 +（锁定）
         let spare = winW - barLeading - barTrailing - CGFloat(structural) * m.hit
         return max(0, Int(spare / m.hit))
     }
@@ -807,9 +846,26 @@ struct OneSkinChrome: View {
         // 否则窄窗口里会被一串无意义的空格把控件挤出可视区。
         let end = (slots.lastIndex { $0 != nil } ?? -1) + 1
         return slots.prefix(end).map { slot in
-            guard let control = slot, available(control) else { return nil }
+            guard let control = slot, available(control), allowedHere(control) else { return nil }
             return control
         }
+    }
+
+    /// 全屏态顶栏放不下的那些（决定那颗小圆点画不画）。
+    ///
+    /// 与 `topOverflow` 同源，但多一道「全屏可用集」过滤 —— 因为
+    /// `layout.top` 里可能排着全屏下不该出现的页级控件（它们已被 `allowedHere` 滤掉，
+    /// 不该算进「溢出」，否则圆点会因为一项永远不显示的东西而常驻）。
+    private var fullScreenNeedsEntry: Bool {
+        guard fullScreen else { return false }
+        // ⛔ 判据**不是**「顶栏有没有溢出」。
+        //
+        // 标准布局的 `layout.top` 只排了 2 项（`airPlay` / `episodes`），全屏滤掉
+        // `episodes` 后只剩 1 项 —— 顶栏永远不溢出，按「顶栏溢出」判会让圆点**永不出现**，
+        // 而 `layout.more` 里那 18 项（画质/音轨/字幕/倍速/弹幕/…）就**全部没有入口**。
+        //
+        // 正确判据：**抽屉里有没有东西要装**。有，就必须给入口。
+        return !moreList.isEmpty
     }
 
     /// 顶栏**放不下**的控件 —— 自动收进「更多」，而不是被静默丢掉。
@@ -852,7 +908,8 @@ struct OneSkinChrome: View {
         return slots.prefix(end).map { slot in
             // `.lock` 例外：它锁上之后其它控件全不画，入口必须常在 ——
             // 底栏这颗只上锁不解锁（底栏在锁定态也不画），所以不让它进来。
-            guard let control = slot, control != .lock, available(control) else { return nil }
+            guard let control = slot, control != .lock, available(control),
+                  allowedHere(control) else { return nil }
             return control
         }
     }
@@ -870,6 +927,57 @@ struct OneSkinChrome: View {
     // 要按同一张表判断「它是回到中央、还是进更多」。
     private static var centerControlSet: Set<PlayerControl> { PlayerControl.centerControls }
 
+    /// **全屏态下不出现**的控件。
+    ///
+    /// 依据 `:739-743` 那段设计（照上游 One）：全屏只留播放器自己的 transport，
+    /// 页级菜单不许叠在画面上。下面这些要么是页级弹层、要么是进度行专用槽位：
+    ///
+    ///   · `episodes` / `moreInSeries` —— 打开选集/本剧列表（页级浮层，盖画面+盖控制）
+    ///   · `anotherPlayer` —— 切到别的播放器 App（离开本页的页级动作）
+    ///   · `markAd` —— 标注要帧比对 + 拖时间轴，必须在窗口态做
+    ///   · `videoInfo` —— 它是左上角浮层（`infoLayer`），会叠在画面上
+    ///   · `timecode` / `progressBar` / `remaining` —— 进度行专用，本来就不是按钮
+    ///
+    /// ⛔ `lock` 不在此列：它是 `fixedKeys`，本来就不进任何栏位与抽屉。
+    ///
+    /// 剔除这 8 项后，全屏可用集只剩 22 项 —— 全屏横（951）顶栏放 19 格、**溢出 0**；
+    /// 全屏竖（669）顶栏只有 12 格、**溢出 5**（`speechSubtitles` / `adBlock` /
+    /// `speechSubtitles` / `adBlock` / `autoPlayNext` / `skipIntroAuto` / `skipIntroManual`，
+    /// 按默认布局顺序）。所以全屏竖仍需一个出口，见 `fullScreenOverflowDot`。
+    ///
+    /// ⛔ `videoInfo` **不排除**（2026-11-18 用户裁决：「语音字幕没有视频信息重要」）。
+    ///
+    /// 它虽是左上角浮层（`infoLayer`，会叠在画面上，本属该排除的那类），但用户明确
+    /// 认为它比 `speechSubtitles` 重要，所以按**价值排序**保留它、让它进前 12 颗直接可点，
+    /// 代价是 `speechSubtitles` 落到溢出位——仍可从抽屉点到，不是不可达。
+    ///
+    /// 先前一轮反向的取舍（排除 videoInfo 换 speechSubtitles 进前 12）已按用户裁决撤销。
+    private static let fullScreenHidden: Set<PlayerControl> = [
+        .episodes, .moreInSeries, .anotherPlayer, .markAd,
+        .timecode, .progressBar, .remaining,
+    ]
+
+    /// 这个控件在当前形态下是否允许出现。
+    private func allowedHere(_ control: PlayerControl) -> Bool {
+        !(fullScreen && Self.fullScreenHidden.contains(control))
+    }
+
+    /// 中央那一组里的**实际控件**（已去空槽，保持用户排序）。
+    ///
+    /// ⛔ 这是 `centerSlotRow` 与中间排溢出**唯一共用的序列**。
+    ///
+    /// 曾经有过一个真 bug：`centerSlotRow` 在**含空槽**的序列上 `prefix(capacity)`，
+    /// 而溢出计算在**去空槽**的序列上 `dropFirst(capacity)` —— 同一颗控件在两个
+    /// 不同序列里取第 n 个，索引对不上。用户在两颗中间控件之间留了空槽时，
+    /// 结果是「本该显示的少了一颗」+「本该在更多的被提前丢掉」/重复。
+    ///
+    /// 现在两者都从这里取，`prefix` / `dropFirst` 天然对齐。
+    /// **空槽的占位语义仍然保留在 `centerSlotRow` 里**（那是布局，不是容量）——
+    /// 用户留空槽是有意的（见 `topSlotRow` 那段「空槽照样占一个热区的宽度」）。
+    private var centerItems: [PlayerControl] {
+        bottomSlotRow.compactMap { $0 }.filter { Self.centerControlSet.contains($0) }
+    }
+
     private var centerSlotRow: [PlayerControl?] {
         let mapped = bottomSlotRow.map {
             $0.flatMap { Self.centerControlSet.contains($0) ? $0 : nil }
@@ -877,7 +985,38 @@ struct OneSkinChrome: View {
         // 末尾的空格**不占位**：`bottomSlotRow` 里还有时间码 / 进度条 / 剩余时间那几格，
         // 它们映射成 nil 后若留在末尾，中央这一组会被硬生生推偏半个屏。
         let end = (mapped.lastIndex { $0 != nil } ?? -1) + 1
-        return Array(mapped.prefix(end).prefix(centerCapacity))
+        let trimmed = Array(mapped.prefix(end))
+        // ⛔ 截断必须按「**含 N 个非空元素的最短前缀**」，不能直接 `.prefix(N)`。
+        //
+        // `trimmed` 里**保留着空槽**（用户留空槽是有意的，见 `topSlotRow` 那段），
+        // 而 `centerSlotsToShow` 数的是**实际控件**。若直接 `.prefix(centerSlotsToShow)`，
+        // 空槽会白占名额 ⇒ 画出的实际控件少于 `centerSlotsToShow`，
+        // 而 `centerOverflow` 只 drop 掉 `centerSlotsToShow` 个 ⇒ 中间那几颗
+        // **既没画出来、也没进更多**，等于凭空丢失。
+        //
+        // 正确：走到「第 centerSlotsToShow 个非 nil」为止（含它），空槽照样保留。
+        var shown = 0
+        var cut = 0
+        for (i, slot) in trimmed.enumerated() {
+            if slot != nil {
+                shown += 1
+                if shown == centerSlotsToShow { cut = i + 1; break }
+            }
+        }
+        return cut == 0 ? [] : Array(trimmed.prefix(cut))
+    }
+
+    /// 中央那一组**实际画出来**的控制器数（= 共用的 show 数）。
+    ///
+    /// `centerSlotRow` 用它截断、`centerOverflow` 用它 dropFirst，**同一个数**。
+    private var centerSlotsToShow: Int { min(centerItems.count, centerCapacity) }
+
+    /// 中间排放不下、必须收进「更多」的那些。
+    ///
+    /// 与 `centerSlotRow` 严格互补：`centerItems.prefix(centerSlotsToShow)` 在栏上画，
+    /// `centerItems.dropFirst(centerSlotsToShow)` 进更多 ⇒ 一颗不漏、一颗不重。
+    private var centerOverflow: [PlayerControl] {
+        Array(centerItems.dropFirst(centerSlotsToShow))
     }
 
     /// 底栏那一行里**真的画出来**的控件（按槽位顺序）。
@@ -922,10 +1061,11 @@ struct OneSkinChrome: View {
     /// 底栏放不下、被收进「更多」的控件（中心与边缘两处合并）。
     private var bottomOverflow: [PlayerControl] {
         let all = bottomSlotRow.compactMap { $0 }
-        let center = all.filter { Self.centerControlSet.contains($0) }
         let edge = all.filter { !Self.centerControlSet.contains($0) }
         let shown = Set(bottomItems)
-        return Array(center.dropFirst(centerCapacity)) + edge.filter { !shown.contains($0) }
+        // 中间排的溢出走 `centerOverflow`（与 `centerSlotRow` 严格互补的共用序列），
+        // 这里只再补上「边缘那些没被 `bottomItems` 收下的」。
+        return centerOverflow + edge.filter { !shown.contains($0) }
     }
 
     /// 「更多」面板此刻真正要列出的控件 = 用户放进去的 + 各处放不下自动收进来的。
@@ -936,6 +1076,8 @@ struct OneSkinChrome: View {
         // 固定键（锁定）不进「更多」：它已经在右上角常驻，再列一条就是同一动作两个入口。
         return (layout.more + topOverflow + bottomOverflow)
             .filter { !PlayerControl.fixedKeys.contains($0) }
+            // 全屏态：页级控件不进抽屉（`fullScreenHidden` 已解释）。
+            .filter { allowedHere($0) }
             .filter { seen.insert($0).inserted }
     }
 
@@ -1202,12 +1344,22 @@ struct OneSkinChrome: View {
     /// 竖屏选集页的窗口只有 ~244pt 高，一屏放不下。系统菜单滑动会被上面的重绘打断；
     /// 自绘 `ScrollView` 不会。
     @ViewBuilder private var morePanel: some View {
-        if showsMore, !fullScreen, !locked, showsTransport {
-            ZStack(alignment: .topTrailing) {
+        // 全屏也允许打开（入口是那颗小圆点，见顶栏）。页级控件已被
+        // `fullScreenHidden` 滤掉，所以抽屉里只有「全屏下有意义」的那些。
+        if showsMore, !locked, showsTransport {
+            // 底部抽屉：从画面下沿升起，向上长高（`.bottom` 对齐）。
+            ZStack(alignment: .bottom) {
                 // 点空白处关闭。遮罩不做全黑：画面还要看得见。
                 Color.black.opacity(0.24)
                     .contentShape(Rectangle())
                     .onTapGesture { closeMore() }
+                    // 下滑关闭：抽屉的通用手势语言，比只点遮罩更直觉。
+                    .gesture(
+                        DragGesture(minimumDistance: 12)
+                            .onEnded { value in
+                                if value.translation.height > 44 { closeMore() }
+                            }
+                    )
 
                 VStack(spacing: 0) {
                     // 标题行：左「更多」，右关闭键。
@@ -1250,21 +1402,33 @@ struct OneSkinChrome: View {
                     }
                     .scrollBounceBehavior(.basedOnSize)
                 }
-                .frame(width: min(winW * 0.68, 330))
-                .frame(maxHeight: max(120, min(winH - m.edge * 2, 420)))
+                // ★ 尺寸自适应（不写死高度）：
+                //   · 宽度：窄窗（外屏竖持 winW=428）时吃满窗口、留边距；
+                //           宽窗（全屏横 951 / 内屏竖持 673）时封顶，避免一行太长要横扫。
+                //   · 高度：内容多则长，但不超过容器的 62%（留出上方画面，用户要看得见在播什么）。
+                //   · 超出即滚：`ScrollView` 已在下面，`maxHeight` 只是给它一个上界。
+                .frame(width: min(winW - m.edge * 2, max(300, winW * 0.72)))
+                .frame(maxHeight: max(160, min(winH * 0.62, winH - m.edge * 2)))
                 // 纯色底 + 细边：材质压在运动画面上每帧重绘，与 `PlaybackInfoPanel` 同理。
                 // ⛔ 半透明底是「字看不清」的根：画面从后面透上来，
                 //    底色随每一帧在变，细字既被抖糊、对比度也压不住。
                 //    0.80 时白字 0.45 只有 3.90:1（低于 WCAG 正文 4.5:1）；
                 //    0.90 时仍会透 10%，只是把问题减轻。⇒ 直接改成**不透明**近黑：
                 //    底固定不动，字在任何画面下都是同一组对比度。
+                // 底部抽屉：只圆上面两角（下沿贴屏幕边，圆角会让它看起来「浮着」）。
                 .background(Color(white: 0.07),
-                            in: RoundedRectangle(cornerRadius: max(10, m.glyph * 0.8), style: .continuous))
+                            in: UnevenRoundedRectangle(topLeadingRadius: max(12, m.glyph * 0.9),
+                                                       topTrailingRadius: max(12, m.glyph * 0.9),
+                                                       style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: max(10, m.glyph * 0.8), style: .continuous)
+                    UnevenRoundedRectangle(topLeadingRadius: max(12, m.glyph * 0.9),
+                                           topTrailingRadius: max(12, m.glyph * 0.9),
+                                           style: .continuous)
                         .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
                 }
-                .padding(m.edge)
+                // 只留顶部与左右内边距，**底边贴齐**（抽屉语义）。
+                .padding(.horizontal, m.edge)
+                .padding(.bottom, 0)
             }
             .frame(width: winW, height: winH)
         }

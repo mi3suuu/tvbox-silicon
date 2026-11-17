@@ -2474,7 +2474,7 @@
 "Close All" = "すべて閉じる";
 "%@ paused — too many playing at once" = "%@ 件停止中 — 同時再生が多すぎます";
 "%@ playing at once" = "%@ 路同時再生中";
-"%@ playing · %@ paused" = "%@ 路再生 · %@ 路一時停止";
+"%@ playing · %@ parked" = "%@ 路再生 · %@ 路待機中";
 "Make Active" = "メインにする";
 "Restore Last Windows" = "前回のウィンドウを復元";
 "Put away %@ — at most %@ at once" = "%@ を閉じました — 同時に最大 %@ 件";

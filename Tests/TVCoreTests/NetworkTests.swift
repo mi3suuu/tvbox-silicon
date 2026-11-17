@@ -118,7 +118,7 @@ private func client() -> HTTPClient {
 @Test func standardCatalogAndPlaybackContract() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/api","header":{"User-Agent":"SiteAgent"}},{"key":"b","type":4,"api":"/parse"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let home = try await api.home()
     #expect(home.categories.first?.id == "1")
     #expect(home.videos.first?.id == "12")
@@ -128,7 +128,7 @@ private func client() -> HTTPClient {
     #expect(play.url.absoluteString == "https://example.com/video.m3u8")
     #expect(play.headers["Referer"] == "https://example.com/")
     #expect(play.headers["User-Agent"] == "SiteAgent")
-    let parseAPI = CatalogClient(site: sub.sites[1], origin: base, http: client())
+    let parseAPI = CatalogClient(site: sub.sites[1], origin: base, http: client()).with(egress: .directOnly)
     await #expect(throws: (any Error).self) { try await parseAPI.playback(episode) }
 }
 
@@ -140,7 +140,7 @@ private func client() -> HTTPClient {
 @Test func cmsHomeTakesEverythingFromOneVideolist() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"cms","type":1,"api":"/cms"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let home = try await api.home()
     #expect(home.videos.map(\.id) == ["7", "8", "9"])
     #expect(home.videos.map { $0.poster?.absoluteString } == ["https://img.example.com/a.jpg", "https://img.example.com/b.jpg", "https://img.example.com/c.jpg"])
@@ -161,7 +161,7 @@ private func client() -> HTTPClient {
 @Test func cmsHomeFallsBackWhenVideolistIsRefused() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"old","type":1,"api":"/cms-old"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let home = try await api.home()
     #expect(home.videos.map(\.id) == ["7", "8", "9"])
     #expect(home.videos.map { $0.poster?.absoluteString }
@@ -172,7 +172,7 @@ private func client() -> HTTPClient {
 @Test func pluginStyleDetailMayOmitRequestedID() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/missing-id"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let detail = try await api.detail("requested-id")
     #expect(detail.id == "requested-id")
     #expect(detail.episodes.first?.address == "opaque-episode")
@@ -182,7 +182,7 @@ private func client() -> HTTPClient {
 @Test func playbackSurfacesProviderLoginReason() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/login"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     do {
         _ = try await api.playback(Episode(id: "a", name: "Episode", address: "id", flag: ""))
         Issue.record("Expected the provider's login error")
@@ -192,7 +192,7 @@ private func client() -> HTTPClient {
 @Test func qualitySelectionResolvesTheChosenEntry() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/qualities"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let plan = try await api.preparePlayback(Episode(id: "a", name: "Episode", address: "id", flag: ""))
     #expect(plan.choices.map(\.name) == ["480P", "360P"])
     let channel = try await api.resolvePlayback(plan, choice: plan.choices[1])
@@ -202,7 +202,7 @@ private func client() -> HTTPClient {
 @Test func playResultSubtitleFilesReachThePlayer() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/subs"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let channel = try await api.playback(Episode(id: "a", name: "Episode", address: "id", flag: ""))
     #expect(channel.url.absoluteString == "https://cdn.example.com/film.mkv")
     #expect(channel.subtitles == [ExternalSubtitle(name: "film.chs.srt", url: URL(string: "http://127.0.0.1:9978/proxy?do=quark&type=sub")!,
@@ -215,7 +215,7 @@ private func client() -> HTTPClient {
 @Test func resolvedMediaWithStaleParseFlagCanPlay() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/api"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let choice = PlaybackChoice(id: 0, name: "Video", address: "https://cdn.example.com/video.mp4?token=1")
     let plan = PlaybackPlan(choices: [choice], headers: [:], group: "", requiresWebDetection: true)
     let channel = try await api.resolvePlayback(plan, choice: choice)
@@ -340,14 +340,14 @@ private actor SearchCollector {
     let base = URL(string: "https://example.com/config")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"a","type":4,"api":"/api","indexs":1}]}"#.utf8), origin: base)
     let http = client()
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: http)
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: http).with(egress: .directOnly)
     let model = RecommendationModel()
     await model.load(client: api, subscriptionDate: sub.importedAt)
     #expect(model.items.count == 1)
     #expect(model.items[0].destination == .search("Test"))
     let offlineConfig = URLSessionConfiguration.ephemeral
     offlineConfig.protocolClasses = [OfflineProtocol.self]
-    let offline = CatalogClient(site: sub.sites[0], origin: base, http: HTTPClient(session: URLSession(configuration: offlineConfig)))
+    let offline = CatalogClient(site: sub.sites[0], origin: base, http: HTTPClient(session: URLSession(configuration: offlineConfig))).with(egress: .directOnly)
     await model.load(client: offline, subscriptionDate: sub.importedAt)
     #expect(model.items.count == 1)
     #expect(model.error == nil)
@@ -544,7 +544,7 @@ private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
 @Test func aCategoryPageIsAPageNotASingleTitle() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"cat","type":1,"api":"/cms-cat"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let page = try await api.list(category: "1", query: "", page: 1)
     #expect(page.videos.count == 14)
     #expect(page.pageCount == 1)
@@ -554,7 +554,7 @@ private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
 @Test func anUnknownCategoryFallsBackToTheFullList() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"cat","type":1,"api":"/cms-cat"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let page = try await api.list(category: "bad", query: "", page: 1)
     // 「按 id 查到一条」被识别出来 → 换成全量：条数与页数都回到真实规模。
     #expect(page.videos.count == 14)
@@ -568,7 +568,7 @@ private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
 @Test func cmsRequestsCarryARefererFromTheSourceItself() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"ref","type":1,"api":"/cms-ref"}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     let home = try await api.home()
     #expect(home.videos.map(\.id) == ["r1"])
     #expect(home.pageCount == 2)
@@ -578,7 +578,7 @@ private final class OfflineProtocol: URLProtocol, @unchecked Sendable {
 @Test func aSourcesOwnRefererIsNotOverridden() async throws {
     let base = URL(string: "https://example.com/config.json")!
     let sub = try Subscription.parse(Data(#"{"sites":[{"key":"ref","type":1,"api":"/cms-ref","header":{"Referer":"https://other.example/"}}]}"#.utf8), origin: base)
-    let api = CatalogClient(site: sub.sites[0], origin: base, http: client())
+    let api = CatalogClient(site: sub.sites[0], origin: base, http: client()).with(egress: .directOnly)
     // 带上的是源自己的 Referer，所以这个 mock（只认 example.com）应当拒绝它。
     await #expect(throws: (any Error).self) { _ = try await api.home() }
 }
