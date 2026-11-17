@@ -342,6 +342,7 @@ enum LoonConfigProbe {
                         + " nodeTypes=\(preset.nodeProtocols.joined(separator: ","))"
                         + " ciphers=\(preset.nodeCiphers.joined(separator: ","))"
                         + " legacyWide=\(preset.hasLegacyWideRange)")
+                    probeRuntimeAPI(host: url.host ?? "127.0.0.1", port: apiPort)
                     return
                 } catch {
                     lastError = error
@@ -354,4 +355,37 @@ enum LoonConfigProbe {
             }
         }
     }
+    /// 探查 Loon 的**运行态**读接口。
+    ///
+    /// 「当前选中哪个节点」不在 `file.conf` 里（那是配置，只有节点定义与组成员），
+    /// 而观众要的是「App 自动用我正在用的那个节点」。所以先问清楚 Loon 到底暴露了哪些
+    /// 只读接口、返回什么形状 —— 有就接上，没有就用配置里唯一那台/默认出口。
+    /// 只发 GET、只看状态码与前几十个字节，不写任何东西（写动词会断连，实测过）。
+    static func probeRuntimeAPI(host: String, port: Int) {
+        let paths = ["/loonapi/v1/proxies", "/loonapi/v1/policy", "/loonapi/v1/groups",
+                     "/loonapi/v1/proxy-groups", "/loonapi/v1/status", "/loonapi/v1/config",
+                     "/loonapi/v1/traffic", "/loonapi/v1/requests"]
+        Task {
+            for path in paths {
+                var components = URLComponents()
+                components.scheme = "http"
+                components.host = host
+                components.port = port
+                components.path = path
+                guard let url = components.url else { continue }
+                var request = URLRequest(url: url, timeoutInterval: 3)
+                request.httpMethod = "GET"
+                guard let (data, response) = try? await URLSession.shared.data(for: request),
+                      let http = response as? HTTPURLResponse else {
+                    Diagnostics.shared.record(.debug, "egress", "loon api \(path) unreachable")
+                    continue
+                }
+                let head = String(decoding: data.prefix(120), as: UTF8.self)
+                    .replacingOccurrences(of: "\n", with: " ")
+                Diagnostics.shared.record(.info, "egress",
+                    "loon api \(path) status=\(http.statusCode) bytes=\(data.count) head=\(head)")
+            }
+        }
+    }
+
 }
