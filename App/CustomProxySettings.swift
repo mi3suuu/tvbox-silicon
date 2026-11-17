@@ -50,8 +50,16 @@ struct ProxySettingsView: View {
                 SettingsRow(symbol: "list.bullet", tint: .secondary,
                             title: L10n.text("Recorded: %@", "\(ForcedNodeHosts.shared.hosts.count)"),
                             subtitle: ForcedNodeHosts.shared.hosts.prefix(3).joined(separator: ", "))
-                SettingsActionRow(title: L10n.text("Subscribe in Loon")) { openInLoon() }
-                SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
+                if ForcedNodeHosts.shared.hosts.isEmpty {
+                    // 空文件导进 Loon 会直接报「无法找到任何有效规则」—— 与其让观众撞一次墙，
+                    // 不如说明白怎么让它变非空。
+                    SettingsRow(symbol: "info.circle", tint: .secondary,
+                                title: L10n.text("Nothing recorded yet"),
+                                subtitle: L10n.text("Open a source that fails to load; the site is recorded once both lines fail."))
+                } else {
+                    SettingsActionRow(title: L10n.text("Subscribe in Loon")) { openInLoon() }
+                    SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
+                }
             }
             // 默认出口：多台代理时，「源路由 = 代理」该从哪条腿出去，必须能指定。
             //

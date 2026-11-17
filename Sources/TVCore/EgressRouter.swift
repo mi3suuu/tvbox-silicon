@@ -545,7 +545,13 @@ public final class EgressRouter: @unchecked Sendable {
                 case .failure(let error):
                     if !(error is CancellationError) {
                         lastError = error
-                        if !leg.isProxy { directFailed = true }
+                        if leg.isProxy {
+                            // 赛跑路径也要记：奥斯卡这类源走的就是这条（直连优先 → 双腿齐发），
+                            // 只在 `follow` 里记会漏掉它们，名单永远是空的。
+                            noteProxyTimeout(key, error: error)
+                        } else {
+                            directFailed = true
+                        }
                     }
                 }
             }

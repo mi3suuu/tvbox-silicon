@@ -212,9 +212,11 @@ public final class LocalProxyServer: @unchecked Sendable {
     private static func serveHostedRules(_ path: String, connection: NWConnection, queue: DispatchQueue) {
         let body: String
         if path.hasPrefix("/loon/rules") {
-            body = ForcedNodeHosts.shared.ruleFragment(fallbackTarget: LoonPreset.defaultGroupName) ?? "# 暂无记录\n"
+            // 订阅文件只放规则本身：不带注释、不带策略名。
+            let lines = ForcedNodeHosts.shared.subscriptionRules()
+            body = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
         } else {
-            body = "# 可用路径：/loon/rules.list\n"
+            body = ""
         }
         let bytes = Data(body.utf8)
         var head = "HTTP/1.1 200 OK\r\n"

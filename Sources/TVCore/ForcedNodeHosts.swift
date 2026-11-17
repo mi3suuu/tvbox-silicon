@@ -55,6 +55,14 @@ public final class ForcedNodeHosts: @unchecked Sendable {
         }
     }
 
+    /// 纯规则行，给 Loon 的**订阅**用：不带策略名、不带注释。
+    ///
+    /// 订阅项的出口由 RULE-SET / 导入时选择的策略决定，文件里再写一遍第三列没有好处，
+    /// 反而可能被判成无效行（真机上就踩过「无法找到任何有效规则」）。
+    public func subscriptionRules() -> [String] {
+        hosts.map { "DOMAIN-SUFFIX,\($0)" }
+    }
+
     /// 可直接粘进 `[Rule]` 的行。没有记录时返回 nil，调用方就别附带这一段。
     public func ruleFragment(fallbackTarget: String = "Proxy") -> String? {
         let hosts = hosts
