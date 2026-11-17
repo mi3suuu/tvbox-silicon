@@ -882,9 +882,23 @@ public final class SourceProbeStore {
             .map { (sourceKey: $0.sourceKey, lineFlag: $0.lineFlag) }
     }
 
+    /// 刚测到「能播」之后，多久之内的失败不覆盖它。
+    ///
+    /// 一次探针失败常常是抖动（边缘节点、回源超时），而一次覆盖就是界面上的红点「不通」
+    /// 加「按结果分组」把这条线搬走 —— 用户点进去却能播。
+    /// 两分钟足够滤掉抖动，也不至于把真的掉线藏起来（用户手动重测时旧读数大概率已经过期）。
+    nonisolated public static let failureGrace: TimeInterval = 120
+
+    /// 这条新读数是否应当被丢弃（旧读数更新鲜且可用，新读数只是失败）。
+    nonisolated static func shouldKeepExisting(_ existing: SourceProbeResult, over result: SourceProbeResult) -> Bool {
+        guard existing.isUsable, !result.isUsable else { return false }
+        return result.measuredAt.timeIntervalSince(existing.measuredAt) < failureGrace
+    }
+
     public func record(_ result: SourceProbeResult, sourceKey: String, videoID: String, lineFlag: String) {
         guard !lineFlag.isEmpty else { return }
         let key = storageKey(sourceKey: sourceKey, videoID: videoID, lineFlag: lineFlag)
+        if let existing = probes[key], Self.shouldKeepExisting(existing, over: result) { return }
         probes[key] = result
         order.removeAll { $0 == key }
         order.append(key)
@@ -944,6 +958,7 @@ public final class SourceProbeStore {
         guard !rows.isEmpty else { return }
         for row in rows where !row.lineFlag.isEmpty {
             let key = storageKey(sourceKey: sourceKey, videoID: videoID, lineFlag: row.lineFlag)
+            if let existing = probes[key], Self.shouldKeepExisting(existing, over: row.result) { continue }
             probes[key] = row.result
             order.removeAll { $0 == key }
             order.append(key)
@@ -1067,6 +1082,11 @@ public final class SourceProbeStore {
     /// 现有的 `record` 签名里没有 URL —— 这里提供带 URL 的入口，调用方顺手传即可。
     public func record(_ result: SourceProbeResult, sourceKey: String, videoID: String,
                        lineFlag: String, url: URL?) {
+        // host 表也要守同一条规矩：一次抖动若写进 `baseLatency`，同 host 的**其它剧**
+        // 下次也会拿这条失败读数当「这个 CDN 不行」而跳过 —— 一条线抖，整台 CDN 陪葬。
+        if !lineFlag.isEmpty,
+           let existing = probes[storageKey(sourceKey: sourceKey, videoID: videoID, lineFlag: lineFlag)],
+           Self.shouldKeepExisting(existing, over: result) { return }
         if let url { noteBase(result, url: url) }
         record(result, sourceKey: sourceKey, videoID: videoID, lineFlag: lineFlag)
     }
@@ -1074,6 +1094,10 @@ public final class SourceProbeStore {
     public func record(_ rows: [(result: SourceProbeResult, lineFlag: String, url: URL?)],
                        sourceKey: String, videoID: String) {
         for row in rows {
+            // 会被 `record` 丢掉的行（刚测到能播、这次只是失败）也不许写 host 表。
+            if !row.lineFlag.isEmpty,
+               let existing = probes[storageKey(sourceKey: sourceKey, videoID: videoID, lineFlag: row.lineFlag)],
+               Self.shouldKeepExisting(existing, over: row.result) { continue }
             if let url = row.url { noteBase(row.result, url: url) }
         }
         record(rows.map { (result: $0.result, lineFlag: $0.lineFlag) },
@@ -1189,6 +1213,47 @@ public enum SourceProbeRunner {
         request.setValue("bytes=0-\(budget - 1)", forHTTPHeaderField: "Range")
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
 
+        // 一次「没答复」不等于死线，所以给第二次机会。
+        //
+        // ⛔ 实测（2026-11-17，24 条被判死的线全量复测）：
+        //    `v.lzcdn31.com/…/index.m3u8` 是一条正常的 1080×608 主清单（96 字节），
+        //    第一轮探针却拿到一张 HTML 错误页 → 判「网页」；同一地址三种请求形态复测全部 200/206。
+        //    这类抖动在采集站的 CDN 上很常见（边缘节点刚上线、回源超时），
+        //    而一次误判会让这条线在界面上「不通」5–10 分钟 —— 用户点进去却能播。
+        //    两次都失败才下结论；而且「拿不到答复」一律记 `.unknown`（未测），不记 `.unreachable`（不通）。
+        var outcome = await attempt(request, url: url, budget: budget, session: session)
+        if outcome.shouldRetry {
+            try? await Task.sleep(for: .milliseconds(250))
+            // 第二次更快收手：8 秒 + 8 秒 = 16 秒的等待对「点一条线的测速」太长。
+            // 5 秒足够等到抖动过去（实测同一条线一秒内就回了 200）。
+            var retry = request
+            retry.timeoutInterval = min(request.timeoutInterval, 5)
+            outcome = await attempt(retry, url: url, budget: budget, session: session)
+        }
+        // 两次都拿不到答复 → 「没测出来」，不是「不通」。
+        //
+        // 这个区分决定界面上是灰点「未测」还是红点「不通」，而后者会被
+        // 「按结果分组」真的搬进「不通」组 —— 一条能播的线因此被藏起来。
+        // 真正的死线仍会被判死：它们回 4xx/5xx，走的是另一条分支。
+        guard outcome.noResponse else { return outcome.result }
+        return SourceProbeResult(reachability: .unknown, measuredAt: outcome.result.measuredAt)
+    }
+
+    /// 一次探测的结果，外加「要不要再来一次」的判据。
+    struct ProbeAttempt {
+        var result: SourceProbeResult
+        /// 值得再问一次：没拿到答复，或 200 却回了一张网页。
+        var shouldRetry: Bool
+        /// 一个字节的答复都没有（超时 / 连接被断 / TLS 握手失败）。
+        ///
+        /// 与「明确拒绝」分开：前者是**不知道**，后者才是**不能用**。
+        /// 分不出来的代价就是用户看到的「标注不通，点进去却能播」。
+        var noResponse = false
+    }
+
+    /// 真正发一次请求。判定口径与原来完全一致，只是把「重试」这件事交给了调用方。
+    private static func attempt(_ request: URLRequest, url: URL,
+                                budget: Int, session: URLSession) async -> ProbeAttempt {
         let started = Date()
         do {
             // ⛔ 不用 `session.data(for:)`：它只给总耗时，而总耗时里混着 TCP 慢启动。
@@ -1238,7 +1303,8 @@ public enum SourceProbeRunner {
                 reachability = .reachable
             }
 
-            return SourceProbeResult(
+            let kind = Self.mediaKind(of: data)
+            let result = SourceProbeResult(
                 reachability: reachability,
                 latencyMilliseconds: latency,
                 kilobytesPerSecond: kBps,
@@ -1248,16 +1314,23 @@ public enum SourceProbeRunner {
                 declaredBitrateKbps: declared.bitrateKbps,
                 fileSizeBytes: size,
                 colourRange: declared.colourRange,
-                mediaKind: Self.mediaKind(of: data),
+                mediaKind: kind,
                 measuredAt: Date()
             )
+            // 200 却回了一张网页：采集站边缘节点紧张时会拿错误页顶替。
+            // 这一档值得再问一次 —— 只有两次都是网页，才真的需要解析。
+            return ProbeAttempt(result: result, shouldRetry: kind == "html")
         } catch {
             // A cancelled probe (line switch / sheet closed) is not a verdict: recording it as
             // unreachable would poison the 5-minute cache with a lie.
             if Task.isCancelled || (error as? URLError)?.code == .cancelled {
-                return SourceProbeResult(reachability: .unknown)
+                return ProbeAttempt(result: SourceProbeResult(reachability: .unknown), shouldRetry: false)
             }
-            return SourceProbeResult(reachability: .unreachable, measuredAt: Date())
+            // 拿不到答复：`timedOut` / `networkConnectionLost` / TLS 被断 / DNS 被污染。
+            // 这些**都不是**「这条线死了」的证据 —— 真正的死线会明确回 4xx/5xx。
+            // 实测同一条线隔一秒就回 200，把它记成 `.unreachable` 就是把能播的线送进「不通」。
+            return ProbeAttempt(result: SourceProbeResult(reachability: .unreachable, measuredAt: Date()),
+                                shouldRetry: true, noResponse: true)
         }
     }
 

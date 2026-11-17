@@ -1279,6 +1279,8 @@ struct OneSkinStage: View {
     /// One 只在 chip 上显示当前线路的数；但「自动」这件事本身需要比较，
     /// 所以线路菜单里每条都带自己的数，最快的标出来 —— 用户才能据此手动切。
     @State private var lineLatencies: [String: Int] = [:]
+    /// 服务器明确拒绝过的线路（4xx/5xx）。没有它的线路失败只算「超时」——不判死。
+    @State private var lineRefused: Set<String> = []
     /// 画中画控制器。绑在 OneSkin 自己那条 AVPlayerLayer 上（见 OneSkinFixedPicture 的 pip 参数）；
     /// 不能与播放器共用 —— 一个 AVPlayer 同时只驱动一层画面，第二层会把悬浮窗的
     /// 画面抢走，只剩声音（`PictureInPicture.sourceLayer` 那段注释记的就是这个坑）。
@@ -4292,9 +4294,12 @@ struct OneSkinStage: View {
         var out: [String: Int] = [:]
         for (name, sample) in targets {
             if Task.isCancelled { break }
-            if let ms = await Self.measure(sample) { out[name] = ms }
+            let ping = await Self.measure(sample)
+            if let ms = ping.milliseconds { out[name] = ms }
             await MainActor.run {
                 lineLatencies.merge([name: out[name]].compactMapValues { $0 }) { _, new in new }
+                // 明确被拒（4xx/5xx）才记「不通」；超时/断连只记作「超时」。
+                if ping.milliseconds == nil, ping.refused { lineRefused.insert(name) } else { lineRefused.remove(name) }
             }
         }
 
@@ -4303,8 +4308,21 @@ struct OneSkinStage: View {
         }
     }
 
+    /// 单条线路测一次的结果。
+    ///
+    /// 「测不出耗时」有两种完全不同的原因，界面上不能都写成「不通」：
+    ///   · `refused` —— 服务器明确回了 4xx/5xx，这条线是真的不能用；
+    ///   · 否则 —— 超时/连接被断，**只是没答上来**。实测这类线点进去往往能播
+    ///     （用户的反馈正是「标注不通，但点进去却能播放」）。
+    struct LinePing {
+        var milliseconds: Int?
+        var refused: Bool
+        static let unknown = LinePing(milliseconds: nil, refused: false)
+    }
+
     /// 单条线路的往返耗时（毫秒）。失败返回 nil，不编造数字。
-    private static func measure(_ sample: OneSkinLineSample) async -> Int? {
+    private static func measure(_ sample: OneSkinLineSample) async -> LinePing {
+        var refused = false
         var head = URLRequest(url: sample.url)
         head.httpMethod = "HEAD"
         head.timeoutInterval = 6
@@ -4317,9 +4335,10 @@ struct OneSkinStage: View {
         // 再加上播放页的线路解析与选集面板的探测，正好把 6 条占满 —— 播放器的
         // m3u8 与分片请求排在后面，用户看到「点播放要等」。
         let t0 = Date()
-        if let (_, resp) = try? await SourceProbeRunner.probeSession.data(for: head),
-           (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400 {
-            return Int(Date().timeIntervalSince(t0) * 1000)
+        if let (_, resp) = try? await SourceProbeRunner.probeSession.data(for: head) {
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code < 400 { return LinePing(milliseconds: Int(Date().timeIntervalSince(t0) * 1000), refused: false) }
+            refused = true
         }
 
         // HEAD 被拒（部分 CDN 只允许 GET）：退一个 1 字节 Range，读完头部即取消。
@@ -4330,11 +4349,38 @@ struct OneSkinStage: View {
         get.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         for (k, v) in sample.headers { get.setValue(v, forHTTPHeaderField: k) }
         let t1 = Date()
-        if let (_, resp) = try? await SourceProbeRunner.probeSession.data(for: get),
-           (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400 {
-            return Int(Date().timeIntervalSince(t1) * 1000)
+        if let (_, resp) = try? await SourceProbeRunner.probeSession.data(for: get) {
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code < 400 { return LinePing(milliseconds: Int(Date().timeIntervalSince(t1) * 1000), refused: false) }
+            refused = true
         }
-        return nil
+
+        // 第三种要法：**照播放器的方式**发一个普通 GET，拿到首字节就取消。
+        //
+        // 前两种都会被一部分 CDN 拒掉：HEAD 常被 403/502，`Range: bytes=0-0` 也有服务端
+        // 直接回 416。而 AVPlayer 发的是普通 GET —— 所以「HEAD 不通」不代表「播不了」。
+        // 实测 `vip.ffzy-plays.com` 的 HEAD 是 502、普通 GET 是 206 正常出页。
+        var plain = URLRequest(url: sample.url)
+        plain.httpMethod = "GET"
+        plain.timeoutInterval = 6
+        plain.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        for (k, v) in sample.headers { plain.setValue(v, forHTTPHeaderField: k) }
+        let t2 = Date()
+        if let (stream, resp) = try? await SourceProbeRunner.probeSession.bytes(for: plain) {
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code < 400 {
+                var iterator = stream.makeAsyncIterator()
+                if (try? await iterator.next()) != nil {
+                    let ms = Int(Date().timeIntervalSince(t2) * 1000)
+                    stream.task.cancel()
+                    return LinePing(milliseconds: ms, refused: false)
+                }
+            } else {
+                refused = true
+            }
+            stream.task.cancel()
+        }
+        return LinePing(milliseconds: nil, refused: refused)
     }
 
     /// One 的 chip 不是胶囊按钮。
@@ -4447,7 +4493,9 @@ struct OneSkinStage: View {
                 // 只在用户真去点那条线时才解析，没解析过就照实写「未测」，
                 // 不替它宣布死刑 —— 否则面板会把他自己没选过的线路全标成不通。
                 let detail: String? = ms.map { "\($0) ms" }
-                    ?? (probingLines ? nil : (lineSamples[line] == nil ? "未测" : "不通"))
+                    ?? (probingLines ? nil
+                        : (lineSamples[line] == nil ? "未测"
+                           : (lineRefused.contains(line) ? "不通" : "超时")))
                 lineRow(title: line.isEmpty ? "线路" : line,
                         detail: detail,
                         isActive: line == activeLine,
