@@ -268,25 +268,35 @@ public final class EgressRouter: @unchecked Sendable {
     }
 
     /// 取数据：按结论选腿，第一次见到该 host 时双腿赛跑。
+    ///
+    /// - Parameter session: 发这条请求用的会话。默认 `nil` = 用路由器自己的 `.default` 会话；
+    ///   调用方（`CatalogClient`）把自己的 `HTTPClient.session` 传进来。
+    ///
+    ///   ⛔ 为什么要能换：`EgressRouter` 自建会话会让**所有**经过它的请求绕过调用方的会话配置 ——
+    ///   不只是测试里的 `protocolClasses`（那批用例因此一直红着，请求真的发去了 `fixture.test`），
+    ///   生产上还意味着「源自己配的会话策略」在出口决策这一段被丢掉了。
+    ///   路由器的职责是**选腿**，不是独占传输。
     public func data(for url: URL, headers: [String: String] = [:],
                      purpose: EgressPurpose, policy: EgressPolicy,
-                     range: String? = nil) async throws -> (Data, URL) {
+                     range: String? = nil, session: URLSession? = nil) async throws -> (Data, URL) {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
             throw TVError.invalidURL
         }
         // 本机上的流（remux / 插件代理）：不参与出口决策，直连就是回环。
         if Self.isLoopback(url) {
-            return try await attempt(url, headers: headers, purpose: purpose, leg: .direct, range: range)
+            return try await attempt(url, headers: headers, purpose: purpose, leg: .direct,
+                                     range: range, session: session)
         }
         // 直连源：不给代理任何机会。这是观众显式选的，不该被「自动优化」掉。
         guard let proxyLeg = proxyLeg(for: policy) else {
-            return try await attempt(url, headers: headers, purpose: purpose, leg: .direct, range: range)
+            return try await attempt(url, headers: headers, purpose: purpose, leg: .direct,
+                                     range: range, session: session)
         }
 
         let key = Self.key(url, purpose)
         if table.isProven(key) {
             return try await follow(table.leg(key), fallback: proxyLeg, url: url, headers: headers,
-                                    purpose: purpose, key: key, range: range)
+                                    purpose: purpose, key: key, range: range, session: session)
         }
 
         // 还没结论。同一个 host 只让一条请求去赛跑，其余先按直连走 ——
@@ -300,19 +310,20 @@ public final class EgressRouter: @unchecked Sendable {
         guard beginDecision(key) else {
             if await awaitDecision(key) {
                 return try await follow(table.leg(key), fallback: proxyLeg, url: url, headers: headers,
-                                        purpose: purpose, key: key, range: range)
+                                        purpose: purpose, key: key, range: range, session: session)
             }
             do {
-                return try await attempt(url, headers: headers, purpose: purpose, leg: .direct, range: range)
+                return try await attempt(url, headers: headers, purpose: purpose, leg: .direct,
+                                         range: range, session: session)
             } catch {
                 guard Self.isEgressFailure(error), table.isProven(key) else { throw error }
                 return try await follow(table.leg(key), fallback: proxyLeg, url: url, headers: headers,
-                                        purpose: purpose, key: key, range: range)
+                                        purpose: purpose, key: key, range: range, session: session)
             }
         }
         defer { endDecision(key) }
         return try await race(url, headers: headers, purpose: purpose, proxyLeg: proxyLeg,
-                              policy: policy, key: key, range: range)
+                              policy: policy, key: key, range: range, session: session)
     }
 
     /// 出发前把这条 host 的结论定下来（只读首包，不取正文）。
@@ -531,9 +542,11 @@ public final class EgressRouter: @unchecked Sendable {
 
     /// 按已知结论走，失败就换另一条腿（这条「换腿」是无条件的 —— 有结论不等于永远对）。
     private func follow(_ leg: EgressLeg, fallback: EgressLeg, url: URL, headers: [String: String],
-                        purpose: EgressPurpose, key: String, range: String?) async throws -> (Data, URL) {
+                        purpose: EgressPurpose, key: String, range: String?,
+                        session: URLSession?) async throws -> (Data, URL) {
         do {
-            let result = try await attempt(url, headers: headers, purpose: purpose, leg: leg, range: range)
+            let result = try await attempt(url, headers: headers, purpose: purpose, leg: leg,
+                                           range: range, session: session)
             table.record(key, leg: leg)
             return result
         } catch {
@@ -544,9 +557,17 @@ public final class EgressRouter: @unchecked Sendable {
             Diagnostics.shared.record(.info, "egress",
                 "\(leg.label) failed on \(key) (\(error.localizedDescription)); trying \(fallback.label)")
             table.recordFailure(key, leg: leg)
-            let other = fallback.isProxy ? fallback : .direct
+            // ⛔ 换腿的方向必须是「换到另一条」，不能是「换到同一条」。
+            //
+            // 原来写的是 `fallback.isProxy ? fallback : .direct`：当结论是**代理**、
+            // 调用方给的 fallback 也是同一个 `proxyLeg` 时，other == leg ⇒ 直接 throw。
+            // 于是「这台 host 学成了必须走代理」之后，只要节点/中继那边一断，
+            // 这一条就当场失败，**明明直连还能用**也不试 —— 用户看到的是
+            // 「昨天能播的源今天打不开」，而且日志里只有一句 proxy failed。
+            let other: EgressLeg = leg.isProxy ? .direct : (fallback.isProxy ? fallback : .direct)
             guard other != leg else { throw error }
-            let result = try await attempt(url, headers: headers, purpose: purpose, leg: other, range: range)
+            let result = try await attempt(url, headers: headers, purpose: purpose, leg: other,
+                                           range: range, session: session)
             table.record(key, leg: other)
             return result
         }
@@ -555,7 +576,7 @@ public final class EgressRouter: @unchecked Sendable {
     /// 双腿赛跑：直连先跑，`hedgeDelay` 后代理起跑，先给出内容的赢。
     private func race(_ url: URL, headers: [String: String], purpose: EgressPurpose,
                       proxyLeg: EgressLeg, policy: EgressPolicy, key: String,
-                      range: String?) async throws -> (Data, URL) {
+                      range: String?, session: URLSession?) async throws -> (Data, URL) {
         let hedge: Duration = {
             if case .preferProxy = policy { return .zero }
             // 「直连优先」的源给直连一个更宽的先行窗口：900ms 足够一个正常的接口响应回来，
@@ -571,14 +592,16 @@ public final class EgressRouter: @unchecked Sendable {
         ) { group in
             group.addTask {
                 (EgressLeg.direct, await Self.capture {
-                    try await self.attempt(url, headers: headers, purpose: purpose, leg: .direct, range: range)
+                    try await self.attempt(url, headers: headers, purpose: purpose, leg: .direct,
+                                           range: range, session: session)
                 })
             }
             group.addTask {
                 if hedge > .zero { try? await Task.sleep(for: hedge) }
                 if Task.isCancelled { return (proxyLeg, .failure(CancellationError())) }
                 return (proxyLeg, await Self.capture {
-                    try await self.attempt(url, headers: headers, purpose: purpose, leg: proxyLeg, range: range)
+                    try await self.attempt(url, headers: headers, purpose: purpose, leg: proxyLeg,
+                                           range: range, session: session)
                 })
             }
             var lastError: Error?
@@ -689,7 +712,8 @@ public final class EgressRouter: @unchecked Sendable {
     }
 
     private func attempt(_ url: URL, headers: [String: String], purpose: EgressPurpose,
-                         leg: EgressLeg, range: String? = nil) async throws -> (Data, URL) {
+                         leg: EgressLeg, range: String? = nil,
+                         session: URLSession? = nil) async throws -> (Data, URL) {
         // 代理腿要的中继地址可能是「还没起来」，不是「没有」。
         //
         // 中继在 `TVBoxApp` 启动时异步拉起；冷启动后的第一批请求会正好撞上这段窗口。
@@ -715,7 +739,7 @@ public final class EgressRouter: @unchecked Sendable {
             request.setValue(HTTPClient.userAgent, forHTTPHeaderField: "User-Agent")
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if let range { request.setValue(range, forHTTPHeaderField: "Range") }
-            return try await send(request, original: url)
+            return try await send(request, original: url, session: session)
         }
         let address = routed(url, leg: leg)
         var request = URLRequest(url: address,
@@ -724,12 +748,13 @@ public final class EgressRouter: @unchecked Sendable {
         request.setValue(HTTPClient.userAgent, forHTTPHeaderField: "User-Agent")
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         if let range { request.setValue(range, forHTTPHeaderField: "Range") }
-        return try await send(request, original: url)
+        return try await send(request, original: url, session: session)
     }
 
     private func send(_ request: URLRequest, original url: URL,
-                      purpose: EgressPurpose = .catalog) async throws -> (Data, URL) {
-        let (data, response) = try await session.data(for: request)
+                      purpose: EgressPurpose = .catalog,
+                      session: URLSession? = nil) async throws -> (Data, URL) {
+        let (data, response) = try await (session ?? self.session).data(for: request)
         guard let http = response as? HTTPURLResponse else { throw TVError.invalidConfiguration }
         // 206/200 都算通；其余按状态码处理，并把「服务器答了但拒绝」也当成这条腿不可用
         // （403/451 在这批源上就是地区封锁，换一条腿通常就通）。

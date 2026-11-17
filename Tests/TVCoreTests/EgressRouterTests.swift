@@ -202,11 +202,15 @@ import Testing
 ///
 /// 真机踩过：端点记着 `192.168.124.55`（家里 Wi-Fi），设备切到热点 `172.20.10.x`，
 /// 中继拨这个地址必然失败 —— 代理腿和直连腿一起挂，界面只剩「暂时无法加载此来源」。
+///
+/// ⛔ 修法**不是**「看到私有地址就改写成回环」：那会把「另一台机器上的代理」
+/// （NAS 在 192.168.1.9、手机在 192.168.124.x）无声打死，日志里只写「连不上」。
+/// 正确做法是「先按用户写的地址拨，拨不通才退，而且记住」（`ProxyDialHost.notePrimaryFailed`）。
 @Suite struct ProxyDialPlanTests {
-    @Test func aStalePrivateAddressFollowsTheCurrentNetwork() {
+    @Test func aStalePrivateAddressKeepsItsTruthUntilItFails() {
         let plan = LocalNetwork.plan(stored: "192.168.124.55", currentIPv4: "172.20.10.2")
-        #expect(plan.primary == "127.0.0.1")
-        #expect(plan.fallback == "172.20.10.2")
+        #expect(plan.primary == "192.168.124.55", "用户填的地址不能被我们擅自改写")
+        #expect(plan.fallback == "127.0.0.1", "拨不通时才退到回环")
     }
 
     @Test func anAddressThatStillExistsIsLeftAlone() {

@@ -2693,7 +2693,7 @@
 "Close All" = "全部關閉";
 "%@ paused — too many playing at once" = "%@ 個已暫停 — 同時播放太多了";
 "%@ playing at once" = "%@ 路同時播放";
-"%@ playing · %@ paused" = "%@ 路播放 · %@ 路已暫停";
+"%@ playing · %@ parked" = "%@ 路播放 · %@ 路已掛起";
 "Make Active" = "設為主窗";
 "Restore Last Windows" = "恢復上次視窗";
 "Put away %@ — at most %@ at once" = "已收起《%@》— 同時最多 %@ 個";

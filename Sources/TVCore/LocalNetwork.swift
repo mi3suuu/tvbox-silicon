@@ -65,10 +65,16 @@ public enum LocalNetwork {
             guard let currentIPv4, currentIPv4 != stored else { return (stored, nil) }
             return (stored, currentIPv4)
         }
-        // 存的是私有网段但不是本机现在的地址 → 多半是「本机代理」换了网段（Loon 就在这台手机上）。
-        guard isPrivate(stored) else { return (stored, nil) }
-        guard let currentIPv4, currentIPv4 != stored else { return (stored, nil) }
-        return ("127.0.0.1", currentIPv4)
+        // 存的是私有网段但不是本机现在的地址。**不猜它是谁**：
+        //   · 可能是「本机 Loon」换网段了（家里 Wi-Fi → 热点），旧地址已经不存在；
+        //   · 也可能是**另一台机器**上的代理（NAS 在 192.168.1.x，而手机在 192.168.124.x）。
+        //
+        // 上一版直接改写成 `127.0.0.1`：后一种情况被无声打死（用户填的 NAS 地址被换成手机自己），
+        // 而且日志里只会写「连不上」。现在**先按存的地址拨**（真相优先），
+        // 拨不通由 `ProxyDialHost.notePrimaryFailed` 记住并改拨回环 ——
+        // 代价是换网段后第一条请求多一次失败，换来的是「用户填什么就拨什么」。
+        guard isPrivate(stored), let currentIPv4, currentIPv4 != stored else { return (stored, nil) }
+        return (stored, "127.0.0.1")
     }
 
     /// 私有网段（RFC1918）。公网代理不动。
@@ -149,8 +155,9 @@ public enum LocalNetwork {
 
 /// 「这条代理现在该拨哪个地址」，带一次失败回落。
 ///
-/// 默认按 `LocalNetwork.dialHost` 换成局域网地址；一旦某个 `host:port` 在局域网地址上
-/// 连不通（最常见的原因是 Loon 的「允许 Wi-Fi 访问」关了），就把它记下来改拨回环 ——
+/// 主选 = 端点自己写的地址（只有回环会被 `plan` 判成「回环主选 + 局域网退路」）。
+/// 一旦某个 `host:port` 在主选上连不通（最常见的原因是 Loon 的「允许 Wi-Fi 访问」关了，
+/// 或者端点里存的是上一个网段的地址），就把它记下来改拨退路 ——
 /// 那种情况下回环至少还能用 Loon 自己的规则，比每条请求都失败要好。
 public enum ProxyDialHost {
     private static let lock = NSLock()
@@ -161,31 +168,36 @@ public enum ProxyDialHost {
     }
 
     /// 现在该拨的地址（主选）。
+    ///
+    /// 规则只有一条：**主选永远是「这条端点自己写的地址」**，直到它被实测证明拨不通。
+    /// 被证明之后才改拨退路（`planned.fallback`），并一直记住。
     public static func primary(for endpoint: CustomProxyEndpoint) -> String {
         let planned = LocalNetwork.plan(stored: endpoint.host, currentIPv4: LocalNetwork.currentIPv4)
-        guard planned.primary != endpoint.host else { return endpoint.host }
-        let key = key(endpoint)
-        let forced = lock.withLock { loopbackOnly.contains(key) }
-        // 端点地址在本机网段上已不存在（换了网络）时，不能因为「上次记录过回环优先」就继续拨旧地址。
-        if forced, LocalNetwork.isPrivate(endpoint.host),
-           LocalNetwork.currentIPv4 != endpoint.host { return planned.primary }
-        return forced ? endpoint.host : planned.primary
+        let forced = lock.withLock { loopbackOnly.contains(key(endpoint)) }
+        guard forced else { return planned.primary }
+        return planned.fallback ?? endpoint.host
     }
 
     /// 主选失败后该退到哪；没有可退的返回 nil。
     public static func fallback(for endpoint: CustomProxyEndpoint) -> String? {
-        let primary = primary(for: endpoint)
-        guard primary != endpoint.host else { return nil }
-        return endpoint.host
+        let planned = LocalNetwork.plan(stored: endpoint.host, currentIPv4: LocalNetwork.currentIPv4)
+        let forced = lock.withLock { loopbackOnly.contains(key(endpoint)) }
+        // 已经在走退路了，就没有「再退一层」。
+        guard !forced else { return nil }
+        return planned.fallback
     }
 
-    /// 主选连不通：记住，后续请求直接拨回环，不用每条都先失败一次。
+    /// 主选连不通：记住，后续请求直接拨退路，不用每条都先失败一次。
+    ///
+    /// ⛔ 判据必须是 `plan.fallback`，不能是「replace 后和原地址不同」——
+    ///    「私有但换了网段」这一类的退路是回环，而主选地址本身**不变**（先按存的拨），
+    ///    用旧判据会直接 early return，于是永远学不到。
     public static func notePrimaryFailed(_ endpoint: CustomProxyEndpoint) {
-        let substituted = LocalNetwork.dialHost(forProxyHost: endpoint.host)
-        guard substituted != endpoint.host else { return }
+        let planned = LocalNetwork.plan(stored: endpoint.host, currentIPv4: LocalNetwork.currentIPv4)
+        guard let fallback = planned.fallback else { return }
         lock.withLock { _ = loopbackOnly.insert(key(endpoint)) }
         Diagnostics.shared.record(.warning, "proxy",
-            "proxy \(endpoint.name) unreachable at \(substituted):\(endpoint.port); dialling \(endpoint.host) instead (turn on Allow Wi-Fi Access in Loon to use the port rules)")
+            "proxy \(endpoint.name) unreachable at \(planned.primary):\(endpoint.port); dialling \(fallback) instead (turn on Allow Wi-Fi Access in Loon to use the port rules)")
     }
 
     /// 改了端点（换地址/端口）就重新试一次主选。

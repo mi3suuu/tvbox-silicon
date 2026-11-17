@@ -2349,7 +2349,7 @@ struct DockManagerPanel: View {
             HStack(spacing: 6) {
                 Text(suspended == 0
                      ? L10n.text("%@ playing at once", String(playing))
-                     : L10n.text("%@ playing · %@ paused", String(playing), String(suspended)))
+                     : L10n.text("%@ playing · %@ parked", String(playing), String(suspended)))
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
             }

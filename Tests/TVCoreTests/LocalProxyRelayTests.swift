@@ -135,4 +135,101 @@ import Testing
         #expect(outcome == nil, "中继接受了「目标是自己」的请求：\(String(describing: outcome?.1))")
         #expect(origin.lastRequestLine.isEmpty, "内层请求被转出去了：\(origin.lastRequestLine.prefix(80))")
     }
+
+    // MARK: - 上游连接复用
+
+    /// 源站（keep-alive）：数「开了几条连接」与「收到几次请求」。
+    ///
+    /// 复用成立时：两次请求 → 1 条连接。不复用时：2 条。
+    private final class KeepAliveServer: @unchecked Sendable {
+        private let queue = DispatchQueue(label: "test.keepalive")
+        private let lock = NSLock()
+        private var _connections = 0
+        private var _requests = 0
+        private var listener: NWListener?
+        private var open: [NWConnection] = []
+
+        init() throws {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+            listener = try NWListener(using: parameters)
+        }
+
+        var port: UInt16 { listener?.port?.rawValue ?? 0 }
+        var connections: Int { lock.withLock { _connections } }
+        var requests: Int { lock.withLock { _requests } }
+
+        func start() async throws {
+            listener?.newConnectionHandler = { [self] connection in
+                lock.withLock { _connections += 1; open.append(connection) }
+                connection.start(queue: queue)
+                serve(connection)
+            }
+            guard let listener else { return }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: continuation.resume()
+                    case .failed(let error): continuation.resume(throwing: error)
+                    default: break
+                    }
+                }
+                listener.start(queue: queue)
+            }
+        }
+
+        /// 一条连接上反复收请求、回响应，**不关连接**。
+        private func serve(_ connection: NWConnection) {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [self] data, _, complete, error in
+                if let data, !data.isEmpty {
+                    lock.withLock { _requests += 1 }
+                    let body = "segment"
+                    let head = "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\n\r\n"
+                    connection.send(content: Data(head.utf8) + Data(body.utf8),
+                                    completion: .contentProcessed { _ in self.serve(connection) })
+                    return
+                }
+                if complete || error != nil { connection.cancel() }
+            }
+        }
+
+        /// ⛔ 必须把**已接受的连接**也关掉。
+        ///
+        /// 中继会把空闲连接放进 `RelayUpstreamPool`，键只到 `host:port`。
+        /// 测试桩若只 cancel 监听器，那些连接还活着；下一个测试桩很可能拿到同一个临时端口，
+        /// 于是中继把「上一条连接的响应」发给新请求 —— 实测表现是别的用例读到 "segment"。
+        var stopCount: Int { 0 }
+        func stop() {
+            listener?.cancel()
+            let connections: [NWConnection] = lock.withLock {
+                let all = open
+                open.removeAll()
+                return all
+            }
+            for connection in connections { connection.cancel() }
+            RelayUpstreamPool.shared.drain()
+        }
+    }
+
+    /// 两片（两次请求）只该付一次握手。
+    ///
+    /// ⛔ 这条断言的意义不在「快」，在「**连接真的被留下来了**」：
+    ///    池子拿不到命中时，源站会看到两条连接 —— 功能看起来完全正常，
+    ///    只是每片又握了一次手。不钉住连接数，这个退化是静默的。
+    @Test func aSecondSegmentReusesTheUpstreamConnection() async throws {
+        let origin = try KeepAliveServer()
+        try await origin.start()
+        defer { origin.stop() }
+
+        let base = try await LocalProxyServer.shared.base()
+        for index in 0..<2 {
+            let target = URL(string: "http://127.0.0.1:\(origin.port)/seg/\(index).ts")!
+            let (data, response) = try await URLSession.shared.data(
+                from: LocalProxyServer.directURL(base: base, url: target))
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            #expect(String(decoding: data, as: UTF8.self) == "segment")
+        }
+        #expect(origin.requests == 2, "两次请求应当都到达源站")
+        #expect(origin.connections == 1, "第二次请求没有复用上游连接（源站开了 \(origin.connections) 条）")
+    }
 }
