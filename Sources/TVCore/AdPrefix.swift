@@ -63,6 +63,8 @@ public enum AdPrefix {
         public let mainPath: String
         /// 被移除的目录数。
         public let droppedGroups: Int
+        /// **未处理的中插广告**数量（这些留着不动，见下面的说明）。
+        public let keptMidrolls: Int
     }
 
     private struct Segment {
@@ -128,7 +130,36 @@ public enum AdPrefix {
         }
         guard !dropped.isEmpty, droppedSeconds <= total * largestTotal else { return nil }
 
-        let kept = segments.filter { !dropped.contains($0.group) }
+        // ⛔ **只删开头的前缀，绝不删中插。**
+        //
+        //    实测（ffmpeg 9.0.2，本地构造 c1+广告+c2 的 HLS）：
+        //      原样            最大帧间隔 0.0400s
+        //      删中插广告段    最大帧间隔 **4.0400s** ← 时间轴出现等于广告长度的洞
+        //      删中插+DISCONTINUITY  仍是 4.0400s ← 这条标签一秒都补不上
+        //      删**开头**前缀  最大帧间隔 **0.0400s** ← 没有洞，安全
+        //
+        //    原因：删掉开头后剩下的段从第一个正片段开始，播放器起播即从那里算时间；
+        //    删中间则在时间轴上留出空洞，AVPlayer 要么停住等、要么报错。
+        //    补洞的唯一办法是重写每个 TS 的 PES/PTS（要改 TS 字节），
+        //    那是另一个量级的工程，且会引入解码器重建。
+        //
+        //    另外实测：广告段是 **1080p / 1.1MB**，正片段是 **720p / 0.3MB** ——
+        //    拼接点必然触发解码器重建（profile/分辨率/码率都变），
+        //    即使补了洞也会有一次可见的画面跳变。这与用户要求的
+        //    「不能影响播放观感」直接冲突，所以中插不做。
+        // 前缀 = 从第 0 段起、连续的广告段长度。
+        var headCount = 0
+        while headCount < segments.count, dropped.contains(segments[headCount].group) {
+            headCount += 1
+        }
+        // 开头不是广告（第 0 段就是正片）⇒ 这个源没有前缀广告，什么都不做。
+        guard headCount > 0, headCount < segments.count else { return nil }
+
+        // 只保留 headCount 之后的全部段落（中插广告**原样保留**）。
+        let kept = Array(segments[headCount...])
+        let keptMidrolls = kept.filter { dropped.contains($0.group) }.count
+        // 实际删掉的时长 = 开头那几段之和。
+        let removedSeconds = segments[0..<headCount].reduce(0.0) { $0 + $1.duration }
         // ③ 至少还要留下正片。
         guard !kept.isEmpty else { return nil }
 
@@ -138,7 +169,7 @@ public enum AdPrefix {
         //    （正片是 AES-128）。这条 KEY 属于广告，必须随广告一起丢掉。
         //    但如果是 `#EXT-X-MAP`（初始化段）或 BYTERANGE 之类，
         //    后面可能真的依赖它 —— 那种情况保守放行。
-        for segment in segments where dropped.contains(segment.group) {
+        for segment in segments[0..<headCount] {
             for tag in segment.tags where !tag.hasPrefix("#EXTINF:") {
                 // 广告自己的密钥声明：跟着广告丢，是安全的。
                 if tag.hasPrefix("#EXT-X-KEY:") { continue }
@@ -165,10 +196,11 @@ public enum AdPrefix {
 
         let mainPath = main.key.split(separator: "/").suffix(2).joined(separator: "/")
         return Result(text: lines.joined(separator: "\n") + "\n",
-                      segments: segments.count - kept.count,
-                      seconds: droppedSeconds,
+                      segments: headCount,
+                      seconds: removedSeconds,
                       mainPath: mainPath,
-                      droppedGroups: dropped.count)
+                      droppedGroups: dropped.count,
+                      keptMidrolls: keptMidrolls)
     }
 
     /// 分组键：目录部分（去掉文件名）。

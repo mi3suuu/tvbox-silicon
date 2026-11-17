@@ -34,12 +34,13 @@ private func bodySeconds(_ text: String) -> Double {
 
 @Test func everyRealSourceGetsItsAdGroupsRemoved() throws {
     // 四个源四种形态（两个分类 + 两个不同站），都必须能剥。
-    // 预期值是从 fixture 里算出来的**广告全部时长**（前贴 + 中插），不是只前贴：
-    //   A  前贴 15.03 + 中插 89.80 = 104.83
-    //   X1 前贴 15.03 + 中插 59.87 =  74.90
-    //   Y2 前贴 26.07
-    //   Z2 前贴 25.76 + 中插 25.76 =  51.52
-    for (name, expectedSeconds) in [("A", 104.83), ("X1", 74.90), ("Y2", 26.07), ("Z2", 51.52)] {
+    // ⚠️ 只删**开头前缀**，中插广告一律保留（见 AdPrefix 里对时间轴洞的说明）。
+    //    所以这里的预期值是各 fixture 的**前缀**时长，不是全部广告时长：
+    //      A  前缀 15.03s（另有两段中插 89.80s，故意不删）
+    //      X1 前缀 15.03s（另有中插 59.87s）
+    //      Y2 前缀 26.07s（没有中插）
+    //      Z2 前缀 25.76s（另有中插 25.76s）
+    for (name, expectedSeconds) in [("A", 15.03), ("X1", 15.03), ("Y2", 26.07), ("Z2", 25.76)] {
         let text = try playlist(name)
         let result = try #require(AdPrefix.strip(text, origin: origin), "\(name) 没识别出广告")
         #expect(abs(result.seconds - expectedSeconds) < 0.5,
@@ -57,9 +58,9 @@ private func bodySeconds(_ text: String) -> Double {
     let after = segments(result.text).count
     let afterSeconds = bodySeconds(result.text)
 
-    // A 的广告 = 前贴 4 片(15.03s) + 中插 24 片(89.80s) = 28 片 / 104.83s。
-    #expect(before - after == 28, "before=\(before) after=\(after)")
-    #expect(abs((beforeSeconds - afterSeconds) - 104.83) < 0.5,
+    // A 的前缀 = 开头 4 片 / 15.03s。中插的 24 片必须**原样留着**。
+    #expect(before - after == 4, "before=\(before) after=\(after)")
+    #expect(abs((beforeSeconds - afterSeconds) - 15.03) < 0.1,
             "少了 \(beforeSeconds - afterSeconds)s")
     // 正片 98.5% 必须一秒不少。
     #expect(afterSeconds > beforeSeconds * 0.95)
@@ -75,10 +76,10 @@ private func bodySeconds(_ text: String) -> Double {
     let result = try #require(AdPrefix.strip(text, origin: origin))
     let after = segments(result.text).count
     let before = segments(text).count
-    // X1 的广告 = 前贴 4 片 + 中插 (59.87s)。只该少广告那几片，
+    // X1 的前缀是 4 片。只该少这 4 片（中插不删），
     // 且绝不能因为 131 个 DISCONTINUITY 把正片切碎。
-    #expect(before - after > 0 && before - after < 30,
-            "切掉了 \(before - after) 个分片，说明判据不是按目录走")
+    #expect(before - after == 4,
+            "切掉了 \(before - after) 个分片；应恰好是开头 4 片前缀")
 }
 
 @Test func theFilmsOwnAESKeyTagsSurvive() throws {
@@ -186,4 +187,48 @@ private func bodySeconds(_ text: String) -> Double {
     for i in 0..<25 { lines += ["#EXTINF:4,", "/b/other/seg_\(i).jpg"] }
     lines.append("#EXT-X-ENDLIST")
     #expect(AdPrefix.strip(lines.joined(separator: "\n"), origin: origin) == nil)
+}
+
+@Test func midrollAdsAreDeliberatelyKeptBecauseCuttingThemLeavesATimelineHole() throws {
+    // ⛔ 这是本模块最重要的一条回归，别把它改"绿"了。
+    //
+    //    实测（ffmpeg 9.0.2，本地构造 c1+广告+c2 的 HLS，见 ad-scan/gap/）：
+    //      原样                     最大帧间隔 0.0400s
+    //      删中插广告段             最大帧间隔 **4.0400s**  ← 等于广告长度的时间轴洞
+    //      删中插 + DISCONTINUITY   仍 4.0400s            ← 该标签一秒都补不上
+    //      删**开头**前缀           0.0400s              ← 没有洞
+    //
+    //    而且实测广告段是 1080p/1.1MB、正片段 720p/0.3MB，拼接点必然重建解码器。
+    //    所以中插广告**只删前缀、不动中插**：宁可留广告，也不能让正片卡顿/跳帧。
+    let text = try playlist("A")
+    let result = try #require(AdPrefix.strip(text, origin: origin))
+
+    // 中插的广告目录必须还在清单里。
+    #expect(result.text.contains("625264b24905f8e9"),
+            "中插广告的分片被删掉了 —— 这会在时间轴上留洞，正片会卡")
+    // 并且要在结果里如实报告"还剩多少处中插没处理"。
+    #expect(result.keptMidrolls > 0, "应如实报告未处理的中插数量，实际 \(result.keptMidrolls)")
+}
+
+@Test func aPlaylistWhoseAdIsOnlyAtTheHeadRemovesExactlyThatHead() throws {
+    // 玉兔没有中插：删完前缀后，清单里不该再有任何广告目录。
+    let text = try playlist("Y2")
+    let result = try #require(AdPrefix.strip(text, origin: origin))
+    #expect(!result.text.contains("5jnnmlLG"), "玉兔的广告前缀应被完整删除")
+    #expect(result.keptMidrolls == 0, "玉兔没有中插，不该报告残留，实际 \(result.keptMidrolls)")
+}
+
+@Test func theFirstSegmentAfterStrippingIsAFilmSegment() throws {
+    // 删完之后第一段必须是正片目录的分片 —— 否则等于把正片开头也吃了。
+    for name in ["A", "X1", "Y2", "Z2"] {
+        let text = try playlist(name)
+        let result = try #require(AdPrefix.strip(text, origin: origin), "\(name) 未识别")
+        let firstSegment = result.text.components(separatedBy: "\n")
+            .first { !$0.isEmpty && !$0.hasPrefix("#") }
+        let first = try #require(firstSegment, "\(name) 删完没有段了")
+        // 广告目录的特征串不许出现在第一段里。
+        for ad in ["seg_k8bord", "625264b24905f8e9", "5jnnmlLG", "RCP0FQBQ"] {
+            #expect(!first.contains(ad), "\(name) 删完后第一段仍是广告（\(ad)）")
+        }
+    }
 }
