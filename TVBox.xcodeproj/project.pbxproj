@@ -257,6 +257,7 @@
 		6CB260D36D1F108ED3A0D1AD /* TVPlayerEpisodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B482395E1DB3E0C2FF8CDC6 /* TVPlayerEpisodes.swift */; };
 		6CE6FB43EF6031C2E216DF33 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F25432F6424C7931768C7B6F /* Assets.xcassets */; };
 		6D108420BB72BBDA68011E7C /* OpenJDK-additional.txt in Resources */ = {isa = PBXBuildFile; fileRef = 49F3577BBD5630331F34E84E /* OpenJDK-additional.txt */; };
+		6D45D9B269EAAB16EBE5F8B7 /* AdRangeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A9E83225BBA9F455D6B450C /* AdRangeEditor.swift */; };
 		6D7F63E735B2F3624CD39974 /* DouyinAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB7347843C885A97DFE397DD /* DouyinAccountView.swift */; };
 		6D9AB8463C9D2249C0B908FF /* unidbg.txt in Resources */ = {isa = PBXBuildFile; fileRef = 995F5F0DB35FE66B4F90B4FF /* unidbg.txt */; };
 		6D9E8CE3B19A5A92029CA9AE /* Store+Subscriptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8770B6D1D8E71A51323B90B7 /* Store+Subscriptions.swift */; };
@@ -287,6 +288,7 @@
 		78CE336AE6714726DFDFDB43 /* CatalogPlaybackActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C4D3FABE1C6E7A7B63BA62 /* CatalogPlaybackActions.swift */; };
 		79250551DB1E2A16A4B007D4 /* HalfFoldConsole.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F1B5D56B5A206F9AB2C963 /* HalfFoldConsole.swift */; };
 		7AA851C4D0805EE7D4EAD670 /* SourceEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64BAC6685AECD9293F2D5503 /* SourceEditor.swift */; };
+		7B36995D3B72089B0C980C9A /* AdRangeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A9E83225BBA9F455D6B450C /* AdRangeEditor.swift */; };
 		7B973D24E9274345AEF4C760 /* BiliSkinEpisodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA8D8C1ED71C478E709A940D /* BiliSkinEpisodes.swift */; };
 		7BD36EB4555214FD392DAFEE /* MangaSourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0E5BAF6D854E7CE5DA362D0 /* MangaSourcesView.swift */; };
 		7C7B124A35FE1D0AA83DCE0B /* MusicMacBrowse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D442D4FB2D2EB656FBBCB2C /* MusicMacBrowse.swift */; };
@@ -471,6 +473,7 @@
 		CA220FE90112CA22B964F339 /* DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B784080CDE6CF171AEA5E7 /* DiscoverView.swift */; };
 		CAA8462079A5E90B5AF54480 /* TMDBViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F714C204B589F33E2806EDF8 /* TMDBViews.swift */; };
 		CB40EB8463342F91C50AF39E /* libffi.txt in Resources */ = {isa = PBXBuildFile; fileRef = 06D9469858E5C5A118DED875 /* libffi.txt */; };
+		CC1429402773ABBE6DF95073 /* AdRangeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A9E83225BBA9F455D6B450C /* AdRangeEditor.swift */; };
 		CC9C32A2CFBC4D4DE2D622ED /* BiliControlSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9860D2DF37978003C09C308 /* BiliControlSupport.swift */; };
 		CCD7DB0DD5837E751E7D268A /* SettingsPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A69C65DB9F24A27E28C819 /* SettingsPlayback.swift */; };
 		CDC78CAFF04C2753B881F19A /* MacUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ACBC18014BA7190EBA2EDD7 /* MacUpdater.swift */; };
@@ -652,6 +655,7 @@
 		57642E0B8E9377FD57BC9D7F /* PlaybackWaitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackWaitView.swift; sourceTree = "<group>"; };
 		57A9F87D575B20715F9E7CCD /* Layout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Layout.swift; sourceTree = "<group>"; };
 		58E59EDBC7BE62078557E781 /* MusicRemoteControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicRemoteControl.swift; sourceTree = "<group>"; };
+		5A9E83225BBA9F455D6B450C /* AdRangeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRangeEditor.swift; sourceTree = "<group>"; };
 		5B482395E1DB3E0C2FF8CDC6 /* TVPlayerEpisodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVPlayerEpisodes.swift; sourceTree = "<group>"; };
 		60131C0E870DAACC980C0B11 /* DeviceTest.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = DeviceTest.xcconfig; sourceTree = "<group>"; };
 		61C44303B4662294C11176AB /* StyledSubtitleOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StyledSubtitleOverlay.swift; sourceTree = "<group>"; };
@@ -880,6 +884,7 @@
 		42F85A68BE50D8E117754B11 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				5A9E83225BBA9F455D6B450C /* AdRangeEditor.swift */,
 				02EF9D73EBDD8FAB84446C96 /* AdSkipSettingsView.swift */,
 				7DD9CCBC29ECDB9D8B254CBF /* AITranslationView.swift */,
 				075F6AC3B287C6219D461DBA /* AITranslatorAdapter.swift */,
@@ -1531,6 +1536,7 @@
 			files = (
 				2C9DAB7BDC6194CAAE63292C /* AITranslationView.swift in Sources */,
 				85B4677026E202083200E9BC /* AITranslatorAdapter.swift in Sources */,
+				7B36995D3B72089B0C980C9A /* AdRangeEditor.swift in Sources */,
 				77B1B0F4A710F470CE13E966 /* AdSkipSettingsView.swift in Sources */,
 				8A685170BCEDE3AE50C538DA /* Announcements.swift in Sources */,
 				0BAEA44063C146779B061BB1 /* ApplePython.c in Sources */,
@@ -1710,6 +1716,7 @@
 			files = (
 				032345C5D74C16D8BC65731B /* AITranslationView.swift in Sources */,
 				A1D25FF82C16A6CF78FDFBA8 /* AITranslatorAdapter.swift in Sources */,
+				6D45D9B269EAAB16EBE5F8B7 /* AdRangeEditor.swift in Sources */,
 				43FB839E124CB117117DD991 /* AdSkipSettingsView.swift in Sources */,
 				D5E6CDAD56F3272FD731DBDE /* Announcements.swift in Sources */,
 				452280EFF985A9357EAAD738 /* ArtworkLanguageView.swift in Sources */,
@@ -1887,6 +1894,7 @@
 			files = (
 				030DFAB42502A2FB222D80BC /* AITranslationView.swift in Sources */,
 				BB123BCA3A508B0B08D97994 /* AITranslatorAdapter.swift in Sources */,
+				CC1429402773ABBE6DF95073 /* AdRangeEditor.swift in Sources */,
 				8856C15BDAEE7E53EBCE7705 /* AdSkipSettingsView.swift in Sources */,
 				D54D6BFE675267FF2D16FC49 /* Announcements.swift in Sources */,
 				B7C3291A656E2548E80F1E4B /* ApplePython.c in Sources */,

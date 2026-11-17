@@ -11,15 +11,79 @@ public struct AdRange: Codable, Equatable, Sendable, Identifiable {
     public var start: Double
     /// 广告时长（秒）。0 表示「到片尾」。
     public var length: Double
+    /// 这段是用户手标起止点的，还是算法从指纹扩出来的。
+    ///
+    /// 两者必须能分辨：手标段是**用户看得见、点得准**的区间，删它要明确；
+    /// 算法段是"大概在这儿"，用户标一次的手标段不应该被后续算法覆盖掉。
+    /// 老存档没有这个字段，解码缺省 `false`（当时的段都是算法扩的）。
+    public var marked: Bool
+    /// 这段属于哪一集。
+    ///
+    /// ⛔ 这条是**必须**的，不是锦上添花：`EpisodeSkipSettings` 按**作品**存
+    ///（`scope(origin:source:video:)` 只到 `videoID`，不含集），片头片尾这样存是对的
+    ///（每集片头位置基本一致），但**广告位置每集都不一样**。
+    /// 不区分集的话，第 1 集标的 30–45 秒会被套到第 2 集的 30–45 秒上 ——
+    /// 把正片剪掉 15 秒，而且用户完全看不出原因（他只标过第 1 集）。
+    ///
+    /// `nil` = 没记集（老存档，或这个频道没有集的概念）。
+    /// 这种段对所有集都生效 —— 保持旧行为，不静默丢用户已标的数据。
+    public var episode: String?
 
-    public init(id: UUID = UUID(), start: Double, length: Double) {
+    public init(id: UUID = UUID(), start: Double, length: Double, marked: Bool = false,
+                episode: String? = nil) {
         self.id = id; self.start = start; self.length = length
+        self.marked = marked; self.episode = episode
+    }
+
+    /// 手标「起点 + 终点」构造。终点在前会被自动摆正。
+    public init(start: Double, end: Double, marked: Bool = true, episode: String? = nil) {
+        let low = min(start, end), high = max(start, end)
+        self.init(start: low, length: max(0, high - low), marked: marked, episode: episode)
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, start, length, marked, episode }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        start = try c.decodeIfPresent(Double.self, forKey: .start) ?? 0
+        length = try c.decodeIfPresent(Double.self, forKey: .length) ?? 0
+        marked = try c.decodeIfPresent(Bool.self, forKey: .marked) ?? false
+        episode = try c.decodeIfPresent(String.self, forKey: .episode)
+    }
+
+    /// 这一段在当前这一集是否算数。
+    ///
+    /// 没记集的段（老数据 / 无集概念的频道）对所有集都算数：
+    /// 宁可保持旧行为，也不要因为一次升级把用户标过的段悄悄作废。
+    public func applies(to episode: String?) -> Bool {
+        guard let own = self.episode else { return true }
+        guard let episode else { return true }
+        return own == episode
     }
 
     public var end: Double { length > 0 ? start + length : .greatestFiniteMagnitude }
 
     public func contains(_ time: Double) -> Bool {
         time >= start && time < end
+    }
+
+    /// 太短的段不算广告：手抖点两下就成一段，会把正片剪碎。
+    public static let shortestLength = 1.5
+
+    /// 这段能不能拿去用。`duration` 用来判断「到片尾」型的段是否越界。
+    public func isValid(duration: Double) -> Bool {
+        guard start.isFinite, length.isFinite, start >= 0 else { return false }
+        if length > 0 { return length >= Self.shortestLength }
+        // 0 = 到片尾，但起点必须真的在片子里。
+        return duration.isFinite && duration > 0 && start < duration
+    }
+
+    /// 两段是否重叠（含端点相接视为不重叠：前一段结束正好是后一段开始是真的相邻广告）。
+    public func overlaps(_ other: AdRange) -> Bool {
+        let a0 = start, a1 = end, b0 = other.start, b1 = other.end
+        guard a1.isFinite, b1.isFinite else { return true }
+        return a0 < b1 && b0 < a1
     }
 }
 
@@ -120,21 +184,48 @@ public struct EpisodeSkipPass: Sendable {
     /// 已经跳过的广告段 id。用 id 而不是索引：用户可能在播放中增删广告段，
     /// 索引会错位，id 不会。一段只跳一次，避免手往回拖又被弹回去。
     private var handledAds: Set<UUID> = []
+    /// 上一次请求跳过的广告段，只用来「确认未成功时回滚」。
+    ///
+    /// 这个字段以前叫 `lastSkippedAd`，只写不读（全仓 0 处读取），
+    /// 于是手标段被跳过时用户看不到任何提示；而且 id 在执行 seek **之前**
+    /// 就进了 `handledAds`，seek 失败后这一段本轮再也不会跳。
+    /// 现在改成「先记待确认，调用方确认成功再 `confirm`」。
+    private var pending: UUID?
     public init() {}
 
-    public mutating func target(time: Double, duration: Double, playing: Bool, settings: EpisodeSkipSettings) -> Double? {
-        guard playing, time.isFinite, time >= 0, time <= duration, settings.enabled else { return nil }
+    /// - Parameter blocksAds: 「广告拦截」总开关（`player.skipAds`）。
+    ///
+    ///   ⛔ 广告段的跳过**不能**挂在 `settings.enabled` 上。那个字段是
+    ///   「自动跳过片头片尾」的开关，与广告是两件事：
+    ///   于是出现两种反向错——① 用户关掉广告拦截，手标的广告段照样被跳；
+    ///   ② 用户没开"跳过片头片尾"，广告段就永远不跳。
+    ///   两边的开关各管各的，这里必须单独收一个参数。
+    /// - Parameter episode: 当前这一集的标识（`PlaybackHistoryContext.episodeID`）。
+    ///
+    ///   广告段只对**标它的那一集**生效。片头片尾可以按作品复用（每集位置基本一致），
+    ///   广告位置每集都不一样 —— 第 1 集标的 30–45 秒套到第 2 集上就是把正片剪掉。
+    ///   `nil`（没有集概念的频道，或老存档里没记集的段）对所有集都生效。
+    public mutating func target(time: Double, duration: Double, playing: Bool,
+                                settings: EpisodeSkipSettings, blocksAds: Bool = true,
+                                episode: String? = nil) -> Double? {
+        guard playing, time.isFinite, time >= 0, time <= duration else { return nil }
 
         // ★ 广告优先于片头片尾：广告可能正好压在片头位置，
         //   这时该跳到广告结尾而不是片头结尾。
-        if let ad = settings.ads.first(where: { $0.contains(time) && !handledAds.contains($0.id) }) {
+        //   广告只认 `blocksAds`；片头片尾才认 `settings.enabled`。
+        if blocksAds,
+           let ad = settings.ads.first(where: {
+               $0.applies(to: episode) && $0.contains(time) && !handledAds.contains($0.id)
+           }) {
             handledAds.insert(ad.id)
+            pending = ad.id
             let end = min(ad.end, duration)
-            // 记一下这次跳过的是广告（供界面显示「已跳过广告」toast）
-            lastSkippedAd = ad
-            return end
+            // 段尾就是当前播放位置的兜底：不能返回一个不前进的目标，
+            // 否则 seek 到原地 → 下一 tick 又命中 → 无限 seek 循环。
+            return end > time + 0.25 ? end : nil
         }
 
+        guard settings.enabled else { return nil }
         guard settings.validationError(duration: duration) == nil else { return nil }
         if !introHandled {
             introHandled = true
@@ -147,10 +238,28 @@ public struct EpisodeSkipPass: Sendable {
         return nil
     }
 
-    /// 最近一次因命中广告而跳转的区间；界面用它弹一下提示。
-    public private(set) var lastSkippedAd: AdRange?
+    /// 刚才那段广告的终点，用来给界面弹提示。
+    public mutating func takeSkippedAd(settings: EpisodeSkipSettings) -> AdRange? {
+        guard let pending else { return nil }
+        defer { self.pending = nil }
+        return settings.ads.first { $0.id == pending }
+    }
+
+    /// seek 失败时调用：把这段放回去，下一 tick 还能再试一次。
+    ///
+    /// `handledAds` 在 `target` 里就已经写入，seek 却可能在 `!seekableTimeRanges`
+    /// 或 seek 回调失败时什么都不做 —— 不回收就等于「这段广告本轮永远不再跳」，
+    /// 而用户看到的是「第一次跳了、后面不跳了」。
+    public mutating func rollbackPending() {
+        guard let pending else { return }
+        handledAds.remove(pending)
+        self.pending = nil
+    }
 
     /// 应用了新的广告列表（用户刚标注过）时，把跳过的记录清掉，
     /// 让新加的广告段本集就能生效。
-    public mutating func resetAds() { handledAds.removeAll() }
+    public mutating func resetAds() {
+        handledAds.removeAll()
+        pending = nil
+    }
 }

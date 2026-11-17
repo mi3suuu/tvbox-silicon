@@ -203,6 +203,8 @@ struct OneSkinChrome: View {
     /// 这两项原属上游 `CatalogPlaybackActions`，收进枚举后在 One 页里自己持有。
     @State private var showsSeries = false
     @State private var showsSkip = false
+    /// 手标广告区间那一页是否打开。
+    @State private var showsAdRange = false
     /// 「更多」面板是否展开。
     ///
     /// 它是个普通 `@State`，不是系统菜单 —— 这样父视图每秒重算（进度条读 `position`）
@@ -544,6 +546,15 @@ struct OneSkinChrome: View {
             guard newID != nil, let ad = session?.lastSkippedAd else { return }
             showAdHUD(.skipped(seconds: ad.duration))
         }
+        // 手标区间被跳过时也要给反馈。
+        //
+        // 上面那条只认指纹命中（`lastSkippedAd`）。手标段走的是另一条路，
+        // 以前那条路**什么都不弹** —— 用户手标了一段，跳过时画面只是"跳了一下"，
+        // 分不清是自己标对了还是播放故障。
+        .onChange(of: session?.lastSkippedAdRange?.id) { _, newID in
+            guard newID != nil, let ad = session?.lastSkippedAdRange else { return }
+            showAdHUD(.skipped(seconds: ad.length))
+        }
         .onChange(of: session != nil) { _, ready in if ready { attachClock() } }
         .onChange(of: channel?.url) { _, _ in attachClock() }
         .onChange(of: nowPlayingState, initial: true) { _, _ in
@@ -571,6 +582,15 @@ struct OneSkinChrome: View {
         }
         .sheet(isPresented: $showsSkip) {
             if let session { EpisodeSkipSettingsView(session: session) }
+        }
+        // 手标广告起止点。此前只有「标注广告」一条路——它靠抓帧猜边界，
+        // 猜歪了用户无从纠正，抓不到帧时更是连猜都没有。这一页让用户直接给两个时间点。
+        .sheet(isPresented: $showsAdRange) {
+            if let session {
+                AdRangeEditor(session: session) { _ in
+                    Task { await loadSkipMarkers() }
+                }
+            }
         }
         // 弹幕列表：旧播放器一直有，One 页此前没有入口，只能看飘过的、找不到刚才那条。
         .sheet(isPresented: $showsDanmakuList) {
@@ -1316,10 +1336,22 @@ struct OneSkinChrome: View {
             // 也能拖到控制栏 —— 原先写死在这个分支里，两头都做不到。
             if canMarkAd {
                 Button {
+                    closeMore()
+                    showsAdRange = true
+                } label: {
+                    Label(L10n.text("Mark Ad Range…"), systemImage: "megaphone")
+                }
+            }
+            // 「快标」：确实什么都不想填的时候，退回原来那条猜边界的路。
+            // 两条都在，是因为场景不同——广告刚开始、用户只想点一下就完事时
+            // 让他填两个时间点是负担；猜歪了他再用上面那条纠。
+            if canMarkAd {
+                Button {
+                    closeMore()
                     Task { await markAdHere() }
                 } label: {
                     Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark This as an Ad"),
-                          systemImage: "megaphone")
+                          systemImage: "megaphone.fill")
                 }
                 .disabled(markingAd)
             }
@@ -2623,12 +2655,14 @@ struct OneSkinChrome: View {
                 if let channel { externalStream = OneSkinHandoff(url: channel.url) }
             }
         case .markAd:
-            // 顶栏形态：一下就把刚才那 30 秒标成广告。菜单里是带文字的那条（见 `moreItem`），
-            // 同一件事两个形态，和别的一样 —— 摆到顶栏就该有按钮，而不是空占位。
-            iconButton("megaphone", label: L10n.text("Mark Ad")) {
-                Task { await markAdHere() }
+            // 顶栏形态：打开手标区间那一页。
+            //
+            // 顶栏是「一下就点」的位置，而标广告需要两个时间点，所以这里是**入口**，
+            // 不是动作本身 —— 打开后起点默认就是当前播放位置，用户只需补终点。
+            // （原来这里直接跑 `markAdHere()` 猜边界，猜歪了没有任何纠正手段。）
+            iconButton("megaphone", label: L10n.text("Mark Ad Range…")) {
+                showsAdRange = true
             }
-            .disabled(markingAd)
         case .adBlock:
             // 顶栏形态：一下切换广告拦截总开关。图标直接反映当前状态
             // （拦着 = 实心盾；关掉 = 带斜线的空盾），不需要再点进菜单确认。

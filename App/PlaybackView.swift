@@ -123,7 +123,12 @@ import TVCore
         set { UserDefaults.standard.set(newValue, forKey: "player.skipAds") }
     }
     /// 最近一次跳过的广告，界面可以拿它弹个 toast。
+    ///
+    /// 指纹命中走这个（`AdSignature`），手标区间命中走 `lastSkippedAdRange`。
+    /// 两条路必须分开：界面要知道「跳过的是哪一类」，提示文案和时长来源都不同。
     private(set) var lastSkippedAd: AdSignature?
+    /// 最近一次因手标区间而被跳过的段。
+    private(set) var lastSkippedAdRange: AdRange?
     private var editingSkip = false
     private var resumeAfterEditing = false
     private var seekingSegment = false
@@ -274,38 +279,100 @@ import TVCore
     ///   - marker: 用户按下「标记」时的播放位置（秒）
     ///   - searchRadius: 往两侧各找多远（秒）。默认 30 秒：
     ///     绝大多数前贴片在 90 秒内，30 秒半径配 4 格模板足够定位。
-    func markAd(at marker: Double, searchRadius: Double = 30) async {
-        guard let item = player.currentItem else { return }
+    @discardableResult
+    func markAd(at marker: Double, searchRadius: Double = 30) async -> AdRange? {
+        guard let item = player.currentItem else { return nil }
         let from = max(0, marker - searchRadius)
         let to = min(duration > 0 ? duration : marker + searchRadius, marker + searchRadius)
-        guard to - from >= 6 else { return }
+        // 锚点两侧都要有片子才谈得上"扩"。
+        guard to - from >= 6 else { return nil }
 
         let hashes = await AdFrameSampler.hashes(for: item.asset,
                                                  from: from, to: to, interval: 1.0)
-        guard hashes.count >= AdBoundary.minimumSpan else { return }
+        guard hashes.count >= AdBoundary.minimumSpan else { return nil }
 
         // 锚点在候选序列里的下标。
         let anchor = Int((marker - from).rounded())
         let clamped = min(max(anchor, 0), hashes.count - 1)
 
-        guard let range = AdBoundary.locate(in: hashes, anchor: clamped) else { return }
+        // 找到边界就用它；找不到就退回「以标记点为中心、两个最小跨度」的保守区间 ——
+        // 以前这里直接 return，用户点了「标注广告」什么都不会发生，也没有任何提示。
+        let range = AdBoundary.locate(in: hashes, anchor: clamped)
+            ?? min(max(clamped - 1, 0), hashes.count - AdBoundary.minimumSpan)...min(clamped + 1, hashes.count - 1)
 
         let slice = Array(hashes[range])
+        guard slice.count >= AdBoundary.minimumSpan else { return nil }
         let startSeconds = from + Double(range.lowerBound)
         let length = Double(slice.count)
 
         let ad = AdSignature(title: "", duration: length,
                              hashes: slice, sampleInterval: 1.0)
         let added = await AdSignatureLibrary.shared.add(ad)
-        guard added else { return }
-        await reloadAdLibrary()
+        if added { await reloadAdLibrary() }
 
         // 新标注的这段本集就生效：加进当前 skipSettings，并清掉已跳记录。
-        var settings = skipSettings
-        settings.ads.append(AdRange(start: startSeconds, length: length))
-        applySkipSettings(settings)
+        commitAdRange(AdRange(start: startSeconds, length: length))
         Diagnostics.shared.record(.info, "ads",
-            "marked ad anchor=\(Int(marker)) found=\(Int(startSeconds))..\(Int(startSeconds + length)) (\(slice.count) frames)")
+            "marked ad anchor=\(Int(marker)) found=\(Int(startSeconds))..\(Int(startSeconds + length)) (\(slice.count) frames) library=\(added)")
+        return AdRange(start: startSeconds, length: length, marked: true)
+    }
+
+    /// 手标一段：用户自己给起点和终点。
+    ///
+    /// 与 `markAd(at:)` 是两条路：那条靠指纹猜边界，这条**用户说了算**。
+    /// 手标段还会顺手从这段画面里提一份指纹入库 —— 采样拿不到帧（切片源、
+    /// 解密流）时指纹为空，但区间本身照样生效，本集就能跳。
+    @discardableResult
+    func markAd(from: Double, to: Double) async -> AdRange? {
+        guard let range = AdMarkRange.make(from: from, to: to, duration: duration) else { return nil }
+
+        commitAdRange(range)
+        Diagnostics.shared.record(.info, "ads",
+            "manual ad range \(Int(range.start))..\(Int(range.end)) (\(Int(range.length))s)")
+
+        // 提指纹供跨集复用。抓不到帧不算失败：区间已经生效。
+        if let item = player.currentItem, duration > 0 {
+            let hashes = await AdFrameSampler.hashes(for: item.asset,
+                                                     from: range.start, to: range.end, interval: 1.0)
+            if hashes.count >= AdBoundary.minimumSpan {
+                let ad = AdSignature(title: "", duration: range.length,
+                                     hashes: hashes, sampleInterval: 1.0)
+                if await AdSignatureLibrary.shared.add(ad) { await reloadAdLibrary() }
+            }
+        }
+        return range
+    }
+
+    /// 删掉本集的一段广告（按 id），落盘并让改动当场生效。
+    func removeAdRange(id: UUID) {
+        guard skipScope != nil else { return }
+        var settings = skipSettings
+        let before = settings.ads.count
+        settings.ads = AdMarkRange.removing(id: id, from: settings.ads)
+        guard settings.ads.count != before else { return }
+        applySkipSettings(settings)
+        Diagnostics.shared.record(.info, "ads", "removed ad range id=\(id.uuidString.prefix(8))")
+    }
+
+    /// 把一段广告并进本集设置并落盘。
+    ///
+    /// ⛔ 这里必须走 `applySkipSettings`（它内部 `save` + 重建 `EpisodeSkipPass`）。
+    ///   直接改 `skipSettings` 有两条后果：不落盘（换集就没了），
+    ///   以及 `skipPass` 里的 `handledAds` 还留着旧 id —— 新段被当成"已跳过"。
+    private func commitAdRange(_ range: AdRange) {
+        var range = range
+        // 记下这是哪一集：广告位置每集不同，不记就会串到别的集上去。
+        range.episode = historyContext?.episodeID
+        // 没有 `skipScope` 的频道（设置页手工建的播放 URL）存不下来。
+        // 以前 `markAd` 在这种情况下照样把它加进内存里的 `skipSettings`，
+        // 界面显示"已标记"，下一集全没 —— 现在直接说出真相。
+        guard skipScope != nil else {
+            Diagnostics.shared.record(.info, "ads", "ad range not saved: channel has no skip scope")
+            return
+        }
+        var settings = skipSettings
+        settings.ads = AdMarkRange.merging(range, into: settings.ads)
+        applySkipSettings(settings)
     }
 
     private func updateSkipping(_ item: AVPlayerItem) {
@@ -324,11 +391,24 @@ import TVCore
         guard skipScope != nil, !editingSkip, !seekingSegment, pendingResume == nil, !restoringPosition,
               item.status == .readyToPlay else { return }
         var pass = skipPass
-        guard let target = pass.target(time: time, duration: length, playing: player.rate > 0, settings: skipSettings) else {
+        guard let target = pass.target(time: time, duration: length, playing: player.rate > 0,
+                                       settings: skipSettings, blocksAds: skipsAds,
+                                       episode: historyContext?.episodeID) else {
             skipPass = pass
             return
         }
-        guard item.seekableTimeRanges.contains(where: { CMTimeRangeContainsTime($0.timeRangeValue, time: CMTime(seconds: target, preferredTimescale: 600)) }) else { return }
+        // 段尾不可 seek（还没缓冲、或落在 seekable 范围外）时把这段放回去，
+        // 下一 tick 还能再试。以前这里 `return` 而不回滚 ——
+        // `handledAds` 已经在 `target()` 里写了，这一段本轮就永远不跳了。
+        guard item.seekableTimeRanges.contains(where: { CMTimeRangeContainsTime($0.timeRangeValue, time: CMTime(seconds: target, preferredTimescale: 600)) }) else {
+            pass.rollbackPending()
+            skipPass = pass
+            return
+        }
+        // 手标段跳过了要告诉用户（`lastSkippedAd` 以前只给指纹命中用）。
+        if let skippedAd = pass.takeSkippedAd(settings: skipSettings) {
+            lastSkippedAdRange = skippedAd
+        }
         skipPass = pass
         seekingSegment = true
         let activeGeneration = generation

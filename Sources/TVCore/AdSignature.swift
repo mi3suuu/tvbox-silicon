@@ -273,6 +273,13 @@ public enum AdBoundary {
     /// 至少要连续这么多格才算一段，太短的认为是误标。
     public static let minimumSpan = 3
 
+    /// 向两侧扩时容忍几个连续不像的格子。
+    ///
+    /// 广告标题卡、转场、纯色收尾用 1 秒采样时常常整整一格与模板毫不相干，
+    /// 但下一格又接回广告。"一帧不像就断"会把这类广告切成两半，
+    /// 只标到前半截 —— 用户看到的就是"跳到一半又出广告"。
+    public static let maxMisses = 2
+
     /// 单帧汉明距离 → 相似度（0…1）。
     public static func similarity(_ distance: Int) -> Double {
         max(0, 1 - Double(distance) / 64.0)
@@ -307,29 +314,117 @@ public enum AdBoundary {
     /// - Returns: 闭区间 `(start, end)`，下标含端点；找不到时返回 `nil`。
     public static func locate(in hashes: [UInt64], anchor: Int, window: Int = 4) -> ClosedRange<Int>? {
         guard !hashes.isEmpty, hashes.indices.contains(anchor) else { return nil }
-        let left = max(0, anchor - window + 1)
-        let template = Array(hashes[left...anchor])
+
+        // ⛔ 模板必须能向**前**取。
+        //
+        // 这里原来只向回取：`left = anchor - window + 1`，模板 = `hashes[left...anchor]`。
+        // 于是 `anchor == 0` 时模板只有 1 格，被下面的 `count >= 2` 挡掉，**直接返回 nil**。
+        // 而 `resolveAndSkip` 传的正是 `anchor: 0`（候选序列从命中点开始），
+        // 所以那条路上这个函数**从来没有成功过一次** —— 每次都退回
+        // 「命中点 + 广告总时长」，正好把它注释里说要避免的「多跳、切掉正片开头」执行了个遍。
+        //
+        // 现在模板以锚点为中心向两侧取，两端各自钳位，锚点在序列头也能拿到完整模板。
+        let half = max(1, window / 2)
+        let lower = max(0, anchor - half)
+        let upper = min(hashes.count - 1, lower + window - 1)
+        let template = Array(hashes[lower...upper])
         guard template.count >= 2 else { return nil }
 
-        // 向右扩
+        // 向右扩：记「最后一个真正像的格子」，容忍中间至多 `maxMisses` 个不像的。
+        // 边界取 `lastGood` 而不是「末格减掉 miss 数」—— 后者会把结尾真实命中的那一格也减掉。
         var end = anchor
+        var lastGood = anchor
+        var misses = 0
         while end + 1 < hashes.count {
-            let next = hashes[end + 1]
-            let sim = similarity(of: [next], against: template)
-            if sim < similarityFloor { break }
+            let sim = similarity(of: [hashes[end + 1]], against: template)
+            if sim >= similarityFloor {
+                lastGood = end + 1
+                misses = 0
+            } else {
+                misses += 1
+                if misses > maxMisses { break }
+            }
             end += 1
         }
+        end = lastGood
 
-        // 向左扩（用同一份模板，保证两边判据一致）
-        var start = left
+        // 向左扩（同一份模板、同一套判据）。
+        var start = lower
+        var firstGood = lower
+        misses = 0
         while start - 1 >= 0 {
-            let prev = hashes[start - 1]
-            let sim = similarity(of: [prev], against: template)
-            if sim < similarityFloor { break }
+            let sim = similarity(of: [hashes[start - 1]], against: template)
+            if sim >= similarityFloor {
+                firstGood = start - 1
+                misses = 0
+            } else {
+                misses += 1
+                if misses > maxMisses { break }
+            }
             start -= 1
         }
+        start = min(anchor, firstGood)
 
+        // 锚点自己必须像它自己的模板（锚点落在正片里时前面已 abort）。
         guard end - start + 1 >= minimumSpan else { return nil }
         return start...end
+    }
+}
+
+// MARK: - 手标区间
+
+/// 用户在时间轴上亲手定的广告区间。
+///
+/// 与「标记广告」按钮的区别（那条走 `AdBoundary.locate` 猜边界）：
+/// 这是**用户说得准**的场景 —— 广告有清晰的黑场切换、片头卡、台标，
+/// 或者算法猜歪了要人纠正。用户给两个时间点，就是两个时间点，
+/// 算法不许再往里塞猜测。
+public enum AdMarkRange {
+
+    /// 最小可接受长度（秒）。低于这个当成误触：两次点在同一秒附近。
+    public static let shortest = AdRange.shortestLength
+
+    /// 由两个时间点造一段。起点比终点晚时自动摆正。
+    ///
+    /// - Returns: 可用区间；时间非有限、负数、或长度不足时 `nil`。
+    public static func make(from: Double, to: Double, duration: Double) -> AdRange? {
+        guard from.isFinite, to.isFinite, from >= 0, to >= 0 else { return nil }
+        // 有片长就钳进去；两端都越过片尾时这一段不成立（`validated` 会返回 nil）。
+        let limit = duration.isFinite && duration > 0 ? duration : .greatestFiniteMagnitude
+        let low = min(min(from, to), limit)
+        let high = min(max(from, to), limit)
+        return AdRange(start: low, end: high, marked: true).validated
+    }
+
+    /// 把手标段并进现有列表：**同一集里**重叠的旧段先剔掉，再按起点排序。
+    ///
+    /// 为什么必须剔：`EpisodeSkipPass` 用 `first(where: contains)` 取段，
+    /// 两段重叠时会取到先入列的那条，跳到它结尾 —— 如果那条是被纠正的错段，
+    /// 用户改了反而跳到更错的地方。重叠即视为同一支广告的再次标注，新标注胜。
+    ///
+    /// ⛔ 只剔**同一集**的：`EpisodeSkipSettings` 按作品存，列表里躺着各集的段。
+    ///   不分集就会在第 2 集标广告时把第 1 集标好的段删掉 —— 用户第二天回头看第 1 集，
+    ///   广告又回来了，而且找不到原因。
+    public static func merging(_ range: AdRange, into existing: [AdRange]) -> [AdRange] {
+        var result = existing.filter { other in
+            // 只在"同一集"范围内判定替换。跨集既不重叠也不替换。
+            guard other.applies(to: range.episode), range.applies(to: other.episode) else { return true }
+            return !other.overlaps(range)
+        }
+        result.append(range)
+        return result.sorted { $0.start < $1.start }
+    }
+
+    /// 从列表里删掉一段（按 id）。
+    public static func removing(id: UUID, from existing: [AdRange]) -> [AdRange] {
+        existing.filter { $0.id != id }
+    }
+}
+
+public extension AdRange {
+    /// 自己过一遍 `isValid`，不合法返回 nil。
+    var validated: AdRange? {
+        guard start.isFinite, length.isFinite, start >= 0, length >= AdMarkRange.shortest else { return nil }
+        return self
     }
 }

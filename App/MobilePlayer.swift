@@ -330,6 +330,8 @@ struct MobilePlayerView: View {
     @State private var showsSkip = false
     /// 正在标注广告（防止连点，顺带给按钮一个忙碌态）。
     @State private var markingAd = false
+    /// 手标广告区间那一页是否打开。
+    @State private var showsAdRange = false
     /// Set to the stream's address when the viewer asks to hand it to another app.
     @State private var externalPlayerStream: HandoffStream?
     /// The intro or credits segment for this item, once a source has claimed one.
@@ -604,6 +606,10 @@ struct MobilePlayerView: View {
         }
         .sheet(isPresented: $showsSeries) { SeriesSuggestionSheet(channel: channel) }
         .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: session) }
+        // 手标广告起止点（与 One 皮肤同一页）。
+        .sheet(isPresented: $showsAdRange) {
+            AdRangeEditor(session: session) { _ in Task { await loadSkipSegment() } }
+        }
     }
 
     /// What the Lock Screen's Now Playing shows, besides the position the system runs on from the rate.
@@ -1411,9 +1417,13 @@ struct MobilePlayerView: View {
         // 原先这四项是 `EmptyView()` —— 它们被收进枚举、设置页能排，
         // 但「更多」里一个都不渲染。现在走与顶栏同一份内容（`seriesEntry`）。
         case .markAd:
+            Button { showsAdRange = true } label: {
+                Label(L10n.text("Mark Ad Range…"), systemImage: "megaphone")
+            }
+            .disabled(!available(.markAd))
             Button { Task { await markAdHere() } } label: {
                 Label(markingAd ? L10n.text("Marking…") : L10n.text("Mark This as an Ad"),
-                      systemImage: "megaphone")
+                      systemImage: "megaphone.fill")
             }
             .disabled(markingAd)
         case .autoPlayNext, .moreInSeries, .skipIntroAuto, .skipIntroManual, .adBlock:
@@ -1783,12 +1793,13 @@ struct MobilePlayerView: View {
     /// 对 `item.asset` 离线抓帧，与自绘层无关，所以原版这条路能标。
     /// 标注点是 `clock.position`（当前播放位置），边界由 `AdBoundary` 自己找。
     @ViewBuilder private func markAdButton(size: CGFloat) -> some View {
-        Button { Task { await markAdHere() } } label: {
-            Image(systemName: markingAd ? "megaphone.fill" : "megaphone")
+        // 打开手标区间那一页，而不是直接猜边界。
+        // 猜边界那条仍在「更多」里（`Mark This as an Ad`），两条并存。
+        Button { showsAdRange = true } label: {
+            Image(systemName: "megaphone")
         }
         .buttonStyle(PlayerCircleStyle(size: size))
-        .disabled(markingAd)
-        .accessibilityLabel(L10n.text("Mark Ad"))
+        .accessibilityLabel(L10n.text("Mark Ad Range…"))
     }
 
     /// 标注一次：把当前位置标成广告，边界自动找，成功后刷新广告库。
