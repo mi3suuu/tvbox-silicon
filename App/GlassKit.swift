@@ -812,7 +812,7 @@ private actor PosterLoader {
     /// Told by a grid as it starts and stops moving.
     func setScrolling(_ scrolling: Bool) { gate.setScrolling(scrolling) }
 
-    /// 一张封面：先直连取，取不到再走观众的出口代理试一次。
+    /// 一张封面：直连先跑，跑不动才让观众的出口代理起跑。
     ///
     /// 为什么需要这一层：一批源的接口在自己域名下（能通），封面却在另一个图床域名上，
     /// 而那个域名在本机被 TLS 阻断（实测 `SSL_ERROR_SYSCALL`：握手就被打断，连 HTTP 状态码
@@ -823,21 +823,14 @@ private actor PosterLoader {
     /// （规则见 `CustomProxyStore.fallbackEndpoint`）。没配代理就没有第二条腿可走，
     /// 保持原来的失败 —— 不要假装加载成功。
     private static func fetchArtwork(_ resource: PosterResource) async throws -> Data {
-        do {
-            return try await HTTPClient().get(resource.url, headers: resource.headers).0
-        } catch {
-            guard let relayed = relayedArtwork(resource.url) else { throw error }
-            return try await HTTPClient().get(relayed, headers: resource.headers).0
-        }
-    }
-
-    /// 同一张图经本机回环中继 + 默认出口的地址；没有出口（或地址不是能转发的那种）时 nil。
-    private static func relayedArtwork(_ url: URL) -> URL? {
-        guard let endpoint = CustomProxyStore.shared.fallbackEndpoint,
-              let base = LocalProxyServer.shared.baseSync,
-              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              url.host() != nil else { return nil }
-        return LocalProxyServer.proxyURL(base: base, url: url, proxyID: endpoint.id)
+        // 封面也走统一出口：直连先跑，失败才让代理起跑。
+        //
+        // ⛔ 旧写法是「直连失败 → 再经中继取一次」的**串行**两步：
+        //    直连那步在真机上要挂满整个超时（十几秒），一页 20 张封面就是 20 次挂满。
+        //    现在两条腿并行，坏 host 的代价压到几百毫秒；好 host 的代理腿根本不起跑。
+        let policy = EgressPolicy.automatic(proxyID: CustomProxyStore.shared.fallbackEndpoint?.id)
+        return try await EgressRouter.shared.data(for: resource.url, headers: resource.headers,
+                                                  purpose: .image, policy: policy).0
     }
 }
 

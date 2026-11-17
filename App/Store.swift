@@ -1935,9 +1935,18 @@ import TVCore
                 }
             }
         }
-        // 「这台源经哪台出口出去」的结论表：播放侧（没有 Store）从这里读，
-        // 保证列表页与视频走的是**同一条腿**。
-        var relayed: [String: String] = [:]
+        // 「这台源该怎么出去」的结论表：播放侧（没有 Store）从这里读。
+        //
+        // ⛔ 这里**不再把 `site.api` 改写成回环中继地址**。
+        //
+        // 旧写法是 `site.routed(.proxy, relayBase:proxyID:)`：一旦观众把源标成代理，
+        // 这个源的接口、海报、播放清单全部变成 `127.0.0.1:port/p/…` —— 只能走同一条腿。
+        // 而实测情况是**按 host 分裂**的：接口在国内直连是好的，播放 CDN 必须过节点；
+        // 换一部剧又反过来。把整源钉死在一条腿上，必然一半能播一半不能。
+        //
+        // 现在只记策略（.direct / .auto / .proxy + 代理 id），由 `EgressRouter` 按请求决定：
+        // 直连先跑，跑不动才让代理起跑。
+        var relayed: [String: RelayRouteRegistry.Route] = [:]
         let sites = config.sites.map { site -> Site in
             let origin = site.origin(or: config.origin)
             let sub: SubscriptionEntry? = {
@@ -1950,35 +1959,32 @@ import TVCore
             // 回环中继换的是「从哪条腿出去」，不是「这台手机能不能连上」。
             //
             // 没指定时用「默认出口」：只配了一台代理的观众，那台就是他的出口。
-            // 不这样兜，`_route: 需代理` 的那批源（本机直连被 TLS 阻断、经境外可读）
-            // 就只能在设置里逐个点代理才活 —— 等于没有这个功能。
             let proxyID = CustomProxyStore.shared.route(origin: origin, sourceKey: site.sourceKey).proxyID
                 ?? CustomProxyStore.shared.fallbackEndpoint?.id
+            let key = RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)
             switch effective {
             case .direct:
+                // 显式直连：不给代理任何机会。这是观众选的，不该被「自动优化」掉。
+                relayed[key] = RelayRouteRegistry.Route(mode: .direct, proxyID: nil)
                 return site.routed(.direct)
             case .proxy:
-                guard let relayBase, let proxyID else { return site.routed(.direct) }
-                relayed[RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)] = proxyID
-                return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
+                // 「代理」= 允许代理，且代理与直连**同时起跑**（谁先给出内容用谁）。
+                // 不再改写地址：标成代理的源不该比直连慢，也不该在直连明明通的时候绕出国。
+                relayed[key] = RelayRouteRegistry.Route(mode: .proxy, proxyID: proxyID)
+                return site.routed(.direct)
             case .auto:
                 // Follow connectivity only for native sources whose address can be relayed.
                 guard site.native, !site.api.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return site }
                 // 旧公共中继的地址一律解包：那台服务器不在映匣里，留着就是一条随时会断的腿。
                 if SourceRelay.isRelayed(site.api) { return site.routed(.direct) }
                 // 包里已经写明「直连不通、需出口代理」的（route.json 的 `_route: 需代理`）：
-                // 有出口就**第一次就走代理**，别让观众先撞一次墙再翻。实测依据见
-                // `Scripts/audit-route-health.py` —— 那批源本机 TLS 握手被中断，经境外可读。
-                if Self.needsOutboundProxy(site), let proxyID, let relayBase {
-                    relayed[RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)] = proxyID
-                    return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
+                // 有出口时让代理**同时起跑**，观众不必先撞一次墙。
+                // 实测依据见 `Scripts/audit-route-health.py` —— 那批源本机 TLS 握手被中断，经境外可读。
+                if Self.needsOutboundProxy(site) || SourceHealth.shared.failedRepeatedly(site, origin: origin) {
+                    relayed[key] = RelayRouteRegistry.Route(mode: .proxy, proxyID: proxyID)
+                    return site
                 }
-                // 其余按连通性翻：只有配了出口代理才值得翻（没配时「中转」只是绕一圈回环）。
-                if SourceHealth.shared.failedRepeatedly(site, origin: origin),
-                   let proxyID, let relayBase {
-                    relayed[RelayRouteRegistry.key(origin: origin, sourceKey: site.sourceKey)] = proxyID
-                    return site.routed(.proxy, relayBase: relayBase, proxyID: proxyID)
-                }
+                relayed[key] = RelayRouteRegistry.Route(mode: .auto, proxyID: proxyID)
                 return site
             }
         }
