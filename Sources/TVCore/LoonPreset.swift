@@ -41,6 +41,9 @@ public struct LoonPreset: Sendable, Equatable {
     public let hasDirectLine: Bool
     /// Whether an older, wider `SRC-PORT` range is still in the config and now covers both lanes.
     public let hasLegacyWideRange: Bool
+    /// 我们那条 `SRC-PORT` 规则的三段字段指向哪个策略组；规则不存在时 nil。
+    /// 不是 `Proxy` 就说明观看者把它写成了某个地区组 —— 代理源会被钉死在那个地区。
+    public let portRuleTarget: String?
 
     /// The endpoint to add. SOCKS5 is preferred when Loon shares it: it carries UDP and leaves the
     /// request line alone, so nothing about the upstream request is rewritten in transit.
@@ -111,6 +114,7 @@ public struct LoonPreset: Sendable, Equatable {
                           sharesOnLAN: (general["allow-wifi-access"] ?? "").lowercased() == "true",
                           portRule: LoonSRCPortRule.placement(inConfig: text),
                           hasDirectLine: LoonSRCPortRule.hasDirectRule(inConfig: text),
-                          hasLegacyWideRange: LoonSRCPortRule.hasLegacyWideRange(inConfig: text))
+                          hasLegacyWideRange: LoonSRCPortRule.hasLegacyWideRange(inConfig: text),
+                          portRuleTarget: LoonSRCPortRule.portRuleTarget(inConfig: text))
     }
 }

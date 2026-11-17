@@ -116,6 +116,14 @@ struct ProxySettingsView: View {
                     case .missing:
                         SettingsRow(symbol: "plus.circle", tint: .secondary, title: L10n.text("Rule not installed yet"))
                     }
+                    // 规则「在」不等于「对」：目标组写成地区组时，代理源会被钉死在那个地区，
+                    // 在 Loon 里换节点对它无效。
+                    if let target = preset.portRuleTarget,
+                       target.caseInsensitiveCompare("Proxy") != .orderedSame {
+                        SettingsRow(symbol: "exclamationmark.triangle", tint: .orange,
+                                    title: L10n.text("Rule points at “%@”, not Proxy", target),
+                                    subtitle: L10n.text("A region group pins the source to that region. Change the third field of the SRC-PORT line to Proxy so it follows the node you picked in Loon."))
+                    }
                 }
             }
         }

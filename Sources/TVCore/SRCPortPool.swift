@@ -195,6 +195,28 @@ public enum LoonSRCPortRule {
         placement(inConfig: text) != .missing
     }
 
+    /// 我们那条规则把流量交给哪个策略组（`SRC-PORT,41500-41599,节点选择` → `节点选择`）。
+    ///
+    /// **必须是 `Proxy`**。`Proxy` 是观看者在 Loon 主界面选中的那一组（它的选择就是他「选的节点」）；
+    /// 写成地区组（「节点选择」「香港节点」「日本节点」）等于把这个源钉死在那个地区，
+    /// 之后在 Loon 里换节点对它完全无效 —— 用户看到的就是「我明明换了节点，代理源还是走老线路」。
+    public static func portRuleTarget(inConfig text: String) -> String? {
+        var inRule = false
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") || line.hasPrefix(";") { continue }
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                inRule = line.lowercased() == "[rule]"
+                continue
+            }
+            guard inRule, line.uppercased().hasPrefix("SRC-PORT"), line.contains(range) else { continue }
+            let fields = line.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count >= 3 else { return nil }
+            return fields[2]
+        }
+        return nil
+    }
+
     /// Diagnoses the rule against a live config. Read the config every time rather than caching a
     /// copy: the viewer keeps adding subscriptions and switching nodes, and a snapshot of their
     /// config goes stale the moment they do — the rule itself never does, because it matches a port.

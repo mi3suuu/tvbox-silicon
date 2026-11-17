@@ -616,15 +616,12 @@ public final class LocalProxyServer: @unchecked Sendable {
         // ephemeral port. Domain rules still win over `SRC-PORT`; see `SRCPortPool`.
         params.allowLocalEndpointReuse = true
         let lane: SRCPortPool.Lane = proxy == nil ? .direct : .proxy
-        // 代理腿默认**不绑** 41500-41599。
+        // 代理腿绑 41500-41599：这是「源标成代理 = 走我选的那个节点」唯一能落地的机制。
+        // Loon 里那条 `SRC-PORT,41500-41599,Proxy` 拿到源端口后，把请求送进观看者在
+        // Loon 主界面选定的策略组（`Proxy`），而不是按域名重新判断一次。
         //
-        // 真相在用户的那份 Loon 配置里：`SRC-PORT,41500-41599,节点选择`。绑这一段等于把所有
-        // 「设成代理」的源整体推给境外节点，国内 api 和视频 CDN 立刻不可用
-        // （`NWError -9816` / `-1200`），而同一个源「直连 + Loon」是好的 —— 差别只在 Loon
-        // 拿到这条连接后按哪条规则处理。不绑端口，Loon 就按它自己的域名 / `GEOIP,CN,DIRECT`
-        // 走，也就是用户「直连」时那条已经验证能播的路。
-        //
-        // 想恢复「代理 = 强制走节点」的语义，在设置里打开 `forceNodeLane`。
+        // 规则目标写成某个地区组（例如「节点选择」）是错的：那会把同一个源固定送到
+        // 那个地区，而观看者选的节点可能早换了。设置页读取 Loon 配置时会核对这一点。
         let wantsPortLane = proxy == nil || CustomProxyStore.shared.forceNodeLane
         var sourcePort: UInt16?
         if bindSourcePort, wantsPortLane, let port = SRCPortPool.shared.acquire(lane) {

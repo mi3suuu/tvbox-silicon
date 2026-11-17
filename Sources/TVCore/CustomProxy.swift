@@ -253,17 +253,19 @@ public final class CustomProxyStore: @unchecked Sendable {
         }
     }
 
-    /// 代理腿是否绑 `41500-41599`，让 Loon 的 `SRC-PORT` 规则把它推进自己的策略组。
+    /// 代理腿是否绑 `41500-41599`，让 Loon 的 `SRC-PORT` 规则把它推进观看者选的策略组。
     ///
-    /// 默认**关**。真机上这一段几乎总是被写成 `SRC-PORT,41500-41599,节点选择`：
-    /// 于是所有「设成代理」的源都被推去境外节点，国内 api 与视频 CDN 直接不可用
-    /// （`NWError -9816` / `-1200`），而同一个源在「直连 + Loon」下是好的。
-    /// 不绑端口时 Loon 会按它自己的域名 / `GEOIP,CN,DIRECT` 规则走 —— 那才是用户配这套东西的本意。
-    /// 只有在真的想让「代理」= 「强制走节点」时才打开它。
+    /// 默认**开**：观看者把源标成「代理」的意图就是「这条走我选的那个节点」，
+    /// 而不是「随便怎么出去都行」。所以代理腿绑 415xx，由 Loon 里那条规则决定落到哪一组。
+    ///
+    /// 规则目标必须是 `Proxy`（Loon 主界面里选的那一组），不是某个地区组 ——
+    /// 地区组是「网络位置」，Proxy 才是「我选的那个节点」。写成地区组时，同一个源
+    /// 会被固定送到那个地区，而不是跟随观看者的选择。
     public static let forceNodeLaneKey = "proxyForceNodeLane.v1"
 
     public var forceNodeLane: Bool {
-        get { lock.withLock { defaults.bool(forKey: Self.forceNodeLaneKey) } }
+        // 缺省为 true：老版本从没写过这个键，升级后要立刻恢复「代理 = 走节点」的语义。
+        get { lock.withLock { defaults.object(forKey: Self.forceNodeLaneKey) as? Bool ?? true } }
         set { lock.withLock { defaults.set(newValue, forKey: Self.forceNodeLaneKey) } }
     }
 
