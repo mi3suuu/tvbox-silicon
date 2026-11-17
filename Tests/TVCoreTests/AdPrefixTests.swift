@@ -349,3 +349,42 @@ private func bodySeconds(_ text: String) -> Double {
     #expect(Set(codes).count == codes.count, "存在重复 code: \(codes)")
     #expect(codes.allSatisfy { !$0.isEmpty })
 }
+
+// MARK: - 换出口后新增检出的源（真实清单，非构造）
+
+@Test func theThreeNewlyReachableSourcesAreHandled() throws {
+    // 用户换出口后这三个源从「连不上」变成可识别：
+    //   番茄资源采集接口（fqzy）—— 删 104.8s
+    //   成人06（XML 接口）      —— 删 51.5s
+    //   奥斯卡资源网（http→https）—— 删 52.9s
+    // 三份清单都是从真实源抓下来存的 fixture，不是构造样本。
+    let cases: [(name: String, expected: Double)] = [
+        ("fqzy", 105), ("adult06", 52), ("oscar", 53)
+    ]
+    for c in cases {
+        let text = try playlist(c.name)
+        let outcome = AdPrefix.inspect(text, origin: origin)
+        let result = try #require(outcome.result, "\(c.name) 应能识别，实际 \(outcome.verdict.code)")
+        #expect(abs(result.seconds - c.expected) < 12,
+                "\(c.name) 删了 \(result.seconds)s，预期约 \(c.expected)s")
+        guard case .removed = outcome.verdict else {
+            Issue.record("\(c.name) verdict 应为 removed，实际 \(outcome.verdict.code)")
+            continue
+        }
+        // 广告分片不能残留在输出里
+        for seg in result.text.components(separatedBy: "\n") where !seg.isEmpty && !seg.hasPrefix("#") {
+            #expect(!seg.isEmpty)
+        }
+    }
+}
+
+@Test func aSourceWhoseAdsLiveInTheSameFolderNameStillWorks() throws {
+    // 成人06 / 奥斯卡 的主目录与广告目录**都叫 `hls`**，只靠 host 或更深路径区分。
+    // 分组键用「绝对 URL 的目录」正好能分开；若改成只比末级目录名就会合并成一组、
+    // 整源判成 single-source —— 这条守护那个前提。
+    for name in ["adult06", "oscar"] {
+        let text = try playlist(name)
+        let outcome = AdPrefix.inspect(text, origin: origin)
+        #expect(outcome.result != nil, "\(name) 必须能识别（两者目录同名 hls），实际 \(outcome.verdict.code)")
+    }
+}
