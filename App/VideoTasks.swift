@@ -2582,7 +2582,7 @@ private struct DockPlacedCard: View {
     let tileOffset: CGSize?
     /// 这张卡此刻是否处于伪全屏（双击置顶）。
     ///
-    /// 只影响两件事：`placed` 临时返回 `.zero`（居中铺满），以及禁用拖拽/捏合。
+    /// 只影响两件事：`placed` 临时返回**居中的负偏移**（见该属性实现；**不是 `.zero`** —— ZStack 是 `bottomTrailing`，`.zero` 会落到右下角），以及禁用拖拽/捏合。
     /// **不参与**宽度计算 —— 宽度走 `widthOverride`，由坞层每帧从容器反算。
     let pseudoFullscreen: Bool
     /// 双击回调（坞层持有状态，卡片只上报）。见 `VideoTaskCard.onDoubleTap`。
@@ -2620,7 +2620,7 @@ private struct DockPlacedCard: View {
     private final class DragAnchor { var value: CGSize? }
     @State private var dragAnchor = DragAnchor()
 
-    /// 这张卡的位置。伪全屏时**临时返回 `.zero`**（居中铺满）。
+    /// 这张卡的位置。伪全屏时**临时返回居中的负偏移**（**不是 `.zero`**：坞的 `ZStack` 是 `bottomTrailing`，`.zero` 会让卡片贴右下角）。
     ///
     /// ⛔ 为什么用「读时覆写」而不是「进入时存原值、退出时写回」：
     ///    写回方案要处理「伪全屏期间 dragOffset 被整理/重钳/转屏改过」的冲突，
@@ -2858,7 +2858,7 @@ struct VideoTaskDock: View {
     /// 伪全屏若要让卡片**居中铺满**，`.offset` 必须给 `.zero` —— 那就覆盖了 `placed`，
     /// 不存原值就还原不回去（卡片会停在左上角）。
     ///
-    /// 但**不需要把原位置存进坞层**：让 `placed` 在伪全屏时临时返回 `.zero` 即可
+    /// 但**不需要把原位置存进坞层**：让 `placed` 在伪全屏时临时返回一个居中的负偏移即可
     /// （见 `DockPlacedCard.placed` 的 `guard`）。`dragOffset` 与 `slot` 全程未被写，
     /// 退出时 `placed` 自动回到原值 —— 零还原成本、零状态同步风险。
     /// 这比「存快照 + 退出写回」更稳：写回要处理「期间的拖动/整理/转屏改了 dragOffset」的冲突，
@@ -3087,7 +3087,9 @@ struct VideoTaskDock: View {
                             // 完全不碰 `pseudoFullscreenID` ⇒ 两条手势互不覆盖。
                             //
                             // 「原位置」不需要存：见 `DockPlacedCard.placed` 的注释 ——
-                            // 伪全屏是让 `placed` **临时返回 .zero**，而 `dragOffset` / `slot`
+                            // 伪全屏是让 `placed` **临时返回一个居中的负偏移**
+                            // （**不是 `.zero`**：坞的 ZStack 是 `bottomTrailing`，
+                            //  `.zero` 会把卡片丢到右下角），而 `dragOffset` / `slot`
                             // 一个字节都没被写，退出时 `placed` 自动回到原值。
                             onDoubleTap: {
                                 pseudoFullscreenID = (pseudoFullscreenID == task.id) ? nil : task.id
