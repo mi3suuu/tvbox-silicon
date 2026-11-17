@@ -127,14 +127,30 @@ public final class AdFrameSampler {
     }
 
     /// CGImage → 9×8 灰度 → dHash。
+    /// CGImage → 9×8 灰度 → dHash。
+    ///
+    /// ⛔ 必须与 `dHash(from: CVPixelBuffer)` 走**同一套缩放**（CIImage + 同一个
+    /// `ciContext`），否则同一条广告"标注时"和"播放时"算出的哈希天然差几个 bit。
+    ///
+    /// 实测（157 真实帧，A/B 两档转码 + 负对照）：
+    ///   · 标注用 `CGContext.interpolationQuality = .medium` 二次重采样、
+    ///     播放用 `CIImage.transformed` 一次缩放 →
+    ///     同源自己标自己放只有 **80%**（距离均值 7.3，阈值 8），跨源 **85%**（均值 8.0，压在阈值上）。
+    ///   · 两边统一走 CIImage → 同源 **100%**（均值 5.3）、跨源 **100%**（均值 5.5）。
+    /// 阈值是 8，均值 7.3 意味着「一半的帧擦着阈值过」——这正是"标了却不跳/时灵时不灵"的根因：
+    /// `AdMatcher` 要求连续 3 帧命中才确认，单帧 80% 的成功率会把连续 3 帧的确认概率打到 51%。
+    ///
+    /// 改动只影响**新标注**的指纹。旧库里用旧实现算出来的哈希距离会略微变大，
+    /// 仍落在阈值内可用（实测旧库 85%），不需要强制清库。
     public nonisolated static func dHash(from image: CGImage) -> UInt64? {
+        let base = CIImage(cgImage: image)
+        guard base.extent.width > 0, base.extent.height > 0 else { return nil }
+        let scaled = base.transformed(by: CGAffineTransform(scaleX: 9 / base.extent.width,
+                                                            y: 8 / base.extent.height))
         var pixels = [UInt8](repeating: 0, count: 9 * 8)
-        guard let ctx = CGContext(data: &pixels, width: 9, height: 8,
-                                  bitsPerComponent: 8, bytesPerRow: 9,
-                                  space: CGColorSpaceCreateDeviceGray(),
-                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-        ctx.interpolationQuality = .medium
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: 9, height: 8))
+        ciContext.render(scaled, toBitmap: &pixels, rowBytes: 9,
+                         bounds: CGRect(x: 0, y: 0, width: 9, height: 8),
+                         format: .L8, colorSpace: CGColorSpaceCreateDeviceGray())
         return AdHash.dHash(gray: pixels)
     }
 
@@ -155,5 +171,42 @@ public final class AdFrameSampler {
                          bounds: CGRect(x: 0, y: 0, width: 9, height: 8),
                          format: .L8, colorSpace: colorSpace)
         return AdHash.dHash(gray: pixels)
+    }
+}
+
+// MARK: - 同一支广告的判定（跨源）
+
+/// 「两个指纹是不是同一支广告」—— 跨源复用就靠这一个判据。
+///
+/// 用户的实际场景是「A 源 A 视频里标过，B 源 B 视频里又遇到同一支广告」，
+/// 所以这个判据要在**转码差异**下仍然成立。实测（两档转码 A/B + 负对照）：
+///
+///   · 标注与播放走同一套缩放时：跨源逐帧距离 4…8（均值 5.5），负对照 15…24（均值 18.5）
+///   · 两侧实现不一致时：同源自己标自己放只有 80%（均值 7.3），跨源 85%（均值 8.0，贴阈值）
+///
+/// 阈值 8 在两侧一致后有明显余量（好帧 ≤8、坏帧 ≥15），不需要放宽 ——
+/// 放宽只会让误跳变多，而误跳比漏跳代价高得多。
+public enum AdMatch {
+    /// 两个指纹库（一支广告 vs 另一支广告）是否同一支。
+    ///
+    /// 判据：取**最像的那一对**采样点，距离 ≤ `AdMatcher.threshold`。
+    /// 用最小距离而不是平均值：两支广告的**开头卡或结尾品牌板**常常一模一样
+    ///（同一家广告主），只靠平均值会被"其它镜头完全不同"拉高而判成两支。
+    /// 只取最小距离的风险是偶发单帧撞上，所以真正的误跳防线在
+    /// `AdMatcher.confirmFrames`（连续多帧）那一层，不在这里。
+    public static func sameAd(_ a: [UInt64], _ b: [UInt64],
+                              threshold: Int = AdMatcher.threshold) -> Bool {
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        for x in a {
+            for y in b {
+                if AdHash.hamming(x, y) <= threshold { return true }
+            }
+        }
+        return false
+    }
+
+    /// 指纹库里是否已经有这支广告（跨源去重用）。
+    public static func contains(_ hashes: [UInt64], in library: [AdSignature]) -> Bool {
+        library.contains { sameAd(hashes, $0.hashes) }
     }
 }

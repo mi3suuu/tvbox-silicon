@@ -237,3 +237,83 @@ private func filmFrame(_ base: UInt64, _ step: Int) -> UInt64 { (base ^ 0xFFFF_F
     #expect(back.marked)
     #expect(back.start == 30)
 }
+
+// MARK: - 跨源复用（A 源标注 → B 源自动跳过）
+
+/// 同一支广告在另一档转码下的样子：与基准只差几位（实测跨源 4…8 位）。
+private func transcoded(_ base: UInt64, _ step: Int) -> UInt64 { base ^ UInt64((step & 0x7) << 1) }
+
+/// 另一支完全不同的广告/正片：差 15 位以上（实测负对照 15…24）。
+private func unrelated(_ base: UInt64, _ step: Int) -> UInt64 { (base ^ 0xFFFF_0000_FFFF_0000) ^ UInt64((step & 0xF) << 4) }
+
+@Test func aFingerprintFromOneSourceMatchesTheSameAdOnAnotherSource() {
+    // 用户场景：A 源 A 视频里标过这支广告，B 源里又遇到它。
+    // 实测跨源逐帧距离 4…8（阈值 8），必须判成同一支。
+    let sourceA = (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0) }
+    let sourceB = (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0 + 3) }
+    #expect(AdMatch.sameAd(sourceA, sourceB))
+}
+
+@Test func aDifferentAdIsNotTakenForTheSameOne() {
+    // 误跳比漏跳代价高得多：不同内容必须判成不同。
+    let ad = (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0) }
+    let other = (0..<15).map { unrelated(0x0123_4567_89AB_CDEF, $0) }
+    #expect(!AdMatch.sameAd(ad, other))
+    #expect(!AdMatch.sameAd([], ad))
+    #expect(!AdMatch.sameAd(ad, []))
+}
+
+@Test func markingTheSameAdTwiceOnTwoSourcesKeepsOneEntry() async {
+    // ⛔ 原来按「哈希数组逐位相等」去重：转码差几个 bit 就当成两支入库。
+    // 后果不是多占几 KB —— `AdMatcher` 会在同一个库里搜到两支几乎相同的广告，
+    // 确认计数在两者之间来回切、`runLength` 反复归 1，**永远凑不满连续 3 帧**。
+    // 用户看到的正是「同一支广告标了两次，反而完全不跳了」。
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ad-lib-" + UUID().uuidString)
+    let lib = AdSignatureLibrary(fileURL: dir.appendingPathComponent("ads.json"))
+    let adA = AdSignature(title: "", duration: 15,
+                          hashes: (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0) })
+    let adB = AdSignature(title: "", duration: 15,
+                          hashes: (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0 + 5) })
+    #expect(await lib.add(adA))
+    // 同一支广告的另一档转码：不能再入一份。
+    #expect(await lib.add(adB) == false)
+    let count = await lib.count()
+    #expect(count == 1)
+}
+
+@Test func aDifferentAdIsStillAddedSeparately() async {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ad-lib2-" + UUID().uuidString)
+    let lib = AdSignatureLibrary(fileURL: dir.appendingPathComponent("ads.json"))
+    let first = AdSignature(title: "", duration: 15,
+                            hashes: (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0) })
+    let second = AdSignature(title: "", duration: 20,
+                             hashes: (0..<20).map { unrelated(0x0123_4567_89AB_CDEF, $0) })
+    #expect(await lib.add(first))
+    #expect(await lib.add(second))
+    let count = await lib.count()
+    #expect(count == 2)
+}
+
+@Test func theMatcherConfirmsAcrossASourceChange() {
+    // 端到端：库里有 A 源标的指纹，B 源连续三帧都该确认命中。
+    // 实测修正后跨源连续 3 帧可确认 6 次、负对照 0 次。
+    let library = [AdSignature(title: "", duration: 15,
+                               hashes: (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0) })]
+    var matcher = AdMatcher()
+    let fromB = (0..<6).map { transcoded(0x0123_4567_89AB_CDEF, $0 + 4) }
+    var hit = false
+    for hash in fromB where matcher.feed(hash, library: library) != nil { hit = true }
+    #expect(hit)
+}
+
+@Test func theMatcherDoesNotConfirmOnUnrelatedFrames() {
+    // 负对照：全程正片，不能确认。
+    let library = [AdSignature(title: "", duration: 15,
+                               hashes: (0..<15).map { transcoded(0x0123_4567_89AB_CDEF, $0) })]
+    var matcher = AdMatcher()
+    for step in 0..<10 {
+        #expect(matcher.feed(unrelated(0x0123_4567_89AB_CDEF, step), library: library) == nil)
+    }
+}

@@ -177,12 +177,21 @@ public actor AdSignatureLibrary {
 
     public func count() -> Int { all().count }
 
-    /// 加入一支新广告。序列号相同（哈希完全一致）时不重复入库。
+    /// 加入一支新广告。
+    ///
+    /// 去重按「是不是同一支广告」判，不是按「哈希数组完全相同」判。
+    ///
+    /// ⛔ 原来是逐位相等（`$0.hashes == ad.hashes`）。那只在**同一份文件**上成立：
+    ///   用户在 A 源标一次、换到 B 源又标一次（同一支广告，转码不同），
+    ///   两份指纹差几个 bit ⇒ 当成两支入库。后果不是"多占几 KB"，
+    ///   而是 `AdMatcher` 在同一个库里搜到 2 支几乎一样的广告，
+    ///   确认计数在两者之间来回切、`runLength` 反复归 1，**永远凑不满连续 3 帧**。
+    ///   用户看到的就是"标了两次反而完全不跳了"。
     @discardableResult
     public func add(_ ad: AdSignature) -> Bool {
         loadIfNeeded()
         guard ad.isUsable else { return false }
-        if snapshot.ads.contains(where: { $0.hashes == ad.hashes }) { return false }
+        if AdMatch.contains(ad.hashes, in: snapshot.ads) { return false }
         snapshot.ads.append(ad)
         snapshot.updatedAt = Date()
         persist()
@@ -208,12 +217,13 @@ public actor AdSignatureLibrary {
     @discardableResult
     public func merge(_ other: Snapshot) -> Int {
         loadIfNeeded()
-        let existingHashes = Set(snapshot.ads.map { $0.hashes })
         let existingIDs = Set(snapshot.ads.map { $0.id })
         var added = 0
         for ad in other.ads where ad.isUsable {
             if existingIDs.contains(ad.id) { continue }
-            if existingHashes.contains(ad.hashes) { continue }
+            // 同 `add`：同一支广告的不同转码版本不能各存一份，
+            // 否则确认计数会被两支几乎相同的指纹来回打断。
+            if AdMatch.contains(ad.hashes, in: snapshot.ads) { continue }
             snapshot.ads.append(ad)
             added += 1
         }
