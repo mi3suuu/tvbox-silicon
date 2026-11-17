@@ -159,10 +159,22 @@ import Testing
     // MARK: 语义
 
     @Test func directOnlyNeverAsksForAProxyLeg() {
-        // `proxyID` 非空也不该被直连策略借用 —— 观众选的是「不过代理」。
+        // 没有端点可用的「直连」才是真的不过代理。
         let policy = EgressPolicy.directOnly
         #expect(policy.proxyID == nil)
         #expect(!policy.allowsProxy)
+    }
+
+    /// 「直连」= 直连先跑、失败由代理救一次，**不是**永不允许代理。
+    ///
+    /// 源列表里一百多条 `direct` 大多是测速/自动分流批量写进去的；把它们当成硬约束，
+    /// 直连一被掐就是上百个源同时「暂时无法加载此来源」，而代理腿明明还在。
+    @Test func aDirectChoiceStillLetsTheProxyRescueAFailure() {
+        let policy = EgressPolicy.preferDirect(proxyID: "loon")
+        #expect(policy.allowsProxy)
+        #expect(policy.proxyID == "loon")
+        // 没有可用端点时退回纯直连，不假装有代理。
+        #expect(!EgressPolicy.preferDirect(proxyID: nil).allowsProxy)
     }
 
     @Test func automaticWithAnEndpointAllowsTheFallback() {

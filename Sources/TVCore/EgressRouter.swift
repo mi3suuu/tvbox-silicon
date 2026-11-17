@@ -52,12 +52,20 @@ public enum EgressPurpose: String, Sendable, CaseIterable {
 /// - `.preferProxy`：代理与直连同时起跑，谁先给出内容用谁。标成「代理」也不该比直连慢。
 public enum EgressPolicy: Sendable, Equatable {
     case directOnly
+    /// 观众把源标成「直连」：直连**先跑**，跑不通再让代理救一次。
+    ///
+    /// ⛔ 不能是「永不允许代理」。源列表里那 100 多条 `direct` 大多不是手点的，
+    /// 是测速/自动分流批量写进去的（`Store+SourceGrouping` 里 `setRoute(.direct, for: up)`）。
+    /// 把它们当成硬约束，等于一次性判死上百个源：直连 TLS 一被掐，界面上就只剩
+    /// 「暂时无法加载此来源」，而代理那条腿明明还在。观众的原话是「直连不通再走代理」。
+    case preferDirect(proxyID: String?)
     case automatic(proxyID: String?)
     case preferProxy(proxyID: String)
 
     public var proxyID: String? {
         switch self {
         case .directOnly: nil
+        case .preferDirect(let id): id
         case .automatic(let id): id
         case .preferProxy(let id): id
         }
@@ -320,6 +328,9 @@ public final class EgressRouter: @unchecked Sendable {
 
         let hedge: Duration = {
             if case .preferProxy = policy { return .zero }
+            // 「直连优先」的源给直连一个更宽的先行窗口：900ms 足够一个正常的接口响应回来，
+            // 又不会让被掐的直连挂满 4 秒超时。代理只在这之后起跑，失败了照样救得上。
+            if case .preferDirect = policy { return .milliseconds(900) }
             return purpose.hedgeDelay
         }()
         await withTaskGroup(of: (EgressLeg, Bool).self) { group in
@@ -500,6 +511,9 @@ public final class EgressRouter: @unchecked Sendable {
                       range: String?) async throws -> (Data, URL) {
         let hedge: Duration = {
             if case .preferProxy = policy { return .zero }
+            // 「直连优先」的源给直连一个更宽的先行窗口：900ms 足够一个正常的接口响应回来，
+            // 又不会让被掐的直连挂满 4 秒超时。代理只在这之后起跑，失败了照样救得上。
+            if case .preferDirect = policy { return .milliseconds(900) }
             return purpose.hedgeDelay
         }()
         Diagnostics.shared.record(.debug, "egress",

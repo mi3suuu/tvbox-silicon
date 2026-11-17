@@ -1113,14 +1113,14 @@ import TVCore
     /// 不在「能不能用直连」—— 直连明明通的时候，标成代理也不该绕出国去变慢。
     private func egressPolicy(for channel: Channel) -> EgressPolicy {
         guard let context = channel.historyContext else {
-            return .automatic(proxyID: CustomProxyStore.shared.fallbackEndpoint?.id)
+            return .automatic(proxyID: CustomProxyStore.shared.bestEndpointID())
         }
         let route = RelayRouteRegistry.shared.route(origin: context.origin, sourceKey: context.sourceKey)
         let lineProxy = LineSettings.shared.route(origin: context.origin, sourceKey: context.sourceKey,
                                                  flag: context.episodeFlag)?.proxyID
-        let proxyID = lineProxy ?? route?.proxyID ?? CustomProxyStore.shared.fallbackEndpoint?.id
+        let proxyID = lineProxy ?? route?.proxyID ?? CustomProxyStore.shared.bestEndpointID()
         switch route?.mode ?? .auto {
-        case .direct: return .directOnly
+        case .direct: return proxyID.map { EgressPolicy.preferDirect(proxyID: $0) } ?? .directOnly
         case .proxy: return proxyID.map { EgressPolicy.preferProxy(proxyID: $0) } ?? .automatic(proxyID: nil)
         case .auto: return .automatic(proxyID: proxyID)
         }

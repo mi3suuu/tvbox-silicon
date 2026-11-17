@@ -458,7 +458,7 @@ public struct CatalogClient: Sendable {
         // 用 `bestEndpointID`：标了代理就必须找到一台，多台没指定默认出口时也不能缩回直连。
         let proxyID = route?.proxyID ?? CustomProxyStore.shared.bestEndpointID()
         switch route?.mode ?? .auto {
-        case .direct: return .directOnly
+        case .direct: return proxyID.map { EgressPolicy.preferDirect(proxyID: $0) } ?? .directOnly
         case .proxy: return proxyID.map { EgressPolicy.preferProxy(proxyID: $0) } ?? .automatic(proxyID: nil)
         case .auto: return .automatic(proxyID: proxyID)
         }
