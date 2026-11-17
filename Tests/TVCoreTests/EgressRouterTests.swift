@@ -236,3 +236,40 @@ import Testing
         #expect(!LocalNetwork.isPrivate("8.8.8.8"))
     }
 }
+
+/// 生成的 Loon 插件必须满足三件事，否则真机上会静默失效：
+///   1. 规则行只写 `PROXY`（插件规则只允许 DIRECT/REJECT/PROXY，写组名会被判非法）；
+///   2. 不能出现空规则（Loon 会报「无法找到任何有效规则」）；
+///   3. 域名去重、忽略空项，否则同一域名重复出现会浪费匹配且不好排查。
+@Suite struct LoonPluginTests {
+    @Test func rulesUseTheProxyKeywordBecauseTheGroupNameMoves() {
+        let text = LoonPlugin.text(hosts: ["aosikazy.com"])
+        #expect(text.contains("DOMAIN-SUFFIX,aosikazy.com,PROXY"))
+        // 写成具体组名在插件里是非法的，也是脆的：观众改组名就失效。
+        #expect(!text.contains("节点选择"))
+    }
+
+    @Test func hostsAreNormalisedAndDeduplicated() {
+        let text = LoonPlugin.text(hosts: ["  AoSikazy.COM ", "aosikazy.com", "", "no-dot", "xingba111.com"])
+        #expect(text.contains("DOMAIN-SUFFIX,aosikazy.com,PROXY"))
+        #expect(text.contains("DOMAIN-SUFFIX,xingba111.com,PROXY"))
+        #expect(text.components(separatedBy: "aosikazy.com").count == 2)  // 只出现一次
+        #expect(!text.contains("no-dot"))
+        #expect(LoonPlugin.ruleCount(hosts: ["a.com", "A.com", " b.com "]) == 2)
+    }
+
+    @Test func anEmptyListNeverProducesAnEmptyRuleSection() {
+        let text = LoonPlugin.text(hosts: [])
+        #expect(text.contains("[Rule]"))
+        // 只有注释，没有半条规则 —— 这种文件不该被导进 Loon，但也不能产出一行空的 "DOMAIN-SUFFIX,,"。
+        #expect(!text.contains("DOMAIN-SUFFIX,"))
+        #expect(LoonPlugin.ruleCount(hosts: []) == 0)
+    }
+
+    @Test func theHeaderCarriesWhatLoonNeedsToAcceptIt() {
+        let text = LoonPlugin.text(hosts: ["a.com"])
+        for field in ["#!name =", "#!desc =", "#!author =", "#!system =", "#!date =", "#!type = normal"] {
+            #expect(text.contains(field), "缺少 \(field)")
+        }
+    }
+}

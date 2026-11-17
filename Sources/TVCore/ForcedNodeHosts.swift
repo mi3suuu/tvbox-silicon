@@ -108,6 +108,18 @@ public enum LoonScheme {
         return components.url
     }
 
+    /// 导入插件（`loon://import?plugin=`）。
+    ///
+    /// 比 `importRules` 更适合我们：插件只在导入时取一次，之后内容存在 Loon 自己的库里，
+    /// 不依赖本机监听是否还活着 —— 也就不会出现「App 挂起后刷新失败」。
+    public static func importPlugin(_ url: URL) -> URL? {
+        var components = URLComponents()
+        components.scheme = "loon"
+        components.host = "import"
+        components.queryItems = [URLQueryItem(name: "plugin", value: url.absoluteString)]
+        return components.url
+    }
+
     /// 让 Loon 重新拉一遍全部订阅资源 —— 我们学到新域名后调它即可。
     public static var updateAll: URL? { URL(string: "loon://update?sub=all") }
 

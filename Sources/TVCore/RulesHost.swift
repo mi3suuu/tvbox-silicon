@@ -28,7 +28,10 @@ public final class RulesHost: @unchecked Sendable {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            parameters.requiredInterfaceType = .wifi
+            // ⛔ 不要限定 `requiredInterfaceType = .wifi`。
+            //    真机上踩过：设备走蜂窝（或蜂窝优先的热点）时，限定 WiFi 的监听**永远不 ready**，
+            //    端口拿不到 → 规则地址一个都取不到，表现为「127.0.0.1 也经常拉不到」。
+            //    绑所有接口，回环与局域网才都在。
             let listener = try NWListener(using: parameters, on: .any)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.serve(connection)
@@ -55,13 +58,25 @@ public final class RulesHost: @unchecked Sendable {
 
     /// 给 Loon 的订阅地址：优先局域网地址（同机也可能被 TUN 拦），回环作为退路。
     public func rulesURLs() -> [URL] {
+        urls(path: "/loon/rules.list")
+    }
+
+    /// 给 Loon 导入的**插件**地址。
+    ///
+    /// 插件只在导入那一刻被取一次，之后内容由 Loon 自己保存 ——
+    /// 所以这个地址不需要常驻，App 退出也不影响已经装上的规则。
+    public func pluginURLs() -> [URL] {
+        urls(path: LoonPlugin.path)
+    }
+
+    private func urls(path: String) -> [URL] {
         guard let port = listeningPort else { return [] }
-        var urls: [URL] = []
-        if let host = LocalNetwork.currentIPv4, let url = URL(string: "http://\(host):\(port)/loon/rules.list") {
-            urls.append(url)
+        var found: [URL] = []
+        if let host = LocalNetwork.currentIPv4, let url = URL(string: "http://\(host):\(port)\(path)") {
+            found.append(url)
         }
-        if let url = URL(string: "http://127.0.0.1:\(port)/loon/rules.list") { urls.append(url) }
-        return urls
+        if let url = URL(string: "http://127.0.0.1:\(port)\(path)") { found.append(url) }
+        return found
     }
 
     private func serve(_ connection: NWConnection) {
@@ -71,7 +86,9 @@ public final class RulesHost: @unchecked Sendable {
             let request = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
             let body: String
-            if path.hasPrefix("/loon/rules") {
+            if path.hasPrefix("/loon/plugin") {
+                body = LoonPlugin.text(hosts: ForcedNodeHosts.shared.hosts)
+            } else if path.hasPrefix("/loon/rules") {
                 let lines = ForcedNodeHosts.shared.subscriptionRules()
                 body = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
             } else {

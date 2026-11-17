@@ -47,7 +47,7 @@ struct ProxySettingsView: View {
             // 之前把入口放在「检测到 Loon 预设」那块，没重新检测就不渲染，
             // 而且还要已经有记录才出现 —— 等于观众永远看不到。改成常驻。
             SettingsGroup(title: L10n.text("Sites That Must Use a Node"),
-                          footer: L10n.text("A site your Loon rules already classify as direct cannot be re-routed by this app. The ones detected so far are listed here: subscribe them in Loon and they will be forced through your node.")) {
+                          footer: L10n.text("A site your Loon rules already classify as direct cannot be re-routed by this app. Install the generated plugin in Loon once; it stays in effect afterwards.")) {
                 SettingsRow(symbol: "list.bullet", tint: .secondary,
                             title: L10n.text("Recorded: %@", "\(ForcedNodeHosts.shared.hosts.count)"),
                             subtitle: ForcedNodeHosts.shared.hosts.prefix(3).joined(separator: ", "))
@@ -58,20 +58,16 @@ struct ProxySettingsView: View {
                                 title: L10n.text("Nothing recorded yet"),
                                 subtitle: L10n.text("Open a source that fails to load; the site is recorded once both lines fail."))
                 } else {
-                    if let rules = RulesHost.shared.rulesURLs().first {
+                    if let plugin = RulesHost.shared.pluginURLs().first {
                         SettingsRow(symbol: "link", tint: .secondary,
-                                    title: L10n.text("Rule URL"),
-                                    subtitle: rules.absoluteString)
+                                    title: L10n.text("Plugin URL"),
+                                    subtitle: plugin.absoluteString)
                     }
-                    SettingsActionRow(title: L10n.text("Subscribe in Loon")) { openInLoon() }
-                    // Loon 只暴露了 scheme 这一个「立刻刷新」入口，它会切到 Loon 前台。
-                    // 所以这条是显式动作，不自动跳 —— 自动跳会打断观看。
-                    SettingsActionRow(title: L10n.text("Sync Now (opens Loon)")) { syncLoon() }
-                    // 真正实现「无感」的那一行：Remote Rule + update-interval，
-                    // Loon 自己在后台按间隔重拉，不需要 scheme、不会切前台。
+                    // 主入口：装一次插件，永久生效，且不需要我们的服务继续活着。
+                    SettingsActionRow(title: L10n.text("Install in Loon")) { installPluginInLoon() }
                     SettingsActionRow(title: L10n.text("Identify My Node")) { identifyNode() }
-                    SettingsActionRow(title: L10n.text("Copy Remote Rule Line")) { copyRemoteRuleLine() }
                     SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
+                    SettingsActionRow(title: L10n.text("Copy Remote Rule Line")) { copyRemoteRuleLine() }
                 }
             }
             // 默认出口：多台代理时，「源路由 = 代理」该从哪条腿出去，必须能指定。
@@ -293,34 +289,24 @@ struct ProxySettingsView: View {
         #endif
     }
 
-    /// 让 Loon 立刻重拉订阅资源。会切到 Loon 前台，所以只能由观众主动点。
-    private func syncLoon() {
-        guard let url = LoonScheme.updateAll else { return }
-        #if os(iOS)
-        UIApplication.shared.open(url)
-        #elseif os(macOS)
-        NSWorkspace.shared.open(url)
-        #endif
-    }
-
-    private func openInLoon() {
+    /// 让 Loon 导入插件（`loon://import?plugin=`）。
+    ///
+    /// 这条路比规则订阅强在**不依赖我们活着**：Loon 只在导入这一刻来取一次，
+    /// 取到之后就存在它自己的库里，App 被挂起或杀掉都不影响。
+    /// 规则里的策略写的是 `PROXY`（= 观众当前选中的策略组），所以不必知道组名，
+    /// 观众改组名也不会失效。
+    private func installPluginInLoon() {
         RulesHost.shared.start()
-        guard let hosted = RulesHost.shared.rulesURLs().first,
-              let schemeURL = LoonScheme.importRules(hosted) else { return }
+        guard let hosted = RulesHost.shared.pluginURLs().first,
+              let schemeURL = LoonScheme.importPlugin(hosted) else { return }
+        Diagnostics.shared.record(.info, "proxy",
+            "installing Loon plugin from \(hosted.host ?? "-"):\(hosted.port ?? 0)"
+            + " rules=\(LoonPlugin.ruleCount(hosts: ForcedNodeHosts.shared.hosts))")
         #if os(iOS)
         UIApplication.shared.open(schemeURL)
         #elseif os(macOS)
         NSWorkspace.shared.open(schemeURL)
         #endif
-    }
-
-    /// `loon://import?rules=<本机托管的规则文件>`；中继没起来或没有记录时不给这个入口。
-    private var hostedRulesSchemeURL: URL? {
-        guard !ForcedNodeHosts.shared.hosts.isEmpty,
-              let base = LocalProxyServer.shared.baseSync,
-              let port = base.port,
-              let hosted = LoonScheme.hostedRulesURL(port: port) else { return nil }
-        return LoonScheme.importRules(hosted)
     }
 
     private func copyLoonRule() {
