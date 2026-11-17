@@ -75,3 +75,27 @@ public final class ForcedNodeHosts: @unchecked Sendable {
         defaults.stringArray(forKey: Self.hostsKey) ?? []
     }
 }
+
+/// Loon 的 URL Scheme（官方 `nsloon.app/docs/Scheme`）。
+///
+/// 有了它，「加规则」不必让观众逐个粘贴：我们托管规则文件，
+/// 再把 `loon://import?rules=<urlencoded>` 交给系统打开，Loon 自己去订阅。
+public enum LoonScheme {
+    /// 导入规则订阅。`url` 需可被 Loon 访问；同机时用局域网地址最稳（回环常被拒）。
+    public static func importRules(_ url: URL) -> URL? {
+        var components = URLComponents()
+        components.scheme = "loon"
+        components.host = "import"
+        components.queryItems = [URLQueryItem(name: "rules", value: url.absoluteString)]
+        return components.url
+    }
+
+    /// 让 Loon 重新拉一遍全部订阅资源 —— 我们学到新域名后调它即可。
+    public static var updateAll: URL? { URL(string: "loon://update?sub=all") }
+
+    /// 本机托管的规则文件地址。回环常被 Loon 拒绝，所以优先用当前局域网地址。
+    public static func hostedRulesURL(port: Int) -> URL? {
+        let host = LocalNetwork.currentIPv4 ?? "127.0.0.1"
+        return URL(string: "http://\(host):\(port)/loon/rules.list")
+    }
+}

@@ -204,11 +204,38 @@ public final class LocalProxyServer: @unchecked Sendable {
         let path: String
     }
 
+    /// 把学到的「必须显式走节点」的域名，作为一份规则文件发给本机请求方（Loon）。
+    ///
+    /// 为什么走这条而不是让观众手粘：Loon 官方有 `loon://import?rules=<url>` 与
+    /// `loon://update?sub=all`，所以「App 生成 → Loon 订阅」是可以自动化的。
+    /// 判定口径与 `ForcedNodeHosts` 一致：只有代理腿超时（Loon 接了连接却不回）才收录。
+    private static func serveHostedRules(_ path: String, connection: NWConnection, queue: DispatchQueue) {
+        let body: String
+        if path.hasPrefix("/loon/rules") {
+            body = ForcedNodeHosts.shared.ruleFragment(fallbackTarget: LoonPreset.defaultGroupName) ?? "# 暂无记录\n"
+        } else {
+            body = "# 可用路径：/loon/rules.list\n"
+        }
+        let bytes = Data(body.utf8)
+        var head = "HTTP/1.1 200 OK\r\n"
+        head += "Content-Type: text/plain; charset=utf-8\r\n"
+        head += "Content-Length: \(bytes.count)\r\n"
+        head += "Connection: close\r\n\r\n"
+        connection.send(content: Data(head.utf8) + bytes, isComplete: true,
+                        completion: .contentProcessed { _ in connection.cancel() })
+    }
+
     private static func route(_ connection: NWConnection, head: String, leftover: Data, queue: DispatchQueue) {
         let lines = head.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else { connection.cancel(); return }
         let fields = requestLine.split(separator: " ")
         guard fields.count >= 2 else { connection.cancel(); return }
+        // 本机托管的规则文件：给 Loon 订阅用（`loon://import?rules=…`）。
+        // 这类请求不是隧道流量，不能走 `parse`（它要求目标里有 host/port）。
+        if fields[1].hasPrefix("/loon/") {
+            Self.serveHostedRules(String(fields[1]), connection: connection, queue: queue)
+            return
+        }
         guard let parsed = parse(String(fields[1])) else { connection.cancel(); return }
         // ⛔ 目标指向本机（回环）一律拒绝。
         //

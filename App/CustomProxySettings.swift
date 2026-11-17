@@ -82,6 +82,15 @@ struct ProxySettingsView: View {
                 SettingsActionRow(title: ruleCopied ? L10n.text("Rule Copied") : L10n.text("Copy Loon Rule")) {
                     copyLoonRule()
                 }
+                // 比粘贴更省事：规则文件由本机托管，Loon 自己订阅它。
+                // 需要逐站覆盖的域名（被 Loon 的域名/IP 规则判成直连那些）会随学习自动进这份文件。
+                if let schemeURL = hostedRulesSchemeURL {
+                    SettingsActionRow(title: L10n.text("Subscribe in Loon")) {
+                        #if os(iOS)
+                        UIApplication.shared.open(schemeURL)
+                        #endif
+                    }
+                }
                 SettingsRow(symbol: "arrow.triangle.branch", tint: .secondary, title: L10n.text("Proxy %@", LoonSRCPortRule.range),
                             subtitle: L10n.text("Dialled for sources you route through a proxy."))
                 SettingsRow(symbol: "arrow.right", tint: .secondary, title: L10n.text("Direct %@", LoonSRCPortRule.directRange),
@@ -214,6 +223,15 @@ struct ProxySettingsView: View {
         guard let extra = ForcedNodeHosts.shared.ruleFragment(fallbackTarget: LoonPreset.defaultGroupName)
         else { return LoonSRCPortRule.fragment }
         return LoonSRCPortRule.fragment + "\n\n" + extra
+    }
+
+    /// `loon://import?rules=<本机托管的规则文件>`；中继没起来或没有记录时不给这个入口。
+    private var hostedRulesSchemeURL: URL? {
+        guard !ForcedNodeHosts.shared.hosts.isEmpty,
+              let base = LocalProxyServer.shared.baseSync,
+              let port = base.port,
+              let hosted = LoonScheme.hostedRulesURL(port: port) else { return nil }
+        return LoonScheme.importRules(hosted)
     }
 
     private func copyLoonRule() {
