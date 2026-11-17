@@ -34,13 +34,12 @@ private func bodySeconds(_ text: String) -> Double {
 
 @Test func everyRealSourceGetsItsAdGroupsRemoved() throws {
     // 四个源四种形态（两个分类 + 两个不同站），都必须能剥。
-    // ⚠️ 只删**开头前缀**，中插广告一律保留（见 AdPrefix 里对时间轴洞的说明）。
-    //    所以这里的预期值是各 fixture 的**前缀**时长，不是全部广告时长：
-    //      A  前缀 15.03s（另有两段中插 89.80s，故意不删）
-    //      X1 前缀 15.03s（另有中插 59.87s）
-    //      Y2 前缀 26.07s（没有中插）
-    //      Z2 前缀 25.76s（另有中插 25.76s）
-    for (name, expectedSeconds) in [("A", 15.03), ("X1", 15.03), ("Y2", 26.07), ("Z2", 25.76)] {
+    // 现在**前后贴都删**（用户要求「都去掉」），所以预期是广告**总时长**：
+    //   A  前贴 15.03 + 中插 89.80 = 104.83
+    //   X1 前贴 15.03 + 中插 59.87 =  74.90
+    //   Y2 前贴 26.07（无中插）
+    //   Z2 前贴 25.76 + 中插 25.76 =  51.52
+    for (name, expectedSeconds) in [("A", 104.83), ("X1", 74.90), ("Y2", 26.07), ("Z2", 51.52)] {
         let text = try playlist(name)
         let result = try #require(AdPrefix.strip(text, origin: origin), "\(name) 没识别出广告")
         #expect(abs(result.seconds - expectedSeconds) < 0.5,
@@ -58,9 +57,9 @@ private func bodySeconds(_ text: String) -> Double {
     let after = segments(result.text).count
     let afterSeconds = bodySeconds(result.text)
 
-    // A 的前缀 = 开头 4 片 / 15.03s。中插的 24 片必须**原样留着**。
-    #expect(before - after == 4, "before=\(before) after=\(after)")
-    #expect(abs((beforeSeconds - afterSeconds) - 15.03) < 0.1,
+    // A 的广告 = 前贴 4 片 + 中插 24 片 = 28 片 / 104.83s，全部删掉。
+    #expect(before - after == 28, "before=\(before) after=\(after)")
+    #expect(abs((beforeSeconds - afterSeconds) - 104.83) < 0.5,
             "少了 \(beforeSeconds - afterSeconds)s")
     // 正片 98.5% 必须一秒不少。
     #expect(afterSeconds > beforeSeconds * 0.95)
@@ -76,10 +75,10 @@ private func bodySeconds(_ text: String) -> Double {
     let result = try #require(AdPrefix.strip(text, origin: origin))
     let after = segments(result.text).count
     let before = segments(text).count
-    // X1 的前缀是 4 片。只该少这 4 片（中插不删），
+    // X1 的广告共 20 片（前贴 4 + 中插 16）。只该少广告那几片，
     // 且绝不能因为 131 个 DISCONTINUITY 把正片切碎。
-    #expect(before - after == 4,
-            "切掉了 \(before - after) 个分片；应恰好是开头 4 片前缀")
+    #expect(before - after == 20,
+            "切掉了 \(before - after) 个分片；应为 20 片广告")
 }
 
 @Test func theFilmsOwnAESKeyTagsSurvive() throws {
@@ -189,25 +188,31 @@ private func bodySeconds(_ text: String) -> Double {
     #expect(AdPrefix.strip(lines.joined(separator: "\n"), origin: origin) == nil)
 }
 
-@Test func midrollAdsAreDeliberatelyKeptBecauseCuttingThemLeavesATimelineHole() throws {
-    // ⛔ 这是本模块最重要的一条回归，别把它改"绿"了。
+@Test func midrollAdsAreRemovedToo() throws {
+    // 用户要求「都去掉」：中插广告也必须删。
     //
-    //    实测（ffmpeg 9.0.2，本地构造 c1+广告+c2 的 HLS，见 ad-scan/gap/）：
-    //      原样                     最大帧间隔 0.0400s
-    //      删中插广告段             最大帧间隔 **4.0400s**  ← 等于广告长度的时间轴洞
-    //      删中插 + DISCONTINUITY   仍 4.0400s            ← 该标签一秒都补不上
-    //      删**开头**前缀           0.0400s              ← 没有洞
-    //
-    //    而且实测广告段是 1080p/1.1MB、正片段 720p/0.3MB，拼接点必然重建解码器。
-    //    所以中插广告**只删前缀、不动中插**：宁可留广告，也不能让正片卡顿/跳帧。
+    // ⚠️ 但**不要**顺手加「前移 PES/PTS」的补偿。实测真实源不需要：
+    //    155 源 m004 末帧 PTS=6162.04、m005 首帧 PTS=6162.12，
+    //    中间删掉了 25.76 秒广告，两者仍天然连续 —— 源站在生成清单时
+    //    已经把广告从时间轴上扣掉了。若按「删多少补多少」去改 PES，
+    //    PTS 会倒退，播放器反而重新缓冲/卡死。
+    //    （这个反例来自我自己造的 concat HLS，与真实源的时间轴组织不同。）
     let text = try playlist("A")
     let result = try #require(AdPrefix.strip(text, origin: origin))
 
-    // 中插的广告目录必须还在清单里。
-    #expect(result.text.contains("625264b24905f8e9"),
-            "中插广告的分片被删掉了 —— 这会在时间轴上留洞，正片会卡")
-    // 并且要在结果里如实报告"还剩多少处中插没处理"。
-    #expect(result.keptMidrolls > 0, "应如实报告未处理的中插数量，实际 \(result.keptMidrolls)")
+    #expect(!result.text.contains("625264b24905f8e9"), "中插广告没删干净")
+    // 删掉的时长要如实报告（供诊断），且应包含前贴 + 中插
+    #expect(result.seconds > 100, "A 应删掉 100 秒以上（前贴+中插），实际 \(result.seconds)")
+}
+
+@Test func theDiagnosticDurationEqualsWhatWasActuallyRemoved() throws {
+    // 报告的删除时长必须与实际少掉的段时长一致，否则诊断会误导。
+    for name in ["A", "X1", "Y2", "Z2"] {
+        let text = try playlist(name)
+        let result = try #require(AdPrefix.strip(text, origin: origin), "\(name)")
+        #expect(abs(result.removedSecondsForDiagnostics - result.seconds) < 0.01)
+        #expect(result.removedSecondsForDiagnostics > 0)
+    }
 }
 
 @Test func aPlaylistWhoseAdIsOnlyAtTheHeadRemovesExactlyThatHead() throws {

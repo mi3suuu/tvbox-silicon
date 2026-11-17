@@ -63,8 +63,32 @@ public enum AdPrefix {
         public let mainPath: String
         /// 被移除的目录数。
         public let droppedGroups: Int
-        /// **未处理的中插广告**数量（这些留着不动，见下面的说明）。
+        /// 被移除的中插广告段数（仅统计非开头的那些，供诊断）。
         public let keptMidrolls: Int
+        /// 删掉的时长（供诊断）。**不要拿它去前移 PTS** —— 原因见下。
+        ///
+        /// ## 实测结论：真实源不需要重基准（重要）
+        ///
+        /// 早期我用自己的 ffmpeg 合成 HLS 测出「删段会留 4.04s 时间轴洞」，
+        /// 于是加了「前移后续段 PES/PTS」的补偿。**在真实源上这是错的**：
+        ///
+        /// 抓 155 源的真实分片逐段读 PTS：
+        /// ```
+        /// m004 末帧 PTS = 6162.04
+        /// m005 首帧 PTS = 6162.12   ← 中间删掉了 25.76s 广告
+        /// ```
+        /// 两者**天然连续**。开头广告同理：删掉前 9 段后，第一个正片段首 PTS=1.48，
+        /// 后续逐段连续到 111.80，全程无洞。
+        ///
+        /// ⇒ 这些源在**生成清单时就已经把广告从时间轴上扣掉了**，
+        ///   广告段的 PTS 不占位，删掉它们之后前后天然相接。
+        ///   若按「删了多少就前移多少」去改 PES，会让 PTS **倒退**，
+        ///   播放器看到时间倒退会重新缓冲甚至卡死 —— 比不去广告更糟。
+        ///
+        /// 合成 HLS 之所以测出洞，是因为我用 `concat` 拼的正片+广告，
+        /// 那种素材的 PTS 天生是连续累加的，与真实源的时间轴组织方式不同。
+        /// **这是「用自造样本代替真实数据」的典型陷阱。**
+        public let removedSecondsForDiagnostics: Double
     }
 
     private struct Segment {
@@ -147,31 +171,36 @@ public enum AdPrefix {
         //    拼接点必然触发解码器重建（profile/分辨率/码率都变），
         //    即使补了洞也会有一次可见的画面跳变。这与用户要求的
         //    「不能影响播放观感」直接冲突，所以中插不做。
-        // 前缀 = 从第 0 段起、连续的广告段长度。
-        var headCount = 0
-        while headCount < segments.count, dropped.contains(segments[headCount].group) {
-            headCount += 1
+        // ① 找出所有要删的段：**凡是落在广告目录里的段，一律删**（前缀 + 中插都删）。
+        //
+        //    这里不再区分前缀/中插 —— 用户要求「都去掉」。
+        //    注意：**不需要**为删段补 PES/PTS —— 真实源的时间轴里广告本就不占位，
+        //    删掉后前后天然连续（见 `removedSecondsForDiagnostics` 的实测数据）。
+        var kept: [Segment] = []
+        var removedCount = 0
+        var removedSeconds = 0.0
+        for segment in segments {
+            if dropped.contains(segment.group) {
+                removedCount += 1
+                removedSeconds += segment.duration
+                continue
+            }
+            kept.append(segment)
         }
-        // 开头不是广告（第 0 段就是正片）⇒ 这个源没有前缀广告，什么都不做。
-        guard headCount > 0, headCount < segments.count else { return nil }
 
-        // 只保留 headCount 之后的全部段落（中插广告**原样保留**）。
-        let kept = Array(segments[headCount...])
-        let keptMidrolls = kept.filter { dropped.contains($0.group) }.count
-        // 实际删掉的时长 = 开头那几段之和。
-        let removedSeconds = segments[0..<headCount].reduce(0.0) { $0 + $1.duration }
-        // ③ 至少还要留下正片。
-        guard !kept.isEmpty else { return nil }
+        // ② 至少还要留下正片；一段都不剩说明判据出错了，放行。
+        guard !kept.isEmpty, removedCount > 0 else { return nil }
+        // 删掉的比例过高同样说明判据不适用（那可能是多路正片而不是广告）。
+        guard removedSeconds <= total * largestTotal else { return nil }
 
-        // ④ 被丢的段里若带 KEY / MAP 之类，要看它是不是**广告自己**的。
+        // ③ 被丢的段里若带 KEY / MAP 之类，要看它是不是**广告自己**的。
         //
         //    实测：番茄的中插广告每段都自带一条 `#EXT-X-KEY:METHOD=NONE`
         //    （正片是 AES-128）。这条 KEY 属于广告，必须随广告一起丢掉。
         //    但如果是 `#EXT-X-MAP`（初始化段）或 BYTERANGE 之类，
         //    后面可能真的依赖它 —— 那种情况保守放行。
-        for segment in segments[0..<headCount] {
+        for segment in segments where dropped.contains(segment.group) {
             for tag in segment.tags where !tag.hasPrefix("#EXTINF:") {
-                // 广告自己的密钥声明：跟着广告丢，是安全的。
                 if tag.hasPrefix("#EXT-X-KEY:") { continue }
                 return nil
             }
@@ -182,11 +211,9 @@ public enum AdPrefix {
         // ⛔ 必须原样保留每个保留段的**全部标签**（尤其是 `#EXT-X-KEY`）。
         //    正片在番茄这类源上是 AES-128 加密的，KEY 标签一丢就解密失败 ——
         //    表现是「广告没了，但正片也放不出来」，比不去广告更糟。
-        //    只跳过两类：被丢广告段自带的标签（整段不写）、以及紧随广告的孤立 DISCONTINUITY。
         var lines = header
         var first = true
         for segment in kept {
-            // 开头那个 DISCONTINUITY 没有意义（前面已经没有内容了）。
             if segment.discontinuity, !first { lines.append("#EXT-X-DISCONTINUITY") }
             lines += segment.tags
             lines.append(segment.address)
@@ -196,11 +223,12 @@ public enum AdPrefix {
 
         let mainPath = main.key.split(separator: "/").suffix(2).joined(separator: "/")
         return Result(text: lines.joined(separator: "\n") + "\n",
-                      segments: headCount,
+                      segments: removedCount,
                       seconds: removedSeconds,
                       mainPath: mainPath,
                       droppedGroups: dropped.count,
-                      keptMidrolls: keptMidrolls)
+                      keptMidrolls: 0,
+                      removedSecondsForDiagnostics: removedSeconds)
     }
 
     /// 分组键：目录部分（去掉文件名）。
