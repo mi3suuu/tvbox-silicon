@@ -592,17 +592,26 @@ public final class EgressRouter: @unchecked Sendable {
                                   url: URL? = nil, headers: [String: String] = [:],
                                   purpose: EgressPurpose = .catalog) {
         guard let urlError = error as? URLError, urlError.code == .timedOut else { return }
-        // 记进「必须显式走节点」的名单：设置页复制规则时一起带出去。
-        if let host = key.split(separator: "|").first.map(String.init) {
-            let isNew = !ForcedNodeHosts.shared.hosts.contains(host.lowercased())
-            ForcedNodeHosts.shared.note(host: host)
-            // 记下之后自己定期重测：Loon 一旦刷新了订阅、把这条域名指向节点，
-            // 下一次探测就会成功，这台 host 的结论自动翻成代理 —— 观众不需要重开页面。
-            //
-            // 不能替 Loon 刷新：`loon://update?sub=all` 是唯一手段，而它会切到 Loon 前台。
-            // 所以「无感」的正确形态是：我们等，Loon 按它自己的间隔刷新。
-            if isNew, let url { scheduleRecoveryProbe(for: url, headers: headers, purpose: purpose) }
+        // ⛔ 只学「源站接口」这一类。
+        //
+        // 这份名单会被写成**永久的全局规则**（Loon 插件里 `DOMAIN-SUFFIX,…,PROXY`），
+        // 所以不能见到超时就收：真机上就收进过两个纯误伤 ——
+        //   · `api.ipify.org`：那是 Identify My Node 自己发出去的探测，它超时说明
+        //     代理腿没通，与「这个站被判直连」无关；
+        //   · `webp.hahacdn.com`：海报 CDN，一次慢就被写成永久强制走节点，
+        //     等于让所有源的海报都绕出国。
+        guard purpose == .catalog, let host = key.split(separator: "|").first.map(String.init) else {
+            Diagnostics.shared.record(.debug, "egress", "\(key): proxy leg timed out (\(purpose.rawValue)); not recorded")
+            return
         }
+        let isNew = !ForcedNodeHosts.shared.hosts.contains(host.lowercased())
+        ForcedNodeHosts.shared.note(host: host)
+        // 记下之后自己定期重测：Loon 一旦刷新了订阅、把这条域名指向节点，
+        // 下一次探测就会成功，这台 host 的结论自动翻成代理 —— 观众不需要重开页面。
+        //
+        // 不能替 Loon 刷新：`loon://update?sub=all` 是唯一手段，而它会切到 Loon 前台。
+        // 所以「无感」的正确形态是：我们等，Loon 按它自己的间隔刷新。
+        if isNew, let url { scheduleRecoveryProbe(for: url, headers: headers, purpose: purpose) }
         Diagnostics.shared.record(.warning, "egress",
             "\(key): the proxy leg timed out — Loon accepted the connection and never answered. "
             + "Loon 的域名规则优先于 SRC-PORT：这个站的出口由你配置的规则决定,App 无法覆盖。"
@@ -670,7 +679,8 @@ public final class EgressRouter: @unchecked Sendable {
         return try await send(request, original: url)
     }
 
-    private func send(_ request: URLRequest, original url: URL) async throws -> (Data, URL) {
+    private func send(_ request: URLRequest, original url: URL,
+                      purpose: EgressPurpose = .catalog) async throws -> (Data, URL) {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw TVError.invalidConfiguration }
         // 206/200 都算通；其余按状态码处理，并把「服务器答了但拒绝」也当成这条腿不可用
@@ -681,7 +691,25 @@ public final class EgressRouter: @unchecked Sendable {
             }
             throw TVError.http(http.statusCode)
         }
+        noteSuspiciousPayload(data, response: http, url: url, purpose: purpose)
         return (data, url)
+    }
+
+    /// 接口回了 200，但正文明显是网页。
+    ///
+    /// 这一类比超时更难查：传输层全部正常，日志里「连上了、也收到了」，
+    /// 只有解析器报一句「未能读取数据，因为它的格式不正确」。
+    /// 真机上就是这么卡住一个源的 —— 域名被停放/拦截页顶掉了，换腿也没用。
+    private func noteSuspiciousPayload(_ data: Data, response: HTTPURLResponse,
+                                       url: URL, purpose: EgressPurpose) {
+        guard purpose == .catalog, !data.isEmpty else { return }
+        let head = String(decoding: data.prefix(96), as: UTF8.self).lowercased()
+        let trimmed = head.drop { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }
+        guard trimmed.hasPrefix("<!doctype") || trimmed.hasPrefix("<html") else { return }
+        let type = response.value(forHTTPHeaderField: "Content-Type") ?? "-"
+        Diagnostics.shared.record(.warning, "egress",
+            "\(url.host ?? "-") answered 200 with an HTML page (content-type=\(type), \(data.count) bytes)"
+            + " — 这不是接口数据，多半是拦截页 / 停放页 / 维护页，换哪条腿都一样。")
     }
 
     private static func capture<T>(_ body: () async throws -> T) async -> Result<T, Error> {

@@ -19,10 +19,13 @@ struct ProxySettingsView: View {
     @State private var checking = false
     @State private var probe: LoonPortRuleProbe?
     @State private var remoteRuleCopied = false
+    /// 名单变化后要重画这一页（`ForcedNodeHosts` 不可观察）。
+    @State private var recordedRevision = 0
 
     var body: some View {
         // 读一次 revision：代理/默认出口改动后要重算这一页（`CustomProxyStore` 本身不可观察）。
         let _ = store.customProxy.revision
+        let _ = recordedRevision
         let endpoints = store.customProxy.store.endpoints
         SettingsPage(title: L10n.text("Outbound Proxy"), symbol: "network") {
             SettingsGroup(footer: L10n.text("Proxies carry the sources you route through them; a source without a route goes direct.")) {
@@ -50,7 +53,7 @@ struct ProxySettingsView: View {
                           footer: L10n.text("A site your Loon rules already classify as direct cannot be re-routed by this app. Install the generated plugin in Loon once; it stays in effect afterwards.")) {
                 SettingsRow(symbol: "list.bullet", tint: .secondary,
                             title: L10n.text("Recorded: %@", "\(ForcedNodeHosts.shared.hosts.count)"),
-                            subtitle: ForcedNodeHosts.shared.hosts.prefix(3).joined(separator: ", "))
+                            subtitle: ForcedNodeHosts.shared.hosts.prefix(6).joined(separator: ", "))
                 if ForcedNodeHosts.shared.hosts.isEmpty {
                     // 空文件导进 Loon 会直接报「无法找到任何有效规则」—— 与其让观众撞一次墙，
                     // 不如说明白怎么让它变非空。
@@ -68,6 +71,12 @@ struct ProxySettingsView: View {
                     SettingsActionRow(title: L10n.text("Identify My Node")) { identifyNode() }
                     SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
                     SettingsActionRow(title: L10n.text("Copy Remote Rule Line")) { copyRemoteRuleLine() }
+                    // 名单会变成**永久**的全局规则，写错一条就得观众自己去 Loon 里删。
+                    // 所以必须给一个「清空重来」的出口。
+                    SettingsActionRow(title: L10n.text("Clear Recorded Sites")) {
+                        ForcedNodeHosts.shared.clear()
+                        recordedRevision += 1
+                    }
                 }
             }
             // 默认出口：多台代理时，「源路由 = 代理」该从哪条腿出去，必须能指定。

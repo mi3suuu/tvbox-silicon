@@ -215,10 +215,16 @@ import Testing
         #expect(plan.fallback == nil)
     }
 
-    @Test func loopbackBecomesTheCurrentLANAddress() {
+    /// 回环端点优先拨回环，局域网只做退路。
+    ///
+    /// 真机日志点名过反着来一次的代价：
+    ///   Loon unreachable at 192.168.124.55:7221; dialling 127.0.0.1 instead
+    ///   (turn on Allow Wi-Fi Access in Loon to use the port rules)
+    /// Loon 的代理端口默认只认本机回环 —— 把局域网放前面等于每次冷启动先白等一个超时。
+    @Test func aLoopbackEndpointIsDialledOnLoopbackFirst() {
         let plan = LocalNetwork.plan(stored: "127.0.0.1", currentIPv4: "10.0.0.7")
-        #expect(plan.primary == "10.0.0.7")
-        #expect(plan.fallback == "127.0.0.1")
+        #expect(plan.primary == "127.0.0.1")
+        #expect(plan.fallback == "10.0.0.7")
     }
 
     @Test func aPublicProxyIsNeverRewritten() {
@@ -271,5 +277,39 @@ import Testing
         for field in ["#!name =", "#!desc =", "#!author =", "#!system =", "#!date =", "#!type = normal"] {
             #expect(text.contains(field), "缺少 \(field)")
         }
+    }
+}
+
+/// 名单会变成**永久的全局规则**，所以收谁不收谁必须钉住。
+@Suite struct ForcedNodeHostsTests {
+    private func freshStore() -> ForcedNodeHosts {
+        ForcedNodeHosts(defaults: UserDefaults(suiteName: "forced-\(UUID().uuidString)")!)
+    }
+
+    @Test func ourOwnProbeAddressesAreNeverWrittenAsRules() {
+        let store = freshStore()
+        // Identify My Node 会经代理腿请求它；它超时只说明代理腿没通，与「这个站被判直连」无关。
+        store.note(host: "api.ipify.org")
+        store.note(host: "IPIFY.ORG")
+        #expect(store.hosts.isEmpty)
+
+        store.note(host: "aosikazy.com")
+        #expect(store.hosts == ["aosikazy.com"])
+    }
+
+    @Test func hostsAreLowercasedAndCapped() {
+        let store = freshStore()
+        store.note(host: " AoSikazy.COM ")
+        #expect(store.hosts == ["aosikazy.com"])
+        store.note(host: "aosikazy.com")
+        #expect(store.hosts == ["aosikazy.com"], "重复项不该重复写入")
+    }
+
+    @Test func thePluginCarriesOnlyWhatWasRecorded() {
+        let store = freshStore()
+        store.note(host: "aosikazy.com")
+        let text = LoonPlugin.text(hosts: store.hosts)
+        #expect(text.contains("DOMAIN-SUFFIX,aosikazy.com,PROXY"))
+        #expect(!text.contains("ipify"))
     }
 }

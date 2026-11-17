@@ -55,8 +55,15 @@ public enum LocalNetwork {
     /// 所以拨号前按**当前**网络重算一次。纯函数，便于测试。
     public static func plan(stored: String, currentIPv4: String?) -> (primary: String, fallback: String?) {
         if isLoopback(stored) {
-            guard let currentIPv4 else { return (stored, nil) }
-            return (currentIPv4, stored)
+            // ⛔ 回环优先，局域网地址只做退路。
+            //
+            // 反过来试过一次，真机日志直接点名：
+            //   `Loon unreachable at 192.168.124.55:7221; dialling 127.0.0.1 instead
+            //    (turn on Allow Wi-Fi Access in Loon to use the port rules)`
+            // Loon 的代理端口默认只接受本机回环，局域网要另开「允许 Wi-Fi 访问」。
+            // 把局域网放前面等于每次冷启动都先撞一次失败再退回 —— 白等一个超时。
+            guard let currentIPv4, currentIPv4 != stored else { return (stored, nil) }
+            return (stored, currentIPv4)
         }
         // 存的是私有网段但不是本机现在的地址 → 多半是「本机代理」换了网段（Loon 就在这台手机上）。
         guard isPrivate(stored) else { return (stored, nil) }

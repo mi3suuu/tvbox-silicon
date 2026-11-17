@@ -31,6 +31,9 @@ public final class ForcedNodeHosts: @unchecked Sendable {
     public func note(host: String) {
         let key = host.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, key.contains(".") else { return }
+        // 名单会变成永久的全局规则，所以「我们自己发出去的探测地址」绝不能进：
+        // 它们的超时只说明代理腿没通，和「这个站被判直连」是两件事。
+        guard !Self.utilityHosts.contains(key) else { return }
         lock.lock()
         defer { lock.unlock() }
         var hosts = storedHosts()
@@ -39,6 +42,13 @@ public final class ForcedNodeHosts: @unchecked Sendable {
         if hosts.count > Self.limit { hosts.removeFirst(hosts.count - Self.limit) }
         defaults.set(hosts, forKey: Self.hostsKey)
     }
+
+    /// 我们自己用来探测出口的公共地址，不属于任何源，不该被写成规则。
+    private static let utilityHosts: Set<String> = [
+        "api.ipify.org", "ipify.org", "www.ipify.org",
+        "api64.ipify.org", "ipinfo.io", "api.ipinfo.io",
+        "ifconfig.me", "icanhazip.com", "myip.ipip.net", "ip.sb", "api.ip.sb"
+    ]
 
     public var hosts: [String] {
         lock.lock()
@@ -90,7 +100,12 @@ public final class ForcedNodeHosts: @unchecked Sendable {
     }
 
     private func storedHosts() -> [String] {
-        defaults.stringArray(forKey: Self.hostsKey) ?? []
+        let raw = defaults.stringArray(forKey: Self.hostsKey) ?? []
+        // 老版本收进来过的探测地址（`api.ipify.org`）在这里顺手剔掉：
+        // 名单会被写成永久规则，错一条就要观众自己去 Loon 里删。
+        let cleaned = raw.filter { !Self.utilityHosts.contains($0.lowercased()) }
+        if cleaned.count != raw.count { defaults.set(cleaned, forKey: Self.hostsKey) }
+        return cleaned
     }
 }
 
