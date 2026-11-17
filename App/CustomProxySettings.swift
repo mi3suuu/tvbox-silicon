@@ -69,6 +69,7 @@ struct ProxySettingsView: View {
                     SettingsActionRow(title: L10n.text("Sync Now (opens Loon)")) { syncLoon() }
                     // 真正实现「无感」的那一行：Remote Rule + update-interval，
                     // Loon 自己在后台按间隔重拉，不需要 scheme、不会切前台。
+                    SettingsActionRow(title: L10n.text("Identify My Node")) { identifyNode() }
                     SettingsActionRow(title: L10n.text("Copy Remote Rule Line")) { copyRemoteRuleLine() }
                     SettingsActionRow(title: L10n.text("Copy Site Rules")) { copyLoonRule() }
                 }
@@ -254,6 +255,26 @@ struct ProxySettingsView: View {
     ///
     /// 没有记录、或中继还没起来时也照常打开 —— 只是内容为空。
     /// 隐藏这个按钮只会让观众找不到它（上一版就是这么错的）。
+    /// 反查 Loon 当前用的节点：比出口 IP。
+    ///
+    /// Loon 不暴露「当前选中谁」，但它出去时的公网 IP 是可观察的；
+    /// 直连每台节点查同一个地址，相等的就是它。
+    private func identifyNode() {
+        let endpoint = store.customProxy.store.endpoints.first
+        let host = endpoint.map { ProxyDialHost.primary(for: $0) } ?? "127.0.0.1"
+        let port = (endpoint?.port == 7221) ? 7222 : (endpoint?.port ?? 7222)
+        Task {
+            let nodes = await CurrentNodeIdentifier.loadNodes(apiHost: host, apiPort: port)
+            let result = await CurrentNodeIdentifier.resolve(nodes: nodes)
+            let detail = result.candidates
+                .map { "\($0.name)=\($0.exitIP ?? "-")" }
+                .joined(separator: " ")
+            Diagnostics.shared.record(.info, "egress",
+                "node identify: loonExit=\(result.exitIP ?? "-") matched=\(result.node?.name ?? "-")"
+                + " candidates=[\(detail)]")
+        }
+    }
+
     /// 复制 `[Remote Rule]` 的一行（带 update-interval）。
     ///
     /// 这是「无感」的正解：Loon 按 `update-interval` 秒在后台自己重拉，
